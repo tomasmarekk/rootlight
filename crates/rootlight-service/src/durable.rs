@@ -68,6 +68,7 @@ const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 4 * 1024;
+pub(super) const DURABLE_PUBLICATION_RESIDUAL_BYTES: u64 = MAX_ACTIVATION_MANIFEST_BYTES;
 const MAX_RECOVERY_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_RECOVERY_ENCODED_BYTES: u64 = MAX_RECOVERY_SNAPSHOT_BYTES + 1024 * 1024;
@@ -309,7 +310,8 @@ pub(super) struct DurableRepositoryStorage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableStorageAdmissionPolicy {
-    pub(super) required_bytes: u64,
+    pub(super) required_catalog_bytes: u64,
+    pub(super) required_repository_bytes: u64,
     pub(super) maximum_repository_bytes: u64,
     pub(super) maximum_storage_bytes: u64,
     pub(super) minimum_free_bytes: u64,
@@ -340,12 +342,24 @@ struct DurableStorageReservations {
 #[derive(Debug, Clone, Copy)]
 struct DurableStorageReservationEntry {
     repository: RepositoryId,
-    bytes: u64,
+    catalog_bytes: u64,
+    repository_bytes: u64,
 }
 
 pub(super) struct DurableStorageReservation {
     reservations: Arc<Mutex<DurableStorageReservations>>,
     id: u64,
+}
+
+pub(super) struct DurableSealedGeneration {
+    prepared: DurablePreparedGeneration,
+    repository: RepositoryId,
+    materialized_bytes: u64,
+    manifest_written_bytes: u64,
+}
+
+pub(super) struct DurableStorageAdmittedGeneration {
+    sealed: DurableSealedGeneration,
 }
 
 impl std::fmt::Debug for DurableStorageReservation {
@@ -819,17 +833,18 @@ impl DurableCatalog {
         generation: GenerationId,
     ) -> Result<DurablePreparedGeneration, FirstSliceError> {
         let repository_name = repository.to_string();
-        let repository =
+        let repository_directory =
             ensure_private_directory(self.repositories.capability(), OsStr::new(&repository_name))?;
         let repository_path = self.repositories_path.join(&repository_name);
         let staging_name = random_staging_name(generation)?;
-        let staging = PrivateDirectory::create(repository.capability(), OsStr::new(&staging_name))
-            .map_err(|_| FirstSliceError::Catalog)?;
+        let staging =
+            PrivateDirectory::create(repository_directory.capability(), OsStr::new(&staging_name))
+                .map_err(|_| FirstSliceError::Catalog)?;
         let staging_path = repository_path.join(&staging_name);
         Ok(DurablePreparedGeneration {
             staging: Some(staging),
             staging_path,
-            repository: Some(repository),
+            repository: Some(repository_directory),
             generation,
             staging_bytes: Arc::clone(&self.staging_bytes),
             accounted_bytes: AtomicU64::new(0),
@@ -871,7 +886,8 @@ impl DurableCatalog {
                 id,
                 DurableStorageReservationEntry {
                     repository,
-                    bytes: policy.required_bytes,
+                    catalog_bytes: policy.required_catalog_bytes,
+                    repository_bytes: policy.required_repository_bytes,
                 },
             )
             .is_some()
@@ -907,12 +923,115 @@ impl DurableCatalog {
             reservation.id,
             DurableStorageReservationEntry {
                 repository: current.repository,
-                bytes: result
+                catalog_bytes: result
                     .as_ref()
-                    .map_or(current.bytes, |_| policy.required_bytes),
+                    .map_or(current.catalog_bytes, |_| policy.required_catalog_bytes),
+                repository_bytes: result.as_ref().map_or(current.repository_bytes, |_| {
+                    policy.required_repository_bytes
+                }),
             },
         );
         Ok(result)
+    }
+
+    pub(super) fn finalize_repository_capacity(
+        &self,
+        reservation: &DurableStorageReservation,
+        sealed: DurableSealedGeneration,
+        policy: DurableStorageAdmissionPolicy,
+    ) -> Result<
+        Result<
+            (DurableStorageAdmission, DurableStorageAdmittedGeneration),
+            DurableStorageAdmissionFailure,
+        >,
+        FirstSliceError,
+    > {
+        let mut reservations = self
+            .storage_reservations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let current = reservations
+            .entries
+            .remove(&reservation.id)
+            .ok_or(FirstSliceError::Retention)?;
+        if current.repository != sealed.repository || current.repository_bytes != 0 {
+            reservations.entries.insert(reservation.id, current);
+            return Err(FirstSliceError::Retention);
+        }
+        let inventory = self.storage_inventory()?;
+        let observed_repository_bytes = inventory
+            .repositories
+            .iter()
+            .find(|repository| repository.repository == sealed.repository)
+            .map_or(0, |repository| repository.physical_bytes);
+        let catalog_remaining_bytes = current
+            .catalog_bytes
+            .checked_sub(sealed.materialized_bytes)
+            .filter(|bytes| *bytes >= policy.required_repository_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let observed_before_candidate = observed_repository_bytes
+            .checked_sub(sealed.materialized_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let candidate_bytes = sealed
+            .materialized_bytes
+            .checked_add(policy.required_repository_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        let other_repository_reservations =
+            reservations.entries.values().fold(0_u64, |total, entry| {
+                if entry.repository == sealed.repository {
+                    total.saturating_add(entry.repository_bytes)
+                } else {
+                    total
+                }
+            });
+        let projected_repository_bytes = observed_repository_bytes
+            .saturating_add(other_repository_reservations)
+            .saturating_add(policy.required_repository_bytes);
+        if projected_repository_bytes > policy.maximum_repository_bytes {
+            reservations.entries.insert(reservation.id, current);
+            return Ok(Err(DurableStorageAdmissionFailure {
+                scope: DurableStorageAdmissionScope::RepositoryBudget,
+                required_bytes: candidate_bytes,
+                observed_bytes: observed_before_candidate
+                    .saturating_add(other_repository_reservations),
+                limit_bytes: policy.maximum_repository_bytes,
+                minimum_free_bytes: policy.minimum_free_bytes,
+            }));
+        }
+        let catalog_policy = DurableStorageAdmissionPolicy {
+            required_catalog_bytes: catalog_remaining_bytes,
+            required_repository_bytes: 0,
+            maximum_repository_bytes: u64::MAX,
+            maximum_storage_bytes: policy.maximum_storage_bytes,
+            minimum_free_bytes: policy.minimum_free_bytes,
+        };
+        if let Err(failure) =
+            check_storage_admission(&inventory, &reservations, sealed.repository, catalog_policy)
+        {
+            reservations.entries.insert(reservation.id, current);
+            return Ok(Err(failure));
+        }
+        reservations.entries.insert(
+            reservation.id,
+            DurableStorageReservationEntry {
+                repository: current.repository,
+                catalog_bytes: catalog_remaining_bytes,
+                repository_bytes: policy.required_repository_bytes,
+            },
+        );
+        Ok(Ok((
+            DurableStorageAdmission {
+                required_bytes: candidate_bytes,
+                observed_bytes: observed_before_candidate
+                    .saturating_add(other_repository_reservations),
+                limit_bytes: policy.maximum_repository_bytes,
+                minimum_free_bytes: policy.minimum_free_bytes,
+                admission_margin_bytes: policy
+                    .maximum_repository_bytes
+                    .saturating_sub(projected_repository_bytes),
+            },
+            DurableStorageAdmittedGeneration { sealed },
+        )))
     }
 
     pub(super) fn release_staging_reservation(
@@ -1806,13 +1925,17 @@ impl DurablePreparedGeneration {
     }
 
     pub(super) fn finish(
-        &self,
+        self,
+        repository: RepositoryId,
         root_identity: ContentHash,
         display_name: &str,
         root_path: &str,
         receipt: &mut FirstSliceIndexReceipt,
-    ) -> Result<u64, FirstSliceError> {
-        if receipt.generation != self.generation || display_name.is_empty() || root_path.is_empty()
+    ) -> Result<DurableSealedGeneration, FirstSliceError> {
+        if repository != receipt.repository
+            || receipt.generation != self.generation
+            || display_name.is_empty()
+            || root_path.is_empty()
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -1860,7 +1983,13 @@ impl DurablePreparedGeneration {
         staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         let manifest_bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
         self.account_staging_bytes(manifest_bytes)?;
-        Ok(manifest_bytes)
+        let materialized_bytes = self.accounted_bytes.load(Ordering::Acquire);
+        Ok(DurableSealedGeneration {
+            prepared: self,
+            repository,
+            materialized_bytes,
+            manifest_written_bytes: manifest_bytes,
+        })
     }
 
     pub(super) fn publish(mut self) -> Result<DurablePublishedGeneration, FirstSliceError> {
@@ -1939,6 +2068,18 @@ impl DurablePreparedGeneration {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_sub(bytes))
             });
+    }
+}
+
+impl DurableSealedGeneration {
+    pub(super) const fn manifest_written_bytes(&self) -> u64 {
+        self.manifest_written_bytes
+    }
+}
+
+impl DurableStorageAdmittedGeneration {
+    pub(super) fn publish(self) -> Result<DurablePublishedGeneration, FirstSliceError> {
+        self.sealed.prepared.publish()
     }
 }
 
@@ -2394,6 +2535,7 @@ fn build_storage_inventory(
     let mut generation_unique_bytes = 0_u64;
     let mut active_generation_bytes = 0_u64;
     let mut predecessor_generation_bytes = 0_u64;
+    let mut physical_source_blob_bytes = 0_u64;
     let mut shared_source_bytes = 0_u64;
     let mut temporary_bytes = 0_u64;
     let mut reclaimable_bytes = 0_u64;
@@ -2405,7 +2547,7 @@ fn build_storage_inventory(
     for repository in scanned_repositories {
         let repository_id = repository.repository;
         let repository_total_before = generation_unique_bytes
-            .saturating_add(shared_source_bytes)
+            .saturating_add(physical_source_blob_bytes)
             .saturating_add(temporary_bytes)
             .saturating_add(repository_overhead_bytes);
         let latest_by_generation = latest_activation_sequences(&repository.markers);
@@ -2447,6 +2589,7 @@ fn build_storage_inventory(
             }
         }
         for (digest, blob) in &repository.source_blobs {
+            checked_add_assign(&mut physical_source_blob_bytes, blob.bytes)?;
             if !referenced_source_blobs.contains(digest) {
                 checked_add_assign(&mut reclaimable_bytes, blob.bytes)?;
             }
@@ -2498,7 +2641,7 @@ fn build_storage_inventory(
         }
         if let Some(repository) = repository_id {
             let repository_total_after = generation_unique_bytes
-                .saturating_add(shared_source_bytes)
+                .saturating_add(physical_source_blob_bytes)
                 .saturating_add(temporary_bytes)
                 .saturating_add(repository_overhead_bytes);
             repository_totals.push(DurableRepositoryStorage {
@@ -2510,7 +2653,7 @@ fn build_storage_inventory(
     generations.sort_unstable_by_key(|generation| (generation.repository, generation.generation));
     repository_totals.sort_unstable_by_key(|repository| repository.repository);
     let total_physical_bytes = generation_unique_bytes
-        .checked_add(shared_source_bytes)
+        .checked_add(physical_source_blob_bytes)
         .and_then(|bytes| bytes.checked_add(temporary_bytes))
         .and_then(|bytes| bytes.checked_add(repository_overhead_bytes))
         .and_then(|bytes| bytes.checked_add(quarantine_bytes))
@@ -2591,34 +2734,35 @@ fn check_storage_admission(
         .fold(0_u64, |total, repository| {
             total.saturating_add(repository.physical_bytes)
         });
-    let reserved_catalog_bytes = reservations
-        .entries
-        .values()
-        .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+    let reserved_catalog_bytes = reservations.entries.values().fold(0_u64, |total, entry| {
+        total.saturating_add(entry.catalog_bytes)
+    });
     let reserved_repository_bytes = reservations
         .entries
         .values()
         .filter(|entry| entry.repository == repository)
-        .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+        .fold(0_u64, |total, entry| {
+            total.saturating_add(entry.repository_bytes)
+        });
     let admitted_repository_bytes =
         observed_repository_bytes.saturating_add(reserved_repository_bytes);
     let projected_repository_bytes =
-        admitted_repository_bytes.saturating_add(policy.required_bytes);
+        admitted_repository_bytes.saturating_add(policy.required_repository_bytes);
     if projected_repository_bytes > policy.maximum_repository_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::RepositoryBudget,
-            required_bytes: policy.required_bytes,
+            required_bytes: policy.required_repository_bytes,
             observed_bytes: admitted_repository_bytes,
             limit_bytes: policy.maximum_repository_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
     let admitted_catalog_bytes = observed_bytes.saturating_add(reserved_catalog_bytes);
-    let projected_bytes = admitted_catalog_bytes.saturating_add(policy.required_bytes);
+    let projected_bytes = admitted_catalog_bytes.saturating_add(policy.required_catalog_bytes);
     if projected_bytes > policy.maximum_storage_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::CatalogBudget,
-            required_bytes: policy.required_bytes,
+            required_bytes: policy.required_catalog_bytes,
             observed_bytes: admitted_catalog_bytes,
             limit_bytes: policy.maximum_storage_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
@@ -2628,16 +2772,16 @@ fn check_storage_admission(
         .available_bytes
         .saturating_sub(policy.minimum_free_bytes)
         .saturating_sub(reserved_catalog_bytes);
-    if policy.required_bytes > usable_free_bytes {
+    if policy.required_catalog_bytes > usable_free_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::FilesystemFreeSpace,
-            required_bytes: policy.required_bytes,
+            required_bytes: policy.required_catalog_bytes,
             observed_bytes: inventory.available_bytes,
             limit_bytes: usable_free_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
-    let filesystem_margin_bytes = usable_free_bytes.saturating_sub(policy.required_bytes);
+    let filesystem_margin_bytes = usable_free_bytes.saturating_sub(policy.required_catalog_bytes);
     let admission_margin_bytes = filesystem_margin_bytes
         .min(policy.maximum_storage_bytes.saturating_sub(projected_bytes))
         .min(
@@ -2646,7 +2790,7 @@ fn check_storage_admission(
                 .saturating_sub(projected_repository_bytes),
         );
     Ok(DurableStorageAdmission {
-        required_bytes: policy.required_bytes,
+        required_bytes: policy.required_catalog_bytes,
         observed_bytes: admitted_catalog_bytes,
         limit_bytes: policy.maximum_storage_bytes,
         minimum_free_bytes: policy.minimum_free_bytes,
@@ -3690,12 +3834,37 @@ mod tests {
 
         let reservations = DurableStorageReservations::default();
         let repository = RepositoryId::from_bytes([1; 16]);
+        let repository_failure = check_storage_admission(
+            &inventory,
+            &reservations,
+            repository,
+            DurableStorageAdmissionPolicy {
+                required_catalog_bytes: 1,
+                required_repository_bytes: 31,
+                maximum_repository_bytes: 130,
+                maximum_storage_bytes: u64::MAX,
+                minimum_free_bytes: 0,
+            },
+        )
+        .expect_err("retained repository bytes exceed the configured budget");
+        assert_eq!(
+            repository_failure,
+            DurableStorageAdmissionFailure {
+                scope: DurableStorageAdmissionScope::RepositoryBudget,
+                required_bytes: 31,
+                observed_bytes: 100,
+                limit_bytes: 130,
+                minimum_free_bytes: 0,
+            }
+        );
+
         let budget_failure = check_storage_admission(
             &inventory,
             &reservations,
             repository,
             DurableStorageAdmissionPolicy {
-                required_bytes: 30,
+                required_catalog_bytes: 30,
+                required_repository_bytes: 0,
                 maximum_repository_bytes: u64::MAX,
                 maximum_storage_bytes: 120,
                 minimum_free_bytes: 10,
@@ -3718,7 +3887,8 @@ mod tests {
             &reservations,
             repository,
             DurableStorageAdmissionPolicy {
-                required_bytes: 31,
+                required_catalog_bytes: 31,
+                required_repository_bytes: 0,
                 maximum_repository_bytes: u64::MAX,
                 maximum_storage_bytes: u64::MAX,
                 minimum_free_bytes: 20,
@@ -3742,7 +3912,8 @@ mod tests {
                 &reservations,
                 repository,
                 DurableStorageAdmissionPolicy {
-                    required_bytes: 10,
+                    required_catalog_bytes: 10,
+                    required_repository_bytes: 10,
                     maximum_repository_bytes: 130,
                     maximum_storage_bytes: 130,
                     minimum_free_bytes: 20,
@@ -3759,6 +3930,120 @@ mod tests {
     }
 
     #[test]
+    fn sealed_generation_uses_exact_repository_bytes_and_preserves_catalog_headroom() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let repository = RepositoryId::from_bytes([37; 16]);
+        let generation = GenerationId::from_bytes([41; 20]);
+        let admitted_worst_case_bytes = 10 * 1024;
+        let reservation = durable
+            .ensure_staging_capacity(
+                repository,
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: admitted_worst_case_bytes,
+                    required_repository_bytes: 0,
+                    maximum_repository_bytes: 6 * 1024,
+                    maximum_storage_bytes: 20 * 1024,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("inventory remains readable")
+            .expect("transient headroom is admitted")
+            .1;
+        let prepared = durable
+            .begin_generation(repository, generation)
+            .expect("staging generation opens");
+        let payload = vec![0_u8; 1024];
+        std::fs::write(prepared.path().join("staged.bin"), &payload)
+            .expect("staged payload writes");
+        prepared
+            .account_external_staging_bytes(1024)
+            .expect("staged payload is accounted");
+        let materialized_bytes = 1024;
+        let sealed = DurableSealedGeneration {
+            prepared,
+            repository,
+            materialized_bytes,
+            manifest_written_bytes: 0,
+        };
+
+        let (admission, _admitted) = durable
+            .finalize_repository_capacity(
+                &reservation,
+                sealed,
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: admitted_worst_case_bytes,
+                    required_repository_bytes: DURABLE_PUBLICATION_RESIDUAL_BYTES,
+                    maximum_repository_bytes: 6 * 1024,
+                    maximum_storage_bytes: 20 * 1024,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("exact inventory remains readable")
+            .expect("exact candidate fits the retained repository budget");
+
+        assert_eq!(
+            admission.required_bytes,
+            1024 + DURABLE_PUBLICATION_RESIDUAL_BYTES
+        );
+        assert_eq!(admission.observed_bytes, 0);
+        let reservations = durable
+            .storage_reservations
+            .lock()
+            .expect("reservation ledger remains available");
+        let entry = reservations
+            .entries
+            .get(&reservation.id)
+            .expect("reservation remains held through publication");
+        assert_eq!(
+            entry.catalog_bytes,
+            admitted_worst_case_bytes - materialized_bytes
+        );
+        assert_eq!(entry.repository_bytes, DURABLE_PUBLICATION_RESIDUAL_BYTES);
+    }
+
+    #[test]
+    fn unreferenced_source_blobs_remain_physical_and_reclaimable() {
+        let repository = RepositoryId::from_bytes([43; 16]);
+        let digest = ContentHash::from_bytes([47; 32]);
+        let blob_bytes = 1536;
+        let mut source_blobs = BTreeMap::new();
+        source_blobs.insert(
+            digest,
+            ScannedSourceBlob {
+                bytes: blob_bytes,
+                payload_bytes: 1024,
+            },
+        );
+        let inventory = build_storage_inventory(
+            vec![ScannedRepositoryStorage {
+                repository: Some(repository),
+                source_blobs,
+                ..ScannedRepositoryStorage::default()
+            }],
+            0,
+            u64::MAX,
+        )
+        .expect("unreferenced physical inventory remains valid");
+
+        assert_eq!(inventory.total_physical_bytes, blob_bytes);
+        assert_eq!(inventory.reclaimable_bytes, blob_bytes);
+        assert_eq!(inventory.shared_source_bytes, 0);
+        assert_eq!(
+            inventory
+                .repositories
+                .iter()
+                .find(|candidate| candidate.repository == repository)
+                .expect("repository inventory is present")
+                .physical_bytes,
+            blob_bytes
+        );
+    }
+
+    #[test]
     fn concurrent_storage_admissions_share_one_serialized_reservation_ledger() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -3771,7 +4056,8 @@ mod tests {
             .total_physical_bytes;
         let required_bytes = 1024;
         let policy = DurableStorageAdmissionPolicy {
-            required_bytes,
+            required_catalog_bytes: required_bytes,
+            required_repository_bytes: 0,
             maximum_repository_bytes: u64::MAX,
             maximum_storage_bytes: observed + required_bytes,
             minimum_free_bytes: 0,

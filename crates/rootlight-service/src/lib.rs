@@ -22,10 +22,10 @@ use catalog::{
     CatalogRepositoryState, CatalogSnapshotStore,
 };
 use durable::{
-    DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration,
+    DURABLE_PUBLICATION_RESIDUAL_BYTES, DurableCatalog, DurablePublishedGeneration,
     DurableRepositoryMetadata, DurableStorageAdmissionFailure, DurableStorageAdmissionPolicy,
-    DurableStorageAdmissionScope, DurableStorageReservation, REPOSITORY_METADATA_VERSION,
-    RestoredGeneration, recovery_snapshot_output_reservation,
+    DurableStorageAdmissionScope, DurableStorageAdmittedGeneration, DurableStorageReservation,
+    REPOSITORY_METADATA_VERSION, RestoredGeneration, recovery_snapshot_output_reservation,
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
@@ -1713,7 +1713,7 @@ pub struct PreparedFirstSliceIndex {
     display_name: String,
     root_path: String,
     register_repository: bool,
-    durable: Option<DurablePreparedGeneration>,
+    durable: Option<DurableStorageAdmittedGeneration>,
     written_bytes: u64,
     reserved_memory_bytes: u64,
     memory_bytes: u64,
@@ -4008,22 +4008,22 @@ impl FirstSliceService {
     fn begin_durable_storage_reservation(
         &self,
         repository: RepositoryId,
-        required_bytes: u64,
+        required_catalog_bytes: u64,
     ) -> Result<Option<DurableStorageReservation>, FirstSliceError> {
         let Some(durable) = &self.durable else {
             return Ok(None);
         };
         #[cfg(test)]
         if let Some(available_bytes) = self.available_disk_bytes_override {
-            if available_bytes < required_bytes {
+            if available_bytes < required_catalog_bytes {
                 return Err(FirstSliceError::InsufficientDiskSpace {
-                    required_bytes,
+                    required_bytes: required_catalog_bytes,
                     available_bytes,
                 });
             }
             return Ok(None);
         }
-        let policy = self.durable_storage_admission_policy(required_bytes);
+        let policy = self.durable_storage_admission_policy(required_catalog_bytes, 0);
         durable
             .ensure_staging_capacity(repository, policy)?
             .map(|(_, reservation)| Some(reservation))
@@ -4033,16 +4033,17 @@ impl FirstSliceService {
     fn resize_durable_storage_reservation(
         &self,
         reservation: Option<&DurableStorageReservation>,
-        required_bytes: u64,
+        required_catalog_bytes: u64,
+        required_repository_bytes: u64,
     ) -> Result<(), FirstSliceError> {
         let (Some(durable), Some(reservation)) = (&self.durable, reservation) else {
             return Ok(());
         };
         #[cfg(test)]
         if let Some(available_bytes) = self.available_disk_bytes_override {
-            if available_bytes < required_bytes {
+            if available_bytes < required_catalog_bytes {
                 return Err(FirstSliceError::InsufficientDiskSpace {
-                    required_bytes,
+                    required_bytes: required_catalog_bytes,
                     available_bytes,
                 });
             }
@@ -4051,7 +4052,10 @@ impl FirstSliceService {
         durable
             .resize_staging_reservation(
                 reservation,
-                self.durable_storage_admission_policy(required_bytes),
+                self.durable_storage_admission_policy(
+                    required_catalog_bytes,
+                    required_repository_bytes,
+                ),
             )?
             .map(|_| ())
             .map_err(storage_admission_error)
@@ -4059,10 +4063,12 @@ impl FirstSliceService {
 
     const fn durable_storage_admission_policy(
         &self,
-        required_bytes: u64,
+        required_catalog_bytes: u64,
+        required_repository_bytes: u64,
     ) -> DurableStorageAdmissionPolicy {
         DurableStorageAdmissionPolicy {
-            required_bytes,
+            required_catalog_bytes,
+            required_repository_bytes,
             maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
             maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
             minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
@@ -4711,6 +4717,7 @@ impl FirstSliceService {
         self.resize_durable_storage_reservation(
             storage_reservation.reservation.as_ref(),
             estimated_disk_bytes,
+            0,
         )?;
         let source_count = source_preflight.supported_file_count;
         let mut file_claims = Vec::new();
@@ -5192,6 +5199,7 @@ impl FirstSliceService {
             self.resize_durable_storage_reservation(
                 storage_reservation.reservation.as_ref(),
                 estimated_disk_bytes,
+                0,
             )?;
         }
         let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
@@ -5335,13 +5343,39 @@ impl FirstSliceService {
             diagnostics: index_diagnostic_summaries(verified.document())?,
             elapsed_micros: elapsed_micros(started),
         };
-        if let Some(durable) = &durable {
-            let manifest_written_bytes =
-                durable.finish(root_identity, &display_name, &root_path, &mut receipt)?;
+        let durable = if let Some(durable) = durable {
+            let sealed = durable.finish(
+                repository,
+                root_identity,
+                &display_name,
+                &root_path,
+                &mut receipt,
+            )?;
+            let manifest_written_bytes = sealed.manifest_written_bytes();
             written_bytes = written_bytes
                 .checked_add(manifest_written_bytes)
                 .ok_or(FirstSliceError::Limits)?;
-        }
+            if let (Some(catalog), Some(reservation)) = (
+                self.durable.as_ref(),
+                storage_reservation.reservation.as_ref(),
+            ) {
+                let (_, admitted) = catalog
+                    .finalize_repository_capacity(
+                        reservation,
+                        sealed,
+                        self.durable_storage_admission_policy(
+                            estimated_disk_bytes,
+                            DURABLE_PUBLICATION_RESIDUAL_BYTES,
+                        ),
+                    )?
+                    .map_err(storage_admission_error)?;
+                Some(admitted)
+            } else {
+                return Err(FirstSliceError::Retention);
+            }
+        } else {
+            None
+        };
         check_cancellation(cancellation)?;
         Ok(FirstSliceIndexPreparation::Pending(
             PreparedFirstSliceIndex {
