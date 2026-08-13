@@ -17505,6 +17505,81 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn failed_semantic_preparation_keeps_structural_sources_across_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("value.py"),
+            "def retained_answer():\n    return 42\n",
+        )
+        .expect("Python fixture writes");
+        let cancellation = deadline();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"bounded-restart-project-analyzer"),
+            calls,
+            partitioned: false,
+            syntax_facts_bounded: true,
+        });
+        let structural = {
+            let mut service = FirstSliceService::new_durable_with_project_analyzer(
+                2,
+                paths.state_dir(),
+                analyzer,
+                &cancellation,
+            )
+            .expect("durable project service initializes");
+            let structural = service
+                .index_repository_with_mode(
+                    fixture.path(),
+                    FirstSliceIndexMode::Structural,
+                    &cancellation,
+                )
+                .expect("structural generation publishes");
+            assert!(matches!(
+                service.prepare_semantic_refinement(
+                    fixture.path(),
+                    structural.generation,
+                    &cancellation,
+                ),
+                Err(FirstSliceError::Adapter)
+            ));
+            structural
+        };
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("structural generation restores after semantic fallback");
+        let located = restored
+            .code_locate(
+                structural.generation,
+                "retained_answer".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("structural declaration remains queryable after restart");
+        let source = located.data.hits[0]
+            .source
+            .clone()
+            .expect("structural declaration retains source evidence");
+        let read = restored
+            .source_read(structural.generation, vec![source], &cancellation)
+            .expect("structural source remains readable after semantic fallback");
+        assert!(
+            std::str::from_utf8(&read.data.chunks[0].bytes)
+                .expect("Python fixture is UTF-8")
+                .contains("retained_answer")
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn durable_restore_accepts_legacy_inline_source_and_recovery_storage() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))

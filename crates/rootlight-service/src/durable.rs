@@ -214,6 +214,7 @@ pub(super) struct DurablePreparedGeneration {
     accounted_bytes: AtomicU64,
     incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
     source_storage: Mutex<Option<DurableSourceStorage>>,
+    created_source_blobs: Mutex<BTreeSet<ContentHash>>,
 }
 
 pub(super) struct DurablePublishedGeneration {
@@ -834,6 +835,7 @@ impl DurableCatalog {
             accounted_bytes: AtomicU64::new(0),
             incremental_state: Mutex::new(None),
             source_storage: Mutex::new(None),
+            created_source_blobs: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -1663,6 +1665,14 @@ impl DurablePreparedGeneration {
             .map_err(|_| FirstSliceError::Catalog)?;
         blobs.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         self.account_staging_bytes(newly_written_bytes)?;
+        let mut retained = self
+            .created_source_blobs
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if !retained.is_empty() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        retained.extend(created);
         let mut storage = self
             .source_storage
             .lock()
@@ -1876,6 +1886,10 @@ impl DurablePreparedGeneration {
             }
         };
         self.release_staging_bytes();
+        self.created_source_blobs
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?
+            .clear();
         let repository = self.repository.take().ok_or(FirstSliceError::Catalog)?;
         Ok(DurablePublishedGeneration {
             directory: Some(directory),
@@ -1968,6 +1982,20 @@ impl Drop for DurablePreparedGeneration {
             if staging.remove().is_ok() {
                 self.release_staging_bytes();
             }
+        }
+        if let Ok(created) = self.created_source_blobs.lock()
+            && let Some(repository) = self.repository.as_ref()
+            && let Ok(blobs) =
+                PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
+        {
+            for digest in created.iter() {
+                if let Ok(blob) =
+                    PrivateDirectory::open(blobs.capability(), OsStr::new(&digest.to_string()))
+                {
+                    let _ = blob.remove();
+                }
+            }
+            let _ = blobs.sync_all();
         }
     }
 }
