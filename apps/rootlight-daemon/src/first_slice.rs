@@ -5040,7 +5040,7 @@ fn startup_registration_identity(
     context: &RepositoryOperationContext,
     record: &OperationRecord,
 ) -> Option<ContentHash> {
-    if context.published_generation.is_none() && record.state == OperationState::Failed {
+    if context.published_generation.is_none() && record.state.is_terminal() {
         return None;
     }
     context.root_identity.map(ContentHash::from_bytes)
@@ -14725,7 +14725,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_does_not_restore_failed_unpublished_registration() {
+    fn startup_does_not_restore_terminal_unpublished_registration() {
         let operation = OperationId::from_bytes([94; 16]);
         let repository = RepositoryId::from_bytes([94; 16]);
         let root_identity = ContentHash::from_bytes([94; 32]);
@@ -14772,6 +14772,18 @@ mod tests {
             startup_registration_identity(&durable_context, &failed),
             None
         );
+        for state in [
+            OperationState::Interrupted,
+            OperationState::Cancelled,
+            OperationState::Succeeded,
+        ] {
+            let mut terminal = failed.clone();
+            terminal.state = state;
+            assert_eq!(
+                startup_registration_identity(&durable_context, &terminal),
+                None
+            );
+        }
         let mut published_context = durable_context;
         published_context.published_generation = Some(GenerationId::from_bytes([94; 20]));
         assert_eq!(
