@@ -13,7 +13,7 @@ use rootlight_ir::{
     RelationEndpoint, RelationPredicate, SourceRef,
 };
 use rootlight_search::{
-    LexicalSearch, SearchBudget, SearchRequest, validate_search_request_with_languages,
+    LexicalSearch, SearchBudget, SearchRequest, validate_search_request_with_filters,
 };
 use rootlight_source::{
     SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError, SourceReadOptions,
@@ -121,6 +121,39 @@ where
         languages: Vec<String>,
         max_results: usize,
         page_offset: usize,
+        search_budget: SearchBudget,
+        budget: QueryBudget,
+    ) -> Result<CodeLocatePlan, QueryError> {
+        self.plan_code_locate_with_filters(
+            query,
+            mode,
+            languages,
+            Vec::new(),
+            max_results,
+            page_offset,
+            search_budget,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded `code.locate` plan over language and path filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid filter, budget, result limit,
+    /// arithmetic overflow, or a conservative estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "language and path unions are independent bounded locate dimensions"
+    )]
+    pub fn plan_code_locate_with_filters(
+        &self,
+        query: String,
+        mode: LocateMode,
+        languages: Vec<String>,
+        path_prefixes: Vec<String>,
+        max_results: usize,
+        page_offset: usize,
         mut search_budget: SearchBudget,
         budget: QueryBudget,
     ) -> Result<CodeLocatePlan, QueryError> {
@@ -140,7 +173,7 @@ where
             max_results,
             page_offset,
         };
-        validate_search_request_with_languages(&request, &languages, search_budget)?;
+        validate_search_request_with_filters(&request, &languages, &path_prefixes, search_budget)?;
         let mandatory_rows = checked_add(
             checked_usize_to_u64(search_budget.max_candidates)?,
             checked_usize_to_u64(max_results)?,
@@ -181,6 +214,7 @@ where
             query: request.query,
             mode,
             languages,
+            path_prefixes,
             max_results,
             page_offset,
             search_budget,
@@ -210,9 +244,10 @@ where
             max_results: plan.max_results,
             page_offset: plan.page_offset,
         };
-        let outcome = self.search.search_with_language_filter_and_stats(
+        let outcome = self.search.search_with_filters_and_stats(
             &request,
             &plan.languages,
+            &plan.path_prefixes,
             plan.search_budget,
             cancellation,
         )?;

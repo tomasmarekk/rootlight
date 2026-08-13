@@ -157,6 +157,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         query: String,
         mode: LocateMode,
         languages: Vec<String>,
+        path_prefixes: Vec<String>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -485,6 +486,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         query: String,
         mode: LocateMode,
         languages: Vec<String>,
+        path_prefixes: Vec<String>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -493,12 +495,13 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .code_locate_async_with_languages_and_options(
+                .code_locate_async_with_filters_and_options(
                     repository,
                     generation,
                     &query,
                     mode,
                     &languages,
+                    &path_prefixes,
                     maximum_results,
                     page_offset,
                     options,
@@ -1090,6 +1093,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.query().to_owned(),
                     request.mode(),
                     request.languages().to_vec(),
+                    request.path_prefixes().to_vec(),
                     request.maximum_results(),
                     request.page_offset(),
                     options,

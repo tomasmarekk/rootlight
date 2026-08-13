@@ -569,6 +569,7 @@ pub struct CodeLocatePortRequest {
     query: String,
     mode: LocateMode,
     languages: Vec<String>,
+    path_prefixes: Vec<String>,
     maximum_results: u32,
     page_offset: u64,
 }
@@ -604,6 +605,12 @@ impl CodeLocatePortRequest {
         &self.languages
     }
 
+    /// Returns canonical repository-relative path prefixes.
+    #[must_use]
+    pub fn path_prefixes(&self) -> &[String] {
+        &self.path_prefixes
+    }
+
     /// Returns the effective result ceiling.
     #[must_use]
     pub const fn maximum_results(&self) -> u32 {
@@ -626,6 +633,7 @@ impl fmt::Debug for CodeLocatePortRequest {
             .field("query_bytes", &self.query.len())
             .field("mode", &self.mode)
             .field("languages", &self.languages)
+            .field("path_prefix_count", &self.path_prefixes.len())
             .field("maximum_results", &self.maximum_results)
             .field("page_offset", &self.page_offset)
             .finish()
@@ -3514,6 +3522,13 @@ fn code_locate_cursor_context(
         request_hasher.update(b"\0languages\0");
         for language in &request.languages {
             request_hasher.update(language.as_bytes());
+            request_hasher.update(&[0]);
+        }
+    }
+    if !request.path_prefixes.is_empty() {
+        request_hasher.update(b"\0path-prefixes\0");
+        for path in &request.path_prefixes {
+            request_hasher.update(path.as_bytes());
             request_hasher.update(&[0]);
         }
     }
@@ -6871,15 +6886,13 @@ fn normalize_code_locate(
     invalid_arguments: &PublicError,
 ) -> Result<CodeLocatePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if input.kinds.is_some()
-        || input.scope.is_some()
-        || input.related_to.is_some()
-        || input.min_confidence.is_some()
-    {
+    if input.kinds.is_some() || input.related_to.is_some() || input.min_confidence.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mode = locate_mode(input.search_modes.as_ref(), unsupported)?;
     let languages = canonical_locate_languages(input.languages, invalid_arguments)?;
+    let path_prefixes =
+        canonical_locate_path_prefixes(input.scope, unsupported, invalid_arguments)?;
     let maximum_results = input
         .max_results
         .into_iter()
@@ -6892,9 +6905,33 @@ fn normalize_code_locate(
         query: input.query,
         mode,
         languages,
+        path_prefixes,
         maximum_results: u32::from(maximum_results),
         page_offset: 0,
     })
+}
+
+fn canonical_locate_path_prefixes(
+    scope: Option<ScopeSelector>,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+) -> Result<Vec<String>, ToolExecutionError> {
+    let Some(scope) = scope else {
+        return Ok(Vec::new());
+    };
+    let ScopeSelector::Paths(scope) = scope else {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    };
+    if scope.paths.is_empty()
+        || scope.paths.len() > 256
+        || scope
+            .paths
+            .iter()
+            .any(|path| !safe_repository_relative_path(path))
+    {
+        return Err(ToolExecutionError::new(invalid_arguments.clone()));
+    }
+    Ok(scope.paths.into_iter().collect())
 }
 
 fn canonical_locate_languages(

@@ -71,6 +71,11 @@ pub fn matrix_target_mu(value: usize) -> usize {
     value.saturating_add(12)
 }
 ";
+const SCOPED_PAGE_SOURCE: &str = "\
+pub fn scope_page_candidate() -> usize {
+    1
+}
+";
 
 #[test]
 fn retrieval_contract_matrix_crosses_real_process_boundaries() {
@@ -79,6 +84,7 @@ fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     supported_symbol_explain_projection_crosses_process_boundaries(&mut fixture);
     supported_architecture_workflows_cross_process_boundaries(&mut fixture);
     supported_language_filters_apply_across_process_boundaries(&mut fixture);
+    supported_path_scope_applies_across_process_boundaries(&mut fixture);
     source_symbol_selector_resolves_the_complete_definition(&mut fixture);
     unsupported_retrieval_options_fail_with_stable_preflight_errors(&mut fixture);
     retrieval_limits_cursors_and_unresolved_ids_are_truthful(&mut fixture);
@@ -426,6 +432,96 @@ fn supported_language_filters_apply_across_process_boundaries(fixture: &mut Retr
     assert_common_read_contract(excluded, &fixture.repository_id);
     assert_eq!(excluded["data"]["matches"], json!([]));
     assert_eq!(excluded["truncated"], false);
+}
+
+fn supported_path_scope_applies_across_process_boundaries(fixture: &mut RetrievalFixture) {
+    let matching = fixture.standalone(
+        "locate-scope-src",
+        "code.locate",
+        json!({
+            "query": "matrix_target_alpha",
+            "search_modes": ["exact"],
+            "scope": {"paths": ["src"]}
+        }),
+    );
+    let matching_batch = fixture.batch(
+        "batch-locate-scope-src",
+        "code.locate",
+        json!({
+            "query": "matrix_target_alpha",
+            "search_modes": ["exact"],
+            "scope": {"paths": ["src"]}
+        }),
+        "compact",
+    );
+    assert_standalone_batch_parity(&matching, &matching_batch, "code.locate");
+    let matching = &matching["result"]["structuredContent"];
+    assert_common_read_contract(matching, &fixture.repository_id);
+    assert_eq!(
+        matching["data"]["matches"]
+            .as_array()
+            .expect("matching scope returns an array")
+            .len(),
+        1
+    );
+
+    let excluded = fixture.standalone(
+        "locate-scope-tests",
+        "code.locate",
+        json!({
+            "query": "matrix_target_alpha",
+            "search_modes": ["exact"],
+            "scope": {"paths": ["tests"]}
+        }),
+    );
+    assert_success(&excluded, "code.locate");
+    let excluded = &excluded["result"]["structuredContent"];
+    assert_common_read_contract(excluded, &fixture.repository_id);
+    assert_eq!(excluded["data"]["matches"], json!([]));
+    assert_eq!(excluded["truncated"], false);
+    assert!(excluded["next_cursor"].is_null());
+
+    let first_unfiltered = fixture.standalone(
+        "locate-scope-first-unfiltered",
+        "code.locate",
+        json!({
+            "query": "scope_page_candidate",
+            "search_modes": ["exact"],
+            "max_results": 1
+        }),
+    );
+    assert_success(&first_unfiltered, "code.locate");
+    let first_path = first_unfiltered["result"]["structuredContent"]["data"]["matches"][0]["path"]
+        .as_str()
+        .expect("the first unfiltered page contains a path");
+    let late_scope = if first_path.starts_with("src/") {
+        "tests"
+    } else {
+        "src"
+    };
+    let scoped_late = fixture.standalone(
+        "locate-scope-late-candidate",
+        "code.locate",
+        json!({
+            "query": "scope_page_candidate",
+            "search_modes": ["exact"],
+            "scope": {"paths": [late_scope]},
+            "max_results": 1
+        }),
+    );
+    assert_success(&scoped_late, "code.locate");
+    let scoped_late = &scoped_late["result"]["structuredContent"];
+    let late_matches = scoped_late["data"]["matches"]
+        .as_array()
+        .expect("the scoped page returns matches");
+    assert_eq!(late_matches.len(), 1);
+    let late_path = late_matches[0]["path"]
+        .as_str()
+        .expect("the scoped match contains a path");
+    assert!(late_path.starts_with(&format!("{late_scope}/")));
+    assert_ne!(late_path, first_path);
+    assert_eq!(scoped_late["truncated"], false);
+    assert!(scoped_late["next_cursor"].is_null());
 }
 
 fn supported_profiles_preserve_standalone_and_batch_semantics(fixture: &mut RetrievalFixture) {
@@ -1076,6 +1172,8 @@ impl RetrievalFixture {
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
             .expect("fixture source directory is created");
+        fs::create_dir_all(repository_root.join("tests"))
+            .expect("fixture test directory is created");
         fs::write(
             repository_root.join("Cargo.toml"),
             "[package]\nname = \"retrieval_process_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -1083,6 +1181,16 @@ impl RetrievalFixture {
         .expect("fixture manifest is written");
         fs::write(repository_root.join("src").join("lib.rs"), RETRIEVAL_SOURCE)
             .expect("fixture source is written");
+        fs::write(
+            repository_root.join("src").join("scope_page.rs"),
+            SCOPED_PAGE_SOURCE,
+        )
+        .expect("scoped source fixture is written");
+        fs::write(
+            repository_root.join("tests").join("scope_page.rs"),
+            SCOPED_PAGE_SOURCE,
+        )
+        .expect("scoped test fixture is written");
 
         let state_dir = root.path().join("state");
         let runtime_dir = root.path().join("runtime");

@@ -275,6 +275,9 @@ pub enum SearchError {
     /// A language filter was empty, noncanonical, duplicated, or oversized.
     #[error("lexical language filter is invalid")]
     InvalidLanguageFilter,
+    /// A repository-relative path filter was empty, noncanonical, or oversized.
+    #[error("lexical path filter is invalid")]
+    InvalidPathFilter,
     /// More matches existed than the deterministic materialization budget.
     #[error("lexical candidate budget exceeded")]
     CandidateBudgetExceeded,

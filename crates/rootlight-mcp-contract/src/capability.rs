@@ -596,7 +596,16 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported("kinds", "kind filtering is not served"),
-    unsupported("scope", "structural scope filtering is not served"),
+    implemented(
+        "scope.paths",
+        "filters lexical candidates by canonical repository-relative path prefixes before ranking",
+    ),
+    unsupported("scope.packages", "package scope filtering is not served"),
+    unsupported(
+        "scope.build_targets",
+        "build-target scope filtering is not served",
+    ),
+    unsupported("scope.symbols", "symbol scope filtering is not served"),
     unsupported(
         "related_to",
         "relationship-constrained lookup is not served",

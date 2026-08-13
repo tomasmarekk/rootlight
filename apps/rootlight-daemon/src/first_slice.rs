@@ -9363,6 +9363,27 @@ fn index_support_inventory(
 
 fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSupportInventory {
     let generation_format = snapshot.generation_format.clone();
+    let active_generation_bytes = snapshot
+        .generations
+        .iter()
+        .filter(|generation| generation.active)
+        .try_fold(0_u64, |total, generation| {
+            total.checked_add(generation.disk_bytes)
+        });
+    let predecessor_generation_bytes = snapshot
+        .generations
+        .iter()
+        .filter(|generation| generation.active)
+        .try_fold(0_u64, |total, generation| {
+            let Some(parent) = generation.parent else {
+                return Some(total);
+            };
+            snapshot
+                .generations
+                .iter()
+                .find(|candidate| candidate.generation == parent)
+                .and_then(|generation| total.checked_add(generation.disk_bytes))
+        });
     IndexSupportInventory {
         adapters: snapshot
             .adapters
@@ -9412,6 +9433,14 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
         generation_disk_bytes: snapshot.generation_disk_bytes,
         unreclaimed_temporary_bytes: snapshot.unreclaimed_temporary_bytes,
         disk_margin_bytes: snapshot.disk_margin_bytes,
+        active_generation_bytes,
+        predecessor_generation_bytes,
+        shared_bytes: None,
+        pinned_bytes: None,
+        reclaimable_bytes: None,
+        total_storage_bytes: Some(snapshot.total_storage_bytes),
+        admission_margin_bytes: None,
+        effective_retention_generations: Some(snapshot.effective_retention_generations),
     }
 }
 
@@ -10582,8 +10611,10 @@ mod tests {
             generations: Vec::new(),
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
+            total_storage_bytes: 0,
             unreclaimed_temporary_bytes: 64,
             disk_margin_bytes: Some(1024),
+            effective_retention_generations: 2,
         });
 
         assert_eq!(mapped.repositories.len(), 1);
@@ -10595,6 +10626,10 @@ mod tests {
         assert_eq!(mapped.repositories[0].generation_count, 1);
         assert_eq!(mapped.unreclaimed_temporary_bytes, 64);
         assert_eq!(mapped.disk_margin_bytes, Some(1024));
+        assert_eq!(mapped.active_generation_bytes, Some(0));
+        assert_eq!(mapped.predecessor_generation_bytes, Some(0));
+        assert_eq!(mapped.total_storage_bytes, Some(0));
+        assert_eq!(mapped.effective_retention_generations, Some(2));
     }
 
     #[test]

@@ -677,6 +677,7 @@ message CodeLocateRequest {
   uint32 maximum_results = 6;
   uint64 page_offset = 7;
   repeated string languages = 8;
+  repeated string path_prefixes = 9;
 }
 
 // One typed lexical lookup result.

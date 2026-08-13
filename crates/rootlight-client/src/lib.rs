@@ -55,11 +55,12 @@ use rootlight_observability::{
     DiagnosticsQuickSnapshot as SupportDiagnosticsQuick, HealthSnapshot as SupportHealth,
     OperationsSummary as SupportOperations, PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
-    SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
-    SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SupportBundleInput, SupportBundleSchema,
-    SupportChecksumStatus, SupportInventory, SupportManifest, SupportOperationKind,
-    SupportOperationState, SupportOperationsV4, SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION,
-    TelemetrySnapshot, build_support_bundle_for_schema,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_BUNDLE_SCHEMA_VERSION_V4, SUPPORT_ENTRY_NAMES,
+    SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5,
+    SupportBundleInput, SupportBundleSchema, SupportChecksumStatus, SupportInventory,
+    SupportManifest, SupportOperationKind, SupportOperationState, SupportOperationsV4,
+    SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
+    build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -97,6 +98,8 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "support.bundle.v1",
     "support.bundle.v2",
     "support.bundle.v3",
+    "support.bundle.v4",
+    "support.bundle.v5",
 ];
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
@@ -288,7 +291,7 @@ pub enum DiagnosticsCheck {
     StoragePolicy,
     /// Immutable generation manifest checksums.
     GenerationChecksums,
-    /// Unreclaimed transactional storage.
+    /// Classified immutable, temporary, and admission storage accounting.
     TemporaryStorage,
     /// Requested language adapter availability.
     AdapterAvailability,
@@ -3703,6 +3706,7 @@ impl Client {
                 query,
                 mode,
                 &[],
+                &[],
                 maximum_results,
                 page_offset,
             )?,
@@ -3793,6 +3797,7 @@ impl Client {
                     query,
                     mode,
                     &[],
+                    &[],
                     maximum_results,
                     page_offset,
                 )?,
@@ -3839,6 +3844,49 @@ impl Client {
         page_offset: u64,
         options: RequestOptions,
     ) -> Result<CodeLocate, ClientError> {
+        self.code_locate_async_with_filters_and_options(
+            repository,
+            generation,
+            query,
+            mode,
+            languages,
+            &[],
+            maximum_results,
+            page_offset,
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously executes one bounded lexical lookup over language and path unions.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid language or path filter, query or
+    /// budget bounds, unavailable protocol support, transport failure, timeout,
+    /// or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded asynchronous lookup or transport dimension"
+    )]
+    pub async fn code_locate_async_with_filters_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        languages: &[String],
+        path_prefixes: &[String],
+        maximum_results: u32,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<CodeLocate, ClientError> {
         match self
             .request_async_with_options(
                 build_code_locate_request(
@@ -3847,6 +3895,7 @@ impl Client {
                     query,
                     mode,
                     languages,
+                    path_prefixes,
                     maximum_results,
                     page_offset,
                 )?,
@@ -7628,8 +7677,10 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 8 {
+    let expected_schema = if selected_protocol_minor >= 12 {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 8 {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4
     } else if selected_protocol_minor >= 5 {
         SUPPORT_BUNDLE_SCHEMA_VERSION_V3
     } else if selected_protocol_minor >= 4 {
@@ -7680,7 +7731,8 @@ fn validate_support_archive(
         SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES,
         PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V2,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V3 => &SUPPORT_ENTRY_NAMES_V3,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V4,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 => &SUPPORT_ENTRY_NAMES_V4,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V5,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -7715,20 +7767,25 @@ fn validate_support_archive(
     let diagnostics: SupportDiagnosticsQuick =
         decode_support_entry(&entries, "diagnostics/quick.json")?;
     let health: SupportHealth = decode_support_entry(&entries, "health.json")?;
-    let (operations, terminal_operations) =
-        if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
-            let operations: SupportOperationsV4 =
-                decode_support_entry(&entries, "operations-summary.json")?;
-            (operations.current, operations.recent_terminal)
-        } else {
-            (
-                decode_support_entry(&entries, "operations-summary.json")?,
-                Vec::new(),
-            )
-        };
+    let (operations, terminal_operations) = if matches!(
+        schema_version,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    ) {
+        let operations: SupportOperationsV4 =
+            decode_support_entry(&entries, "operations-summary.json")?;
+        (operations.current, operations.recent_terminal)
+    } else {
+        (
+            decode_support_entry(&entries, "operations-summary.json")?,
+            Vec::new(),
+        )
+    };
     let manifest: SupportManifest = decode_support_entry(&entries, "manifest.json")?;
     let redaction: RedactionReport = decode_support_entry(&entries, "redaction-report.json")?;
-    let inventory = if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    let inventory = if matches!(
+        schema_version,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    ) {
         Some(decode_support_entry(&entries, "inventory.json")?)
     } else {
         None
@@ -7768,8 +7825,10 @@ fn validate_support_archive(
             SupportBundleSchema::V2
         } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V3 {
             SupportBundleSchema::V3
-        } else {
+        } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V4 {
             SupportBundleSchema::V4
+        } else {
+            SupportBundleSchema::V5
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -7822,8 +7881,10 @@ fn validate_support_semantics(
         PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION | SUPPORT_BUNDLE_SCHEMA_VERSION_V3
     ) {
         rootlight_observability::OMITTED_DATA_CLASSES_V2.as_slice()
-    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V4 {
         rootlight_observability::OMITTED_DATA_CLASSES_V4.as_slice()
+    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        rootlight_observability::OMITTED_DATA_CLASSES_V5.as_slice()
     } else {
         return Err(ClientError::InvalidSupportBundle);
     };
@@ -7845,7 +7906,10 @@ fn validate_support_semantics(
                 .collect::<Vec<_>>()
         || (schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_some())
         || (schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_none())
-        || (schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION) != inventory.is_some()
+        || matches!(
+            schema_version,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        ) != inventory.is_some()
     {
         return Err(ClientError::InvalidSupportBundle);
     }
@@ -7859,7 +7923,7 @@ fn validate_support_semantics(
             "operations-summary.json",
             "redaction-report.json",
         ],
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
             "diagnostics/quick.json",
             "health.json",
             "inventory.json",
@@ -8189,12 +8253,17 @@ fn operation_status_request_options(wait_ms: Option<u32>) -> Result<RequestOptio
     Ok(RequestOptions::new().with_timeout(RequestTimeout::new(timeout)?))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the wire request carries independent repository, query, filter, and page dimensions"
+)]
 fn build_code_locate_request(
     repository: RepositoryId,
     generation: GenerationSelector,
     query: &str,
     mode: LocateMode,
     languages: &[String],
+    path_prefixes: &[String],
     maximum_results: u32,
     page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
@@ -8202,6 +8271,7 @@ fn build_code_locate_request(
         || query.len() > 2048
         || !(1..=200).contains(&maximum_results)
         || !valid_language_filter(languages)
+        || !valid_path_filter(path_prefixes)
     {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
@@ -8215,8 +8285,25 @@ fn build_code_locate_request(
             maximum_results,
             page_offset,
             languages: languages.to_vec(),
+            path_prefixes: path_prefixes.to_vec(),
         },
     ))
+}
+
+fn valid_path_filter(paths: &[String]) -> bool {
+    paths.len() <= 256
+        && paths.windows(2).all(|pair| pair[0] < pair[1])
+        && paths.iter().all(|path| {
+            !path.is_empty()
+                && path.len() <= 8_192
+                && !path.starts_with('/')
+                && !path
+                    .bytes()
+                    .any(|byte| matches!(byte, b'\0' | b'\\' | b':'))
+                && path
+                    .split('/')
+                    .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+        })
 }
 
 fn valid_language_filter(languages: &[String]) -> bool {
@@ -12572,7 +12659,7 @@ fn build_storage_diagnostics(
             generation_status,
             BTreeMap::from([("retained_durable_bytes", status.retained_durable_bytes)]),
         ),
-        temporary_storage_observation(inventory),
+        storage_accounting_observation(status, inventory),
     ];
     Ok(diagnostics_report(
         DiagnosticsMode::Storage,
@@ -12848,8 +12935,48 @@ fn generation_checksum_observation(
     )
 }
 
-fn temporary_storage_observation(inventory: &SupportInventory) -> DiagnosticsObservation {
-    let temporary_bytes = inventory.storage.unreclaimed_temporary_bytes;
+fn storage_accounting_observation(
+    status: &RepositoryStatus,
+    inventory: &SupportInventory,
+) -> DiagnosticsObservation {
+    let storage = &inventory.storage;
+    let temporary_bytes = storage.unreclaimed_temporary_bytes;
+    let mut measurements = BTreeMap::from([
+        ("generation_disk_bytes", storage.generation_disk_bytes),
+        ("unreclaimed_temporary_bytes", temporary_bytes),
+    ]);
+    if let Some(disk_margin_bytes) = storage.disk_margin_bytes {
+        measurements.insert("disk_margin_bytes", disk_margin_bytes);
+    }
+    for (key, value) in [
+        (
+            "active_generation_bytes",
+            storage
+                .active_generation_bytes
+                .or_else(|| generation_storage_bytes(status.active_generation, inventory)),
+        ),
+        (
+            "predecessor_generation_bytes",
+            storage.predecessor_generation_bytes.or_else(|| {
+                status
+                    .active_parent_generation
+                    .and_then(|generation| generation_storage_bytes(generation, inventory))
+            }),
+        ),
+        ("shared_bytes", storage.shared_bytes),
+        ("pinned_bytes", storage.pinned_bytes),
+        ("reclaimable_bytes", storage.reclaimable_bytes),
+        ("total_storage_bytes", storage.total_storage_bytes),
+        ("admission_margin_bytes", storage.admission_margin_bytes),
+        (
+            "effective_retention_generations",
+            storage.effective_retention_generations.map(u64::from),
+        ),
+    ] {
+        if let Some(value) = value {
+            measurements.insert(key, value);
+        }
+    }
     status_observation(
         DiagnosticsCheck::TemporaryStorage,
         if temporary_bytes == 0 {
@@ -12857,14 +12984,17 @@ fn temporary_storage_observation(inventory: &SupportInventory) -> DiagnosticsObs
         } else {
             HealthStatus::Degraded
         },
-        BTreeMap::from([
-            (
-                "generation_disk_bytes",
-                inventory.storage.generation_disk_bytes,
-            ),
-            ("unreclaimed_temporary_bytes", temporary_bytes),
-        ]),
+        measurements,
     )
+}
+
+fn generation_storage_bytes(generation: GenerationId, inventory: &SupportInventory) -> Option<u64> {
+    let generation = support_evidence_id(generation.as_bytes());
+    inventory
+        .generations
+        .iter()
+        .find(|entry| entry.generation_id == generation)
+        .map(|entry| entry.disk_bytes)
 }
 
 fn status_observation(
@@ -14141,7 +14271,7 @@ mod tests {
             }],
         };
         let support_wire = support_response_with_schema(
-            valid_support_archive_v4(),
+            valid_support_archive_v5(),
             CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
         );
         let expected_health = parse_health(health_wire.clone(), CURRENT_PROTOCOL_MINOR)
@@ -15065,6 +15195,8 @@ mod tests {
                 "support.bundle.v1",
                 "support.bundle.v2",
                 "support.bundle.v3",
+                "support.bundle.v4",
+                "support.bundle.v5",
             ]
         );
         assert!(
@@ -15534,6 +15666,7 @@ mod tests {
             "publish",
             LocateMode::Text,
             &valid_languages,
+            &[],
             1,
             0,
         )
@@ -15542,6 +15675,22 @@ mod tests {
             panic!("language-filtered lookup builds a code-locate request");
         };
         assert_eq!(request.languages, valid_languages);
+        let valid_paths = ["src".to_owned(), "tests/integration".to_owned()];
+        let request = build_code_locate_request(
+            test_repository(),
+            GenerationSelector::Active,
+            "publish",
+            LocateMode::Text,
+            &[],
+            &valid_paths,
+            1,
+            0,
+        )
+        .expect("canonical path filters build");
+        let daemon::request_envelope::Request::CodeLocate(request) = request else {
+            panic!("path-filtered lookup builds a code-locate request");
+        };
+        assert_eq!(request.path_prefixes, valid_paths);
         for invalid_languages in [
             vec!["Rust".to_owned()],
             vec!["rust".to_owned(), "python".to_owned()],
@@ -15555,6 +15704,28 @@ mod tests {
                     "publish",
                     LocateMode::Text,
                     &invalid_languages,
+                    &[],
+                    1,
+                    0,
+                ),
+                Err(ClientError::InvalidFirstSliceRequest)
+            ));
+        }
+        for invalid_paths in [
+            vec!["../src".to_owned()],
+            vec!["/src".to_owned()],
+            vec!["src\\lib.rs".to_owned()],
+            vec!["tests".to_owned(), "src".to_owned()],
+            vec!["src".to_owned(), "src".to_owned()],
+        ] {
+            assert!(matches!(
+                build_code_locate_request(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    "publish",
+                    LocateMode::Text,
+                    &[],
+                    &invalid_paths,
                     1,
                     0,
                 ),
@@ -16261,11 +16432,37 @@ mod tests {
 
     fn valid_support_archive_v4() -> Vec<u8> {
         let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_8);
-        input.inventory = Some(test_support_inventory());
+        let mut inventory = test_support_inventory();
+        clear_extended_storage_accounting(&mut inventory.storage);
+        input.inventory = Some(inventory);
         build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
             .expect("test production support bundle builds")
             .archive()
             .to_vec()
+    }
+
+    fn valid_support_archive_v5() -> Vec<u8> {
+        let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_12);
+        let mut inventory = test_support_inventory();
+        inventory.runtime.protocol_minor = 12;
+        input.inventory = Some(inventory);
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V5)
+            .expect("test storage-accounting support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
+    fn clear_extended_storage_accounting(
+        storage: &mut rootlight_observability::SupportStorageInventory,
+    ) {
+        storage.active_generation_bytes = None;
+        storage.predecessor_generation_bytes = None;
+        storage.shared_bytes = None;
+        storage.pinned_bytes = None;
+        storage.reclaimable_bytes = None;
+        storage.total_storage_bytes = None;
+        storage.admission_margin_bytes = None;
+        storage.effective_retention_generations = None;
     }
 
     fn valid_telemetry_support_archive(
@@ -16372,6 +16569,14 @@ mod tests {
                 generation_disk_bytes: 0,
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: None,
+                active_generation_bytes: Some(0),
+                predecessor_generation_bytes: None,
+                shared_bytes: None,
+                pinned_bytes: None,
+                reclaimable_bytes: None,
+                total_storage_bytes: None,
+                admission_margin_bytes: None,
+                effective_retention_generations: None,
             },
         }
     }
@@ -16730,16 +16935,35 @@ mod tests {
 
         let v4 = support_response_with_schema(
             valid_support_archive_v4(),
-            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
         );
         let parsed = parse_support_bundle(v4.clone(), 8)
             .expect("protocol 1.8 accepts schema v4 support evidence");
-        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, SUPPORT_BUNDLE_SCHEMA_VERSION_V4);
         assert!(parsed.telemetry.is_some());
         assert!(parsed.inventory.is_some());
         assert!(parsed.terminal_operations.is_empty());
         assert!(matches!(
             parse_support_bundle(v4, 5),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let v5 = support_response_with_schema(
+            valid_support_archive_v5(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v5.clone(), 12)
+            .expect("protocol 1.12 accepts schema v5 support evidence");
+        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(
+            parsed
+                .inventory
+                .as_ref()
+                .and_then(|inventory| inventory.storage.active_generation_bytes),
+            Some(0)
+        );
+        assert!(matches!(
+            parse_support_bundle(v5, 11),
             Err(ClientError::InvalidSupportBundle)
         ));
         assert!(matches!(
@@ -17156,13 +17380,37 @@ mod tests {
 
     #[test]
     fn storage_scrub_fails_on_scoped_generation_checksum_mismatch() {
+        let mut support = diagnostic_support(SupportChecksumStatus::Failed, Vec::new());
+        let inventory = support
+            .inventory
+            .as_mut()
+            .expect("diagnostic inventory exists");
+        let predecessor = GenerationId::from_bytes([8; 20]);
+        inventory.repositories[0].generation_count = 2;
+        inventory
+            .generations
+            .push(rootlight_observability::SupportGenerationInventory {
+                repository_id: support_evidence_id(test_repository().as_bytes()),
+                generation_id: support_evidence_id(predecessor.as_bytes()),
+                format_version: "1.2".to_owned(),
+                checksum_status: SupportChecksumStatus::Verified,
+                disk_bytes: 2_048,
+                state: "superseded".to_owned(),
+            });
+        inventory.storage.active_generation_bytes = None;
+        inventory.storage.predecessor_generation_bytes = None;
+        inventory.storage.total_storage_bytes = Some(8_192);
+        inventory.storage.admission_margin_bytes = Some(1024 * 1024);
+        inventory.storage.effective_retention_generations = Some(8);
+        let mut status = diagnostic_repository_status();
+        status.active_parent_generation = Some(predecessor);
         let report = build_storage_diagnostics(
             test_repository(),
             true,
             HealthStatus::Healthy,
             diagnostic_quick(),
-            &diagnostic_repository_status(),
-            &diagnostic_support(SupportChecksumStatus::Failed, Vec::new()),
+            &status,
+            &support,
         )
         .expect("validated support evidence builds storage diagnostics");
 
@@ -17177,6 +17425,30 @@ mod tests {
             .expect("storage diagnostics include generation checksums");
         assert_eq!(checksums.status, HealthStatus::Failed);
         assert_eq!(checksums.measurements.get("failed"), Some(&1));
+        let accounting = report
+            .observations
+            .iter()
+            .find(|observation| observation.check == DiagnosticsCheck::TemporaryStorage)
+            .expect("storage diagnostics include accounting");
+        assert_eq!(
+            accounting.measurements.get("active_generation_bytes"),
+            Some(&4096)
+        );
+        assert_eq!(
+            accounting.measurements.get("predecessor_generation_bytes"),
+            Some(&2048)
+        );
+        assert_eq!(
+            accounting.measurements.get("total_storage_bytes"),
+            Some(&8192)
+        );
+        assert_eq!(
+            accounting
+                .measurements
+                .get("effective_retention_generations"),
+            Some(&8)
+        );
+        assert!(!accounting.measurements.contains_key("shared_bytes"));
     }
 
     #[test]

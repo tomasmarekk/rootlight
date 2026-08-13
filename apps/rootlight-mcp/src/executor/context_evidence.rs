@@ -734,6 +734,7 @@ where
             query,
             mode,
             languages: Vec::new(),
+            path_prefixes: Vec::new(),
             maximum_results,
             page_offset: 0,
         };

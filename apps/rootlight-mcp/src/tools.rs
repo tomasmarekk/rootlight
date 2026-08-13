@@ -2791,11 +2791,11 @@ mod tests {
         .expect("implemented values and descendants override limited ancestors");
 
         let error = validate_capability_input(
-            VerticalTool::SourceRead,
+            VerticalTool::RepoStatus,
             &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("the restricted source representation is rejected");
+        .expect_err("the restricted status representation is rejected");
         assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(error.registry_path(), "response_profile");
         assert_eq!(error.instance_path(), "response_profile");
@@ -2806,7 +2806,7 @@ mod tests {
     fn unresolved_bindings_fail_closed_only_for_restricted_targets() {
         let binding = json!({"$from": "find", "source": "source_ref", "index": 0});
         let error = validate_capability_input(
-            VerticalTool::SourceRead,
+            VerticalTool::RepoStatus,
             &json!({"response_profile": binding}),
             CapabilityBindingPolicy::RejectUnprovenRestrictedBindings,
         )
@@ -2936,7 +2936,7 @@ mod tests {
     #[test]
     fn capability_rejection_builds_bounded_field_details() {
         let error = validate_capability_input(
-            VerticalTool::SourceRead,
+            VerticalTool::RepoStatus,
             &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
@@ -3605,16 +3605,16 @@ mod tests {
             observed,
             [
                 (
-                    225_473,
-                    "c24f5f1b2a28079ee1ff961ae9a3abeb105fa0e78cfbeab3dee768f9983a5ca0".to_owned(),
+                    225_457,
+                    "6700bf200dbf3bc8b0353331dd32a851918860d81fa97b8e5f855fd198c34d33".to_owned(),
                 ),
                 (
-                    493_579,
-                    "f892b4e23e63bfb2ab935ea41b59fc52e09eeba2fca5332d15eb38b6e0754175".to_owned(),
+                    493_563,
+                    "72724a0d9bd7c2222bb7d7bcf4dacf8e17295dd7dbf173c7b7431cb1355fd367".to_owned(),
                 ),
                 (
-                    678_328,
-                    "7bae4e449b5675016f18c7533478635f37de14eefd13cdc92aa676a7ebfe2be2".to_owned(),
+                    678_312,
+                    "2f3031263581c1a6c6125adadb300d3c76786d9d89222b4b0a9c47e7918c2114".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

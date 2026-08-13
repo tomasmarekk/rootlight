@@ -90,6 +90,7 @@ const CAPABILITIES: &[&str] = &[
     "support.bundle.v2",
     "support.bundle.v3",
     "support.bundle.v4",
+    "support.bundle.v5",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -898,6 +899,22 @@ pub struct IndexSupportInventory {
     pub unreclaimed_temporary_bytes: u64,
     /// Remaining disk margin when the repository service can measure it.
     pub disk_margin_bytes: Option<u64>,
+    /// Immutable bytes owned by active generations when fully classified.
+    pub active_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by direct active predecessors when measured.
+    pub predecessor_generation_bytes: Option<u64>,
+    /// Physically shared immutable bytes when they can be attributed.
+    pub shared_bytes: Option<u64>,
+    /// Bytes protected from reclamation by a durable pin.
+    pub pinned_bytes: Option<u64>,
+    /// Bytes currently eligible for safe reclamation.
+    pub reclaimable_bytes: Option<u64>,
+    /// Total physical bytes owned by the indexed storage scope.
+    pub total_storage_bytes: Option<u64>,
+    /// Bytes remaining after admission reserves and safety margins.
+    pub admission_margin_bytes: Option<u64>,
+    /// Effective maximum retained generations per repository.
+    pub effective_retention_generations: Option<u32>,
 }
 
 fn generation_health_status(inventory: &IndexSupportInventory) -> HealthStatus {
@@ -5733,6 +5750,17 @@ impl CancellationHandoffTestHook {
     }
 }
 
+fn clear_extended_storage_accounting(storage: &mut SupportStorageInventory) {
+    storage.active_generation_bytes = None;
+    storage.predecessor_generation_bytes = None;
+    storage.shared_bytes = None;
+    storage.pinned_bytes = None;
+    storage.reclaimable_bytes = None;
+    storage.total_storage_bytes = None;
+    storage.admission_margin_bytes = None;
+    storage.effective_retention_generations = None;
+}
+
 fn support_inventory(
     health: &Health,
     limits: DaemonLimits,
@@ -5790,6 +5818,14 @@ fn support_inventory(
             generation_disk_bytes: index.generation_disk_bytes,
             unreclaimed_temporary_bytes: index.unreclaimed_temporary_bytes,
             disk_margin_bytes: index.disk_margin_bytes,
+            active_generation_bytes: index.active_generation_bytes,
+            predecessor_generation_bytes: index.predecessor_generation_bytes,
+            shared_bytes: index.shared_bytes,
+            pinned_bytes: index.pinned_bytes,
+            reclaimable_bytes: index.reclaimable_bytes,
+            total_storage_bytes: index.total_storage_bytes,
+            admission_margin_bytes: index.admission_margin_bytes,
+            effective_retention_generations: index.effective_retention_generations,
         },
     })
 }
@@ -6183,6 +6219,7 @@ impl ControlService {
                         "support.bundle.v2" => selected_minor >= 4,
                         "support.bundle.v3" => selected_minor >= 5,
                         "support.bundle.v4" => selected_minor >= 8,
+                        "support.bundle.v5" => selected_minor >= 12,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -6409,32 +6446,34 @@ impl ControlService {
                 rootlight_observability::PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
             SupportBundleSchema::V3 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
-            SupportBundleSchema::V4 => {
+            SupportBundleSchema::V4 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
+            SupportBundleSchema::V5 => {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
-        let (mut terminal_operations, mut inventory) = if schema == SupportBundleSchema::V4 {
-            let terminal_records =
-                match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
-                    Ok(records) => records,
-                    Err(error) => {
-                        return ControlResponse::Error(operation_error_to_public(&error, None));
-                    }
-                };
-            let contexts = self.state.repository_index_contexts();
-            let terminal_operations =
-                match support_terminal_operations(&terminal_records, &contexts) {
-                    Ok(operations) => operations,
+        let (mut terminal_operations, mut inventory) =
+            if matches!(schema, SupportBundleSchema::V4 | SupportBundleSchema::V5) {
+                let terminal_records =
+                    match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
+                        Ok(records) => records,
+                        Err(error) => {
+                            return ControlResponse::Error(operation_error_to_public(&error, None));
+                        }
+                    };
+                let contexts = self.state.repository_index_contexts();
+                let terminal_operations =
+                    match support_terminal_operations(&terminal_records, &contexts) {
+                        Ok(operations) => operations,
+                        Err(_) => return ControlResponse::Error(internal_error()),
+                    };
+                let inventory = match self.support_bundle_inventory_snapshot(&health) {
+                    Ok(inventory) => inventory,
                     Err(_) => return ControlResponse::Error(internal_error()),
                 };
-            let inventory = match self.support_bundle_inventory_snapshot(&health) {
-                Ok(inventory) => inventory,
-                Err(_) => return ControlResponse::Error(internal_error()),
+                (terminal_operations, Some(inventory))
+            } else {
+                (Vec::new(), None)
             };
-            (terminal_operations, Some(inventory))
-        } else {
-            (Vec::new(), None)
-        };
         if let Some(repository) = repository {
             let repository_id = support_id(repository.as_bytes());
             let Some(inventory) = inventory.as_mut() else {
@@ -6462,10 +6501,34 @@ impl ControlService {
             else {
                 return ControlResponse::Error(internal_error());
             };
+            let expected_generation_count =
+                usize::try_from(inventory.repositories[0].generation_count).unwrap_or(usize::MAX);
+            let active_generation_bytes = (inventory.generations.len()
+                == expected_generation_count)
+                .then(|| {
+                    inventory
+                        .generations
+                        .iter()
+                        .filter(|entry| entry.state == "active")
+                        .try_fold(0_u64, |total, entry| total.checked_add(entry.disk_bytes))
+                })
+                .flatten();
             inventory.storage.generation_disk_bytes = generation_disk_bytes;
+            inventory.storage.active_generation_bytes = active_generation_bytes;
+            inventory.storage.predecessor_generation_bytes = None;
+            inventory.storage.shared_bytes = None;
+            inventory.storage.pinned_bytes = None;
+            inventory.storage.reclaimable_bytes = None;
+            inventory.storage.total_storage_bytes = Some(generation_disk_bytes);
+            inventory.storage.admission_margin_bytes = None;
             terminal_operations.retain(|operation| {
                 operation.repository_id.as_deref() == Some(repository_id.as_str())
             });
+        }
+        if schema == SupportBundleSchema::V4
+            && let Some(inventory) = inventory.as_mut()
+        {
+            clear_extended_storage_accounting(&mut inventory.storage);
         }
         if Instant::now() >= deadline {
             return ControlResponse::Error(request_timed_out());
@@ -6476,6 +6539,7 @@ impl ControlService {
                 SupportBundleSchema::V2 => ObservabilityProtocolVersion::V1_4,
                 SupportBundleSchema::V3 => ObservabilityProtocolVersion::V1_5,
                 SupportBundleSchema::V4 => ObservabilityProtocolVersion::V1_8,
+                SupportBundleSchema::V5 => ObservabilityProtocolVersion::V1_12,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
@@ -10454,7 +10518,9 @@ fn request_from_wire(
             }
             let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 8 {
+                if selected_protocol_minor >= 12 {
+                    SupportBundleSchema::V5
+                } else if selected_protocol_minor >= 8 {
                     SupportBundleSchema::V4
                 } else if selected_protocol_minor >= 5 {
                     SupportBundleSchema::V3
@@ -12321,13 +12387,24 @@ mod tests {
                     .expect("supported minor negotiates"),
                 common::ContractVersion { major: 1, minor }
             );
-            let expected = if minor >= 10 {
+            let expected = if minor >= 12 {
                 CAPABILITIES.to_vec()
+            } else if minor >= 10 {
+                CAPABILITIES
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != "support.bundle.v5")
+                    .collect()
             } else if minor >= 8 {
                 CAPABILITIES
                     .iter()
                     .copied()
-                    .filter(|capability| *capability != "rootlight.ui.graph_projection.v1")
+                    .filter(|capability| {
+                        !matches!(
+                            *capability,
+                            "rootlight.ui.graph_projection.v1" | "support.bundle.v5"
+                        )
+                    })
                     .collect()
             } else if minor >= 5 {
                 CAPABILITIES
@@ -12336,7 +12413,9 @@ mod tests {
                     .filter(|capability| {
                         !matches!(
                             *capability,
-                            "rootlight.ui.graph_projection.v1" | "support.bundle.v4"
+                            "rootlight.ui.graph_projection.v1"
+                                | "support.bundle.v4"
+                                | "support.bundle.v5"
                         )
                     })
                     .collect()
@@ -12625,10 +12704,18 @@ mod tests {
                 generation_disk_bytes: 6144,
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: Some(1024 * 1024),
+                active_generation_bytes: Some(6144),
+                predecessor_generation_bytes: Some(1024),
+                shared_bytes: None,
+                pinned_bytes: None,
+                reclaimable_bytes: None,
+                total_storage_bytes: Some(7168),
+                admission_margin_bytes: None,
+                effective_retention_generations: Some(8),
             })
             .expect("index support inventory publishes");
 
-        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V4, None));
+        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V5, None));
         let ControlResponse::SupportBundle(bundle) = bundle else {
             panic!("production support bundle response expected");
         };
@@ -12688,10 +12775,15 @@ mod tests {
         assert_eq!(inventory.repositories.len(), 2);
         assert_eq!(inventory.generations.len(), 2);
         assert_eq!(inventory.storage.generation_disk_bytes, 6144);
+        assert_eq!(inventory.storage.active_generation_bytes, Some(6144));
+        assert_eq!(inventory.storage.predecessor_generation_bytes, Some(1024));
+        assert_eq!(inventory.storage.total_storage_bytes, Some(7168));
+        assert_eq!(inventory.storage.effective_retention_generations, Some(8));
+        assert_eq!(inventory.storage.shared_bytes, None);
         assert_eq!(inventory.runtime.protocol_minor, PROTOCOL_MINOR);
 
         let scoped = service.execute(ControlRequest::SupportBundle(
-            SupportBundleSchema::V4,
+            SupportBundleSchema::V5,
             Some(repository),
         ));
         let ControlResponse::SupportBundle(scoped) = scoped else {
@@ -12720,6 +12812,32 @@ mod tests {
                 .iter()
                 .all(|generation| generation.repository_id == support_id(repository.as_bytes()))
         );
+        assert_eq!(scoped_inventory.storage.active_generation_bytes, Some(4096));
+        assert_eq!(scoped_inventory.storage.total_storage_bytes, Some(4096));
+        assert_eq!(
+            scoped_inventory.storage.effective_retention_generations,
+            Some(8)
+        );
+        let legacy = service.execute(ControlRequest::SupportBundle(
+            SupportBundleSchema::V4,
+            Some(repository),
+        ));
+        let ControlResponse::SupportBundle(legacy) = legacy else {
+            panic!("legacy repository-scoped support bundle response expected");
+        };
+        let mut legacy_archive = zip::ZipArchive::new(std::io::Cursor::new(legacy.archive))
+            .expect("legacy support ZIP opens");
+        let mut legacy_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut legacy_archive
+                .by_name("inventory.json")
+                .expect("legacy inventory entry opens"),
+            &mut legacy_inventory_bytes,
+        )
+        .expect("legacy inventory entry reads");
+        let legacy_inventory: SupportInventory =
+            serde_json::from_slice(&legacy_inventory_bytes).expect("legacy inventory decodes");
+        assert_eq!(legacy_inventory.storage.active_generation_bytes, None);
         let mut scoped_operation_bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut scoped_archive
@@ -12736,7 +12854,7 @@ mod tests {
         }));
 
         let missing = service.execute(ControlRequest::SupportBundle(
-            SupportBundleSchema::V4,
+            SupportBundleSchema::V5,
             Some(RepositoryId::from_bytes([99; 16])),
         ));
         let ControlResponse::Error(missing) = missing else {
@@ -12992,6 +13110,7 @@ mod tests {
             maximum_results: 1,
             page_offset: 0,
             languages: Vec::new(),
+            path_prefixes: Vec::new(),
         });
 
         let response = dispatch_first_slice(
@@ -13348,6 +13467,14 @@ mod tests {
             generation_disk_bytes: 4096,
             unreclaimed_temporary_bytes: 0,
             disk_margin_bytes: Some(1024 * 1024),
+            active_generation_bytes: Some(4096),
+            predecessor_generation_bytes: None,
+            shared_bytes: None,
+            pinned_bytes: None,
+            reclaimable_bytes: None,
+            total_storage_bytes: None,
+            admission_margin_bytes: None,
+            effective_retention_generations: None,
         };
 
         service
@@ -18015,6 +18142,7 @@ mod tests {
                 maximum_results: 1,
                 page_offset: 0,
                 languages,
+                path_prefixes: Vec::new(),
             })
         };
         assert!(
@@ -18145,6 +18273,7 @@ mod tests {
             maximum_results: 1,
             page_offset: 0,
             languages: vec!["rust".to_owned()],
+            path_prefixes: Vec::new(),
         });
         let deadline = Instant::now() + Duration::from_secs(1);
         let legacy = dispatch_first_slice(
@@ -18774,6 +18903,7 @@ mod tests {
             maximum_results: 2,
             page_offset: 0,
             languages: Vec::new(),
+            path_prefixes: Vec::new(),
         });
         let locate_hit =
             |symbol_byte: u8, source: &daemon::FirstSliceSourceRef| daemon::FirstSliceLocateHit {
@@ -18870,6 +19000,7 @@ mod tests {
             maximum_results: 2,
             page_offset: 0,
             languages: Vec::new(),
+            path_prefixes: Vec::new(),
         });
         assert!(first_slice_response_correlates(
             &pinned_locate_request,

@@ -1129,6 +1129,9 @@ pub struct CodeLocateRequest {
     #[prost(string, repeated, tag = "8")]
     #[allow(missing_docs)]
     pub languages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "9")]
+    #[allow(missing_docs)]
+    pub path_prefixes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// One typed lexical lookup result.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

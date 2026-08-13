@@ -25,8 +25,10 @@ pub const SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub const PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 2;
 /// Frozen support-bundle schema including every protocol 1.5 control method.
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V3: u32 = 3;
-/// Current support-bundle schema with production inventory and terminal operations.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 4;
+/// Frozen production support-bundle schema used by protocol 1.8 through 1.11 clients.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V4: u32 = 4;
+/// Current support-bundle schema with storage-accounting inventory.
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 5;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -96,6 +98,8 @@ pub const SUPPORT_ENTRY_NAMES_V4: [&str; SUPPORT_ENTRY_COUNT_V4] = [
     "redaction-report.json",
     "telemetry.json",
 ];
+/// Ordered allow-list for current production support archives.
+pub const SUPPORT_ENTRY_NAMES_V5: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
 /// Data classes that the frozen support schema must explicitly omit.
 pub const OMITTED_DATA_CLASSES: [&str; 12] = [
     "absolute_roots",
@@ -143,6 +147,8 @@ pub const OMITTED_DATA_CLASSES_V4: [&str; 12] = [
     "source",
     "symbol_names",
 ];
+/// Data classes omitted by current storage-accounting support archives.
+pub const OMITTED_DATA_CLASSES_V5: [&str; 12] = OMITTED_DATA_CLASSES_V4;
 
 /// Closed daemon protocol version emitted by this support schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +165,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.8.
     #[serde(rename = "1.8")]
     V1_8,
+    /// Rootlight daemon protocol 1.12.
+    #[serde(rename = "1.12")]
+    V1_12,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -698,6 +707,30 @@ pub struct SupportStorageInventory {
     pub unreclaimed_temporary_bytes: u64,
     /// Remaining disk margin when available.
     pub disk_margin_bytes: Option<u64>,
+    /// Immutable bytes owned by active generations when fully classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by direct active predecessors when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_generation_bytes: Option<u64>,
+    /// Physically shared immutable bytes when the storage engine can attribute them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_bytes: Option<u64>,
+    /// Bytes protected from reclamation by an explicit durable pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_bytes: Option<u64>,
+    /// Bytes currently eligible for safe reclamation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaimable_bytes: Option<u64>,
+    /// Total physical bytes owned by the selected storage scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_storage_bytes: Option<u64>,
+    /// Bytes remaining after every admission reserve and safety margin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_margin_bytes: Option<u64>,
+    /// Effective maximum retained generations per repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_retention_generations: Option<u32>,
 }
 
 /// Complete allow-listed production inventory accepted by the privacy boundary.
@@ -1147,6 +1180,8 @@ pub enum SupportBundleSchema {
     V3,
     /// Production schema with inventory and bounded terminal operations.
     V4,
+    /// Production schema with explicit optional storage-accounting dimensions.
+    V5,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -1732,6 +1767,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V2 => ProtocolVersion::V1_4,
         SupportBundleSchema::V3 => ProtocolVersion::V1_5,
         SupportBundleSchema::V4 => ProtocolVersion::V1_8,
+        SupportBundleSchema::V5 => ProtocolVersion::V1_12,
     };
     if input.protocol_version != expected_protocol {
         return Err(SupportBundleError::ProtocolVersionMismatch);
@@ -1741,6 +1777,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V2 => build_support_bundle_v2(input),
         SupportBundleSchema::V3 => build_support_bundle_v3(input),
         SupportBundleSchema::V4 => build_support_bundle_v4(input),
+        SupportBundleSchema::V5 => build_support_bundle_v5(input),
     }
 }
 
@@ -1820,6 +1857,35 @@ fn build_support_bundle_v3(
 fn build_support_bundle_v4(
     input: &SupportBundleInput,
 ) -> Result<SupportBundle, SupportBundleError> {
+    if input
+        .inventory
+        .as_ref()
+        .is_some_and(|inventory| inventory.storage.has_extended_accounting())
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    build_production_support_bundle(
+        input,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
+        &OMITTED_DATA_CLASSES_V4,
+    )
+}
+
+fn build_support_bundle_v5(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
+    build_production_support_bundle(
+        input,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        &OMITTED_DATA_CLASSES_V5,
+    )
+}
+
+fn build_production_support_bundle(
+    input: &SupportBundleInput,
+    schema_version: u32,
+    omitted_data_classes: &[&str],
+) -> Result<SupportBundle, SupportBundleError> {
     let telemetry = input
         .telemetry
         .as_ref()
@@ -1828,7 +1894,7 @@ fn build_support_bundle_v4(
         .inventory
         .as_ref()
         .ok_or(SupportBundleError::MissingInventory)?;
-    validate_v4_input(input, inventory)?;
+    validate_production_input(input, inventory, schema_version)?;
     let diagnostics = json_entry("diagnostics/quick.json", &input.diagnostics)?;
     let health = json_entry("health.json", &input.health)?;
     let inventory = json_entry("inventory.json", inventory)?;
@@ -1839,13 +1905,10 @@ fn build_support_bundle_v4(
             recent_terminal: input.terminal_operations.clone(),
         },
     )?;
-    let redaction = redaction_entry(
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
-        &OMITTED_DATA_CLASSES_V4,
-    )?;
+    let redaction = redaction_entry(schema_version, omitted_data_classes)?;
     let telemetry = json_entry_with_limit("telemetry.json", telemetry, MAX_TELEMETRY_ENTRY_BYTES)?;
     let manifest = support_manifest_entry(
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        schema_version,
         input,
         [
             &diagnostics,
@@ -1867,17 +1930,23 @@ fn build_support_bundle_v4(
     ])
 }
 
-fn validate_v4_input(
+fn validate_production_input(
     input: &SupportBundleInput,
     inventory: &SupportInventory,
+    schema_version: u32,
 ) -> Result<(), SupportBundleError> {
+    let minimum_protocol_minor = if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        12
+    } else {
+        8
+    };
     if input.terminal_operations.len() > MAX_SUPPORT_TERMINAL_OPERATIONS
         || inventory.dependencies.len() > MAX_SUPPORT_DEPENDENCIES
         || inventory.adapters.len() > MAX_SUPPORT_ADAPTERS
         || inventory.repositories.len() > MAX_SUPPORT_REPOSITORIES
         || inventory.generations.len() > MAX_SUPPORT_GENERATIONS
         || inventory.runtime.protocol_major != 1
-        || inventory.runtime.protocol_minor < 8
+        || inventory.runtime.protocol_minor < minimum_protocol_minor
         || inventory.runtime.logical_processors == 0
         || inventory.configuration.schema_version == 0
         || inventory.storage.catalog_schema_version == 0
@@ -1889,6 +1958,18 @@ fn validate_v4_input(
         || !labels_are_valid(&inventory.runtime.feature_profile)
         || !is_support_label(&inventory.storage.sqlite_version)
         || !optional_label_is_valid(inventory.storage.generation_format_version.as_deref())
+        || inventory
+            .storage
+            .active_generation_bytes
+            .is_some_and(|bytes| bytes > inventory.storage.generation_disk_bytes)
+        || inventory
+            .storage
+            .predecessor_generation_bytes
+            .is_some_and(|bytes| bytes > inventory.storage.generation_disk_bytes)
+        || inventory
+            .storage
+            .effective_retention_generations
+            .is_some_and(|generations| generations == 0)
     {
         return Err(SupportBundleError::InvalidInventory);
     }
@@ -1940,6 +2021,19 @@ fn validate_v4_input(
         validate_terminal_operation(operation)?;
     }
     Ok(())
+}
+
+impl SupportStorageInventory {
+    const fn has_extended_accounting(&self) -> bool {
+        self.active_generation_bytes.is_some()
+            || self.predecessor_generation_bytes.is_some()
+            || self.shared_bytes.is_some()
+            || self.pinned_bytes.is_some()
+            || self.reclaimable_bytes.is_some()
+            || self.total_storage_bytes.is_some()
+            || self.admission_margin_bytes.is_some()
+            || self.effective_retention_generations.is_some()
+    }
 }
 
 fn validate_terminal_operation(
@@ -2209,10 +2303,10 @@ pub enum SupportBundleError {
     /// A telemetry-bearing schema was selected without a normalized snapshot.
     #[error("support bundle telemetry is required for this schema")]
     MissingTelemetry,
-    /// Schema v4 was selected without production inventory.
+    /// A production schema was selected without inventory.
     #[error("support bundle inventory is required for this schema")]
     MissingInventory,
-    /// Schema-v4 inventory violated a reviewed size or privacy bound.
+    /// Production inventory violated a reviewed size or privacy bound.
     #[error("support bundle inventory violates its bounded schema")]
     InvalidInventory,
     /// The selected support schema and daemon protocol version did not match.
@@ -2279,7 +2373,7 @@ mod tests {
 
     fn production_input() -> SupportBundleInput {
         let mut input = input();
-        input.protocol_version = ProtocolVersion::V1_8;
+        input.protocol_version = ProtocolVersion::V1_12;
         input.telemetry = Some(Telemetry::default().snapshot());
         input.terminal_operations = vec![SupportTerminalOperation {
             operation_id: "11".repeat(16),
@@ -2320,7 +2414,7 @@ mod tests {
                 binary_sha256: Some("aa".repeat(32)),
                 feature_profile: vec!["standard".to_owned()],
                 protocol_major: 1,
-                protocol_minor: 8,
+                protocol_minor: 12,
                 logical_processors: 8,
                 physical_memory_bytes: None,
             },
@@ -2384,9 +2478,34 @@ mod tests {
                 generation_disk_bytes: 4096,
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: Some(1024 * 1024),
+                active_generation_bytes: Some(4096),
+                predecessor_generation_bytes: None,
+                shared_bytes: None,
+                pinned_bytes: None,
+                reclaimable_bytes: None,
+                total_storage_bytes: None,
+                admission_margin_bytes: None,
+                effective_retention_generations: None,
             },
         });
         input
+    }
+
+    fn make_schema_v4_input(input: &mut SupportBundleInput) {
+        input.protocol_version = ProtocolVersion::V1_8;
+        let storage = &mut input
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .storage;
+        storage.active_generation_bytes = None;
+        storage.predecessor_generation_bytes = None;
+        storage.shared_bytes = None;
+        storage.pinned_bytes = None;
+        storage.reclaimable_bytes = None;
+        storage.total_storage_bytes = None;
+        storage.admission_margin_bytes = None;
+        storage.effective_retention_generations = None;
     }
 
     #[test]
@@ -2754,7 +2873,14 @@ mod tests {
 
     #[test]
     fn schema_v4_support_archive_is_deterministic_complete_and_source_free() {
-        let input = production_input();
+        let mut input = production_input();
+        make_schema_v4_input(&mut input);
+        let mut extended = production_input();
+        extended.protocol_version = ProtocolVersion::V1_8;
+        assert!(matches!(
+            build_support_bundle_for_schema(&extended, SupportBundleSchema::V4),
+            Err(SupportBundleError::InvalidInventory)
+        ));
         let first = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
             .expect("schema v4 support bundle builds");
         let second = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
@@ -2825,8 +2951,53 @@ mod tests {
     }
 
     #[test]
+    fn schema_v5_round_trips_known_storage_accounting_without_inventing_unknowns() {
+        let input = production_input();
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V5)
+            .expect("schema v5 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut inventory = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory entry opens")
+            .read_to_end(&mut inventory)
+            .expect("inventory entry reads");
+        let inventory: SupportInventory =
+            serde_json::from_slice(&inventory).expect("inventory entry decodes");
+
+        assert_eq!(inventory.storage.active_generation_bytes, Some(4096));
+        assert_eq!(inventory.storage.predecessor_generation_bytes, None);
+        assert_eq!(inventory.storage.shared_bytes, None);
+        assert_eq!(inventory.storage.total_storage_bytes, None);
+
+        let mut legacy = serde_json::to_value(&inventory.storage).expect("storage serializes");
+        legacy
+            .as_object_mut()
+            .expect("storage is an object")
+            .remove("active_generation_bytes");
+        let legacy: SupportStorageInventory =
+            serde_json::from_value(legacy).expect("legacy storage inventory still decodes");
+        assert_eq!(legacy.active_generation_bytes, None);
+        assert_eq!(legacy.effective_retention_generations, None);
+
+        let mut obsolete_protocol = input;
+        obsolete_protocol
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .runtime
+            .protocol_minor = 11;
+        assert!(matches!(
+            build_support_bundle_for_schema(&obsolete_protocol, SupportBundleSchema::V5),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    #[test]
     fn schema_v4_rejects_path_shaped_inventory_and_unbounded_operations() {
         let mut path_shaped = production_input();
+        make_schema_v4_input(&mut path_shaped);
         path_shaped
             .inventory
             .as_mut()
@@ -2839,6 +3010,7 @@ mod tests {
         ));
 
         let mut unbounded = production_input();
+        make_schema_v4_input(&mut unbounded);
         let record = unbounded.terminal_operations[0].clone();
         unbounded
             .terminal_operations
@@ -2851,7 +3023,8 @@ mod tests {
 
     #[test]
     fn schema_v4_omits_linkable_repository_root_fingerprints() {
-        let input = production_input();
+        let mut input = production_input();
+        make_schema_v4_input(&mut input);
         let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
             .expect("privacy-safe schema v4 support bundle builds");
         let mut archive =
@@ -2871,6 +3044,7 @@ mod tests {
         );
 
         let mut linkable = production_input();
+        make_schema_v4_input(&mut linkable);
         linkable
             .inventory
             .as_mut()

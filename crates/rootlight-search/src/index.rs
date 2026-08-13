@@ -152,6 +152,28 @@ pub trait LexicalSearch: Send + Sync {
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError>;
 
+    /// Executes one bounded domain query over canonical language and path filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] when a filter, input, budget, cancellation,
+    /// durable data, or backend prevents a truthful result.
+    fn search_with_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        path_prefixes: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        let outcome =
+            self.search_with_language_filter_and_stats(request, languages, budget, cancellation)?;
+        if path_prefixes.is_empty() {
+            return Ok(outcome);
+        }
+        Err(SearchError::InvalidPathFilter)
+    }
+
     /// Executes one bounded domain query and returns only its ordered hits.
     ///
     /// # Errors
@@ -208,6 +230,23 @@ pub fn validate_search_request_with_languages(
 ) -> Result<(), SearchError> {
     validate_request(request, budget)?;
     validate_language_filter(languages)
+}
+
+/// Validates one query, canonical language/path filters, and lexical budget.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for an invalid filter, syntax, result limit, or
+/// resource field outside the backend hard ceilings.
+pub fn validate_search_request_with_filters(
+    request: &SearchRequest,
+    languages: &[String],
+    path_prefixes: &[String],
+    budget: SearchBudget,
+) -> Result<(), SearchError> {
+    validate_request(request, budget)?;
+    validate_language_filter(languages)?;
+    validate_path_filter(path_prefixes)
 }
 
 /// A read-only lexical index pinned to one immutable generation.
@@ -351,10 +390,30 @@ impl LexicalIndex {
         budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_filters_and_stats(request, languages, &[], budget, cancellation)
+    }
+
+    /// Executes a bounded query over canonical language and path-prefix filters.
+    ///
+    /// Path filtering occurs before candidate accounting, ranking, and paging.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid input, cancellation, candidate
+    /// overflow, incompatible stored data, or redacted Tantivy failures.
+    pub fn search_with_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        path_prefixes: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
         let control = SearchControl::new(cancellation, budget.max_duration);
         control.check()?;
         validate_request(request, budget)?;
         validate_language_filter(languages)?;
+        validate_path_filter(path_prefixes)?;
         let searcher = self.reader.searcher();
         let query = self
             .fields
@@ -378,14 +437,18 @@ impl LexicalIndex {
             let mut document_id = scorer.doc();
             while document_id != TERMINATED {
                 control.check()?;
-                if hits.len() >= budget.max_candidates {
-                    return Err(SearchError::CandidateBudgetExceeded);
-                }
                 let score = scorer.score();
                 let document = searcher
                     .doc::<TantivyDocument>(DocAddress::new(segment_ord, document_id))
                     .map_err(|_| operation("stored_document"))?;
                 let (hit, hit_text_bytes) = self.fields.decode(document, score)?;
+                if !path_matches_prefixes(&hit.path, path_prefixes) {
+                    document_id = scorer.advance();
+                    continue;
+                }
+                if hits.len() >= budget.max_candidates {
+                    return Err(SearchError::CandidateBudgetExceeded);
+                }
                 materialized_text_bytes = materialized_text_bytes
                     .checked_add(hit_text_bytes)
                     .ok_or(SearchError::ReturnedTextBudgetExceeded)?;
@@ -466,9 +529,50 @@ impl LexicalSearch for LexicalIndex {
         self.search_with_language_filter_and_stats(request, languages, budget, cancellation)
     }
 
+    fn search_with_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        path_prefixes: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_filters_and_stats(request, languages, path_prefixes, budget, cancellation)
+    }
+
     fn document_count(&self) -> u64 {
         self.document_count()
     }
+}
+
+fn validate_path_filter(path_prefixes: &[String]) -> Result<(), SearchError> {
+    if path_prefixes.len() > 256
+        || path_prefixes.windows(2).any(|pair| pair[0] >= pair[1])
+        || path_prefixes.iter().any(|path| {
+            path.is_empty()
+                || path.len() > 8_192
+                || path.starts_with('/')
+                || path
+                    .bytes()
+                    .any(|byte| matches!(byte, b'\0' | b'\\' | b':'))
+                || path
+                    .split('/')
+                    .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        })
+    {
+        return Err(SearchError::InvalidPathFilter);
+    }
+    Ok(())
+}
+
+fn path_matches_prefixes(path: &str, path_prefixes: &[String]) -> bool {
+    path_prefixes.is_empty()
+        || path_prefixes.iter().any(|prefix| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|remainder| remainder.starts_with('/'))
+        })
 }
 
 fn sort_with_checkpoints<T>(
@@ -2105,6 +2209,94 @@ mod tests {
             .expect("unknown canonical language is a deterministic empty domain");
         assert_eq!(no_match.matched_candidates, 0);
         assert!(no_match.hits.is_empty());
+    }
+
+    #[test]
+    fn path_prefixes_filter_before_candidate_counts_ranking_and_pagination() {
+        let outside_first = document(1, "shared_name", "a/outside.rs");
+        let outside_second = document(2, "shared_name", "b/outside.rs");
+        let scoped_late = document(3, "shared_name", "src/scoped.rs");
+        let (_directory, _manifest, index) =
+            build(vec![outside_first, outside_second, scoped_late]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+
+        let outcome = index
+            .search_with_filters_and_stats(
+                &request,
+                &[],
+                &["src".to_owned()],
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("canonical path prefix searches");
+
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].path, "src/scoped.rs");
+    }
+
+    #[test]
+    fn trailing_out_of_scope_candidate_does_not_exceed_matching_candidate_budget() {
+        let scoped = document(1, "shared_name", "src/scoped.rs");
+        let trailing_outside = document(2, "shared_name", "tests/outside.rs");
+        let (_directory, _manifest, index) = build(vec![scoped, trailing_outside]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        let budget = SearchBudget {
+            max_candidates: 1,
+            ..SearchBudget::default()
+        };
+
+        let outcome = index
+            .search_with_filters_and_stats(
+                &request,
+                &[],
+                &["src".to_owned()],
+                budget,
+                &Cancellation::new(),
+            )
+            .expect("out-of-scope documents do not consume the matching candidate budget");
+
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].path, "src/scoped.rs");
+    }
+
+    #[test]
+    fn path_prefixes_reject_noncanonical_and_escaping_values() {
+        let (_directory, _manifest, index) = build(vec![document(1, "shared_name", "src/lib.rs")]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+
+        for paths in [
+            vec!["../outside".to_owned()],
+            vec!["src\\lib.rs".to_owned()],
+            vec!["src".to_owned(), "src".to_owned()],
+        ] {
+            assert_eq!(
+                index.search_with_filters_and_stats(
+                    &request,
+                    &[],
+                    &paths,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                ),
+                Err(SearchError::InvalidPathFilter)
+            );
+        }
     }
 
     #[test]

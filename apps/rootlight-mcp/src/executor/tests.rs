@@ -878,6 +878,7 @@ async fn analytic_request_options_reach_the_port_unchanged() {
         query: "transport options".to_owned(),
         mode: LocateMode::Text,
         languages: Vec::new(),
+        path_prefixes: Vec::new(),
         maximum_results: 3,
         page_offset: 0,
     };
@@ -1473,6 +1474,14 @@ fn schema_valid_invalid_inputs() -> Vec<(VerticalTool, Value)> {
                 "repository": {"repository_id": repository()},
                 "query": "publish",
                 "languages": ["rust/lang"]
+            }),
+        ),
+        (
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish",
+                "scope": {"paths": ["../src"]}
             }),
         ),
         (
@@ -2289,6 +2298,15 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
                     "language domain",
                     with_argument(
                         with_argument(base.clone(), "languages", json!(["rust"])),
+                        "cursor",
+                        json!(valid_cursor.clone()),
+                    ),
+                    ExposureProfile::Developer,
+                ));
+                cases.push((
+                    "path domain",
+                    with_argument(
+                        with_argument(base.clone(), "scope", json!({"paths": ["src"]})),
                         "cursor",
                         json!(valid_cursor.clone()),
                     ),
@@ -3568,6 +3586,28 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
     let request_debug = format!("{request:?}");
     assert!(!request_debug.contains("publish"));
     assert!(request_debug.contains("query_bytes: 7"));
+    assert!(request_debug.contains("path_prefix_count: 0"));
+}
+
+#[test]
+fn code_locate_request_debug_redacts_repository_relative_paths() {
+    let request = CodeLocatePortRequest {
+        repository: repository(),
+        generation: ClientGenerationSelector::Active,
+        query: "publish".to_owned(),
+        mode: LocateMode::Text,
+        languages: vec!["rust".to_owned()],
+        path_prefixes: vec!["private/customer/billing".to_owned()],
+        maximum_results: 3,
+        page_offset: 0,
+    };
+
+    let debug = format!("{request:?}");
+
+    assert!(!debug.contains("private"));
+    assert!(!debug.contains("customer"));
+    assert!(!debug.contains("billing"));
+    assert!(debug.contains("path_prefix_count: 1"));
 }
 
 #[tokio::test]
@@ -5096,12 +5136,13 @@ async fn query_batch_rejects_unproven_restricted_bindings_before_dependencies() 
                 {"id": "find", "tool": "code.locate", "arguments": {
                     "query": "publish"
                 }},
-                {"id": "restricted", "tool": "source.read", "depends_on": ["find"], "arguments": {
-                    "response_profile": {
+                {"id": "restricted", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                    "query": "publish",
+                    "search_modes": [{
                         "$from": "find",
                         "source": "symbol_id",
                         "index": 0
-                    }
+                    }]
                 }}
             ]
         }),
@@ -5111,7 +5152,7 @@ async fn query_batch_rejects_unproven_restricted_bindings_before_dependencies() 
     assert_capability_rejection(
         &error,
         ErrorCode::UnsupportedCapability,
-        "operations.1.arguments.response_profile",
+        "operations.1.arguments.search_modes.0",
         "unproven_bound_value",
     );
     assert_eq!(
@@ -9139,10 +9180,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "scope": {"paths": ["src"]}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "search_modes": ["structural"]}),
         ),
         (
@@ -10545,6 +10582,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "max_results",
             "query",
             "repository",
+            "scope",
             "search_modes"
         ]
     );
@@ -10874,7 +10912,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "772401a02110b94803b3f10b7ad354b1f0b60b36f45b817cbe6e95b378f5d392",
+        "8738435221bb704db981e713ed1af1ff08985d52d4218b8e0c953ad8afc61745",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -10939,8 +10977,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [216, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
-    assert_eq!(categorized.len(), 497);
+    assert_eq!(counts, [218, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
+    assert_eq!(categorized.len(), 499);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -11175,6 +11213,11 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ),
         ("generation", json!(alternate_generation()), true),
         ("languages", json!(["rust"]), true),
+        (
+            "scope",
+            json!({"paths": [format!("src/scope-{seed}")]}),
+            true,
+        ),
         ("query", json!(format!("publish-{seed}")), false),
         ("search_modes", json!(["exact"]), true),
         ("max_results", bounded.clone(), true),
@@ -11532,6 +11575,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "generation" => json!(format!("{:?}", request.generation())),
                 "query" => json!(request.query()),
                 "languages" => json!(request.languages()),
+                "scope" => json!({"paths": request.path_prefixes()}),
                 "search_modes" => json!(format!("{:?}", request.mode())),
                 "max_results" => json!(request.maximum_results()),
                 _ => panic!("unknown code.locate observation field"),
@@ -13115,6 +13159,11 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
         json!({
             "repository": {"repository_id": repository()},
             "query": "publish",
+            "scope": {"paths": ["tests/integration", "src"]}
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
             "max_results": 7
         }),
         json!({
@@ -13140,6 +13189,7 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
             (
                 request.mode(),
                 request.languages().to_vec(),
+                request.path_prefixes().to_vec(),
                 request.maximum_results(),
             )
         })
@@ -13147,15 +13197,27 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
     assert_eq!(
         requests,
         [
-            (LocateMode::Text, Vec::<String>::new(), 20),
-            (LocateMode::Exact, Vec::new(), 20),
+            (
+                LocateMode::Text,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+                20
+            ),
+            (LocateMode::Exact, Vec::new(), Vec::new(), 20),
             (
                 LocateMode::Text,
                 vec!["python".to_owned(), "rust".to_owned()],
+                Vec::new(),
                 20,
             ),
-            (LocateMode::Text, Vec::new(), 7),
-            (LocateMode::Text, Vec::new(), 5),
+            (
+                LocateMode::Text,
+                Vec::new(),
+                vec!["src".to_owned(), "tests/integration".to_owned()],
+                20,
+            ),
+            (LocateMode::Text, Vec::new(), Vec::new(), 7),
+            (LocateMode::Text, Vec::new(), Vec::new(), 5),
         ]
     );
 }
