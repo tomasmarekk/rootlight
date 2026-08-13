@@ -89,6 +89,7 @@ pub(super) struct DurableCatalog {
     quarantine: PrivateDirectory<'static>,
     repositories_path: PathBuf,
     maximum_generations_per_repository: usize,
+    maximum_repositories: usize,
     staging_bytes: Arc<AtomicU64>,
 }
 
@@ -546,9 +547,8 @@ impl DurableCatalog {
         state_root: &Path,
         maximum_generations_per_repository: usize,
     ) -> Result<Self, FirstSliceError> {
-        if maximum_generations_per_repository == 0 {
-            return Err(FirstSliceError::Retention);
-        }
+        let maximum_repositories =
+            super::maximum_repositories_for_retention(maximum_generations_per_repository)?;
         PrivateDirectory::require_supported().map_err(|_| FirstSliceError::Catalog)?;
         let root = Dir::open_ambient_dir(state_root, ambient_authority())
             .map_err(|_| FirstSliceError::Catalog)?;
@@ -565,6 +565,7 @@ impl DurableCatalog {
             quarantine,
             repositories_path,
             maximum_generations_per_repository,
+            maximum_repositories,
             staging_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -680,7 +681,7 @@ impl DurableCatalog {
 
     pub(super) fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
         let repository_names = private_entry_names(&self.repositories)?;
-        if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
+        if repository_names.len() > self.maximum_repositories {
             return Err(FirstSliceError::Retention);
         }
         for repository_name in repository_names {
@@ -705,7 +706,7 @@ impl DurableCatalog {
         &self,
     ) -> Result<Vec<FirstSliceRecoveryTarget>, FirstSliceError> {
         let repository_names = private_entry_names(&self.repositories)?;
-        if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
+        if repository_names.len() > self.maximum_repositories {
             return Err(FirstSliceError::Retention);
         }
         let mut targets = Vec::new();
@@ -835,7 +836,7 @@ impl DurableCatalog {
         };
         check_cancellation(cancellation)?;
         let repository_names = private_entry_names(&self.repositories)?;
-        if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
+        if repository_names.len() > self.maximum_repositories {
             return Err(FirstSliceError::Retention);
         }
         let mut restored = Vec::new();

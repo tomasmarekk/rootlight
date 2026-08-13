@@ -142,7 +142,6 @@ const DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR: u64 = 8;
 const GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR: u64 = 48;
 const GENERATION_MEMORY_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_FIRST_SLICE_REPOSITORIES: usize = 128;
 const MAX_FIRST_SLICE_GIT_CHANGE_PATHS: usize = 1_000;
 const MAX_FIRST_SLICE_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const HARD_MAX_FIRST_SLICE_GENERATIONS: usize = 8_193;
@@ -684,6 +683,14 @@ pub struct FirstSliceIndexAdmission {
     /// Conservative upper bound reserved for durable staging and publication.
     pub estimated_disk_bytes: u64,
     reservation_inserted: bool,
+}
+
+impl FirstSliceIndexAdmission {
+    /// Returns whether this admission created a new catalog reservation.
+    #[must_use]
+    pub const fn created_repository_reservation(&self) -> bool {
+        self.reservation_inserted
+    }
 }
 
 /// Evidence-backed semantic stitch between two active repository generations.
@@ -2861,6 +2868,7 @@ pub struct FirstSliceService {
     catalog_snapshots: Mutex<CatalogSnapshotStore>,
     durable: Option<Arc<DurableCatalog>>,
     maximum_generations_per_repository: usize,
+    maximum_repositories: usize,
     activation_sequences: BTreeMap<RepositoryId, u64>,
     global_activation_sequence: u64,
     activation_order_by_generation: BTreeMap<GenerationId, u64>,
@@ -3264,8 +3272,11 @@ impl FirstSliceService {
                     .len()
                     .checked_add(pending.len())
                     .ok_or(FirstSliceError::Retention)?;
-                if retained_repositories >= MAX_FIRST_SLICE_REPOSITORIES {
-                    return Err(FirstSliceError::Retention);
+                if retained_repositories >= self.maximum_repositories {
+                    return Err(repository_capacity_limit(
+                        retained_repositories,
+                        self.maximum_repositories,
+                    ));
                 }
                 let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
                 let display_name = sanitized_repository_display_name(&canonical, repository)?;
@@ -3378,9 +3389,12 @@ impl FirstSliceService {
             .len()
             .checked_add(pending.len())
             .ok_or(FirstSliceError::Retention)?
-            >= MAX_FIRST_SLICE_REPOSITORIES
+            >= self.maximum_repositories
         {
-            return Err(FirstSliceError::Retention);
+            return Err(repository_capacity_limit(
+                self.repository_display_names.len() + pending.len(),
+                self.maximum_repositories,
+            ));
         }
         pending.insert(root_identity, (repository, repository.to_string(), None));
         Ok(())
@@ -3399,10 +3413,10 @@ impl FirstSliceService {
         durable: Option<Arc<DurableCatalog>>,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<Self, FirstSliceError> {
+        let maximum_repositories = maximum_repositories_for_retention(maximum_generations)?;
         let total_generation_capacity = maximum_generations
-            .checked_mul(MAX_FIRST_SLICE_REPOSITORIES)
+            .checked_mul(maximum_repositories)
             .and_then(|capacity| capacity.checked_add(1))
-            .filter(|capacity| *capacity <= HARD_MAX_FIRST_SLICE_GENERATIONS)
             .ok_or(FirstSliceError::Retention)?;
         let config = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::Defaults,
@@ -3501,6 +3515,7 @@ impl FirstSliceService {
             )),
             durable,
             maximum_generations_per_repository: maximum_generations,
+            maximum_repositories,
             activation_sequences: BTreeMap::new(),
             global_activation_sequence: 0,
             activation_order_by_generation: BTreeMap::new(),
@@ -3938,9 +3953,12 @@ impl FirstSliceService {
                 .len()
                 .checked_add(pending.len())
                 .ok_or(FirstSliceError::Retention)?
-                >= MAX_FIRST_SLICE_REPOSITORIES
+                >= self.maximum_repositories
         {
-            return Err(FirstSliceError::Retention);
+            return Err(repository_capacity_limit(
+                self.repository_display_names.len() + pending.len(),
+                self.maximum_repositories,
+            ));
         }
         let repository_result = match existing_repository {
             Some(repository) => repository,
@@ -8100,6 +8118,8 @@ impl std::fmt::Debug for FirstSliceService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FirstSliceResource {
+    /// Repository registrations retained in the local catalog.
+    Repositories,
     /// Supported source files selected for one generation.
     SourceFiles,
     /// Aggregate retained source bytes selected for one generation.
@@ -8177,6 +8197,7 @@ impl FirstSliceResource {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Repositories => "repositories",
             Self::SourceFiles => "source_files",
             Self::SourceBytes => "source_bytes",
             Self::Records => "records",
@@ -11528,8 +11549,40 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
                 limit: maximum,
             }
         }
+        DiscoveryError::EntryLimit { maximum } => FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::Files,
+            observed: u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
+            limit: u64::try_from(maximum).unwrap_or(u64::MAX),
+        },
+        DiscoveryError::Vfs(VfsError::DirectoryEntryLimit { maximum }) => {
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Files,
+                observed: u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
+                limit: u64::try_from(maximum).unwrap_or(u64::MAX),
+            }
+        }
         _ => FirstSliceError::Discovery,
     }
+}
+
+fn repository_capacity_limit(observed: usize, limit: usize) -> FirstSliceError {
+    FirstSliceError::ResourceLimit {
+        resource: FirstSliceResource::Repositories,
+        observed: u64::try_from(observed)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    }
+}
+
+fn maximum_repositories_for_retention(
+    maximum_generations: usize,
+) -> Result<usize, FirstSliceError> {
+    HARD_MAX_FIRST_SLICE_GENERATIONS
+        .checked_sub(1)
+        .and_then(|capacity| capacity.checked_div(maximum_generations))
+        .filter(|capacity| *capacity > 0)
+        .ok_or(FirstSliceError::Retention)
 }
 
 fn map_incremental_error(error: IncrementalError, cancellation: &Cancellation) -> FirstSliceError {
@@ -14514,6 +14567,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repository_catalog_admits_more_than_128_roots() {
+        const ROOT_COUNT: usize = 176;
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let service = FirstSliceService::new(8).expect("service initializes");
+        let cancellation = deadline();
+        let mut admissions = Vec::new();
+        for ordinal in 0..ROOT_COUNT {
+            let root = fixture.path().join(format!("repository-{ordinal}"));
+            fs::create_dir(&root).expect("repository root exists");
+            admissions.push(
+                service
+                    .admit_repository(&root, &cancellation)
+                    .expect("repository is admitted"),
+            );
+        }
+
+        assert_eq!(admissions.len(), ROOT_COUNT);
+        assert!(
+            admissions
+                .iter()
+                .all(FirstSliceIndexAdmission::created_repository_reservation)
+        );
+    }
+
+    #[test]
+    fn repository_catalog_capacity_reports_observed_and_limit() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let service = FirstSliceService::new(4_096).expect("service initializes");
+        let cancellation = deadline();
+        for ordinal in 0..2 {
+            let root = fixture.path().join(format!("repository-{ordinal}"));
+            fs::create_dir(&root).expect("repository root exists");
+            service
+                .admit_repository(&root, &cancellation)
+                .expect("repository is admitted");
+        }
+        let rejected = fixture.path().join("repository-rejected");
+        fs::create_dir(&rejected).expect("rejected repository root exists");
+
+        assert_eq!(
+            service.admit_repository(&rejected, &cancellation),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Repositories,
+                observed: 3,
+                limit: 2,
+            })
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn repository_operations_reject_symbolic_link_roots() {
@@ -15954,6 +16058,25 @@ mod tests {
                 resource: FirstSliceResource::SourceBytes,
                 observed: 513,
                 limit: 512,
+            }
+        );
+        assert_eq!(
+            map_discovery_error(DiscoveryError::EntryLimit { maximum: 90 }, &cancellation,),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Files,
+                observed: 91,
+                limit: 90,
+            }
+        );
+        assert_eq!(
+            map_discovery_error(
+                DiscoveryError::Vfs(VfsError::DirectoryEntryLimit { maximum: 90 }),
+                &cancellation,
+            ),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Files,
+                observed: 91,
+                limit: 90,
             }
         );
         assert_eq!(
