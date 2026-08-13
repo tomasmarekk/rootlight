@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 
 /// The frozen initial production configuration contract version.
 pub const CONFIG_VERSION_1_0: ContractVersion = ContractVersion::new(1, 0);
+/// The frozen production configuration contract version before storage policy.
+pub const CONFIG_VERSION_1_1: ContractVersion = ContractVersion::new(1, 1);
 /// The current production configuration contract version.
-pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 1);
+pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 2);
 /// Default source bytes available to one source-bearing response.
 pub const DEFAULT_MAX_SOURCE_RESPONSE_BYTES: u64 = 64 * 1024;
 /// Hard source-byte ceiling for one source-bearing response in configuration 1.1.
@@ -23,6 +25,42 @@ pub const MAX_SOURCE_RESPONSE_BYTES: u64 = 512 * 1024;
 pub const DEFAULT_MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Hard bytes accepted from one source file for discovery and analysis.
 pub const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Default durable bytes retained for one repository.
+pub const DEFAULT_MAXIMUM_REPOSITORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Minimum durable-byte budget accepted for one repository.
+pub const MINIMUM_REPOSITORY_BYTES: u64 = 128 * 1024 * 1024;
+/// Hard durable-byte budget accepted for one repository.
+pub const MAXIMUM_REPOSITORY_BYTES: u64 = 512 * 1024 * 1024 * 1024;
+/// Default aggregate durable-byte budget for one catalog.
+pub const DEFAULT_MAXIMUM_CATALOG_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Minimum aggregate durable-byte budget accepted for one catalog.
+pub const MINIMUM_CATALOG_BYTES: u64 = 1024 * 1024 * 1024;
+/// Hard aggregate durable-byte budget accepted for one catalog.
+pub const MAXIMUM_CATALOG_BYTES: u64 = 512 * 1024 * 1024 * 1024;
+/// Default number of complete published generations retained per repository.
+pub const DEFAULT_RETAINED_GENERATIONS: u8 = 2;
+/// Minimum generation count that preserves active and predecessor recovery.
+pub const MINIMUM_RETAINED_GENERATIONS: u8 = 2;
+/// Hard generation-retention ceiling.
+pub const MAXIMUM_RETAINED_GENERATIONS: u8 = 8;
+/// Default disk reserve that durable publication must leave available.
+pub const DEFAULT_MINIMUM_FREE_DISK_BYTES: u64 = 64 * 1024 * 1024;
+/// Minimum supported durable-publication disk reserve.
+pub const MINIMUM_FREE_DISK_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard durable-publication disk-reserve ceiling.
+pub const MAXIMUM_FREE_DISK_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Default source-storage reservation multiplier.
+pub const DEFAULT_SOURCE_RESERVATION_FACTOR: u8 = 25;
+/// Minimum source-storage reservation multiplier.
+pub const MINIMUM_SOURCE_RESERVATION_FACTOR: u8 = 25;
+/// Hard source-storage reservation multiplier.
+pub const MAXIMUM_SOURCE_RESERVATION_FACTOR: u8 = 64;
+/// Default oracle-storage reservation multiplier.
+pub const DEFAULT_ORACLE_RESERVATION_FACTOR: u8 = 8;
+/// Minimum oracle-storage reservation multiplier.
+pub const MINIMUM_ORACLE_RESERVATION_FACTOR: u8 = 8;
+/// Hard oracle-storage reservation multiplier.
+pub const MAXIMUM_ORACLE_RESERVATION_FACTOR: u8 = 32;
 const CONFIG_V1_0_MAX_SOURCE_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum number of explicit configuration layers in one resolution.
 pub const MAX_CONFIG_LAYERS: usize = 16;
@@ -255,6 +293,53 @@ impl Default for AnalysisConfig {
     }
 }
 
+/// Durable storage policy controlled only by system and user configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+    /// Maximum durable bytes retained for one repository.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 134_217_728_i64, max = 549_755_813_888_i64))
+    )]
+    pub maximum_repository_bytes: u64,
+    /// Maximum durable bytes retained across one catalog.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 1_073_741_824_i64, max = 549_755_813_888_i64))
+    )]
+    pub maximum_catalog_bytes: u64,
+    /// Number of complete published generations retained per repository.
+    #[cfg_attr(feature = "schema", schemars(range(min = 2, max = 8)))]
+    pub retained_generations: u8,
+    /// Disk bytes reserved from durable publication.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 67_108_864_i64, max = 68_719_476_736_i64))
+    )]
+    pub minimum_free_disk_bytes: u64,
+    /// Worst-case source-storage reservation multiplier.
+    #[cfg_attr(feature = "schema", schemars(range(min = 25, max = 64)))]
+    pub source_reservation_factor: u8,
+    /// Worst-case oracle-storage reservation multiplier.
+    #[cfg_attr(feature = "schema", schemars(range(min = 8, max = 32)))]
+    pub oracle_reservation_factor: u8,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            maximum_repository_bytes: DEFAULT_MAXIMUM_REPOSITORY_BYTES,
+            maximum_catalog_bytes: DEFAULT_MAXIMUM_CATALOG_BYTES,
+            retained_generations: DEFAULT_RETAINED_GENERATIONS,
+            minimum_free_disk_bytes: DEFAULT_MINIMUM_FREE_DISK_BYTES,
+            source_reservation_factor: DEFAULT_SOURCE_RESERVATION_FACTOR,
+            oracle_reservation_factor: DEFAULT_ORACLE_RESERVATION_FACTOR,
+        }
+    }
+}
+
 /// Metadata retained for an optional namespaced extension.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionSnapshot {
@@ -317,6 +402,7 @@ pub struct ConfigSnapshot {
     security: SecurityConfig,
     resources: ResourceConfig,
     analysis: AnalysisConfig,
+    storage: StorageConfig,
     extensions: BTreeMap<String, ExtensionSnapshot>,
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
@@ -367,6 +453,12 @@ impl ConfigSnapshot {
         self.analysis
     }
 
+    /// Returns the effective durable storage policy.
+    #[must_use]
+    pub const fn storage(&self) -> StorageConfig {
+        self.storage
+    }
+
     /// Returns preserved optional extension metadata without exposing payloads.
     #[must_use]
     pub const fn extensions(&self) -> &BTreeMap<String, ExtensionSnapshot> {
@@ -414,11 +506,11 @@ struct EffectiveConfig {
     security: SecurityConfig,
     resources: ResourceConfig,
     analysis: AnalysisConfig,
+    storage: StorageConfig,
     extensions: BTreeMap<String, ExtensionSnapshot>,
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
-    saw_explicit_layer: bool,
-    uses_current_contract: bool,
+    newest_contract: Option<ConfigContract>,
 }
 
 impl EffectiveConfig {
@@ -432,6 +524,12 @@ impl EffectiveConfig {
             "resources.max_results",
             "analysis.default_tier",
             "analysis.max_source_file_bytes",
+            "storage.maximum_repository_bytes",
+            "storage.maximum_catalog_bytes",
+            "storage.retained_generations",
+            "storage.minimum_free_disk_bytes",
+            "storage.source_reservation_factor",
+            "storage.oracle_reservation_factor",
         ] {
             provenance.insert(field.to_owned(), ConfigSource::Defaults);
         }
@@ -439,17 +537,19 @@ impl EffectiveConfig {
             security: SecurityConfig::default(),
             resources: ResourceConfig::default(),
             analysis: AnalysisConfig::default(),
+            storage: StorageConfig::default(),
             extensions: BTreeMap::new(),
             provenance,
             hard_denial_provenance: BTreeMap::new(),
-            saw_explicit_layer: false,
-            uses_current_contract: false,
+            newest_contract: None,
         }
     }
 
     fn apply(&mut self, source: ConfigSource, wire: DecodedConfig) -> Result<(), ConfigError> {
-        self.saw_explicit_layer = true;
-        self.uses_current_contract |= wire.uses_current_contract;
+        self.newest_contract = Some(
+            self.newest_contract
+                .map_or(wire.contract, |current| current.max(wire.contract)),
+        );
         if let Some(security) = wire.security {
             if let Some(network) = security.network {
                 self.apply_network_policy(source, network)?;
@@ -465,10 +565,10 @@ impl EffectiveConfig {
         }
         if let Some(resources) = wire.resources {
             if let Some(max_source_bytes) = resources.max_source_bytes {
-                let maximum = if wire.uses_current_contract {
-                    MAX_SOURCE_RESPONSE_BYTES
-                } else {
+                let maximum = if wire.contract == ConfigContract::V1_0 {
                     CONFIG_V1_0_MAX_SOURCE_RESPONSE_BYTES
+                } else {
+                    MAX_SOURCE_RESPONSE_BYTES
                 };
                 if !(1..=maximum).contains(&max_source_bytes) {
                     return Err(ConfigError::ResourceLimitOutOfRange {
@@ -507,6 +607,12 @@ impl EffectiveConfig {
                     .insert("analysis.max_source_file_bytes".to_owned(), source);
             }
         }
+        if let Some(storage) = wire.storage {
+            if !matches!(source, ConfigSource::System | ConfigSource::User) {
+                return Err(ConfigError::StorageAuthority { authority: source });
+            }
+            self.apply_storage(source, storage)?;
+        }
         for (namespace, extension) in wire.extensions {
             validate_namespace(&namespace)?;
             if extension.critical {
@@ -526,6 +632,80 @@ impl EffectiveConfig {
             self.extensions.insert(namespace.clone(), snapshot);
             self.provenance
                 .insert(format!("extensions.{namespace}"), source);
+        }
+        Ok(())
+    }
+
+    fn apply_storage(
+        &mut self,
+        source: ConfigSource,
+        storage: PartialStorageConfig,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = storage.maximum_repository_bytes {
+            validate_storage_range(
+                "storage.maximum_repository_bytes",
+                value,
+                MINIMUM_REPOSITORY_BYTES,
+                MAXIMUM_REPOSITORY_BYTES,
+            )?;
+            self.storage.maximum_repository_bytes = value;
+            self.provenance
+                .insert("storage.maximum_repository_bytes".to_owned(), source);
+        }
+        if let Some(value) = storage.maximum_catalog_bytes {
+            validate_storage_range(
+                "storage.maximum_catalog_bytes",
+                value,
+                MINIMUM_CATALOG_BYTES,
+                MAXIMUM_CATALOG_BYTES,
+            )?;
+            self.storage.maximum_catalog_bytes = value;
+            self.provenance
+                .insert("storage.maximum_catalog_bytes".to_owned(), source);
+        }
+        if let Some(value) = storage.retained_generations {
+            validate_storage_range(
+                "storage.retained_generations",
+                value,
+                MINIMUM_RETAINED_GENERATIONS,
+                MAXIMUM_RETAINED_GENERATIONS,
+            )?;
+            self.storage.retained_generations = value;
+            self.provenance
+                .insert("storage.retained_generations".to_owned(), source);
+        }
+        if let Some(value) = storage.minimum_free_disk_bytes {
+            validate_storage_range(
+                "storage.minimum_free_disk_bytes",
+                value,
+                MINIMUM_FREE_DISK_BYTES,
+                MAXIMUM_FREE_DISK_BYTES,
+            )?;
+            self.storage.minimum_free_disk_bytes = value;
+            self.provenance
+                .insert("storage.minimum_free_disk_bytes".to_owned(), source);
+        }
+        if let Some(value) = storage.source_reservation_factor {
+            validate_storage_range(
+                "storage.source_reservation_factor",
+                value,
+                MINIMUM_SOURCE_RESERVATION_FACTOR,
+                MAXIMUM_SOURCE_RESERVATION_FACTOR,
+            )?;
+            self.storage.source_reservation_factor = value;
+            self.provenance
+                .insert("storage.source_reservation_factor".to_owned(), source);
+        }
+        if let Some(value) = storage.oracle_reservation_factor {
+            validate_storage_range(
+                "storage.oracle_reservation_factor",
+                value,
+                MINIMUM_ORACLE_RESERVATION_FACTOR,
+                MAXIMUM_ORACLE_RESERVATION_FACTOR,
+            )?;
+            self.storage.oracle_reservation_factor = value;
+            self.provenance
+                .insert("storage.oracle_reservation_factor".to_owned(), source);
         }
         Ok(())
     }
@@ -577,39 +757,51 @@ impl EffectiveConfig {
     }
 
     fn finish(mut self) -> Result<ConfigSnapshot, ConfigError> {
-        let version = if !self.saw_explicit_layer || self.uses_current_contract {
-            CONFIG_VERSION
-        } else {
-            CONFIG_VERSION_1_0
-        };
-        if version == CONFIG_VERSION && self.resources.max_source_bytes > MAX_SOURCE_RESPONSE_BYTES
+        let contract = self.newest_contract.unwrap_or(ConfigContract::V1_2);
+        let version = contract.version();
+        if contract != ConfigContract::V1_0
+            && self.resources.max_source_bytes > MAX_SOURCE_RESPONSE_BYTES
         {
             return Err(ConfigError::ResourceLimitOutOfRange {
                 field: "max_source_bytes",
             });
         }
-        let canonical = if version == CONFIG_VERSION_1_0 {
-            self.provenance.remove("analysis.max_source_file_bytes");
-            serde_json::to_vec(&CanonicalConfigV1_0 {
-                version,
-                security: self.security,
-                resources: CanonicalResourceConfigV1_0 {
-                    max_source_bytes: self.resources.max_source_bytes,
-                    max_results: self.resources.max_results,
-                },
-                analysis: CanonicalAnalysisConfigV1_0 {
-                    default_tier: self.analysis.default_tier,
-                },
-                extensions: self.extensions.clone(),
-            })
-        } else {
-            serde_json::to_vec(&CanonicalConfig {
+        validate_storage_invariants(self.storage)?;
+        let canonical = match contract {
+            ConfigContract::V1_0 => {
+                self.provenance.remove("analysis.max_source_file_bytes");
+                remove_storage_provenance(&mut self.provenance);
+                serde_json::to_vec(&CanonicalConfigV1_0 {
+                    version,
+                    security: self.security,
+                    resources: CanonicalResourceConfigV1_0 {
+                        max_source_bytes: self.resources.max_source_bytes,
+                        max_results: self.resources.max_results,
+                    },
+                    analysis: CanonicalAnalysisConfigV1_0 {
+                        default_tier: self.analysis.default_tier,
+                    },
+                    extensions: self.extensions.clone(),
+                })
+            }
+            ConfigContract::V1_1 => {
+                remove_storage_provenance(&mut self.provenance);
+                serde_json::to_vec(&CanonicalConfigV1_1 {
+                    version,
+                    security: self.security,
+                    resources: self.resources,
+                    analysis: self.analysis,
+                    extensions: self.extensions.clone(),
+                })
+            }
+            ConfigContract::V1_2 => serde_json::to_vec(&CanonicalConfig {
                 version,
                 security: self.security,
                 resources: self.resources,
                 analysis: self.analysis,
+                storage: self.storage,
                 extensions: self.extensions.clone(),
-            })
+            }),
         }
         .map_err(|source| ConfigError::Canonicalize { source })?;
         let hash = content_hash(&canonical);
@@ -618,6 +810,7 @@ impl EffectiveConfig {
             security: self.security,
             resources: self.resources,
             analysis: self.analysis,
+            storage: self.storage,
             extensions: self.extensions,
             provenance: self.provenance,
             hard_denial_provenance: self.hard_denial_provenance,
@@ -625,6 +818,44 @@ impl EffectiveConfig {
             hash,
         })
     }
+}
+
+fn validate_storage_range<T>(
+    field: &'static str,
+    value: T,
+    minimum: T,
+    maximum: T,
+) -> Result<(), ConfigError>
+where
+    T: PartialOrd,
+{
+    if value < minimum || value > maximum {
+        Err(ConfigError::ResourceLimitOutOfRange { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_storage_invariants(storage: StorageConfig) -> Result<(), ConfigError> {
+    if storage.maximum_repository_bytes > storage.maximum_catalog_bytes {
+        return Err(ConfigError::StorageInvariant {
+            field: "storage.maximum_repository_bytes",
+        });
+    }
+    if storage
+        .maximum_catalog_bytes
+        .checked_add(storage.minimum_free_disk_bytes)
+        .is_none_or(|required| required > MAXIMUM_CATALOG_BYTES)
+    {
+        return Err(ConfigError::StorageInvariant {
+            field: "storage.maximum_catalog_bytes",
+        });
+    }
+    Ok(())
+}
+
+fn remove_storage_provenance(provenance: &mut BTreeMap<String, ConfigSource>) {
+    provenance.retain(|field, _| !field.starts_with("storage."));
 }
 
 fn validate_layer_bounds(layers: &[ConfigLayer<'_>]) -> Result<(), ConfigError> {
@@ -816,18 +1047,40 @@ impl schemars::JsonSchema for ConfigDocumentSchemaV1_1 {
     }
 }
 
+/// JSON Schema marker for the strict configuration 1.2 document.
+///
+/// This schema adds durable storage budgets controlled only by system and user
+/// layers.
+#[derive(Debug)]
+pub struct ConfigDocumentSchemaV1_2;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ConfigDocumentSchemaV1_2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigDocumentSchemaV1_2".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = generator.subschema_for::<WireConfigV1_2>();
+        schema.insert("title".to_owned(), "Rootlight configuration 1.2".into());
+        schema
+    }
+}
+
 fn decode_wire_config(contents: &str) -> Result<DecodedConfig, ConfigError> {
     let probe: WireVersionProbe =
         toml::from_str(contents).map_err(|source| ConfigError::Parse { source })?;
     probe.version.require_supported()?;
-    if probe.version.minor() == 0 {
-        toml::from_str::<WireConfig>(contents)
+    match probe.version.minor() {
+        0 => toml::from_str::<WireConfig>(contents)
             .map(DecodedConfig::from)
-            .map_err(|source| ConfigError::Parse { source })
-    } else {
-        toml::from_str::<WireConfigV1_1>(contents)
+            .map_err(|source| ConfigError::Parse { source }),
+        1 => toml::from_str::<WireConfigV1_1>(contents)
             .map(DecodedConfig::from)
-            .map_err(|source| ConfigError::Parse { source })
+            .map_err(|source| ConfigError::Parse { source }),
+        _ => toml::from_str::<WireConfigV1_2>(contents)
+            .map(DecodedConfig::from)
+            .map_err(|source| ConfigError::Parse { source }),
     }
 }
 
@@ -848,7 +1101,24 @@ impl schemars::JsonSchema for ConfigVersionV1_1Schema {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^1\\.([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+            "pattern": "^1\\.1$",
+        })
+    }
+}
+
+#[cfg(feature = "schema")]
+struct ConfigVersionV1_2Schema;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ConfigVersionV1_2Schema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigVersionV1_2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^1\\.([2-9]|[1-9][0-9]{1,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
         })
     }
 }
@@ -912,6 +1182,25 @@ struct WireConfigV1_1 {
     extensions: BTreeMap<String, WireExtension>,
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct WireConfigV1_2 {
+    #[cfg_attr(feature = "schema", schemars(with = "ConfigVersionV1_2Schema"))]
+    version: ContractVersion,
+    #[serde(default)]
+    security: Option<PartialSecurityConfig>,
+    #[serde(default)]
+    resources: Option<PartialResourceConfigV1_1>,
+    #[serde(default)]
+    analysis: Option<PartialAnalysisConfigV1_1>,
+    #[serde(default)]
+    storage: Option<PartialStorageConfig>,
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "ExtensionMapSchema"))]
+    extensions: BTreeMap<String, WireExtension>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -931,12 +1220,57 @@ struct PartialAnalysisConfigV1_1 {
     max_source_file_bytes: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct PartialStorageConfig {
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 134_217_728_i64, max = 549_755_813_888_i64))
+    )]
+    maximum_repository_bytes: Option<u64>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 1_073_741_824_i64, max = 549_755_813_888_i64))
+    )]
+    maximum_catalog_bytes: Option<u64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 2, max = 8)))]
+    retained_generations: Option<u8>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 67_108_864_i64, max = 68_719_476_736_i64))
+    )]
+    minimum_free_disk_bytes: Option<u64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 25, max = 64)))]
+    source_reservation_factor: Option<u8>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 8, max = 32)))]
+    oracle_reservation_factor: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ConfigContract {
+    V1_0,
+    V1_1,
+    V1_2,
+}
+
+impl ConfigContract {
+    const fn version(self) -> ContractVersion {
+        match self {
+            Self::V1_0 => CONFIG_VERSION_1_0,
+            Self::V1_1 => CONFIG_VERSION_1_1,
+            Self::V1_2 => CONFIG_VERSION,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DecodedConfig {
-    uses_current_contract: bool,
+    contract: ConfigContract,
     security: Option<PartialSecurityConfig>,
     resources: Option<DecodedResourceConfig>,
     analysis: Option<DecodedAnalysisConfig>,
+    storage: Option<PartialStorageConfig>,
     extensions: BTreeMap<String, WireExtension>,
 }
 
@@ -962,7 +1296,11 @@ impl From<WireConfig> for DecodedConfig {
             extensions,
         } = wire;
         Self {
-            uses_current_contract: version.minor() != 0,
+            contract: if version.minor() == 0 {
+                ConfigContract::V1_0
+            } else {
+                unreachable!("version 1.0 decoder accepts only minor zero")
+            },
             security,
             resources: resources.map(|resources| DecodedResourceConfig {
                 max_source_bytes: resources.max_source_bytes,
@@ -972,6 +1310,7 @@ impl From<WireConfig> for DecodedConfig {
                 default_tier: analysis.default_tier,
                 max_source_file_bytes: None,
             }),
+            storage: None,
             extensions,
         }
     }
@@ -987,7 +1326,11 @@ impl From<WireConfigV1_1> for DecodedConfig {
             extensions,
         } = wire;
         Self {
-            uses_current_contract: version.minor() != 0,
+            contract: if version.minor() == 1 {
+                ConfigContract::V1_1
+            } else {
+                unreachable!("version 1.1 decoder accepts only minor one")
+            },
             security,
             resources: resources.map(|resources| DecodedResourceConfig {
                 max_source_bytes: resources.max_source_bytes,
@@ -997,6 +1340,38 @@ impl From<WireConfigV1_1> for DecodedConfig {
                 default_tier: analysis.default_tier,
                 max_source_file_bytes: analysis.max_source_file_bytes,
             }),
+            storage: None,
+            extensions,
+        }
+    }
+}
+
+impl From<WireConfigV1_2> for DecodedConfig {
+    fn from(wire: WireConfigV1_2) -> Self {
+        let WireConfigV1_2 {
+            version,
+            security,
+            resources,
+            analysis,
+            storage,
+            extensions,
+        } = wire;
+        Self {
+            contract: if version.minor() >= 2 {
+                ConfigContract::V1_2
+            } else {
+                unreachable!("version 1.2 decoder accepts additive minors")
+            },
+            security,
+            resources: resources.map(|resources| DecodedResourceConfig {
+                max_source_bytes: resources.max_source_bytes,
+                max_results: resources.max_results,
+            }),
+            analysis: analysis.map(|analysis| DecodedAnalysisConfig {
+                default_tier: analysis.default_tier,
+                max_source_file_bytes: analysis.max_source_file_bytes,
+            }),
+            storage,
             extensions,
         }
     }
@@ -1031,6 +1406,16 @@ fn empty_extension_data() -> toml::Value {
 
 #[derive(Debug, Serialize)]
 struct CanonicalConfig {
+    version: ContractVersion,
+    security: SecurityConfig,
+    resources: ResourceConfig,
+    analysis: AnalysisConfig,
+    storage: StorageConfig,
+    extensions: BTreeMap<String, ExtensionSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalConfigV1_1 {
     version: ContractVersion,
     security: SecurityConfig,
     resources: ResourceConfig,
@@ -1104,6 +1489,18 @@ pub enum ConfigError {
     /// A resource field was outside its declared hard bounds.
     #[error("configuration resource limit is out of range: {field}")]
     ResourceLimitOutOfRange {
+        /// Stable source-free field name.
+        field: &'static str,
+    },
+    /// A storage section was supplied by a source without storage authority.
+    #[error("configuration source cannot control durable storage")]
+    StorageAuthority {
+        /// Rejected configuration authority.
+        authority: ConfigSource,
+    },
+    /// Effective storage values violate a cross-field invariant.
+    #[error("configuration storage invariant is invalid: {field}")]
+    StorageInvariant {
         /// Stable source-free field name.
         field: &'static str,
     },
@@ -1343,7 +1740,7 @@ repository_execution = "explicit_consent"
         let explicit = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::System,
             contents: r#"
-version = "1.1"
+version = "1.2"
 [security]
 network = "deny"
 repository_execution = "deny"
@@ -1413,6 +1810,10 @@ max_source_bytes = 16777216
                 .expect("canonical configuration is UTF-8"),
             r#"{"version":"1.0","security":{"network":"deny","repository_execution":"deny","in_process_native_plugins":"deny"},"resources":{"max_source_bytes":16777216,"max_results":50},"analysis":{"default_tier":"structural"},"extensions":{}}"#
         );
+        assert_eq!(
+            snapshot.hash().to_string(),
+            "b3_hwxifm4bjdzgcn23zlo6s4wtxrgx7z3tcgrh7vt2wr4c5c3ygs36zngzqi"
+        );
 
         assert!(matches!(
             ConfigSnapshot::resolve(&[ConfigLayer {
@@ -1437,7 +1838,7 @@ max_source_file_bytes = 67108864
         }])
         .expect("configuration 1.1 resolves");
 
-        assert_eq!(snapshot.version(), CONFIG_VERSION);
+        assert_eq!(snapshot.version(), CONFIG_VERSION_1_1);
         assert_eq!(
             snapshot.resources().max_source_bytes,
             MAX_SOURCE_RESPONSE_BYTES
@@ -1449,6 +1850,20 @@ max_source_file_bytes = 67108864
         assert_eq!(
             snapshot.provenance().get("analysis.max_source_file_bytes"),
             Some(&ConfigSource::User)
+        );
+        assert!(
+            !snapshot
+                .provenance()
+                .contains_key("storage.maximum_repository_bytes")
+        );
+        assert_eq!(
+            std::str::from_utf8(snapshot.canonical_bytes())
+                .expect("canonical configuration is UTF-8"),
+            r#"{"version":"1.1","security":{"network":"deny","repository_execution":"deny","in_process_native_plugins":"deny"},"resources":{"max_source_bytes":524288,"max_results":50},"analysis":{"default_tier":"structural","max_source_file_bytes":67108864},"extensions":{}}"#
+        );
+        assert_eq!(
+            snapshot.hash().to_string(),
+            "b3_5ncsqvcwbtgyq5ilgdxkbebffa3mojzdpmt2jdlqdjhaqkutzg2ywf3bgi"
         );
 
         for (field, contents) in [
@@ -1470,6 +1885,121 @@ max_source_file_bytes = 67108864
                     if observed == field
             ));
         }
+
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.1\"\n[storage]\nmaximum_repository_bytes = 8589934592\n",
+            }]),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn version_1_2_resolves_bounded_storage_policy() {
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: r#"
+version = "1.2"
+[storage]
+maximum_repository_bytes = 1073741824
+maximum_catalog_bytes = 8589934592
+retained_generations = 4
+minimum_free_disk_bytes = 134217728
+source_reservation_factor = 32
+oracle_reservation_factor = 16
+"#,
+        }])
+        .expect("configuration 1.2 storage resolves");
+
+        assert_eq!(snapshot.version(), CONFIG_VERSION);
+        assert_eq!(
+            snapshot.storage(),
+            StorageConfig {
+                maximum_repository_bytes: 1_073_741_824,
+                maximum_catalog_bytes: 8_589_934_592,
+                retained_generations: 4,
+                minimum_free_disk_bytes: 134_217_728,
+                source_reservation_factor: 32,
+                oracle_reservation_factor: 16,
+            }
+        );
+        assert_eq!(
+            snapshot
+                .provenance()
+                .get("storage.maximum_repository_bytes"),
+            Some(&ConfigSource::User)
+        );
+        let canonical = std::str::from_utf8(snapshot.canonical_bytes())
+            .expect("canonical configuration is UTF-8");
+        assert!(canonical.contains(r#""version":"1.2""#));
+        assert!(canonical.contains(r#""maximum_repository_bytes":1073741824"#));
+    }
+
+    #[test]
+    fn storage_policy_rejects_untrusted_authority() {
+        for authority in [
+            ConfigSource::Defaults,
+            ConfigSource::Repository,
+            ConfigSource::Operation,
+        ] {
+            assert!(matches!(
+                ConfigSnapshot::resolve(&[ConfigLayer {
+                    source: authority,
+                    contents:
+                        "version = \"1.2\"\n[storage]\nretained_generations = 3\n",
+                }]),
+                Err(ConfigError::StorageAuthority {
+                    authority: observed
+                }) if observed == authority
+            ));
+        }
+    }
+
+    #[test]
+    fn storage_policy_enforces_bounds_and_cross_field_invariants() {
+        for (field, contents) in [
+            (
+                "storage.maximum_repository_bytes",
+                "version = \"1.2\"\n[storage]\nmaximum_repository_bytes = 134217727\n",
+            ),
+            (
+                "storage.retained_generations",
+                "version = \"1.2\"\n[storage]\nretained_generations = 1\n",
+            ),
+            (
+                "storage.source_reservation_factor",
+                "version = \"1.2\"\n[storage]\nsource_reservation_factor = 24\n",
+            ),
+        ] {
+            assert!(matches!(
+                ConfigSnapshot::resolve(&[ConfigLayer {
+                    source: ConfigSource::User,
+                    contents,
+                }]),
+                Err(ConfigError::ResourceLimitOutOfRange { field: observed })
+                    if observed == field
+            ));
+        }
+
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.2\"\n[storage]\nmaximum_repository_bytes = 2147483648\nmaximum_catalog_bytes = 1073741824\n",
+            }]),
+            Err(ConfigError::StorageInvariant {
+                field: "storage.maximum_repository_bytes"
+            })
+        ));
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.2\"\n[storage]\nmaximum_catalog_bytes = 549755813888\n",
+            }]),
+            Err(ConfigError::StorageInvariant {
+                field: "storage.maximum_catalog_bytes"
+            })
+        ));
     }
 
     #[test]
@@ -1641,7 +2171,7 @@ critical = true
     fn accepts_additive_minor_versions_and_omitted_optional_sections() {
         let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::User,
-            contents: "version = \"1.2\"",
+            contents: "version = \"1.3\"",
         }])
         .expect("minor versions are additive");
 
@@ -1649,5 +2179,6 @@ critical = true
         assert_eq!(snapshot.security(), SecurityConfig::default());
         assert_eq!(snapshot.resources(), ResourceConfig::default());
         assert_eq!(snapshot.analysis(), AnalysisConfig::default());
+        assert_eq!(snapshot.storage(), StorageConfig::default());
     }
 }

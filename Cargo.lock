@@ -2584,6 +2584,7 @@ dependencies = [
 name = "rootlight-runtime"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
  "cap-std",
  "directories",
  "nix",

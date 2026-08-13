@@ -13,7 +13,7 @@ use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_catalog::{catalog_schema_compatibility, oracle_schema_compatibility};
-use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
+use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1, ConfigDocumentSchemaV1_2};
 use rootlight_ir::{
     ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
     NormalizedIrDocument, decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
@@ -289,7 +289,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_daemon_protocol_baselines(&workspace_root)?;
     validate_protobuf_unknown_field_skip()?;
     validate_storage_compatibility(&workspace_root)?;
-    println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
+    println!("compatibility: frozen configuration 1.0 and 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
     println!("compatibility: daemon protocol 1.1 through 1.11 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
@@ -378,11 +378,15 @@ fn validate_configuration_schema(
         .get("version")
         .and_then(serde_json::Value::as_str)
         .and_then(|version| rootlight_config::ContractVersion::parse(version).ok())
-        .map_or("config-1.1.schema.json", |version| {
-            if version.major() == 1 && version.minor() == 0 {
-                "config-1.0.schema.json"
+        .map_or("config-1.2.schema.json", |version| {
+            if version.major() == 1 {
+                match version.minor() {
+                    0 => "config-1.0.schema.json",
+                    1 => "config-1.1.schema.json",
+                    _ => "config-1.2.schema.json",
+                }
             } else {
-                "config-1.1.schema.json"
+                "config-1.2.schema.json"
             }
         });
     let path = workspace_root
@@ -427,7 +431,7 @@ fn validate_configuration_semantics(
     }
 
     let mut toml = format!("version = {version:?}\n");
-    for section in ["security", "resources", "analysis"] {
+    for section in ["security", "resources", "analysis", "storage"] {
         let Some(fields) = configuration
             .get(section)
             .and_then(serde_json::Value::as_object)
@@ -866,6 +870,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     }
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
+    write_schema::<ConfigDocumentSchemaV1_2>(&schema_root.join("config-1.2.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
     write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
     write_schema::<LexicalEvidenceV1>(
@@ -1449,6 +1454,42 @@ fn validate_generated_json_schemas(
             serde_json::json!({
                 "version": "1.1",
                 "resources": {"max_source_bytes": 524_289}
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.1.schema.json",
+            "storage policy is not part of frozen configuration 1.1",
+            serde_json::json!({
+                "version": "1.1",
+                "storage": {"retained_generations": 2}
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "config-1.2.schema.json",
+            "bounded durable storage policy",
+            serde_json::json!({
+                "version": "1.2",
+                "storage": {
+                    "maximum_repository_bytes": 8_589_934_592_u64,
+                    "maximum_catalog_bytes": 68_719_476_736_u64,
+                    "retained_generations": 2,
+                    "minimum_free_disk_bytes": 67_108_864_u64,
+                    "source_reservation_factor": 25,
+                    "oracle_reservation_factor": 8
+                }
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "config-1.2.schema.json",
+            "additive configuration minor",
+            serde_json::json!({"version": "1.3"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.2.schema.json",
+            "repository storage limit is below its hard minimum",
+            serde_json::json!({
+                "version": "1.2",
+                "storage": {"maximum_repository_bytes": 134_217_727}
             }),
         ),
         SchemaSemanticCase::invalid(
@@ -2132,6 +2173,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/protobuf/rootlight.desc"),
         format!("{SCHEMA_ROOT}/json/config-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/config-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/config-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),

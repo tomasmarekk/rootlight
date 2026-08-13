@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    ffi::OsStr,
     fs::{self, File, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -41,6 +42,8 @@ pub const STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT: Duration = Duration::from_s
 pub const COORDINATED_START_SIGNAL_ENV: &str = "ROOTLIGHT_COORDINATED_START_SIGNAL";
 /// Current coordinated startup signal protocol version.
 pub const COORDINATED_START_SIGNAL_VERSION: &str = "1";
+/// Fixed per-user configuration filename beneath the protected state directory.
+pub const USER_CONFIG_FILE_NAME: &str = "config.toml";
 
 /// Resolves an existing executable beneath the trusted Windows system root.
 ///
@@ -278,6 +281,39 @@ impl RuntimePaths {
     #[must_use]
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
+    }
+
+    /// Returns the protected per-user configuration path.
+    #[must_use]
+    pub fn user_config_path(&self) -> PathBuf {
+        self.state_dir.join(USER_CONFIG_FILE_NAME)
+    }
+
+    /// Reads the optional per-user configuration through its protected parent.
+    ///
+    /// The state directory and retained file descriptor must remain owner
+    /// private, single-linked, regular, and stable for the full bounded read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InsecureUserConfig`] when the file violates the
+    /// private-file policy, [`RuntimeError::UserConfigTooLarge`] when it exceeds
+    /// `maximum_bytes`, or [`RuntimeError::Io`] for other filesystem failures.
+    pub fn read_user_config(&self, maximum_bytes: u64) -> Result<Option<Vec<u8>>, RuntimeError> {
+        self.read_user_config_with_check(maximum_bytes, || Ok(()))
+    }
+
+    fn read_user_config_with_check(
+        &self,
+        maximum_bytes: u64,
+        check: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+        read_optional_private_config(
+            &self.state_dir,
+            OsStr::new(USER_CONFIG_FILE_NAME),
+            maximum_bytes,
+            check,
+        )
     }
 
     /// Returns the exclusive catalog-writer lock path.
@@ -1054,6 +1090,148 @@ fn validate_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Ru
     Ok(())
 }
 
+fn read_optional_private_config(
+    state_dir: &Path,
+    name: &OsStr,
+    maximum_bytes: u64,
+    check: impl FnOnce() -> Result<(), RuntimeError>,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+    use cap_std::{
+        ambient_authority,
+        fs::{Dir, OpenOptions},
+    };
+
+    validate_private_directory(state_dir, PrivateScope::Account)?;
+    let parent = Dir::open_ambient_dir(state_dir, ambient_authority()).map_err(RuntimeError::Io)?;
+    validate_config_parent_handle(&parent)?;
+
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        };
+
+        options
+            .access_mode(FILE_GENERIC_READ.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+    }
+    let mut file = match parent.open_with(Path::new(name), &options) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) if source.kind() == io::ErrorKind::InvalidInput => {
+            return Err(RuntimeError::InsecureUserConfig);
+        }
+        Err(source) => return Err(RuntimeError::Io(source)),
+    };
+    validate_config_file_handle(&file)?;
+    let before = file.metadata().map_err(RuntimeError::Io)?;
+    let identity = config_file_identity(&before)?;
+    if before.len() > maximum_bytes {
+        return Err(RuntimeError::UserConfigTooLarge {
+            maximum: maximum_bytes,
+        });
+    }
+
+    check()?;
+    let mut bytes = Vec::new();
+    let mut bounded = (&mut file).take(maximum_bytes.saturating_add(1));
+    bounded.read_to_end(&mut bytes).map_err(RuntimeError::Io)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+        return Err(RuntimeError::UserConfigTooLarge {
+            maximum: maximum_bytes,
+        });
+    }
+    let after = file.metadata().map_err(RuntimeError::Io)?;
+    if config_file_identity(&after)? != identity
+        || before.len() != after.len()
+        || after.len() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+    {
+        return Err(RuntimeError::InsecureUserConfig);
+    }
+
+    let reopened = parent
+        .open_with(Path::new(name), &options)
+        .map_err(|_| RuntimeError::InsecureUserConfig)?;
+    validate_config_file_handle(&reopened)?;
+    if config_file_identity(&reopened.metadata().map_err(RuntimeError::Io)?)? != identity {
+        return Err(RuntimeError::InsecureUserConfig);
+    }
+    Ok(Some(bytes))
+}
+
+fn validate_config_parent_handle(parent: &cap_std::fs::Dir) -> Result<(), RuntimeError> {
+    let metadata = parent.dir_metadata().map_err(RuntimeError::Io)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(RuntimeError::InsecureDirectory);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt as _;
+
+        if metadata.uid() != effective_user_id() || metadata.mode() & 0o077 != 0 {
+            return Err(RuntimeError::InsecureDirectory);
+        }
+        PrivateDirectory::verify_parent(parent).map_err(|_| RuntimeError::InsecureDirectory)?;
+    }
+    #[cfg(windows)]
+    {
+        let handle = parent
+            .try_clone()
+            .map(cap_std::fs::Dir::into_std_file)
+            .map_err(RuntimeError::Io)?;
+        verify_private_windows_file_dacl(&handle, PrivateScope::Account)
+            .map_err(|_| RuntimeError::InsecureDirectory)?;
+    }
+    Ok(())
+}
+
+fn validate_config_file_handle(file: &cap_std::fs::File) -> Result<(), RuntimeError> {
+    let _ = file;
+    #[cfg(windows)]
+    {
+        let handle = file
+            .try_clone()
+            .map(cap_std::fs::File::into_std)
+            .map_err(RuntimeError::Io)?;
+        verify_private_windows_file_dacl(&handle, PrivateScope::Account)
+            .map_err(|_| RuntimeError::InsecureUserConfig)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfigFileIdentity {
+    volume: u64,
+    file: u128,
+}
+
+fn config_file_identity(
+    metadata: &cap_std::fs::Metadata,
+) -> Result<ConfigFileIdentity, RuntimeError> {
+    use cap_fs_ext::MetadataExt as _;
+
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1
+    {
+        return Err(RuntimeError::InsecureUserConfig);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt as _;
+
+        if metadata.uid() != effective_user_id() || metadata.mode() & 0o077 != 0 {
+            return Err(RuntimeError::InsecureUserConfig);
+        }
+    }
+    Ok(ConfigFileIdentity {
+        volume: metadata.dev(),
+        file: u128::from(metadata.ino()),
+    })
+}
+
 fn remove_private_tree_if_present(path: &Path) -> Result<(), RuntimeError> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -1574,6 +1752,15 @@ pub enum RuntimeError {
     /// A user-selected protected output violated the private-file policy.
     #[error("protected output file is insecure")]
     InsecureOutputFile,
+    /// The per-user configuration violated the private-file policy.
+    #[error("per-user configuration file is insecure")]
+    InsecureUserConfig,
+    /// The per-user configuration exceeded its caller-supplied read bound.
+    #[error("per-user configuration exceeds its byte limit; maximum is {maximum}")]
+    UserConfigTooLarge {
+        /// Maximum accepted configuration bytes.
+        maximum: u64,
+    },
     /// The platform could not establish the private output publication boundary.
     ///
     /// The optional source retains internal operating-system context when the boundary operation
@@ -1698,6 +1885,131 @@ mod tests {
         let paths = RuntimePaths::new(state, runtime).expect("explicit paths are valid");
         paths.prepare_owner().expect("private directories prepare");
         (temporary, paths)
+    }
+
+    fn write_private_user_config(paths: &RuntimePaths, bytes: &[u8]) {
+        fs::write(paths.user_config_path(), bytes).expect("user configuration writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            fs::set_permissions(paths.user_config_path(), fs::Permissions::from_mode(0o600))
+                .expect("user configuration becomes private");
+        }
+        #[cfg(windows)]
+        apply_private_windows_dacl(&paths.user_config_path(), PrivateScope::Account)
+            .expect("user configuration DACL becomes private");
+    }
+
+    #[test]
+    fn optional_user_config_absence_is_not_an_error() {
+        let (_temporary, paths) = paths();
+
+        assert_eq!(
+            paths
+                .read_user_config(256 * 1024)
+                .expect("absent user configuration is optional"),
+            None
+        );
+    }
+
+    #[test]
+    fn user_config_reads_private_bounded_bytes() {
+        let (_temporary, paths) = paths();
+        write_private_user_config(&paths, b"version = \"1.2\"\n");
+
+        assert_eq!(
+            paths
+                .read_user_config(256 * 1024)
+                .expect("private user configuration reads"),
+            Some(b"version = \"1.2\"\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn user_config_rejects_oversized_content() {
+        let (_temporary, paths) = paths();
+        write_private_user_config(&paths, b"12345");
+
+        assert!(matches!(
+            paths.read_user_config(4),
+            Err(RuntimeError::UserConfigTooLarge { maximum: 4 })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_config_rejects_non_private_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_temporary, paths) = paths();
+        write_private_user_config(&paths, b"version = \"1.2\"\n");
+        fs::set_permissions(paths.user_config_path(), fs::Permissions::from_mode(0o644))
+            .expect("fixture permissions widen");
+
+        assert!(matches!(
+            paths.read_user_config(256 * 1024),
+            Err(RuntimeError::InsecureUserConfig)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_config_rejects_symbolic_and_hard_links() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let (_temporary, paths) = paths();
+        let external = paths.state_dir().join("external.toml");
+        fs::write(&external, b"version = \"1.2\"\n").expect("external fixture writes");
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o600))
+            .expect("external fixture becomes private");
+        symlink(&external, paths.user_config_path()).expect("symbolic link creates");
+        assert!(matches!(
+            paths.read_user_config(256 * 1024),
+            Err(RuntimeError::Io(_)) | Err(RuntimeError::InsecureUserConfig)
+        ));
+
+        fs::remove_file(paths.user_config_path()).expect("symbolic link removes");
+        fs::hard_link(&external, paths.user_config_path()).expect("hard link creates");
+        assert!(matches!(
+            paths.read_user_config(256 * 1024),
+            Err(RuntimeError::InsecureUserConfig)
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_named_file_swap_during_read() {
+        let (_temporary, paths) = paths();
+        write_private_user_config(&paths, b"version = \"1.2\"\n");
+        let original = paths.state_dir().join("config.original.toml");
+
+        let result = paths.read_user_config_with_check(256 * 1024, || {
+            fs::rename(paths.user_config_path(), &original).map_err(RuntimeError::Io)?;
+            write_private_user_config(&paths, b"version = \"1.2\"\n[storage]\n");
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(RuntimeError::InsecureUserConfig)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_config_rejects_reparse_points() {
+        use std::os::windows::fs::symlink_file;
+
+        let (_temporary, paths) = paths();
+        let external = paths.state_dir().join("external.toml");
+        write_private_user_config(&paths, b"version = \"1.2\"\n");
+        fs::rename(paths.user_config_path(), &external).expect("fixture moves");
+        if let Err(error) = symlink_file(&external, paths.user_config_path()) {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            return;
+        }
+
+        assert!(matches!(
+            paths.read_user_config(256 * 1024),
+            Err(RuntimeError::Io(_)) | Err(RuntimeError::InsecureUserConfig)
+        ));
     }
 
     #[cfg(windows)]
