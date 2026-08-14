@@ -319,6 +319,7 @@ mod tests {
                 state: OperationState::Succeeded,
                 revision: 2,
                 mode: RepositoryIndexMode::Auto,
+                selected_analysis_mode: None,
                 parent_generation: None,
                 published_generation: None,
                 discovered_inputs: 0,

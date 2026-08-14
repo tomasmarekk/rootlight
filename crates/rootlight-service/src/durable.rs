@@ -904,11 +904,24 @@ fn validate_incremental_evidence(
         .collect::<BTreeSet<_>>();
     let fallback_matches_strategy = match evidence.strategy {
         super::FirstSliceBuildStrategy::Initial
-        | super::FirstSliceBuildStrategy::DependencyDirected => evidence.fallback_reason.is_none(),
+        | super::FirstSliceBuildStrategy::DependencyDirected
+        | super::FirstSliceBuildStrategy::CleanRebuild => evidence.fallback_reason.is_none(),
         super::FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
             evidence.fallback_reason.is_some()
         }
     };
+    let clean_rebuild_evidence_is_consistent =
+        evidence.strategy != super::FirstSliceBuildStrategy::CleanRebuild
+            || evidence.reused_parser_artifacts == 0
+                && evidence.reused_parser_artifact_bytes == 0
+                && evidence.reused_normalized_facts == 0
+                && evidence.planned_fact_work.iter().all(|work| {
+                    work.disposition == super::FirstSliceFactWorkDisposition::Rebuild
+                        && work.cause == super::FirstSliceFactWorkCause::UserRequestedCleanRebuild
+                })
+                && evidence.normalized_fact_work.iter().all(|work| {
+                    work.cause != super::FirstSliceFactWorkCause::CompleteDependencyMatch
+                });
     if input_classes.len() != evidence.input_changes.len()
         || file_kinds.len() != evidence.file_changes.len()
         || domains.len() != evidence.invalidated_domains.len()
@@ -918,6 +931,7 @@ fn validate_incremental_evidence(
             .any(|change| change.inputs == 0)
         || evidence.file_changes.iter().any(|change| change.files == 0)
         || !fallback_matches_strategy
+        || !clean_rebuild_evidence_is_consistent
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }

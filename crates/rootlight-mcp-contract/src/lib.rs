@@ -42,10 +42,10 @@ pub const MCP_SPECIFICATION_DATE: &str = "2025-11-25";
 pub const MCP_SCHEMA_VERSION: &str = "1.0";
 
 /// The additive repository-operation tool schema version.
-pub const MCP_OPERATION_SCHEMA_VERSION: &str = "1.2";
+pub const MCP_OPERATION_SCHEMA_VERSION: &str = "1.3";
 
 /// The additive operation-status tool schema version.
-pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.3";
+pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.4";
 
 /// The additive analysis-tool schema version.
 pub const MCP_ANALYSIS_SCHEMA_VERSION: &str = "1.1";

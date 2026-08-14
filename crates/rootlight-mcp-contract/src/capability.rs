@@ -487,6 +487,11 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
         "deep",
         "selects native-isolated whole-project semantic analysis",
     ),
+    implemented_value(
+        "mode",
+        "rebuild",
+        "constructs a clean generation without reusing retained index artifacts",
+    ),
     implemented(
         "wait_ms",
         "waits up to the requested bound for operation progress or completion",
@@ -1793,7 +1798,7 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
 
 const fn input_shape_hash(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "5a755ef510ba28a57e7520f88a961b95fc384da8c5c38550964013bc2db0190e",
+        McpTool::RepoIndex => "c3b8f09d698f9bc2cea10fb2bc0d6d680e97a975f174eb62f6f581d7d11e288e",
         McpTool::RepoStatus => "209bc1a141e386684f402cf339130536f63e16ecbc960d92f720529ff522d9bb",
         McpTool::RepoList => "5f2a9e3fe96343fa1e75e8c4151d07cbc38ca6b1935ee7a8fadfd9defa9759b7",
         McpTool::OperationStatus => {
@@ -2253,7 +2258,7 @@ mod tests {
             repo_index.disposition("detached", Some("false")).status,
             CapabilityStatus::Implemented
         );
-        for mode in ["auto", "structural", "deep"] {
+        for mode in ["auto", "structural", "deep", "rebuild"] {
             assert_eq!(
                 repo_index.disposition("mode", Some(mode)).status,
                 CapabilityStatus::Implemented

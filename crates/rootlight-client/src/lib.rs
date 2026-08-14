@@ -97,6 +97,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "repository.index.clean-rebuild.v1",
     "repository.index.v1",
     "repository.status.logical-snapshot.v1",
     "source.read.v1",
@@ -832,6 +833,18 @@ pub enum RepositoryIndexMode {
     Structural,
     /// Attempt native-isolated whole-project Tier B analysis.
     Deep,
+    /// Rebuild the active analysis strength without parent artifact reuse.
+    Rebuild,
+}
+
+/// Analysis strength preserved by a clean repository rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryIndexAnalysisMode {
+    /// Use only audited in-process structural analyzers.
+    Structural,
+    /// Attempt native-isolated whole-project Tier B analysis.
+    Deep,
 }
 
 /// Successful repository-index publication.
@@ -849,6 +862,9 @@ pub struct RepositoryIndex {
     pub revision: u64,
     /// Analysis strength selected by the daemon.
     pub mode: RepositoryIndexMode,
+    /// Analysis strength preserved by a clean rebuild.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_analysis_mode: Option<RepositoryIndexAnalysisMode>,
     /// Previous generation, when present.
     pub parent_generation: Option<GenerationId>,
     /// Newly published immutable generation after successful completion.
@@ -879,6 +895,8 @@ pub enum RepositoryBuildStrategy {
     ConservativeRepositoryRebuild,
     /// An identical retained generation was reactivated without rebuilding it.
     RetainedGeneration,
+    /// The caller requested a complete rebuild without parent reuse.
+    CleanRebuild,
 }
 
 /// Source-free reason fine-grained invalidation expanded to a full rebuild.
@@ -917,6 +935,8 @@ pub enum RepositoryFactWorkCause {
     GenerationBoundLowering,
     /// Repository-wide resolution completed the records.
     Resolution,
+    /// The caller explicitly requested a complete rebuild.
+    UserRequestedCleanRebuild,
 }
 
 /// Logical domain selected by incremental planning.
@@ -3741,11 +3761,12 @@ impl Client {
         detached: bool,
         mode: RepositoryIndexMode,
     ) -> Result<RepositoryIndex, ClientError> {
-        match self.request(build_repository_index_request(
-            root, operation, detached, mode,
-        )?)? {
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            build_repository_index_request(root, operation, detached, mode)?,
+        )?;
+        match response {
             daemon::response_envelope::Response::RepositoryIndex(response) => {
-                parse_repository_index(response, operation)
+                parse_repository_index_for_minor(response, operation, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3798,15 +3819,15 @@ impl Client {
         mode: RepositoryIndexMode,
         timeout: RequestTimeout,
     ) -> Result<RepositoryIndex, ClientError> {
-        match self
-            .request_async(
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(
                 build_repository_index_request(root, operation, detached, mode)?,
                 timeout,
             )
-            .await?
-        {
+            .await?;
+        match response {
             daemon::response_envelope::Response::RepositoryIndex(response) => {
-                parse_repository_index(response, operation)
+                parse_repository_index_for_minor(response, operation, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -7740,6 +7761,11 @@ fn ensure_request_supported(
         {
             8
         }
+        daemon::request_envelope::Request::RepositoryIndex(request)
+            if request.mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32 =>
+        {
+            16
+        }
         daemon::request_envelope::Request::RepositoryIndex(_)
         | daemon::request_envelope::Request::RepositoryOperationStatus(_)
         | daemon::request_envelope::Request::CodeLocate(_)
@@ -7794,6 +7820,16 @@ fn ensure_request_capability(
     ) && !capabilities
         .iter()
         .any(|capability| capability == "rootlight.ui.graph_projection.v1")
+    {
+        return Err(ClientError::ProtocolFeatureUnavailable);
+    }
+    if matches!(
+        request,
+        daemon::request_envelope::Request::RepositoryIndex(request)
+            if request.mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32
+    ) && !capabilities
+        .iter()
+        .any(|capability| capability == "repository.index.clean-rebuild.v1")
     {
         return Err(ClientError::ProtocolFeatureUnavailable);
     }
@@ -8509,6 +8545,9 @@ fn build_repository_index_request(
                 RepositoryIndexMode::Deep => {
                     daemon::RepositoryIndexMode::RepositoryIndexDeep as i32
                 }
+                RepositoryIndexMode::Rebuild => {
+                    daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32
+                }
             },
         },
     ))
@@ -8980,9 +9019,18 @@ fn source_reference_to_wire(reference: &SourceReference) -> daemon::FirstSliceSo
     }
 }
 
+#[cfg(test)]
 fn parse_repository_index(
     response: daemon::RepositoryIndexResponse,
     expected_operation: OperationId,
+) -> Result<RepositoryIndex, ClientError> {
+    parse_repository_index_for_minor(response, expected_operation, CURRENT_PROTOCOL_MINOR)
+}
+
+fn parse_repository_index_for_minor(
+    response: daemon::RepositoryIndexResponse,
+    expected_operation: OperationId,
+    selected_protocol_minor: u32,
 ) -> Result<RepositoryIndex, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let operation = parse_operation(response.operation)?;
@@ -8992,11 +9040,37 @@ fn parse_repository_index(
     {
         daemon::RepositoryIndexMode::RepositoryIndexStructural => RepositoryIndexMode::Structural,
         daemon::RepositoryIndexMode::RepositoryIndexDeep => RepositoryIndexMode::Deep,
+        daemon::RepositoryIndexMode::RepositoryIndexRebuild if selected_protocol_minor >= 16 => {
+            RepositoryIndexMode::Rebuild
+        }
+        daemon::RepositoryIndexMode::RepositoryIndexRebuild => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
         daemon::RepositoryIndexMode::RepositoryIndexAuto
         | daemon::RepositoryIndexMode::Unspecified => {
             return Err(ClientError::InvalidResponseCorrelation);
         }
     };
+    let selected_analysis_mode =
+        match daemon::RepositoryIndexAnalysisMode::try_from(response.selected_analysis_mode)
+            .map_err(|_| ClientError::InvalidResponseCorrelation)?
+        {
+            daemon::RepositoryIndexAnalysisMode::Unspecified => None,
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural
+                if selected_protocol_minor >= 16 =>
+            {
+                Some(RepositoryIndexAnalysisMode::Structural)
+            }
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep
+                if selected_protocol_minor >= 16 =>
+            {
+                Some(RepositoryIndexAnalysisMode::Deep)
+            }
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural
+            | daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep => {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        };
     let published_generation = response
         .published_generation
         .map(parse_generation)
@@ -9014,6 +9088,7 @@ fn parse_repository_index(
         || response.indexed_files > response.discovered_inputs
         || semantic_operation == Some(operation)
         || semantic_operation.is_some() && state != OperationState::Succeeded
+        || (mode == RepositoryIndexMode::Rebuild) != selected_analysis_mode.is_some()
         || parent_generation.is_some() && parent_generation == published_generation
         || state != OperationState::Succeeded && !diagnostics.is_empty()
         || match state {
@@ -9039,6 +9114,7 @@ fn parse_repository_index(
         state,
         revision: response.revision,
         mode,
+        selected_analysis_mode,
         parent_generation,
         published_generation,
         discovered_inputs: response.discovered_inputs,
@@ -9307,6 +9383,14 @@ fn parse_repository_operation_evidence(
         daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration => {
             RepositoryBuildStrategy::RetainedGeneration
         }
+        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
+            if selected_protocol_minor >= 16 =>
+        {
+            RepositoryBuildStrategy::CleanRebuild
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
         daemon::RepositoryBuildStrategy::Unspecified => {
             return Err(ClientError::InvalidResponseCorrelation);
         }
@@ -9335,6 +9419,8 @@ fn parse_repository_operation_evidence(
             && (response.rebuilt_files != 0
                 || response.rebuilt_facts != 0
                 || response.owned_memory_bytes != 0)
+        || build_strategy == RepositoryBuildStrategy::CleanRebuild
+            && (response.reused_files != 0 || response.reused_facts != 0)
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -9495,6 +9581,20 @@ fn parse_repository_incremental_fact_work(
         RepositoryBuildStrategy::RetainedGeneration => {
             return Err(ClientError::InvalidResponseCorrelation);
         }
+        RepositoryBuildStrategy::CleanRebuild => {
+            if fallback_reason.is_some()
+                || reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::UserRequestedCleanRebuild
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        }
     }
 
     Ok(RepositoryIncrementalFactWorkEvidence {
@@ -9646,7 +9746,8 @@ fn validate_fact_work_cause(
             RepositoryFactWorkDisposition::Rebuild,
             RepositoryFactWorkCause::InitialGeneration
                 | RepositoryFactWorkCause::DependencyClosure
-                | RepositoryFactWorkCause::ConservativeFallback,
+                | RepositoryFactWorkCause::ConservativeFallback
+                | RepositoryFactWorkCause::UserRequestedCleanRebuild,
             false
         ) | (
             RepositoryFactWorkDisposition::Rebuild,
@@ -9713,6 +9814,9 @@ fn parse_fact_work_cause(cause: i32) -> Result<RepositoryFactWorkCause, ClientEr
         }
         daemon::RepositoryFactWorkCause::RepositoryFactWorkResolution => {
             Ok(RepositoryFactWorkCause::Resolution)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkUserRequestedCleanRebuild => {
+            Ok(RepositoryFactWorkCause::UserRequestedCleanRebuild)
         }
         daemon::RepositoryFactWorkCause::Unspecified => {
             Err(ClientError::InvalidResponseCorrelation)
@@ -14707,6 +14811,7 @@ mod tests {
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             semantic_operation: None,
+            selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::Unspecified as i32,
         }
     }
 
@@ -16263,6 +16368,7 @@ mod tests {
                 "operation.lifecycle.v1",
                 "operation.status",
                 "operation.submit",
+                "repository.index.clean-rebuild.v1",
                 "repository.index.v1",
                 "repository.status.logical-snapshot.v1",
                 "source.read.v1",
@@ -16311,6 +16417,27 @@ mod tests {
         ));
         assert!(
             ensure_request_capability(&graph, &["rootlight.ui.graph_projection.v1".to_owned()])
+                .is_ok()
+        );
+
+        let rebuild = build_repository_index_request(
+            "C:\\bounded",
+            OperationId::from_bytes([12; 16]),
+            false,
+            RepositoryIndexMode::Rebuild,
+        )
+        .expect("clean rebuild request builds");
+        assert!(matches!(
+            ensure_request_supported(&rebuild, 15),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&rebuild, 16).is_ok());
+        assert!(matches!(
+            ensure_request_capability(&rebuild, &[]),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(
+            ensure_request_capability(&rebuild, &["repository.index.clean-rebuild.v1".to_owned()])
                 .is_ok()
         );
     }
@@ -16954,8 +17081,63 @@ mod tests {
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             semantic_operation: None,
+            selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::Unspecified as i32,
         };
-        assert!(parse_repository_index(index.clone(), operation).is_ok());
+        let structural = parse_repository_index(index.clone(), operation)
+            .expect("structural repository response parses");
+        assert_eq!(structural.selected_analysis_mode, None);
+        assert!(
+            serde_json::to_value(structural)
+                .expect("repository response serializes")
+                .get("selected_analysis_mode")
+                .is_none()
+        );
+        let mut rebuild = index.clone();
+        rebuild.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+        rebuild.selected_analysis_mode =
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural as i32;
+        assert!(matches!(
+            parse_repository_index_for_minor(rebuild.clone(), operation, 15),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let rebuild = parse_repository_index_for_minor(rebuild, operation, 16)
+            .expect("minor sixteen accepts authoritative clean-rebuild analysis mode");
+        assert_eq!(rebuild.mode, RepositoryIndexMode::Rebuild);
+        assert_eq!(
+            rebuild.selected_analysis_mode,
+            Some(RepositoryIndexAnalysisMode::Structural)
+        );
+        assert_eq!(
+            serde_json::to_value(&rebuild).expect("clean-rebuild response serializes")["selected_analysis_mode"],
+            "structural"
+        );
+        let mut deep_rebuild = index.clone();
+        deep_rebuild.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+        deep_rebuild.selected_analysis_mode =
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep as i32;
+        assert_eq!(
+            parse_repository_index_for_minor(deep_rebuild, operation, 16)
+                .expect("minor sixteen accepts deep clean-rebuild analysis mode")
+                .selected_analysis_mode,
+            Some(RepositoryIndexAnalysisMode::Deep)
+        );
+        let mut leaked_analysis_mode = index.clone();
+        leaked_analysis_mode.selected_analysis_mode =
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep as i32;
+        assert!(matches!(
+            parse_repository_index_for_minor(leaked_analysis_mode.clone(), operation, 15),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(matches!(
+            parse_repository_index_for_minor(leaked_analysis_mode, operation, 16),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut missing_analysis_mode = index.clone();
+        missing_analysis_mode.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+        assert!(matches!(
+            parse_repository_index_for_minor(missing_analysis_mode, operation, 16),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let mut auto = index.clone();
         auto.semantic_operation = Some(operation_to_wire(foreign_operation));
         assert_eq!(
@@ -17095,6 +17277,31 @@ mod tests {
             parse_repository_operation_status_for_minor(incremental_status.clone(), operation, 14,),
             Err(ClientError::InvalidResponseCorrelation)
         ));
+        let mut clean_status = incremental_status.clone();
+        clean_status.build_strategy =
+            daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild as i32;
+        clean_status.reused_files = 0;
+        clean_status
+            .fact_work
+            .as_mut()
+            .and_then(|fact_work| fact_work.planned.as_mut())
+            .expect("planned clean groups exist")
+            .groups[0]
+            .cause =
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkUserRequestedCleanRebuild as i32;
+        assert!(matches!(
+            parse_repository_operation_status_for_minor(clean_status.clone(), operation, 15),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let clean = parse_repository_operation_status_for_minor(clean_status, operation, 16)
+            .expect("minor sixteen accepts clean rebuild evidence");
+        assert_eq!(
+            clean
+                .evidence
+                .expect("clean rebuild evidence is retained")
+                .build_strategy,
+            RepositoryBuildStrategy::CleanRebuild
+        );
         let incremental = parse_repository_operation_status(incremental_status, operation)
             .expect("durable incremental evidence decodes");
         let evidence = incremental

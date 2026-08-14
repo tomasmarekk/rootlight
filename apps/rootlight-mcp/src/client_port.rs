@@ -21,6 +21,7 @@ use rootlight_client::{
     CoverageStatus, FlowTrace, GenerationSelector, HistoryCompare, LocateMode, OperationKind,
     OperationState, PlanChange, QueryFreshness, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryIndex,
+    RepositoryIndexAnalysisMode as ClientRepositoryIndexAnalysisMode,
     RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
@@ -977,7 +978,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 IndexMode::Auto => ClientRepositoryIndexMode::Auto,
                 IndexMode::Structural => ClientRepositoryIndexMode::Structural,
                 IndexMode::Deep => ClientRepositoryIndexMode::Deep,
-                IndexMode::Rebuild => return Err(ClientPortError::Executor),
+                IndexMode::Rebuild => ClientRepositoryIndexMode::Rebuild,
             };
             let mut result = client
                 .repository_index(root, operation, request.detached(), requested_mode, timeout)
@@ -1015,18 +1016,35 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 result.published_generation = status.published_generation;
                 result.semantic_operation = status.semantic_operation;
             }
-            let (mode, providers) = match result.mode {
-                ClientRepositoryIndexMode::Structural => {
+            let (mode, providers) = match (result.mode, result.selected_analysis_mode) {
+                (ClientRepositoryIndexMode::Structural, None) => {
                     (IndexMode::Structural, vec![FIRST_SLICE_PROVIDER.to_owned()])
                 }
-                ClientRepositoryIndexMode::Deep => (
+                (ClientRepositoryIndexMode::Deep, None) => (
                     IndexMode::Deep,
                     vec![
                         FIRST_SLICE_PROVIDER.to_owned(),
                         PROJECT_SEMANTICS_PROVIDER.to_owned(),
                     ],
                 ),
-                ClientRepositoryIndexMode::Auto => {
+                (
+                    ClientRepositoryIndexMode::Rebuild,
+                    Some(ClientRepositoryIndexAnalysisMode::Structural),
+                ) => (IndexMode::Rebuild, vec![FIRST_SLICE_PROVIDER.to_owned()]),
+                (
+                    ClientRepositoryIndexMode::Rebuild,
+                    Some(ClientRepositoryIndexAnalysisMode::Deep),
+                ) => (
+                    IndexMode::Rebuild,
+                    vec![
+                        FIRST_SLICE_PROVIDER.to_owned(),
+                        PROJECT_SEMANTICS_PROVIDER.to_owned(),
+                    ],
+                ),
+                (ClientRepositoryIndexMode::Auto, _)
+                | (ClientRepositoryIndexMode::Structural, Some(_))
+                | (ClientRepositoryIndexMode::Deep, Some(_))
+                | (ClientRepositoryIndexMode::Rebuild, None) => {
                     return Err(ClientPortError::InvalidResponse);
                 }
             };

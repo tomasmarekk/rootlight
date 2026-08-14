@@ -7,11 +7,11 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.1",
+            "contractVersion": "1.3",
             "explainSupported": false,
             "fallbackSummary": "bounded attached durable generation creation",
             "generation": "creates_generation",
-            "inputShapeHash": "5a755ef510ba28a57e7520f88a961b95fc384da8c5c38550964013bc2db0190e",
+            "inputShapeHash": "c3b8f09d698f9bc2cea10fb2bc0d6d680e97a975f174eb62f6f581d7d11e288e",
             "lifecycle": {
               "acceptedModes": [
                 "auto",
@@ -71,11 +71,16 @@
                   "const": "deep",
                   "description": "Request available deep tiers.",
                   "type": "string"
+                },
+                {
+                  "const": "rebuild",
+                  "description": "Rebuild from a clean generation.",
+                  "type": "string"
                 }
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.1",
+          "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `repo.index`.",
@@ -296,6 +301,11 @@
                   "const": "deep",
                   "description": "Request available deep tiers.",
                   "type": "string"
+                },
+                {
+                  "const": "rebuild",
+                  "description": "Rebuild from a clean generation.",
+                  "type": "string"
                 }
               ]
             },
@@ -367,8 +377,8 @@
               ],
               "type": "object"
             },
-            "NextAction": {
-              "description": "Stable remediation hints generated from a closed set of templates.",
+            "McpNextAction": {
+              "description": "Remediation hint set exposed by current MCP contracts.\n\nThis MCP-owned schema type includes protocol-1.15 actions while retained\ncontracts continue deriving their exact historical schemas from\n[`NextAction`].",
               "oneOf": [
                 {
                   "additionalProperties": false,
@@ -461,7 +471,7 @@
                 },
                 {
                   "additionalProperties": false,
-                  "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+                  "description": "Restart enumeration from the beginning.",
                   "properties": {
                     "action": {
                       "const": "restart_enumeration",
@@ -472,80 +482,45 @@
                     "action"
                   ],
                   "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Update one checked configuration value.",
+                  "properties": {
+                    "action": {
+                      "const": "update_configuration",
+                      "type": "string"
+                    },
+                    "key": {
+                      "$ref": "#/$defs/SafeLabel",
+                      "description": "Canonical source-free configuration key."
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "key"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Delete an unneeded repository through catalog mutation.",
+                  "properties": {
+                    "action": {
+                      "const": "delete_repository",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
                 }
               ]
             },
-            "OperationErrorResponse": {
+            "McpPublicError": {
               "additionalProperties": false,
-              "description": "Checked error response for repository-operation schema 1.1.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable source-redacted error."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/OperationSchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
-            },
-            "OperationId": {
-              "pattern": "^op1_[a-z2-7]{32}$",
-              "type": "string"
-            },
-            "OperationSchemaVersion": {
-              "description": "Version marker carried by additive repository-operation responses.",
-              "oneOf": [
-                {
-                  "const": "1.1",
-                  "description": "Tool contract version 1.1.",
-                  "type": "string"
-                }
-              ]
-            },
-            "OperationState": {
-              "description": "Durable operation state.",
-              "oneOf": [
-                {
-                  "const": "queued",
-                  "description": "Accepted but not started.",
-                  "type": "string"
-                },
-                {
-                  "const": "running",
-                  "description": "Actively running.",
-                  "type": "string"
-                },
-                {
-                  "const": "published",
-                  "description": "Published an immutable generation.",
-                  "type": "string"
-                },
-                {
-                  "const": "failed",
-                  "description": "Failed without publishing partial state.",
-                  "type": "string"
-                },
-                {
-                  "const": "cancelled",
-                  "description": "Cancelled without publishing partial state.",
-                  "type": "string"
-                },
-                {
-                  "const": "waiting_for_context",
-                  "description": "Waiting for explicit build or environment context.",
-                  "type": "string"
-                }
-              ]
-            },
-            "PublicError": {
-              "additionalProperties": false,
-              "description": "A stable source-redacted failure safe to serialize across public boundaries.",
+              "description": "Source-redacted failure envelope exposed by current MCP contracts.\n\nDeserialization delegates invariant checking to [`PublicError`] before\nmaterializing this schema-complete MCP representation.",
               "properties": {
                 "code": {
                   "$ref": "#/$defs/ErrorCode"
@@ -575,7 +550,7 @@
                 },
                 "next_actions": {
                   "items": {
-                    "$ref": "#/$defs/NextAction"
+                    "$ref": "#/$defs/McpNextAction"
                   },
                   "maxItems": 8,
                   "type": "array"
@@ -621,6 +596,74 @@
                 "next_actions"
               ],
               "type": "object"
+            },
+            "OperationErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for repository-operation schema 1.3.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/McpPublicError",
+                  "description": "Stable source-redacted error including current remediation actions."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/OperationSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "OperationId": {
+              "pattern": "^op1_[a-z2-7]{32}$",
+              "type": "string"
+            },
+            "OperationSchemaVersion": {
+              "description": "Version marker carried by additive repository-operation responses.",
+              "oneOf": [
+                {
+                  "const": "1.3",
+                  "description": "Tool contract version 1.3.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationState": {
+              "description": "Durable operation state.",
+              "oneOf": [
+                {
+                  "const": "queued",
+                  "description": "Accepted but not started.",
+                  "type": "string"
+                },
+                {
+                  "const": "running",
+                  "description": "Actively running.",
+                  "type": "string"
+                },
+                {
+                  "const": "published",
+                  "description": "Published an immutable generation.",
+                  "type": "string"
+                },
+                {
+                  "const": "failed",
+                  "description": "Failed without publishing partial state.",
+                  "type": "string"
+                },
+                {
+                  "const": "cancelled",
+                  "description": "Cancelled without publishing partial state.",
+                  "type": "string"
+                },
+                {
+                  "const": "waiting_for_context",
+                  "description": "Waiting for explicit build or environment context.",
+                  "type": "string"
+                }
+              ]
             },
             "PublicValue": {
               "description": "Bounded primitive values permitted in public error details.",
@@ -811,9 +854,9 @@
               ],
               "type": "object"
             },
-            "RepoIndexSuccessV1_1": {
+            "RepoIndexSuccessV1_3": {
               "additionalProperties": false,
-              "description": "Strict output for `repo.index`.",
+              "description": "Strict output for `repo.index` schema 1.3.",
               "properties": {
                 "data": {
                   "$ref": "#/$defs/RepoIndexDataV1_1",
@@ -860,11 +903,11 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.1",
+          "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/RepoIndexSuccessV1_1",
+              "$ref": "#/$defs/RepoIndexSuccessV1_3",
               "description": "Tool-specific successful response."
             },
             {
@@ -872,7 +915,7 @@
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for repository-operation schema 1.1.",
+          "description": "Success-or-error response for repository-operation schema 1.3.",
           "title": "OperationToolResponse",
           "type": "object",
           "unevaluatedProperties": false
@@ -885,7 +928,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "unsupported",
-            "contractVersion": "1.1",
+            "contractVersion": "1.2",
             "explainSupported": true,
             "fallbackSummary": "bounded durable active or exact-generation status with coverage, operations, and freshness conditions",
             "generation": "selects_generation",
@@ -1159,7 +1202,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.status/input/1.1",
+          "$id": "https://rootlight.local/schema/mcp/repo.status/input/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `repo.status`.",
@@ -1226,103 +1269,6 @@
         "name": "repo.status",
         "outputSchema": {
           "$defs": {
-            "AnalysisErrorResponse": {
-              "additionalProperties": false,
-              "description": "Checked error response for analysis schema 1.1.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable source-redacted error."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/AnalysisSchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
-            },
-            "AnalysisReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for additive analysis-tool responses.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/RepoStatusData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable4",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/AnalysisSchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
-            "AnalysisSchemaVersion": {
-              "description": "Version marker carried by additive analysis responses.",
-              "oneOf": [
-                {
-                  "const": "1.1",
-                  "description": "Tool contract version 1.1.",
-                  "type": "string"
-                }
-              ]
-            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -1392,6 +1338,10 @@
                   "type": "string"
                 }
               ]
+            },
+            "ContentHash": {
+              "pattern": "^b3_[a-z2-7]{58}$",
+              "type": "string"
             },
             "ContinuationAvailability": {
               "description": "Whether an incomplete result exposes a safe continuation.",
@@ -1944,6 +1894,35 @@
                 }
               ]
             },
+            "LogicalSnapshotIdentity": {
+              "additionalProperties": false,
+              "description": "Source-free generation-neutral identity for one logical snapshot.",
+              "properties": {
+                "hash": {
+                  "$ref": "#/$defs/ContentHash",
+                  "description": "Complete generation-neutral logical snapshot digest."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/LogicalSnapshotSchemaVersion",
+                  "description": "Version of the canonical generation-neutral projection."
+                }
+              },
+              "required": [
+                "schema_version",
+                "hash"
+              ],
+              "type": "object"
+            },
+            "LogicalSnapshotSchemaVersion": {
+              "description": "Version of the logical snapshot identity projection.",
+              "oneOf": [
+                {
+                  "const": "1.0",
+                  "description": "Initial generation-neutral projection contract.",
+                  "type": "string"
+                }
+              ]
+            },
             "NextAction": {
               "description": "Stable remediation hints generated from a closed set of templates.",
               "oneOf": [
@@ -2399,14 +2378,14 @@
             },
             "RepoStatusData": {
               "additionalProperties": false,
-              "description": "`repo.status` result data.",
+              "description": "Current `repo.status` result data.",
               "properties": {
                 "active_generation": {
                   "$ref": "#/$defs/RequiredNullable2",
                   "description": "Active generation summary, null when no generation is published."
                 },
                 "alias": {
-                  "$ref": "#/$defs/RequiredNullable3",
+                  "$ref": "#/$defs/RequiredNullable4",
                   "description": "Registered repository alias, when configured."
                 },
                 "coverage": {
@@ -2423,6 +2402,10 @@
                     }
                   ],
                   "description": "Bounded source-free plan present when explain was requested."
+                },
+                "logical_snapshot": {
+                  "$ref": "#/$defs/RequiredNullable3",
+                  "description": "Generation-neutral identity, null when no supported persisted sidecar is available."
                 },
                 "operations": {
                   "description": "Bounded operation list, most recent first.",
@@ -2471,12 +2454,110 @@
                 "active_generation",
                 "publication_state",
                 "retained_durable_bytes",
+                "logical_snapshot",
                 "alias",
                 "coverage",
                 "operations",
                 "recommended_actions"
               ],
               "type": "object"
+            },
+            "RepoStatusErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for repository-status schema 1.2.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/RepoStatusSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "RepoStatusReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Strict current response envelope for generation-pinned repository status.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/RepoStatusData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable5",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/RepoStatusSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "RepoStatusSchemaVersion": {
+              "description": "Version marker carried by current `repo.status` responses.",
+              "oneOf": [
+                {
+                  "const": "1.2",
+                  "description": "Repository status contract version 1.2.",
+                  "type": "string"
+                }
+              ]
             },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
@@ -2540,13 +2621,24 @@
               "description": "A property that must be present and may contain JSON `null`."
             },
             "RequiredNullable3": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LogicalSnapshotIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable4": {
               "description": "A property that must be present and may contain JSON `null`.",
               "type": [
                 "string",
                 "null"
               ]
             },
-            "RequiredNullable4": {
+            "RequiredNullable5": {
               "anyOf": [
                 {
                   "$ref": "#/$defs/ContinuationCursor"
@@ -2588,7 +2680,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -2724,20 +2816,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.status/output/1.1",
+          "$id": "https://rootlight.local/schema/mcp/repo.status/output/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalysisReadEnvelope",
-              "description": "Tool-specific successful response."
+              "$ref": "#/$defs/RepoStatusReadEnvelope",
+              "description": "Successful repository status response."
             },
             {
-              "$ref": "#/$defs/AnalysisErrorResponse",
+              "$ref": "#/$defs/RepoStatusErrorResponse",
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for analysis schema 1.1.",
-          "title": "AnalysisToolResponse",
+          "description": "Checked success-or-error response for repository-status schema 1.2.",
+          "title": "RepoStatusToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -3877,7 +3969,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -4015,7 +4107,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.2",
+            "contractVersion": "1.4",
             "explainSupported": false,
             "fallbackSummary": "bounded operation read and cancel",
             "generation": "none",
@@ -4064,7 +4156,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.2",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `operation.status`.",
@@ -4227,12 +4319,20 @@
                 }
               ]
             },
+            "FactId": {
+              "pattern": "^fact1_[a-z2-7]{39}$",
+              "type": "string"
+            },
+            "FileId": {
+              "pattern": "^file1_[a-z2-7]{39}$",
+              "type": "string"
+            },
             "GenerationId": {
               "pattern": "^gen1_[a-z2-7]{39}$",
               "type": "string"
             },
-            "NextAction": {
-              "description": "Stable remediation hints generated from a closed set of templates.",
+            "McpNextAction": {
+              "description": "Remediation hint set exposed by current MCP contracts.\n\nThis MCP-owned schema type includes protocol-1.15 actions while retained\ncontracts continue deriving their exact historical schemas from\n[`NextAction`].",
               "oneOf": [
                 {
                   "additionalProperties": false,
@@ -4325,7 +4425,7 @@
                 },
                 {
                   "additionalProperties": false,
-                  "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+                  "description": "Restart enumeration from the beginning.",
                   "properties": {
                     "action": {
                       "const": "restart_enumeration",
@@ -4336,8 +4436,182 @@
                     "action"
                   ],
                   "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Update one checked configuration value.",
+                  "properties": {
+                    "action": {
+                      "const": "update_configuration",
+                      "type": "string"
+                    },
+                    "key": {
+                      "$ref": "#/$defs/SafeLabel",
+                      "description": "Canonical source-free configuration key."
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "key"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Delete an unneeded repository through catalog mutation.",
+                  "properties": {
+                    "action": {
+                      "const": "delete_repository",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
                 }
               ]
+            },
+            "McpPublicError": {
+              "additionalProperties": false,
+              "description": "Source-redacted failure envelope exposed by current MCP contracts.\n\nDeserialization delegates invariant checking to [`PublicError`] before\nmaterializing this schema-complete MCP representation.",
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/ErrorCode"
+                },
+                "details": {
+                  "additionalProperties": false,
+                  "patternProperties": {
+                    "^[a-z0-9_]+$": {
+                      "$ref": "#/$defs/PublicValue"
+                    }
+                  },
+                  "type": "object"
+                },
+                "generation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/GenerationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "message": {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                "next_actions": {
+                  "items": {
+                    "$ref": "#/$defs/McpNextAction"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "operation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repository": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RepositoryId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_after_ms": {
+                  "format": "uint64",
+                  "maximum": 86400000,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details",
+                "next_actions"
+              ],
+              "type": "object"
+            },
+            "OperationAffectedAnalysisUnitIds": {
+              "additionalProperties": false,
+              "description": "Exact count and bounded canonical sample of affected analysis units.",
+              "properties": {
+                "complete": {
+                  "description": "Whether the sample includes every affected analysis unit.",
+                  "type": "boolean"
+                },
+                "samples": {
+                  "description": "Canonical ascending identity sample.",
+                  "items": {
+                    "$ref": "#/$defs/FactId"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                "total": {
+                  "description": "Exact number of distinct affected analysis units.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total",
+                "samples",
+                "complete"
+              ],
+              "type": "object"
+            },
+            "OperationAffectedFileIds": {
+              "additionalProperties": false,
+              "description": "Exact count and bounded canonical sample of affected file identities.",
+              "properties": {
+                "complete": {
+                  "description": "Whether the sample includes every affected file.",
+                  "type": "boolean"
+                },
+                "samples": {
+                  "description": "Canonical ascending identity sample.",
+                  "items": {
+                    "$ref": "#/$defs/FileId"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                "total": {
+                  "description": "Exact number of distinct affected files.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total",
+                "samples",
+                "complete"
+              ],
+              "type": "object"
             },
             "OperationBuildStrategy": {
               "description": "Construction strategy retained with a successful repository operation.",
@@ -4360,6 +4634,11 @@
                 {
                   "const": "retained_generation",
                   "description": "An identical retained generation was reactivated without rebuilding it.",
+                  "type": "string"
+                },
+                {
+                  "const": "clean_rebuild",
+                  "description": "The caller requested construction from a clean repository snapshot.",
                   "type": "string"
                 }
               ]
@@ -4417,6 +4696,61 @@
               ],
               "type": "object"
             },
+            "OperationFactWorkCause": {
+              "description": "Source-free reason attributed to one fact-work group.",
+              "oneOf": [
+                {
+                  "const": "initial_generation",
+                  "description": "No committed parent generation existed.",
+                  "type": "string"
+                },
+                {
+                  "const": "dependency_closure",
+                  "description": "The dependency closure selected this rebuild scope.",
+                  "type": "string"
+                },
+                {
+                  "const": "complete_dependency_match",
+                  "description": "The dependency graph proved this scope reusable.",
+                  "type": "string"
+                },
+                {
+                  "const": "conservative_fallback",
+                  "description": "Missing dependency evidence required conservative rebuilding.",
+                  "type": "string"
+                },
+                {
+                  "const": "generation_bound_lowering",
+                  "description": "Generation ownership required fresh lowering.",
+                  "type": "string"
+                },
+                {
+                  "const": "resolution",
+                  "description": "Repository-wide resolution completed the records.",
+                  "type": "string"
+                },
+                {
+                  "const": "user_requested_clean_rebuild",
+                  "description": "The caller explicitly requested a complete rebuild.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationFactWorkDisposition": {
+              "description": "Whether one incremental fact scope was rebuilt or reused.",
+              "oneOf": [
+                {
+                  "const": "rebuild",
+                  "description": "The operation constructed fresh normalized records for this scope.",
+                  "type": "string"
+                },
+                {
+                  "const": "reuse",
+                  "description": "Verified generation-neutral records were rebound without lowering again.",
+                  "type": "string"
+                }
+              ]
+            },
             "OperationFallbackReason": {
               "description": "Source-free reason fine-grained invalidation expanded to a full rebuild.",
               "oneOf": [
@@ -4436,9 +4770,9 @@
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
             },
-            "OperationIncrementalEvidenceV1_1": {
+            "OperationIncrementalEvidence": {
               "additionalProperties": false,
-              "description": "Durable source-free invalidation, reuse, and rebuild evidence.",
+              "description": "Durable source-free invalidation and grouped fact-work evidence.",
               "properties": {
                 "build_strategy": {
                   "$ref": "#/$defs/OperationBuildStrategy",
@@ -4457,6 +4791,17 @@
                   "maximum": 18446744073709551615,
                   "minimum": 0,
                   "type": "integer"
+                },
+                "fact_work": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationIncrementalFactWorkEvidence"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Bounded grouped planned and completed normalized fact work."
                 },
                 "fallback_reason": {
                   "$ref": "#/$defs/RequiredNullable3",
@@ -4519,6 +4864,25 @@
                 "rebuilt_files",
                 "reused_facts",
                 "rebuilt_facts"
+              ],
+              "type": "object"
+            },
+            "OperationIncrementalFactWorkEvidence": {
+              "additionalProperties": false,
+              "description": "Bounded grouped evidence for planned and normalized incremental fact work.",
+              "properties": {
+                "normalized": {
+                  "$ref": "#/$defs/OperationNormalizedFactWorkCollection",
+                  "description": "Completed normalized record groups."
+                },
+                "planned": {
+                  "$ref": "#/$defs/OperationPlannedFactWorkCollection",
+                  "description": "Planned logical work groups."
+                }
+              },
+              "required": [
+                "planned",
+                "normalized"
               ],
               "type": "object"
             },
@@ -5195,6 +5559,253 @@
               ],
               "type": "object"
             },
+            "OperationNormalizedFactDomain": {
+              "description": "Normalized IR record domain completed by incremental construction.",
+              "oneOf": [
+                {
+                  "const": "files",
+                  "description": "File records.",
+                  "type": "string"
+                },
+                {
+                  "const": "entities",
+                  "description": "Entity records.",
+                  "type": "string"
+                },
+                {
+                  "const": "occurrences",
+                  "description": "Occurrence records.",
+                  "type": "string"
+                },
+                {
+                  "const": "relations",
+                  "description": "Relationship records.",
+                  "type": "string"
+                },
+                {
+                  "const": "provenance",
+                  "description": "Provenance records.",
+                  "type": "string"
+                },
+                {
+                  "const": "source_mappings",
+                  "description": "Source-mapping records.",
+                  "type": "string"
+                },
+                {
+                  "const": "diagnostics",
+                  "description": "Diagnostic records.",
+                  "type": "string"
+                },
+                {
+                  "const": "extensions",
+                  "description": "Extension records.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationNormalizedFactWorkCollection": {
+              "additionalProperties": false,
+              "description": "Bounded normalized fact-work groups and collection completeness.",
+              "properties": {
+                "complete": {
+                  "description": "Whether every group is retained.",
+                  "type": "boolean"
+                },
+                "groups": {
+                  "description": "Canonically ordered retained groups.",
+                  "items": {
+                    "$ref": "#/$defs/OperationNormalizedFactWorkGroup"
+                  },
+                  "maxItems": 32,
+                  "type": "array"
+                },
+                "total_groups": {
+                  "description": "Exact total number of groups before response bounding.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "groups",
+                "total_groups",
+                "complete"
+              ],
+              "type": "object"
+            },
+            "OperationNormalizedFactWorkGroup": {
+              "additionalProperties": false,
+              "description": "One normalized IR partition retained or rebuilt by the operation.",
+              "properties": {
+                "affected_analysis_units": {
+                  "$ref": "#/$defs/OperationAffectedAnalysisUnitIds",
+                  "description": "Exact count and bounded identities for affected analysis units."
+                },
+                "affected_files": {
+                  "$ref": "#/$defs/OperationAffectedFileIds",
+                  "description": "Exact count and bounded identities for affected files."
+                },
+                "cause": {
+                  "$ref": "#/$defs/OperationFactWorkCause",
+                  "description": "Construction or verified-reuse cause."
+                },
+                "disposition": {
+                  "$ref": "#/$defs/OperationFactWorkDisposition",
+                  "description": "Whether normalized records were rebuilt or reused."
+                },
+                "domain": {
+                  "$ref": "#/$defs/OperationNormalizedFactDomain",
+                  "description": "Normalized IR record domain."
+                },
+                "fact_count": {
+                  "description": "Exact normalized record count.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "provider_pass": {
+                  "description": "Source-free provider pass.",
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "disposition",
+                "domain",
+                "provider_pass",
+                "cause",
+                "fact_count",
+                "affected_files",
+                "affected_analysis_units"
+              ],
+              "type": "object"
+            },
+            "OperationPlannedFactDomain": {
+              "description": "Logical domain selected by incremental planning.",
+              "oneOf": [
+                {
+                  "const": "syntax",
+                  "description": "Parsed syntax facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "public_surface",
+                  "description": "Public symbol surface facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "body",
+                  "description": "Function or method body facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "resolution",
+                  "description": "Name and type resolution facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "search",
+                  "description": "Search projection facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "derived_graph",
+                  "description": "Derived graph facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "tests",
+                  "description": "Test facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "services",
+                  "description": "Service and route facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "history",
+                  "description": "History-derived facts.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationPlannedFactWorkCollection": {
+              "additionalProperties": false,
+              "description": "Bounded planned fact-work groups and collection completeness.",
+              "properties": {
+                "complete": {
+                  "description": "Whether every group is retained.",
+                  "type": "boolean"
+                },
+                "groups": {
+                  "description": "Canonically ordered retained groups.",
+                  "items": {
+                    "$ref": "#/$defs/OperationPlannedFactWorkGroup"
+                  },
+                  "maxItems": 32,
+                  "type": "array"
+                },
+                "total_groups": {
+                  "description": "Exact total number of groups before response bounding.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "groups",
+                "total_groups",
+                "complete"
+              ],
+              "type": "object"
+            },
+            "OperationPlannedFactWorkGroup": {
+              "additionalProperties": false,
+              "description": "One source-free logical work scope selected before fact construction.",
+              "properties": {
+                "affected_analysis_units": {
+                  "$ref": "#/$defs/OperationAffectedAnalysisUnitIds",
+                  "description": "Exact count and bounded identities for affected analysis units."
+                },
+                "affected_files": {
+                  "$ref": "#/$defs/OperationAffectedFileIds",
+                  "description": "Exact count and bounded identities for affected files."
+                },
+                "cause": {
+                  "$ref": "#/$defs/OperationFactWorkCause",
+                  "description": "Dependency or construction cause."
+                },
+                "disposition": {
+                  "$ref": "#/$defs/OperationFactWorkDisposition",
+                  "description": "Whether the planner selected rebuild or reuse."
+                },
+                "domain": {
+                  "$ref": "#/$defs/OperationPlannedFactDomain",
+                  "description": "Logical incremental fact domain."
+                },
+                "provider_pass": {
+                  "description": "Source-free provider pass.",
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "disposition",
+                "domain",
+                "provider_pass",
+                "cause",
+                "affected_files",
+                "affected_analysis_units"
+              ],
+              "type": "object"
+            },
             "OperationProgress": {
               "additionalProperties": false,
               "description": "Progress units reported by an operation.",
@@ -5335,9 +5946,9 @@
                 }
               ]
             },
-            "OperationStatusDataV1_2": {
+            "OperationStatusData": {
               "additionalProperties": false,
-              "description": "`operation.status` result data for schema 1.2.",
+              "description": "`operation.status` result data for schema 1.4.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/RequiredNullable4",
@@ -5346,7 +5957,7 @@
                 "incremental": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/OperationIncrementalEvidenceV1_1"
+                      "$ref": "#/$defs/OperationIncrementalEvidence"
                     },
                     {
                       "type": "null"
@@ -5395,13 +6006,13 @@
               ],
               "type": "object"
             },
-            "OperationStatusErrorResponseV1_2": {
+            "OperationStatusErrorResponse": {
               "additionalProperties": false,
-              "description": "Checked error response for operation-status schema 1.2.",
+              "description": "Checked error response for operation-status schema 1.4.",
               "properties": {
                 "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable source-redacted error."
+                  "$ref": "#/$defs/McpPublicError",
+                  "description": "Stable source-redacted error including current remediation actions."
                 },
                 "schema_version": {
                   "$ref": "#/$defs/OperationStatusSchemaVersion",
@@ -5418,18 +6029,18 @@
               "description": "Version marker carried by additive operation-status responses.",
               "oneOf": [
                 {
-                  "const": "1.2",
-                  "description": "Tool contract version 1.2.",
+                  "const": "1.4",
+                  "description": "Tool contract version 1.4.",
                   "type": "string"
                 }
               ]
             },
-            "OperationStatusSuccessV1_2": {
+            "OperationStatusSuccess": {
               "additionalProperties": false,
-              "description": "Strict output for operation-status schema 1.2.",
+              "description": "Strict output for operation-status schema 1.4.",
               "properties": {
                 "data": {
-                  "$ref": "#/$defs/OperationStatusDataV1_2",
+                  "$ref": "#/$defs/OperationStatusData",
                   "description": "Operation result."
                 },
                 "schema_version": {
@@ -5440,85 +6051,6 @@
               "required": [
                 "schema_version",
                 "data"
-              ],
-              "type": "object"
-            },
-            "PublicError": {
-              "additionalProperties": false,
-              "description": "A stable source-redacted failure safe to serialize across public boundaries.",
-              "properties": {
-                "code": {
-                  "$ref": "#/$defs/ErrorCode"
-                },
-                "details": {
-                  "additionalProperties": false,
-                  "patternProperties": {
-                    "^[a-z0-9_]+$": {
-                      "$ref": "#/$defs/PublicValue"
-                    }
-                  },
-                  "type": "object"
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/GenerationId"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "message": {
-                  "maxLength": 1024,
-                  "type": "string"
-                },
-                "next_actions": {
-                  "items": {
-                    "$ref": "#/$defs/NextAction"
-                  },
-                  "maxItems": 8,
-                  "type": "array"
-                },
-                "operation": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/OperationId"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "repository": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/RepositoryId"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "retry_after_ms": {
-                  "format": "uint64",
-                  "maximum": 86400000,
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "retryable": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "code",
-                "message",
-                "retryable",
-                "details",
-                "next_actions"
               ],
               "type": "object"
             },
@@ -5696,7 +6228,7 @@
             "RequiredNullable4": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/PublicError"
+                  "$ref": "#/$defs/McpPublicError"
                 },
                 {
                   "type": "null"
@@ -5721,20 +6253,20 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.2",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationStatusSuccessV1_2",
+              "$ref": "#/$defs/OperationStatusSuccess",
               "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/OperationStatusErrorResponseV1_2",
+              "$ref": "#/$defs/OperationStatusErrorResponse",
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for operation-status schema 1.2.",
-          "title": "OperationStatusToolResponseV1_2",
+          "description": "Success-or-error response for operation-status schema 1.4.",
+          "title": "OperationStatusToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -5760,9 +6292,21 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
+                "field": "scope.packages",
                 "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
+                "summary": "package scope filtering is not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "scope.build_targets",
+                "status": "unsupported_stable_error",
+                "summary": "build-target scope filtering is not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "scope.symbols",
+                "status": "unsupported_stable_error",
+                "summary": "symbol scope filtering is not served"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -7644,7 +8188,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -9565,7 +10109,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -10010,7 +10554,7 @@
             "budget": "per_request",
             "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded static call, caller, reference, type, implementation, and import relationships",
+            "fallbackSummary": "bounded static call, caller, reference, type, implementation, import, test, and handler-to-route relationships",
             "generation": "selects_generation",
             "inputShapeHash": "069fcd4baaab602bd4857fe3f8181c4f512c2567622fcb0c0b013ba689c7bdd4",
             "limitations": [
@@ -10031,13 +10575,6 @@
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "relations[]",
                 "status": "unsupported_stable_error",
-                "summary": "test relations are not served",
-                "value": "tests"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relations[]",
-                "status": "unsupported_stable_error",
                 "summary": "ownership relations are not served",
                 "value": "ownership"
               },
@@ -10047,13 +10584,6 @@
                 "status": "unsupported_stable_error",
                 "summary": "service-call relations are not served",
                 "value": "service_call"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "route-call relations are not served",
-                "value": "calls_route"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -10128,7 +10658,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded static call, caller, reference, type, implementation, and import relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported.",
+        "description": "Return bounded static call, caller, reference, type, implementation, import, test, and handler-to-route relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -10575,7 +11105,7 @@
               "type": "integer"
             },
             "relations": {
-              "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, and `imports`.",
+              "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, `imports`, `tests`, and `calls_route`. Use inbound\n`tests` from a production symbol and outbound `calls_route` from a\nhandler to follow the normalized producer directions.",
               "items": {
                 "$ref": "#/$defs/RelationKind"
               },
@@ -11969,7 +12499,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -12272,7 +12802,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded paths over static call, reference, type, implementation, and import edges",
+            "fallbackSummary": "bounded paths over static call, reference, type, implementation, import, test, and handler-to-route edges",
             "generation": "selects_generation",
             "inputShapeHash": "8650a95d727af584f8e11256c853bd9f83f8367a02673f1623e5324d742d1555",
             "limitations": [
@@ -12335,13 +12865,6 @@
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "relations[]",
                 "status": "unsupported_stable_error",
-                "summary": "test relations are not served",
-                "value": "tests"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relations[]",
-                "status": "unsupported_stable_error",
                 "summary": "ownership relations are not served",
                 "value": "ownership"
               },
@@ -12351,13 +12874,6 @@
                 "status": "unsupported_stable_error",
                 "summary": "service-call relations are not served",
                 "value": "service_call"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "route-call relations are not served",
-                "value": "calls_route"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -12426,7 +12942,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Trace bounded paths over static call, reference, type, implementation, and import edges; other relation families plus route, service, database, and cross-repository endpoints are unsupported.",
+        "description": "Trace bounded paths over static call, reference, type, implementation, import, test, and handler-to-route edges; other relation families plus route, service, and database endpoints are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -12824,7 +13340,7 @@
               "description": "Path selection strategy."
             },
             "relations": {
-              "description": "Explicit relation allow-list.\n\nEvery declared relation family is admitted; missing adapter coverage is\nreported through response coverage rather than fabricated edges.",
+              "description": "Explicit relation allow-list.\n\nThe served set is `calls`, `references`, `types`, `implements`,\n`imports`, `tests`, and `calls_route`. Use inbound `tests` and outbound\n`calls_route` to follow the normalized producer directions.",
               "items": {
                 "$ref": "#/$defs/RelationKind"
               },
@@ -14118,7 +14634,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -16361,7 +16877,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -18237,7 +18753,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -20521,7 +21037,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -22650,7 +23166,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -24775,7 +25291,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -26826,7 +27342,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -29092,7 +29608,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -31210,7 +31726,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -31635,20 +32151,6 @@
                 "field": "budget.evidence_level",
                 "status": "unsupported_stable_error",
                 "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "response_profile",
-                "status": "unsupported_stable_error",
-                "summary": "only compact response projection is served",
-                "value": "evidence"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "response_profile",
-                "status": "unsupported_stable_error",
-                "summary": "only compact response projection is served",
-                "value": "standard"
               }
             ],
             "pagination": "explicit_truncation",
@@ -31661,7 +32163,9 @@
               "default": "compact",
               "mode": "selectable",
               "supported": [
-                "compact"
+                "compact",
+                "standard",
+                "evidence"
               ],
               "wireField": "response_profile"
             },
@@ -33149,7 +33653,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -35654,7 +36158,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [
@@ -37633,7 +38137,7 @@
                 },
                 "message": {
                   "$ref": "#/$defs/SourceFreeMessage",
-                  "description": "Rootlight-generated source-free explanation."
+                  "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count."
                 }
               },
               "required": [

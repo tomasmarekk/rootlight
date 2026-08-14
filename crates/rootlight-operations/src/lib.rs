@@ -87,7 +87,8 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const REPOSITORY_OPERATION_META_PREFIX: &str = "operation_repository_context/";
 const VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 5;
-const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 6;
+const VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 6;
+const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 7;
 const LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES: usize = 71;
 const VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 32;
@@ -287,6 +288,8 @@ pub enum RepositoryBuildStrategy {
     ConservativeRepositoryRebuild,
     /// An identical retained generation was reactivated without rebuilding it.
     RetainedGeneration,
+    /// The caller requested a complete rebuild without parent reuse.
+    CleanRebuild,
 }
 
 impl RepositoryBuildStrategy {
@@ -296,6 +299,7 @@ impl RepositoryBuildStrategy {
             Self::DependencyDirected => 2,
             Self::ConservativeRepositoryRebuild => 3,
             Self::RetainedGeneration => 4,
+            Self::CleanRebuild => 5,
         }
     }
 
@@ -305,6 +309,14 @@ impl RepositoryBuildStrategy {
             2 => Ok(Self::DependencyDirected),
             3 => Ok(Self::ConservativeRepositoryRebuild),
             4 => Ok(Self::RetainedGeneration),
+            5 => Ok(Self::CleanRebuild),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+
+    fn from_v6_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1..=4 => Self::from_tag(tag),
             _ => Err(OperationError::CorruptState),
         }
     }
@@ -377,6 +389,8 @@ pub enum RepositoryFactWorkCause {
     GenerationBoundLowering,
     /// Repository-wide resolution produced or retained normalized facts.
     Resolution,
+    /// The caller explicitly requested a complete rebuild.
+    UserRequestedCleanRebuild,
 }
 
 impl RepositoryFactWorkCause {
@@ -388,6 +402,7 @@ impl RepositoryFactWorkCause {
             Self::ConservativeFallback => 4,
             Self::GenerationBoundLowering => 5,
             Self::Resolution => 6,
+            Self::UserRequestedCleanRebuild => 7,
         }
     }
 
@@ -399,6 +414,14 @@ impl RepositoryFactWorkCause {
             4 => Ok(Self::ConservativeFallback),
             5 => Ok(Self::GenerationBoundLowering),
             6 => Ok(Self::Resolution),
+            7 => Ok(Self::UserRequestedCleanRebuild),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+
+    fn from_v6_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1..=6 => Self::from_tag(tag),
             _ => Err(OperationError::CorruptState),
         }
     }
@@ -4588,7 +4611,8 @@ fn validate_repository_fact_work_cause(
             RepositoryFactWorkDisposition::Rebuild,
             RepositoryFactWorkCause::InitialGeneration
             | RepositoryFactWorkCause::DependencyClosure
-            | RepositoryFactWorkCause::ConservativeFallback,
+            | RepositoryFactWorkCause::ConservativeFallback
+            | RepositoryFactWorkCause::UserRequestedCleanRebuild,
             false,
         )
         | (
@@ -4764,6 +4788,38 @@ fn validate_repository_operation_fact_work(
         RepositoryBuildStrategy::RetainedGeneration => {
             return Err(OperationError::CorruptState);
         }
+        RepositoryBuildStrategy::CleanRebuild => {
+            if evidence.fallback_reason.is_some()
+                || evidence.reused_files != 0
+                || evidence.reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::UserRequestedCleanRebuild
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(OperationError::CorruptState);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_repository_operation_evidence(
+    evidence: &RepositoryOperationEvidence,
+) -> Result<(), OperationError> {
+    if evidence.build_strategy == RepositoryBuildStrategy::CleanRebuild
+        && (evidence.fallback_reason.is_some()
+            || evidence.reused_files != 0
+            || evidence.reused_facts != 0
+            || evidence.fact_work.is_none())
+    {
+        return Err(OperationError::CorruptState);
+    }
+    if let Some(fact_work) = &evidence.fact_work {
+        validate_repository_operation_fact_work(evidence, fact_work)?;
     }
     Ok(())
 }
@@ -4806,11 +4862,25 @@ fn repository_fact_work_flags(
         | (u8::from(affected_analysis_units_complete) << 2)
 }
 
+fn repository_operation_evidence_requires_v7(evidence: &RepositoryOperationEvidence) -> bool {
+    evidence.build_strategy == RepositoryBuildStrategy::CleanRebuild
+        || evidence.fact_work.as_ref().is_some_and(|fact_work| {
+            fact_work
+                .planned
+                .groups
+                .iter()
+                .any(|group| group.cause == RepositoryFactWorkCause::UserRequestedCleanRebuild)
+                || fact_work
+                    .normalized
+                    .groups
+                    .iter()
+                    .any(|group| group.cause == RepositoryFactWorkCause::UserRequestedCleanRebuild)
+        })
+}
+
 fn encode_repository_operation_fact_work(
-    evidence: &RepositoryOperationEvidence,
     fact_work: &RepositoryIncrementalFactWorkEvidence,
 ) -> Result<Vec<u8>, OperationError> {
-    validate_repository_operation_fact_work(evidence, fact_work)?;
     let provider_passes = fact_work
         .planned
         .groups
@@ -5046,7 +5116,7 @@ fn decode_repository_fact_work_analysis_units(
 
 fn decode_repository_operation_fact_work(
     encoded: &[u8],
-    evidence: &RepositoryOperationEvidence,
+    version_seven: bool,
 ) -> Result<RepositoryIncrementalFactWorkEvidence, OperationError> {
     if encoded.len() > MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES {
         return Err(OperationError::CorruptState);
@@ -5108,7 +5178,12 @@ fn decode_repository_operation_fact_work(
             .get(usize::from(decoder.read_u8()?))
             .cloned()
             .ok_or(OperationError::CorruptState)?;
-        let cause = RepositoryFactWorkCause::from_tag(decoder.read_u8()?)?;
+        let cause_tag = decoder.read_u8()?;
+        let cause = if version_seven {
+            RepositoryFactWorkCause::from_tag(cause_tag)
+        } else {
+            RepositoryFactWorkCause::from_v6_tag(cause_tag)
+        }?;
         let flags = decoder.read_u8()?;
         if flags & !0b111 != 0 {
             return Err(OperationError::CorruptState);
@@ -5157,7 +5232,12 @@ fn decode_repository_operation_fact_work(
             .get(usize::from(decoder.read_u8()?))
             .cloned()
             .ok_or(OperationError::CorruptState)?;
-        let cause = RepositoryFactWorkCause::from_tag(decoder.read_u8()?)?;
+        let cause_tag = decoder.read_u8()?;
+        let cause = if version_seven {
+            RepositoryFactWorkCause::from_tag(cause_tag)
+        } else {
+            RepositoryFactWorkCause::from_v6_tag(cause_tag)
+        }?;
         let flags = decoder.read_u8()?;
         if flags & !0b111 != 0 {
             return Err(OperationError::CorruptState);
@@ -5220,13 +5300,19 @@ fn decode_repository_operation_fact_work(
     {
         return Err(OperationError::CorruptState);
     }
-    validate_repository_operation_fact_work(evidence, &fact_work)?;
     Ok(fact_work)
 }
 
 fn encode_repository_operation_context(
     context: &RepositoryOperationContext,
 ) -> Result<Vec<u8>, OperationError> {
+    if let Some(evidence) = &context.evidence {
+        validate_repository_operation_evidence(evidence)?;
+    }
+    let requires_version_seven = context
+        .evidence
+        .as_ref()
+        .is_some_and(repository_operation_evidence_requires_v7);
     let encoded_bytes = if context.evidence.is_some() {
         REPOSITORY_OPERATION_CONTEXT_BYTES
     } else if context.published_generation.is_some() {
@@ -5237,7 +5323,9 @@ fn encode_repository_operation_context(
         LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES
     };
     let mut encoded = vec![0_u8; encoded_bytes];
-    encoded[0] = if context.evidence.is_some() {
+    encoded[0] = if requires_version_seven {
+        REPOSITORY_OPERATION_CONTEXT_VERSION
+    } else if context.evidence.is_some() {
         VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION
     } else if context.published_generation.is_some() {
         3
@@ -5294,9 +5382,14 @@ fn encode_repository_operation_context(
             encoded[start..start + size_of::<u64>()].copy_from_slice(&value.to_be_bytes());
         }
         if let Some(fact_work) = &evidence.fact_work {
-            // Version six changes only the discriminator and appends to the exact v5 prefix.
-            encoded[0] = REPOSITORY_OPERATION_CONTEXT_VERSION;
-            encoded.extend_from_slice(&encode_repository_operation_fact_work(evidence, fact_work)?);
+            // A new discriminator keeps older readers from interpreting additive
+            // evidence tags under the closed v6 tag allowlists.
+            encoded[0] = if requires_version_seven {
+                REPOSITORY_OPERATION_CONTEXT_VERSION
+            } else {
+                VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION
+            };
+            encoded.extend_from_slice(&encode_repository_operation_fact_work(fact_work)?);
         }
     }
     Ok(encoded)
@@ -5317,11 +5410,15 @@ fn decode_repository_operation_context(
                 REPOSITORY_OPERATION_CONTEXT_BYTES
             )
     );
-    let version_six = encoded.first() == Some(&REPOSITORY_OPERATION_CONTEXT_VERSION)
+    let version_six = encoded.first() == Some(&VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION)
         && encoded.len() > REPOSITORY_OPERATION_CONTEXT_BYTES
         && encoded.len()
             <= REPOSITORY_OPERATION_CONTEXT_BYTES + MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES;
-    if !fixed_version && !version_six {
+    let version_seven = encoded.first() == Some(&REPOSITORY_OPERATION_CONTEXT_VERSION)
+        && encoded.len() > REPOSITORY_OPERATION_CONTEXT_BYTES
+        && encoded.len()
+            <= REPOSITORY_OPERATION_CONTEXT_BYTES + MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES;
+    if !fixed_version && !version_six && !version_seven {
         return Err(OperationError::CorruptState);
     }
     let repository = RepositoryId::from_bytes(
@@ -5414,8 +5511,13 @@ fn decode_repository_operation_context(
                     .map_err(|_| OperationError::CorruptState)?,
             );
         }
+        let build_strategy = if version_seven {
+            RepositoryBuildStrategy::from_tag(encoded[125])
+        } else {
+            RepositoryBuildStrategy::from_v6_tag(encoded[125])
+        }?;
         let mut evidence = RepositoryOperationEvidence {
-            build_strategy: RepositoryBuildStrategy::from_tag(encoded[125])?,
+            build_strategy,
             fallback_reason,
             invalidated_units: values[0],
             changed_inputs: values[1],
@@ -5431,11 +5533,15 @@ fn decode_repository_operation_context(
             retained_durable_bytes: values[11],
             fact_work: None,
         };
-        if version_six {
+        if version_six || version_seven && encoded.len() > REPOSITORY_OPERATION_CONTEXT_BYTES {
             evidence.fact_work = Some(decode_repository_operation_fact_work(
                 &encoded[REPOSITORY_OPERATION_CONTEXT_BYTES..],
-                &evidence,
+                version_seven,
             )?);
+        }
+        validate_repository_operation_evidence(&evidence)?;
+        if version_seven != repository_operation_evidence_requires_v7(&evidence) {
+            return Err(OperationError::CorruptState);
         }
         Some(evidence)
     } else {
@@ -7142,7 +7248,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_context_versions_one_through_five_keep_golden_bytes() {
+    fn repository_context_versions_one_through_six_keep_golden_bytes() {
         use sha2::Digest as _;
 
         let mut version_one = sample_repository_context(None);
@@ -7169,12 +7275,15 @@ mod tests {
             retained_durable_bytes: 12,
             fact_work: None,
         }));
+        let version_six =
+            sample_repository_context(Some(sample_repository_evidence(Some(sample_fact_work()))));
 
         let version_one = encode_repository_operation_context(&version_one).expect("v1 encodes");
         let version_two = encode_repository_operation_context(&version_two).expect("v2 encodes");
         let version_three =
             encode_repository_operation_context(&version_three).expect("v3 encodes");
         let version_five = encode_repository_operation_context(&version_five).expect("v5 encodes");
+        let version_six = encode_repository_operation_context(&version_six).expect("v6 encodes");
         let mut version_four =
             version_five[..VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES].to_vec();
         version_four[0] = 4;
@@ -7205,6 +7314,11 @@ mod tests {
                 REPOSITORY_OPERATION_CONTEXT_BYTES,
                 "fa60b8b7472e006f6ad459c53cce69b40d85ec7e030391295a833b14db995d98",
             ),
+            (
+                &version_six,
+                551,
+                "4b8e3a641f2d3f3ed5f8049c7df4c6e9a3b25e4031224eefb255b895d94fba56",
+            ),
         ] {
             assert_eq!(encoded.len(), expected_bytes);
             let digest = Sha256::digest(encoded);
@@ -7215,11 +7329,12 @@ mod tests {
             assert_eq!(observed_digest, expected_digest);
             let decoded = decode_repository_operation_context(operation(90), encoded)
                 .expect("golden repository context decodes");
-            assert!(
+            assert_eq!(
                 decoded
                     .evidence
                     .as_ref()
-                    .is_none_or(|evidence| evidence.fact_work.is_none())
+                    .is_some_and(|evidence| evidence.fact_work.is_some()),
+                encoded.first() == Some(&VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION)
             );
         }
 
@@ -7230,6 +7345,17 @@ mod tests {
             encode_repository_operation_context(&decoded_version_five)
                 .expect("decoded v5 context re-encodes"),
             version_five
+        );
+        assert_eq!(
+            version_six.first(),
+            Some(&VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION)
+        );
+        let decoded_version_six = decode_repository_operation_context(operation(90), &version_six)
+            .expect("v6 context decodes");
+        assert_eq!(
+            encode_repository_operation_context(&decoded_version_six)
+                .expect("decoded v6 context re-encodes"),
+            version_six
         );
     }
 
@@ -7250,9 +7376,26 @@ mod tests {
                 RepositoryFactWorkCause::ConservativeFallback.tag(),
                 RepositoryFactWorkCause::GenerationBoundLowering.tag(),
                 RepositoryFactWorkCause::Resolution.tag(),
+                RepositoryFactWorkCause::UserRequestedCleanRebuild.tag(),
             ],
-            [1, 2, 3, 4, 5, 6]
+            [1, 2, 3, 4, 5, 6, 7]
         );
+        assert_eq!(RepositoryBuildStrategy::CleanRebuild.tag(), 5);
+        for tag in 1..=4 {
+            RepositoryBuildStrategy::from_v6_tag(tag)
+                .expect("pre-clean strategy remains valid in v6");
+        }
+        assert!(matches!(
+            RepositoryBuildStrategy::from_v6_tag(5),
+            Err(OperationError::CorruptState)
+        ));
+        for tag in 1..=6 {
+            RepositoryFactWorkCause::from_v6_tag(tag).expect("pre-clean cause remains valid in v6");
+        }
+        assert!(matches!(
+            RepositoryFactWorkCause::from_v6_tag(7),
+            Err(OperationError::CorruptState)
+        ));
         assert_eq!(
             [
                 RepositoryPlannedFactDomain::Syntax.tag(),
@@ -7291,7 +7434,7 @@ mod tests {
         let v5_context = sample_repository_context(Some(sample_repository_evidence(None)));
         let v5_encoded =
             encode_repository_operation_context(&v5_context).expect("v5 context encodes");
-        assert_eq!(encoded[0], REPOSITORY_OPERATION_CONTEXT_VERSION);
+        assert_eq!(encoded[0], VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION);
         assert_eq!(
             &encoded[1..REPOSITORY_OPERATION_CONTEXT_BYTES],
             &v5_encoded[1..REPOSITORY_OPERATION_CONTEXT_BYTES]
@@ -7331,6 +7474,143 @@ mod tests {
         reopened
             .quick_check()
             .expect("v6 repository metadata validates");
+    }
+
+    #[test]
+    fn clean_rebuild_evidence_uses_v7_and_survives_restart() {
+        use sha2::Digest as _;
+
+        let mut fact_work = sample_fact_work();
+        fact_work.planned.groups.truncate(1);
+        fact_work.planned.groups[0].cause = RepositoryFactWorkCause::UserRequestedCleanRebuild;
+        fact_work.planned.total_groups = 1;
+        fact_work.normalized.groups.truncate(1);
+        fact_work.normalized.total_groups = 1;
+        let mut evidence = sample_repository_evidence(Some(fact_work));
+        evidence.build_strategy = RepositoryBuildStrategy::CleanRebuild;
+        evidence.reused_files = 0;
+        evidence.reused_facts = 0;
+        let context = sample_repository_context(Some(evidence.clone()));
+
+        let encoded =
+            encode_repository_operation_context(&context).expect("clean rebuild context encodes");
+        assert_eq!(encoded[0], REPOSITORY_OPERATION_CONTEXT_VERSION);
+        assert_eq!(encoded[125], 5);
+        assert_eq!(encoded.len(), 399);
+        let observed_digest = Sha256::digest(&encoded)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            observed_digest,
+            "352bbf79b5a1309bbb3882b952e3fd08dcda509e31a41a594d65edbbaac7fa06"
+        );
+        assert_eq!(
+            decode_repository_operation_context(context.operation, &encoded)
+                .expect("clean rebuild context decodes"),
+            context
+        );
+
+        let mut without_fact_work = evidence.clone();
+        without_fact_work.fact_work = None;
+        let without_fact_work = sample_repository_context(Some(without_fact_work));
+        assert!(matches!(
+            encode_repository_operation_context(&without_fact_work),
+            Err(OperationError::CorruptState)
+        ));
+
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(92);
+        let repository = RepositoryId::from_bytes([7; 16]);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(repository_submission(operation, repository, 4_000))
+                .expect("clean rebuild operation submits");
+            journal
+                .start_execution(operation)
+                .expect("clean rebuild operation starts");
+            journal
+                .transition(operation, OperationState::Succeeded, None)
+                .expect("clean rebuild operation succeeds");
+            journal
+                .record_repository_evidence(operation, evidence.clone())
+                .expect("v7 evidence persists");
+        }
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        assert_eq!(
+            reopened
+                .repository_operation_context(operation)
+                .expect("v7 evidence survives restart")
+                .evidence,
+            Some(evidence)
+        );
+        reopened
+            .quick_check()
+            .expect("v7 repository metadata validates");
+    }
+
+    #[test]
+    fn v7_clean_rebuild_context_rejects_v6_and_corrupt_tags() {
+        let mut fact_work = sample_fact_work();
+        fact_work.planned.groups.truncate(1);
+        fact_work.planned.groups[0].cause = RepositoryFactWorkCause::UserRequestedCleanRebuild;
+        fact_work.planned.total_groups = 1;
+        fact_work.normalized.groups.truncate(1);
+        fact_work.normalized.total_groups = 1;
+        let mut evidence = sample_repository_evidence(Some(fact_work));
+        evidence.build_strategy = RepositoryBuildStrategy::CleanRebuild;
+        evidence.reused_files = 0;
+        evidence.reused_facts = 0;
+        let context = sample_repository_context(Some(evidence));
+        let encoded =
+            encode_repository_operation_context(&context).expect("v7 clean context encodes");
+
+        let mut corruptions = Vec::new();
+        let mut corrupted = encoded.clone();
+        corrupted.truncate(REPOSITORY_OPERATION_CONTEXT_BYTES);
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[0] = VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION;
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[126] = RepositoryFallbackReason::MissingDependencyDeclaration.tag();
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[151..159].copy_from_slice(&1_u64.to_be_bytes());
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[167..175].copy_from_slice(&1_u64.to_be_bytes());
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[125] = RepositoryBuildStrategy::DependencyDirected.tag();
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[125] = 6;
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 23] =
+            RepositoryFactWorkCause::Resolution.tag();
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded;
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 23] = 8;
+        corruptions.push(corrupted);
+
+        for corrupted in corruptions {
+            assert!(matches!(
+                decode_repository_operation_context(context.operation, &corrupted),
+                Err(OperationError::CorruptState)
+            ));
+        }
     }
 
     #[test]
@@ -7381,7 +7661,7 @@ mod tests {
         corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 184] = 1;
         corruptions.push(corrupted);
 
-        for strategy in [1, 3, 4] {
+        for strategy in [1, 3, 4, 5] {
             let mut corrupted = encoded.clone();
             corrupted[125] = strategy;
             corruptions.push(corrupted);
@@ -7395,6 +7675,10 @@ mod tests {
             corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + offset] = value;
             corruptions.push(corrupted);
         }
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 29] =
+            RepositoryFactWorkCause::UserRequestedCleanRebuild.tag();
+        corruptions.push(corrupted);
 
         let mut corrupted = encoded.clone();
         corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 31..REPOSITORY_OPERATION_CONTEXT_BYTES + 39]
@@ -7579,6 +7863,14 @@ mod tests {
         conservative.planned.groups[0].cause = RepositoryFactWorkCause::ConservativeFallback;
         validate_repository_operation_fact_work(&conservative_evidence, &conservative)
             .expect("conservative grouped evidence is valid");
+
+        let mut clean_evidence = initial_evidence;
+        clean_evidence.build_strategy = RepositoryBuildStrategy::CleanRebuild;
+        clean_evidence.reused_files = 0;
+        let mut clean = conservative.clone();
+        clean.planned.groups[0].cause = RepositoryFactWorkCause::UserRequestedCleanRebuild;
+        validate_repository_operation_fact_work(&clean_evidence, &clean)
+            .expect("clean rebuild grouped evidence is valid");
 
         let mut retained_evidence = conservative_evidence;
         retained_evidence.build_strategy = RepositoryBuildStrategy::RetainedGeneration;

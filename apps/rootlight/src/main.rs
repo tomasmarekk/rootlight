@@ -94,7 +94,7 @@ Usage:
   rootlight <command> [options]
 
 Repository commands:
-  repo index <root> [--mode auto|structural|deep] [--attached|--detached]
+  repo index <root> [--mode auto|structural|deep|rebuild] [--attached|--detached]
   repo list [--max-results <count>] [--query <text>]
   repo status <repository-id> [--generation active|<generation-id>]
   operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]
@@ -1595,6 +1595,7 @@ fn parse_repository_index_mode(
         Some("auto") => Ok(RepositoryIndexMode::Auto),
         Some("structural") => Ok(RepositoryIndexMode::Structural),
         Some("deep") => Ok(RepositoryIndexMode::Deep),
+        Some("rebuild") => Ok(RepositoryIndexMode::Rebuild),
         _ => Err(CliError::InvalidRepositoryIndexMode),
     }
 }
@@ -2476,7 +2477,7 @@ impl CliHelp {
         Self {
             usage: "rootlight <command> [options]",
             repository_commands: [
-                "repo index <root> [--mode auto|structural|deep] [--attached|--detached]",
+                "repo index <root> [--mode auto|structural|deep|rebuild] [--attached|--detached]",
                 "repo list [--max-results <count>] [--query <text>]",
                 "repo status <repository-id> [--generation active|<generation-id>]",
                 "operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]",
@@ -3138,6 +3139,7 @@ mod tests {
             state: rootlight_client::OperationState::Running,
             revision: 3,
             mode: RepositoryIndexMode::Structural,
+            selected_analysis_mode: None,
             parent_generation: None,
             published_generation: None,
             discovered_inputs: 0,
@@ -3284,6 +3286,17 @@ mod tests {
             RepositoryCliCommand::Index {
                 root: "C:/source".to_owned(),
                 mode: RepositoryIndexMode::Structural,
+                wait_for_completion: false,
+            }
+        );
+        let rebuild =
+            parse_repository_command(&arguments(&["index", "C:/source", "--mode", "rebuild"]))
+                .expect("clean rebuild arguments parse");
+        assert_eq!(
+            rebuild,
+            RepositoryCliCommand::Index {
+                root: "C:/source".to_owned(),
+                mode: RepositoryIndexMode::Rebuild,
                 wait_for_completion: false,
             }
         );

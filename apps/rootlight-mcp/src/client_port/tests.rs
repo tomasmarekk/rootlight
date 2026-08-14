@@ -23,11 +23,11 @@ use rootlight_client::{
     PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry,
     RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
     RepositoryCatalogSnapshotId, RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex,
-    RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
-    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
-    TestsSelectCoverageStrategy,
+    RepositoryIndexAnalysisMode, RepositoryIndexDiagnostic, RepositoryIndexMode,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
+    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
+    SymbolExplanation, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -45,9 +45,9 @@ use tokio::sync::watch;
 
 use super::{
     AsyncClientFuture, AsyncFirstSliceClient, AuthorizedRepositoryRoot, FIRST_SLICE_PROVIDER,
-    NativeFirstSliceClientPort, UnavailableFirstSliceClientPort, coverage_gap_warning,
-    locate_languages, map_client_error, map_operation_client_error, read_metadata,
-    source_languages, symbol_languages,
+    NativeFirstSliceClientPort, PROJECT_SEMANTICS_PROVIDER, UnavailableFirstSliceClientPort,
+    coverage_gap_warning, locate_languages, map_client_error, map_operation_client_error,
+    read_metadata, source_languages, symbol_languages,
 };
 use crate::{
     FirstSliceClientPort, FirstSliceToolExecutor, RepositoryStatusPortRequest, RequestCancellation,
@@ -220,6 +220,7 @@ enum Call {
 struct FakeAsyncClient {
     calls: Arc<Mutex<Vec<Call>>>,
     index_state: Option<OperationState>,
+    deep_rebuild: bool,
     resolve_symbols: bool,
 }
 
@@ -243,6 +244,13 @@ impl FakeAsyncClient {
     fn with_resolved_symbols() -> Self {
         Self {
             resolve_symbols: true,
+            ..Self::default()
+        }
+    }
+
+    fn with_deep_rebuild() -> Self {
+        Self {
+            deep_rebuild: true,
             ..Self::default()
         }
     }
@@ -279,6 +287,16 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             RepositoryIndexMode::Auto => RepositoryIndexMode::Structural,
             RepositoryIndexMode::Structural => RepositoryIndexMode::Structural,
             RepositoryIndexMode::Deep => RepositoryIndexMode::Deep,
+            RepositoryIndexMode::Rebuild => RepositoryIndexMode::Rebuild,
+        };
+        let selected_analysis_mode = match selected_mode {
+            RepositoryIndexMode::Rebuild if self.deep_rebuild => {
+                Some(RepositoryIndexAnalysisMode::Deep)
+            }
+            RepositoryIndexMode::Rebuild => Some(RepositoryIndexAnalysisMode::Structural),
+            RepositoryIndexMode::Auto
+            | RepositoryIndexMode::Structural
+            | RepositoryIndexMode::Deep => None,
         };
         let state = self.index_state.unwrap_or(OperationState::Succeeded);
         Box::pin(async move {
@@ -287,6 +305,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 operation,
                 semantic_operation: None,
                 mode: selected_mode,
+                selected_analysis_mode,
                 state,
                 revision: 2,
                 parent_generation: Some(parent_generation()),
@@ -1285,6 +1304,78 @@ async fn repository_index_is_limited_to_the_canonical_authorized_tree() {
             path_argument(&allowed.canonicalize().expect("allowed root canonicalizes")),
             path_argument(&child.canonicalize().expect("allowed child canonicalizes")),
         ]
+    );
+}
+
+#[tokio::test]
+async fn repository_clean_rebuild_reaches_the_client_and_preserves_the_public_json_shape() {
+    let fixture = tempfile::tempdir().expect("repository fixture is available");
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("repository fixture canonicalizes");
+    let fake = FakeAsyncClient::default();
+    let calls = Arc::clone(&fake.calls);
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(
+        fake,
+        authorized_root(&canonical_root),
+    ))
+    .expect("executor initializes");
+
+    let output: RepoIndexOutput = execute(
+        &executor,
+        VerticalTool::RepoIndex,
+        json!({
+            "root": path_argument(&canonical_root),
+            "mode": "rebuild"
+        }),
+    )
+    .await;
+    let encoded = serde_json::to_value(output).expect("repo.index output serializes");
+    assert_eq!(encoded["schema_version"], "1.3");
+    assert_eq!(encoded["data"]["accepted_plan"]["mode"], "rebuild");
+    assert_eq!(
+        encoded["data"]["accepted_plan"]["providers"],
+        json!([FIRST_SLICE_PROVIDER])
+    );
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    assert!(matches!(
+        calls.as_slice(),
+        [Call::RepositoryIndex {
+            mode: RepositoryIndexMode::Rebuild,
+            ..
+        }]
+    ));
+}
+
+#[tokio::test]
+async fn repository_deep_clean_rebuild_advertises_project_semantics_in_the_accepted_plan() {
+    let fixture = tempfile::tempdir().expect("repository fixture is available");
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("repository fixture canonicalizes");
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(
+        FakeAsyncClient::with_deep_rebuild(),
+        authorized_root(&canonical_root),
+    ))
+    .expect("executor initializes");
+
+    let output: RepoIndexOutput = execute(
+        &executor,
+        VerticalTool::RepoIndex,
+        json!({
+            "root": path_argument(&canonical_root),
+            "mode": "rebuild"
+        }),
+    )
+    .await;
+    let encoded = serde_json::to_value(output).expect("repo.index output serializes");
+    assert_eq!(encoded["data"]["accepted_plan"]["mode"], "rebuild");
+    assert_eq!(
+        encoded["data"]["accepted_plan"]["providers"],
+        json!([FIRST_SLICE_PROVIDER, PROJECT_SEMANTICS_PROVIDER])
     );
 }
 

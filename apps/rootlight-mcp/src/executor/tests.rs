@@ -1774,6 +1774,46 @@ fn grouped_fact_work() -> RepositoryIncrementalFactWorkEvidence {
     }
 }
 
+fn clean_rebuild_fact_work() -> RepositoryIncrementalFactWorkEvidence {
+    let affected_files = RepositoryAffectedFileIds {
+        total: 1,
+        samples: vec![file()],
+        complete: true,
+    };
+    let affected_analysis_units = RepositoryAffectedAnalysisUnitIds {
+        total: 1,
+        samples: vec![analysis_unit()],
+        complete: true,
+    };
+    RepositoryIncrementalFactWorkEvidence {
+        planned: RepositoryPlannedFactWorkCollection {
+            groups: vec![RepositoryPlannedFactWorkGroup {
+                disposition: RepositoryFactWorkDisposition::Rebuild,
+                domain: RepositoryPlannedFactDomain::Body,
+                provider_pass: "lower".to_owned(),
+                cause: RepositoryFactWorkCause::UserRequestedCleanRebuild,
+                affected_files: affected_files.clone(),
+                affected_analysis_units: affected_analysis_units.clone(),
+            }],
+            total_groups: 1,
+            complete: true,
+        },
+        normalized: RepositoryNormalizedFactWorkCollection {
+            groups: vec![RepositoryNormalizedFactWorkGroup {
+                disposition: RepositoryFactWorkDisposition::Rebuild,
+                domain: RepositoryNormalizedFactDomain::Entities,
+                provider_pass: "lower".to_owned(),
+                cause: RepositoryFactWorkCause::GenerationBoundLowering,
+                fact_count: 12,
+                affected_files,
+                affected_analysis_units,
+            }],
+            total_groups: 1,
+            complete: true,
+        },
+    }
+}
+
 fn locate_response() -> CodeLocatePortResponse {
     CodeLocatePortResponse::new(
         client::CodeLocate {
@@ -3119,6 +3159,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             operation: operation(),
             semantic_operation: Some(second_operation()),
             mode: client::RepositoryIndexMode::Structural,
+            selected_analysis_mode: None,
             state: ClientOperationState::Succeeded,
             revision: 8,
             parent_generation: Some(parent_generation()),
@@ -3216,6 +3257,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
             operation: operation(),
             semantic_operation: None,
             mode: client::RepositoryIndexMode::Structural,
+            selected_analysis_mode: None,
             state: ClientOperationState::Succeeded,
             revision: 8,
             parent_generation: Some(parent_generation()),
@@ -3269,6 +3311,7 @@ async fn repository_deep_mode_preserves_the_isolated_project_plan() {
             operation: operation(),
             semantic_operation: None,
             mode: client::RepositoryIndexMode::Deep,
+            selected_analysis_mode: None,
             state: ClientOperationState::Succeeded,
             revision: 8,
             parent_generation: Some(parent_generation()),
@@ -3318,6 +3361,55 @@ async fn repository_deep_mode_preserves_the_isolated_project_plan() {
 }
 
 #[tokio::test]
+async fn repository_rebuild_mode_preserves_the_clean_generation_plan() {
+    let response = RepositoryIndexPortResponse::new(
+        RepositoryIndex {
+            repository: repository(),
+            operation: operation(),
+            semantic_operation: None,
+            mode: client::RepositoryIndexMode::Rebuild,
+            selected_analysis_mode: Some(client::RepositoryIndexAnalysisMode::Structural),
+            state: ClientOperationState::Succeeded,
+            revision: 8,
+            parent_generation: Some(parent_generation()),
+            published_generation: Some(generation()),
+            discovered_inputs: 4,
+            indexed_files: 4,
+            entities: 12,
+            elapsed_micros: 500,
+            estimated_disk_bytes: 4_096,
+            diagnostics: Vec::new(),
+        },
+        IndexPlanSummary {
+            scope: IndexPlanScope::Repository,
+            mode: IndexMode::Rebuild,
+            providers: vec!["rootlight-first-slice-treesitter".to_owned()],
+            parent_generation: RequiredNullable(Some(parent_generation())),
+            estimated_disk_bytes: 4_096,
+        },
+        Vec::new(),
+    );
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Ok(response)));
+
+    let output = execute(
+        &harness.executor,
+        VerticalTool::RepoIndex,
+        json!({"root": "C:/fixture", "mode": "rebuild"}),
+    )
+    .await
+    .expect("clean rebuild reaches the repository-index port");
+    assert_eq!(output["schema_version"], "1.3");
+    assert_eq!(output["data"]["accepted_plan"]["mode"], "rebuild");
+    assert!(matches!(
+        harness.only_call(),
+        ObservedCall::RepositoryIndex(RepositoryIndexPortRequest {
+            mode: IndexMode::Rebuild,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation() {
     let response = |operation| {
         RepositoryIndexPortResponse::new(
@@ -3326,6 +3418,7 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
                 operation,
                 semantic_operation: None,
                 mode: client::RepositoryIndexMode::Structural,
+                selected_analysis_mode: None,
                 state: ClientOperationState::Succeeded,
                 revision: 8,
                 parent_generation: Some(parent_generation()),
@@ -3526,6 +3619,102 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
     assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
     assert_eq!(output.data.operation.resources.reserved_memory_bytes, 4_096);
     assert_eq!(output.data.operation.resources.owned_memory_bytes, 3_072);
+}
+
+#[tokio::test]
+async fn maps_clean_rebuild_strategy_with_planned_user_cause_and_normalized_technical_cause() {
+    let response = RepositoryOperationStatus {
+        operation: operation_status(ClientOperationState::Succeeded),
+        published_generation: Some(generation()),
+        semantic_operation: None,
+        started_unix_ms: 1,
+        peak_rss_bytes: 100,
+        written_bytes: 2_048,
+        files_examined: 5,
+        bytes_examined: 512,
+        index_stage: "complete".to_owned(),
+        retry_after_ms: None,
+        evidence: Some(RepositoryOperationEvidence {
+            build_strategy: ClientBuildStrategy::CleanRebuild,
+            fallback_reason: None,
+            invalidated_units: 5,
+            changed_inputs: 5,
+            changed_files: 5,
+            reused_files: 0,
+            rebuilt_files: 5,
+            reused_facts: 0,
+            rebuilt_facts: 12,
+            referenced_bytes: 0,
+            newly_written_bytes: 2_048,
+            reserved_memory_bytes: 4_096,
+            owned_memory_bytes: 3_072,
+            retained_durable_bytes: 1_536,
+            invalidation_trace_json: None,
+            fact_work: Some(clean_rebuild_fact_work()),
+        }),
+    };
+    let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
+    let encoded = execute(
+        &harness.executor,
+        VerticalTool::OperationStatus,
+        json!({"operation_id": operation()}),
+    )
+    .await
+    .expect("clean-rebuild operation evidence maps");
+
+    assert_eq!(encoded["schema_version"], "1.4");
+    assert_eq!(
+        encoded["data"]["incremental"]["build_strategy"],
+        "clean_rebuild"
+    );
+    assert_eq!(encoded["data"]["incremental"]["reused_files"], 0);
+    assert_eq!(encoded["data"]["incremental"]["reused_facts"], 0);
+    assert_eq!(
+        encoded["data"]["incremental"]["fact_work"]["planned"]["groups"][0]["cause"],
+        "user_requested_clean_rebuild"
+    );
+    assert_eq!(
+        encoded["data"]["incremental"]["fact_work"]["normalized"]["groups"][0]["cause"],
+        "generation_bound_lowering"
+    );
+}
+
+#[test]
+fn rejects_user_requested_clean_rebuild_as_a_normalized_fact_work_cause() {
+    let mut fact_work = clean_rebuild_fact_work();
+    fact_work.normalized.groups[0].cause = RepositoryFactWorkCause::UserRequestedCleanRebuild;
+    let response = RepositoryOperationStatus {
+        operation: operation_status(ClientOperationState::Succeeded),
+        published_generation: Some(generation()),
+        semantic_operation: None,
+        started_unix_ms: 1,
+        peak_rss_bytes: 100,
+        written_bytes: 2_048,
+        files_examined: 5,
+        bytes_examined: 512,
+        index_stage: "complete".to_owned(),
+        retry_after_ms: None,
+        evidence: Some(RepositoryOperationEvidence {
+            build_strategy: ClientBuildStrategy::CleanRebuild,
+            fallback_reason: None,
+            invalidated_units: 5,
+            changed_inputs: 5,
+            changed_files: 5,
+            reused_files: 0,
+            rebuilt_files: 5,
+            reused_facts: 0,
+            rebuilt_facts: 12,
+            referenced_bytes: 0,
+            newly_written_bytes: 2_048,
+            reserved_memory_bytes: 4_096,
+            owned_memory_bytes: 3_072,
+            retained_durable_bytes: 1_536,
+            invalidation_trace_json: None,
+            fact_work: Some(fact_work),
+        }),
+    };
+
+    assert!(map_operation_status(response, operation()).is_err());
 }
 
 #[test]
@@ -13152,6 +13341,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                         operation: operation(),
                         semantic_operation: None,
                         mode: client::RepositoryIndexMode::Structural,
+                        selected_analysis_mode: None,
                         state: ClientOperationState::Succeeded,
                         revision: 8,
                         parent_generation: None,

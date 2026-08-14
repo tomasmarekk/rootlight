@@ -84,6 +84,7 @@ const CAPABILITIES: &[&str] = &[
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "repository.index.clean-rebuild.v1",
     "repository.index.v1",
     "repository.status.logical-snapshot.v1",
     "source.read.v1",
@@ -6331,7 +6332,8 @@ impl ControlService {
                         "support.bundle.v6" => selected_minor >= 13,
                         "support.bundle.v7" => selected_minor >= 14,
                         "support.bundle.v8" => selected_minor >= 15,
-                        "repository.status.logical-snapshot.v1" => selected_minor >= 16,
+                        "repository.index.clean-rebuild.v1"
+                        | "repository.status.logical-snapshot.v1" => selected_minor >= 16,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -7615,6 +7617,11 @@ async fn dispatch_first_slice(
     context: FirstSliceIpcContext,
 ) -> daemon::response_envelope::Response {
     let required_protocol_minor = match &request {
+        FirstSliceIpcRequest::RepositoryIndex(request)
+            if request.mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32 =>
+        {
+            16
+        }
         FirstSliceIpcRequest::GraphProjectionOpen(_)
         | FirstSliceIpcRequest::GraphProjectionPage(_)
         | FirstSliceIpcRequest::GraphProjectionRelease(_) => 10,
@@ -7625,6 +7632,7 @@ async fn dispatch_first_slice(
     };
     if context.selected_protocol_minor < required_protocol_minor {
         let message = match required_protocol_minor {
+            16 => "clean repository rebuilds need protocol minor sixteen",
             11 => "repository catalog mutations need protocol minor eleven",
             10 => "graph projections need protocol minor ten",
             8 => "code locate language filters need protocol minor eight",
@@ -7664,7 +7672,11 @@ async fn dispatch_first_slice(
     )
     .await
     {
-        Ok(Ok(response)) => correlated_first_slice_response(&correlation_request, response),
+        Ok(Ok(response)) => correlated_first_slice_response_for_minor(
+            &correlation_request,
+            response,
+            selected_protocol_minor,
+        ),
         Ok(Err(error)) => daemon::response_envelope::Response::Error(
             public_error_to_wire_for_minor(&error, selected_protocol_minor),
         ),
@@ -7696,20 +7708,50 @@ fn first_slice_request_supports_budget(request: &FirstSliceIpcRequest) -> bool {
     )
 }
 
-fn correlated_first_slice_response(
+fn correlated_first_slice_response_for_minor(
     request: &FirstSliceIpcRequest,
-    response: FirstSliceIpcResponse,
+    mut response: FirstSliceIpcResponse,
+    selected_protocol_minor: u32,
 ) -> daemon::response_envelope::Response {
-    if first_slice_response_correlates(request, &response) {
+    select_first_slice_response_minor(&mut response, selected_protocol_minor);
+    if first_slice_response_correlates_for_minor(request, &response, selected_protocol_minor) {
         response.into_wire()
     } else {
         daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()))
     }
 }
 
+#[cfg(test)]
+fn correlated_first_slice_response(
+    request: &FirstSliceIpcRequest,
+    response: FirstSliceIpcResponse,
+) -> daemon::response_envelope::Response {
+    correlated_first_slice_response_for_minor(request, response, CURRENT_PROTOCOL_MINOR)
+}
+
+fn select_first_slice_response_minor(
+    response: &mut FirstSliceIpcResponse,
+    selected_protocol_minor: u32,
+) {
+    if selected_protocol_minor < 16
+        && let FirstSliceIpcResponse::RepositoryIndex(response) = response
+    {
+        response.selected_analysis_mode = daemon::RepositoryIndexAnalysisMode::Unspecified as i32;
+    }
+}
+
+#[cfg(test)]
 fn first_slice_response_correlates(
     request: &FirstSliceIpcRequest,
     response: &FirstSliceIpcResponse,
+) -> bool {
+    first_slice_response_correlates_for_minor(request, response, CURRENT_PROTOCOL_MINOR)
+}
+
+fn first_slice_response_correlates_for_minor(
+    request: &FirstSliceIpcRequest,
+    response: &FirstSliceIpcResponse,
+    selected_protocol_minor: u32,
 ) -> bool {
     match (request, response) {
         (
@@ -7750,6 +7792,11 @@ fn first_slice_response_correlates(
                     response.published_generation.as_ref().map(|id| &id.value),
                 )
                 && repository_index_mode_correlates(request.mode, response.mode)
+                && repository_index_analysis_mode_correlates(
+                    response.mode,
+                    response.selected_analysis_mode,
+                    selected_protocol_minor,
+                )
                 && response.indexed_files <= response.discovered_inputs
         }
         (
@@ -8730,8 +8777,42 @@ fn repository_index_mode_correlates(request: i32, response: i32) -> bool {
             daemon::RepositoryIndexMode::RepositoryIndexAuto,
             daemon::RepositoryIndexMode::RepositoryIndexStructural
                 | daemon::RepositoryIndexMode::RepositoryIndexDeep
+        ) | (
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild,
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild
         )
     )
+}
+
+fn repository_index_analysis_mode_correlates(
+    response_mode: i32,
+    selected_analysis_mode: i32,
+    selected_protocol_minor: u32,
+) -> bool {
+    let Ok(response_mode) = daemon::RepositoryIndexMode::try_from(response_mode) else {
+        return false;
+    };
+    let Ok(selected_analysis_mode) =
+        daemon::RepositoryIndexAnalysisMode::try_from(selected_analysis_mode)
+    else {
+        return false;
+    };
+    match response_mode {
+        daemon::RepositoryIndexMode::RepositoryIndexRebuild => {
+            selected_protocol_minor >= 16
+                && matches!(
+                    selected_analysis_mode,
+                    daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural
+                        | daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep
+                )
+        }
+        daemon::RepositoryIndexMode::RepositoryIndexStructural
+        | daemon::RepositoryIndexMode::RepositoryIndexDeep => {
+            selected_analysis_mode == daemon::RepositoryIndexAnalysisMode::Unspecified
+        }
+        daemon::RepositoryIndexMode::RepositoryIndexAuto
+        | daemon::RepositoryIndexMode::Unspecified => false,
+    }
 }
 
 fn repository_catalog_page_correlates(
@@ -12742,7 +12823,8 @@ mod tests {
                     "support.bundle.v6" => minor >= 13,
                     "support.bundle.v7" => minor >= 14,
                     "support.bundle.v8" => minor >= 15,
-                    "repository.status.logical-snapshot.v1" => minor >= 16,
+                    "repository.index.clean-rebuild.v1"
+                    | "repository.status.logical-snapshot.v1" => minor >= 16,
                     "code.locate.v1"
                     | "repository.index.v1"
                     | "source.read.v1"
@@ -12757,6 +12839,13 @@ mod tests {
                     .capabilities
                     .iter()
                     .any(|capability| capability == "operation.lease.renew")
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "repository.index.clean-rebuild.v1"),
+                minor >= 16
             );
             assert_eq!(
                 negotiated
@@ -18860,6 +18949,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn clean_rebuild_requires_negotiated_minor_sixteen() {
+        let request = FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            root: "C:\\bounded".to_owned(),
+            operation: Some(common::OperationId { value: vec![7; 16] }),
+            detached: false,
+            mode: daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let dispatch = |selected_protocol_minor| {
+            dispatch_first_slice(
+                &UnavailableFirstSliceIpcHandler,
+                request.clone(),
+                FirstSliceIpcContext {
+                    client_instance_id: ClientInstanceId::SYSTEM,
+                    selected_protocol_minor,
+                    cancellation: Cancellation::new(),
+                    deadline,
+                    effective_budget: None,
+                    index_admission: None,
+                },
+            )
+        };
+
+        let legacy = dispatch(15).await;
+        let current = dispatch(16).await;
+        assert!(matches!(
+            legacy,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::ProtocolMismatch as i32
+        ));
+        assert!(matches!(
+            current,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::UnsupportedCapability as i32
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn repository_catalog_mutation_requires_negotiated_minor_eleven() {
         let request = FirstSliceIpcRequest::RepositoryCatalogMutation(
             daemon::RepositoryCatalogMutationRequest {
@@ -19337,6 +19469,7 @@ mod tests {
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             semantic_operation: None,
+            selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::Unspecified as i32,
         };
         assert!(first_slice_response_correlates(
             &index_request,
@@ -19347,6 +19480,54 @@ mod tests {
         assert!(!first_slice_response_correlates(
             &index_request,
             &FirstSliceIpcResponse::RepositoryIndex(substituted_mode)
+        ));
+        let mut leaked_analysis_mode = index_response.clone();
+        leaked_analysis_mode.selected_analysis_mode =
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep as i32;
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(leaked_analysis_mode.clone())
+        ));
+        let legacy = correlated_first_slice_response_for_minor(
+            &index_request,
+            FirstSliceIpcResponse::RepositoryIndex(leaked_analysis_mode),
+            15,
+        );
+        assert!(matches!(
+            legacy,
+            daemon::response_envelope::Response::RepositoryIndex(
+                daemon::RepositoryIndexResponse {
+                    selected_analysis_mode,
+                    ..
+                }
+            ) if selected_analysis_mode
+                == daemon::RepositoryIndexAnalysisMode::Unspecified as i32
+        ));
+        let mut rebuild_request = index_request.clone();
+        let FirstSliceIpcRequest::RepositoryIndex(rebuild_wire_request) = &mut rebuild_request
+        else {
+            panic!("repository index fixture remains typed");
+        };
+        rebuild_wire_request.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+        for analysis_mode in [
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural,
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep,
+        ] {
+            let mut rebuild_response = index_response.clone();
+            rebuild_response.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+            rebuild_response.selected_analysis_mode = analysis_mode as i32;
+            assert!(first_slice_response_correlates_for_minor(
+                &rebuild_request,
+                &FirstSliceIpcResponse::RepositoryIndex(rebuild_response),
+                16
+            ));
+        }
+        let mut missing_analysis_mode = index_response.clone();
+        missing_analysis_mode.mode = daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32;
+        assert!(!first_slice_response_correlates_for_minor(
+            &rebuild_request,
+            &FirstSliceIpcResponse::RepositoryIndex(missing_analysis_mode),
+            16
         ));
         let mut pending_index = index_response.clone();
         pending_index.state = daemon::OperationState::Queued as i32;

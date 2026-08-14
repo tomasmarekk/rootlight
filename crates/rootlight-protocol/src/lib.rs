@@ -105,6 +105,70 @@ mod tests {
     }
 
     #[test]
+    fn clean_rebuild_wire_tags_are_additive_and_frozen() {
+        use generated::daemon::v1 as daemon;
+
+        assert_eq!(
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+            4
+        );
+        assert_eq!(
+            daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild as i32,
+            5
+        );
+        assert_eq!(
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkUserRequestedCleanRebuild as i32,
+            7
+        );
+        assert_eq!(
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural as i32,
+            1
+        );
+        assert_eq!(
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep as i32,
+            2
+        );
+    }
+
+    #[test]
+    fn legacy_repository_index_decoder_ignores_selected_clean_rebuild_analysis_mode() {
+        use generated::{common::v1 as common, daemon::v1 as daemon};
+
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyRepositoryIndexResponse {
+            #[prost(message, optional, tag = "1")]
+            schema_version: Option<common::ContractVersion>,
+            #[prost(enumeration = "daemon::RepositoryIndexMode", tag = "14")]
+            mode: i32,
+            #[prost(message, optional, tag = "15")]
+            semantic_operation: Option<common::OperationId>,
+        }
+
+        let current = daemon::RepositoryIndexResponse {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            mode: daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+            selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep
+                as i32,
+            ..Default::default()
+        };
+        let decoded = LegacyRepositoryIndexResponse::decode(current.encode_to_vec().as_slice())
+            .expect("a protocol 1.15 decoder skips selected analysis mode");
+        assert_eq!(
+            decoded.mode,
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32
+        );
+
+        let without_analysis_mode = daemon::RepositoryIndexResponse {
+            selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::Unspecified as i32,
+            ..current
+        };
+        assert_eq!(
+            decoded.encode_to_vec(),
+            without_analysis_mode.encode_to_vec()
+        );
+    }
+
+    #[test]
     fn legacy_operation_status_decoder_ignores_current_additive_fields() {
         use generated::{common::v1 as common, daemon::v1 as daemon};
 

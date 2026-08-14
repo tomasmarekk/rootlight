@@ -890,6 +890,9 @@ pub struct RepositoryIndexResponse {
     pub semantic_operation: ::core::option::Option<
         super::super::common::v1::OperationId,
     >,
+    #[prost(enumeration = "RepositoryIndexAnalysisMode", tag = "16")]
+    #[allow(missing_docs)]
+    pub selected_analysis_mode: i32,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3747,6 +3750,8 @@ pub enum RepositoryIndexMode {
     RepositoryIndexDeep = 2,
     #[allow(missing_docs)]
     RepositoryIndexAuto = 3,
+    #[allow(missing_docs)]
+    RepositoryIndexRebuild = 4,
 }
 impl RepositoryIndexMode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3759,6 +3764,7 @@ impl RepositoryIndexMode {
             Self::RepositoryIndexStructural => "REPOSITORY_INDEX_STRUCTURAL",
             Self::RepositoryIndexDeep => "REPOSITORY_INDEX_DEEP",
             Self::RepositoryIndexAuto => "REPOSITORY_INDEX_AUTO",
+            Self::RepositoryIndexRebuild => "REPOSITORY_INDEX_REBUILD",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3768,6 +3774,45 @@ impl RepositoryIndexMode {
             "REPOSITORY_INDEX_STRUCTURAL" => Some(Self::RepositoryIndexStructural),
             "REPOSITORY_INDEX_DEEP" => Some(Self::RepositoryIndexDeep),
             "REPOSITORY_INDEX_AUTO" => Some(Self::RepositoryIndexAuto),
+            "REPOSITORY_INDEX_REBUILD" => Some(Self::RepositoryIndexRebuild),
+            _ => None,
+        }
+    }
+}
+/// Analysis strength preserved by one clean repository rebuild.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryIndexAnalysisMode {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryIndexAnalysisStructural = 1,
+    #[allow(missing_docs)]
+    RepositoryIndexAnalysisDeep = 2,
+}
+impl RepositoryIndexAnalysisMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_INDEX_ANALYSIS_MODE_UNSPECIFIED",
+            Self::RepositoryIndexAnalysisStructural => {
+                "REPOSITORY_INDEX_ANALYSIS_STRUCTURAL"
+            }
+            Self::RepositoryIndexAnalysisDeep => "REPOSITORY_INDEX_ANALYSIS_DEEP",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_INDEX_ANALYSIS_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_INDEX_ANALYSIS_STRUCTURAL" => {
+                Some(Self::RepositoryIndexAnalysisStructural)
+            }
+            "REPOSITORY_INDEX_ANALYSIS_DEEP" => Some(Self::RepositoryIndexAnalysisDeep),
             _ => None,
         }
     }
@@ -3859,6 +3904,8 @@ pub enum RepositoryFactWorkCause {
     RepositoryFactWorkGenerationBoundLowering = 5,
     #[allow(missing_docs)]
     RepositoryFactWorkResolution = 6,
+    #[allow(missing_docs)]
+    RepositoryFactWorkUserRequestedCleanRebuild = 7,
 }
 impl RepositoryFactWorkCause {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3884,6 +3931,9 @@ impl RepositoryFactWorkCause {
                 "REPOSITORY_FACT_WORK_GENERATION_BOUND_LOWERING"
             }
             Self::RepositoryFactWorkResolution => "REPOSITORY_FACT_WORK_RESOLUTION",
+            Self::RepositoryFactWorkUserRequestedCleanRebuild => {
+                "REPOSITORY_FACT_WORK_USER_REQUESTED_CLEAN_REBUILD"
+            }
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3906,6 +3956,9 @@ impl RepositoryFactWorkCause {
                 Some(Self::RepositoryFactWorkGenerationBoundLowering)
             }
             "REPOSITORY_FACT_WORK_RESOLUTION" => Some(Self::RepositoryFactWorkResolution),
+            "REPOSITORY_FACT_WORK_USER_REQUESTED_CLEAN_REBUILD" => {
+                Some(Self::RepositoryFactWorkUserRequestedCleanRebuild)
+            }
             _ => None,
         }
     }
@@ -4087,6 +4140,8 @@ pub enum RepositoryBuildStrategy {
     RepositoryBuildConservativeRepositoryRebuild = 3,
     #[allow(missing_docs)]
     RepositoryBuildRetainedGeneration = 4,
+    #[allow(missing_docs)]
+    RepositoryBuildCleanRebuild = 5,
 }
 impl RepositoryBuildStrategy {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -4106,6 +4161,7 @@ impl RepositoryBuildStrategy {
             Self::RepositoryBuildRetainedGeneration => {
                 "REPOSITORY_BUILD_RETAINED_GENERATION"
             }
+            Self::RepositoryBuildCleanRebuild => "REPOSITORY_BUILD_CLEAN_REBUILD",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4122,6 +4178,7 @@ impl RepositoryBuildStrategy {
             "REPOSITORY_BUILD_RETAINED_GENERATION" => {
                 Some(Self::RepositoryBuildRetainedGeneration)
             }
+            "REPOSITORY_BUILD_CLEAN_REBUILD" => Some(Self::RepositoryBuildCleanRebuild),
             _ => None,
         }
     }

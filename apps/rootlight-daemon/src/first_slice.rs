@@ -88,13 +88,14 @@ use rootlight_service::{
     FirstSliceDurableOperation, FirstSliceError, FirstSliceFactWorkCause,
     FirstSliceFactWorkDisposition, FirstSliceGenerationContext, FirstSliceGitEvidenceError,
     FirstSliceIndexAdmission, FirstSliceIndexAdmissionMetadata, FirstSliceIndexMode,
-    FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexProgress,
-    FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
-    FirstSliceOperationContext, FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError,
-    FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
-    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceStorageAccountingState,
-    FirstSliceStoragePolicy, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
-    HistoryChangeKind, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
+    FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexOptions,
+    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
+    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
+    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
+    FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
+    FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
+    FirstSliceSupportInventory, FirstSliceWorkingTreeSelection, HistoryChangeKind,
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -915,6 +916,7 @@ struct ServiceRequestResources<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PublicationBoundary {
+    BeforeMetadataReservation,
     AfterAdmission,
     AfterActivation,
     BeforeCompletion,
@@ -4296,6 +4298,10 @@ fn repository_index_with_intent(
         .registered_repository_for_root(&root, &context.cancellation)
         .map_err(service_error)?;
     guard_repository_index_recovery(lanes, requested_repository)?;
+    let clean_rebuild = matches!(
+        intent,
+        RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher
+    ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild;
     let active_generation_is_deep = requested_repository
         .map(|repository| {
             read_service(service)?
@@ -4310,7 +4316,7 @@ fn repository_index_with_intent(
     ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
         && read_service(service)?.deep_analysis_available()
         && !active_generation_is_deep;
-    let mode = match intent {
+    let mut mode = match intent {
         RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => match requested_mode {
             daemon::RepositoryIndexMode::Unspecified
@@ -4318,6 +4324,10 @@ fn repository_index_with_intent(
                 FirstSliceIndexMode::Structural
             }
             daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild if active_generation_is_deep => {
+                FirstSliceIndexMode::Deep
+            }
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild => FirstSliceIndexMode::Structural,
             // An already-deep generation can prove a no-op without publishing
             // a weaker structural generation and queueing redundant refinement.
             daemon::RepositoryIndexMode::RepositoryIndexAuto if active_generation_is_deep => {
@@ -4357,7 +4367,7 @@ fn repository_index_with_intent(
             };
             plan_hasher.update(b"rootlight.repository-index-plan/1\0");
             plan_hasher.update(request.root.as_bytes());
-            plan_hasher.update(&[repository_index_mode_tag(plan_mode)]);
+            plan_hasher.update(&[repository_index_plan_mode_tag(requested_mode, plan_mode)]);
             PlanHash::from_bytes(*plan_hasher.finalize().as_bytes())
         }
         RepositoryIndexIntent::SemanticRefinement {
@@ -4384,12 +4394,13 @@ fn repository_index_with_intent(
             // The request deadline is transport-local and is recomputed for a
             // retry. Reuse the durable first submission's deadline while still
             // checking every caller-controlled immutable field.
-            let repository_context = match journal_call(
+            let (repository_context, retry_analysis_mode) = match journal_call(
                 runtime,
                 context.deadline,
                 journal.repository_operation_context(operation),
             ) {
                 Ok(context) => {
+                    let retry_analysis_mode = repository_operation_analysis_mode(context.mode);
                     let submission = RepositoryOperationSubmission::new(
                         context.repository,
                         context.parent_generation,
@@ -4398,12 +4409,15 @@ fn repository_index_with_intent(
                         context.mode,
                     )
                     .map_err(|error| operation_error(&error, Some(operation)))?;
-                    Some(match context.root_identity {
-                        Some(root_identity) => submission.with_root_identity(root_identity),
-                        None => submission,
-                    })
+                    (
+                        Some(match context.root_identity {
+                            Some(root_identity) => submission.with_root_identity(root_identity),
+                            None => submission,
+                        }),
+                        retry_analysis_mode,
+                    )
                 }
-                Err(error) if error.code() == ErrorCode::NotFound => None,
+                Err(error) if error.code() == ErrorCode::NotFound => (None, mode),
                 Err(error) => return Err(error),
             };
             let retry = OperationSubmission {
@@ -4422,7 +4436,12 @@ fn repository_index_with_intent(
                 if let Some(admitted) = admission_ack {
                     let _ = admitted.try_send(Ok(()));
                 }
-                let response = retry_index_response(metadata, existing, mode)?;
+                let response = retry_index_response(
+                    metadata,
+                    existing,
+                    repository_index_response_mode(mode, clean_rebuild),
+                    retry_analysis_mode,
+                )?;
                 if auto_refinement {
                     return complete_auto_structural_index(
                         &request.root,
@@ -4444,6 +4463,15 @@ fn repository_index_with_intent(
         Err(error) if error.code() == ErrorCode::NotFound => {}
         Ok(_) => return Err(internal_error()),
         Err(error) => return Err(error),
+    }
+    if clean_rebuild {
+        let repository = requested_repository.ok_or_else(invalid_argument)?;
+        if read_service(service)?
+            .active_generation_for(repository)
+            .is_none()
+        {
+            return Err(invalid_argument());
+        }
     }
     if matches!(intent, RepositoryIndexIntent::Requested)
         && let Some(repository) = requested_repository
@@ -4481,6 +4509,18 @@ fn repository_index_with_intent(
         }
     };
     drop(service_guard);
+    if let Some(hook) = publication_hook
+        && let Err(error) = hook.pause(PublicationBoundary::BeforeMetadataReservation)
+    {
+        read_service(service)?.release_index_admission(admission);
+        terminalize_pre_submitted_semantic(
+            resume_pre_submitted_semantic,
+            operation,
+            &error,
+            journal,
+        )?;
+        return Err(error);
+    }
     let metadata_admission = reconcile_terminal_repository_admission(
         runtime,
         journal,
@@ -4506,6 +4546,38 @@ fn repository_index_with_intent(
             journal,
         )?;
         return Err(error);
+    }
+    if clean_rebuild {
+        let stable_mode = read_service(service).and_then(|service| {
+            if service.active_generation_for(admission.repository) != admission.parent {
+                Err(operation_in_progress())
+            } else {
+                service
+                    .active_generation_is_deep(admission.repository)
+                    .map(|is_deep| {
+                        if is_deep {
+                            FirstSliceIndexMode::Deep
+                        } else {
+                            FirstSliceIndexMode::Structural
+                        }
+                    })
+                    .map_err(service_error)
+            }
+        });
+        match stable_mode {
+            Ok(stable_mode) => mode = stable_mode,
+            Err(error) => {
+                lock_metadata(metadata)?.remove_unpublished(operation);
+                read_service(service)?.release_index_admission(admission);
+                terminalize_pre_submitted_semantic(
+                    resume_pre_submitted_semantic,
+                    operation,
+                    &error,
+                    journal,
+                )?;
+                return Err(error);
+            }
+        }
     }
     if resume_pre_submitted_semantic {
         let Some(repository_context) = submission.repository_context else {
@@ -4563,7 +4635,12 @@ fn repository_index_with_intent(
         if let Some(admitted) = admission_ack {
             let _ = admitted.try_send(Ok(()));
         }
-        return retry_index_response(metadata, submitted.operation, mode);
+        return retry_index_response(
+            metadata,
+            submitted.operation,
+            repository_index_response_mode(mode, clean_rebuild),
+            mode,
+        );
     }
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
@@ -4582,7 +4659,12 @@ fn repository_index_with_intent(
         );
     }
     if detached && let Some(reply) = reply.take() {
-        let response = admitted_index_response(&admission, &submitted.operation, mode);
+        let response = admitted_index_response(
+            &admission,
+            &submitted.operation,
+            repository_index_response_mode(mode, clean_rebuild),
+            mode,
+        );
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response)));
     }
     let mut publication_committed = false;
@@ -4700,9 +4782,13 @@ fn repository_index_with_intent(
             let service = read_service(service)?;
             match intent {
                 RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => service
-                    .prepare_repository_after_admission_with_progress(
+                    .prepare_repository_after_admission_with_options_and_progress(
                         &root,
-                        mode,
+                        if clean_rebuild {
+                            FirstSliceIndexOptions::clean_rebuild(mode)
+                        } else {
+                            FirstSliceIndexOptions::incremental(mode)
+                        },
                         &mut admission,
                         &cancellation,
                         &mut observe_progress,
@@ -5094,7 +5180,12 @@ fn repository_index_with_intent(
                 operation_metadata.commit(operation)?;
                 drop(operation_metadata);
                 publication_committed = true;
-                let response = index_response(receipt, &operation_record, mode);
+                let response = index_response(
+                    receipt,
+                    &operation_record,
+                    repository_index_response_mode(mode, clean_rebuild),
+                    mode,
+                );
                 if auto_refinement {
                     complete_auto_structural_index(
                         &request.root,
@@ -5776,7 +5867,8 @@ fn bind_journal_cancellation_deadline(
 fn retry_index_response(
     metadata: &Mutex<OperationMetadataSet>,
     operation: OperationRecord,
-    mode: FirstSliceIndexMode,
+    mode: daemon::RepositoryIndexMode,
+    analysis_mode: FirstSliceIndexMode,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let metadata = lock_metadata(metadata)?
         .records
@@ -5798,6 +5890,7 @@ fn retry_index_response(
                 metadata.estimated_disk_bytes,
                 &operation,
                 mode,
+                analysis_mode,
             ));
         }
         OperationState::Failed => {
@@ -5823,13 +5916,14 @@ fn retry_index_response(
         PublicationState::None | PublicationState::FailedClosed => return Err(internal_error()),
     }
     let receipt = metadata.receipt.ok_or_else(internal_error)?;
-    Ok(index_response(receipt, &operation, mode))
+    Ok(index_response(receipt, &operation, mode, analysis_mode))
 }
 
 fn admitted_index_response(
     admission: &FirstSliceIndexAdmission,
     operation: &OperationRecord,
-    mode: FirstSliceIndexMode,
+    mode: daemon::RepositoryIndexMode,
+    analysis_mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     pending_index_response(
         admission.repository,
@@ -5837,6 +5931,7 @@ fn admitted_index_response(
         admission.estimated_disk_bytes,
         operation,
         mode,
+        analysis_mode,
     )
 }
 
@@ -5845,7 +5940,8 @@ fn pending_index_response(
     parent: Option<GenerationId>,
     estimated_disk_bytes: u64,
     operation: &OperationRecord,
-    mode: FirstSliceIndexMode,
+    mode: daemon::RepositoryIndexMode,
+    analysis_mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     daemon::RepositoryIndexResponse {
         schema_version: Some(schema_version()),
@@ -5861,15 +5957,17 @@ fn pending_index_response(
         elapsed_micros: 0,
         estimated_disk_bytes,
         diagnostics: Vec::new(),
-        mode: repository_index_mode_to_wire(mode) as i32,
+        mode: mode as i32,
         semantic_operation: None,
+        selected_analysis_mode: repository_index_analysis_mode_to_wire(mode, analysis_mode) as i32,
     }
 }
 
 fn index_response(
     receipt: FirstSliceIndexReceipt,
     operation: &OperationRecord,
-    mode: FirstSliceIndexMode,
+    mode: daemon::RepositoryIndexMode,
+    analysis_mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     daemon::RepositoryIndexResponse {
         schema_version: Some(schema_version()),
@@ -5892,8 +5990,9 @@ fn index_response(
                 message: diagnostic.message,
             })
             .collect(),
-        mode: repository_index_mode_to_wire(mode) as i32,
+        mode: mode as i32,
         semantic_operation: None,
+        selected_analysis_mode: repository_index_analysis_mode_to_wire(mode, analysis_mode) as i32,
     }
 }
 
@@ -5913,6 +6012,7 @@ fn repository_operation_evidence(
             FirstSliceIndexOperationStrategy::RetainedGeneration => {
                 RepositoryBuildStrategy::RetainedGeneration
             }
+            FirstSliceIndexOperationStrategy::CleanRebuild => RepositoryBuildStrategy::CleanRebuild,
         },
         fallback_reason: evidence.fallback_reason.map(|reason| match reason {
             ServiceFallbackReason::MissingDependencyDeclaration => {
@@ -6080,6 +6180,9 @@ const fn repository_fact_work_cause(cause: FirstSliceFactWorkCause) -> Repositor
             RepositoryFactWorkCause::GenerationBoundLowering
         }
         FirstSliceFactWorkCause::Resolution => RepositoryFactWorkCause::Resolution,
+        FirstSliceFactWorkCause::UserRequestedCleanRebuild => {
+            RepositoryFactWorkCause::UserRequestedCleanRebuild
+        }
     }
 }
 
@@ -6257,22 +6360,26 @@ fn repository_operation_status(
     if record.kind == OperationKind::RepositoryIndex
         && let Some(evidence) = repository_context.and_then(|context| context.evidence)
     {
+        let expose_trace = context.selected_protocol_minor >= 16
+            || evidence.build_strategy != RepositoryBuildStrategy::CleanRebuild;
         project_repository_operation_evidence(
             &mut response,
             evidence,
             context.selected_protocol_minor,
         );
-        let generation = published_generation.ok_or_else(internal_error)?;
-        let trace = match read_service(service)?
-            .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
-        {
-            Ok(trace) => Some(trace),
-            Err(FirstSliceError::GenerationNotFound) => None,
-            Err(error) => return Err(service_error(error)),
-        };
-        response.invalidation_trace_json = trace
-            .map(|trace| trace.canonical_json().map_err(service_error))
-            .transpose()?;
+        if expose_trace {
+            let generation = published_generation.ok_or_else(internal_error)?;
+            let trace = match read_service(service)?
+                .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
+            {
+                Ok(trace) => Some(trace),
+                Err(FirstSliceError::GenerationNotFound) => None,
+                Err(error) => return Err(service_error(error)),
+            };
+            response.invalidation_trace_json = trace
+                .map(|trace| trace.canonical_json().map_err(service_error))
+                .transpose()?;
+        }
     }
     Ok(response)
 }
@@ -6326,6 +6433,11 @@ fn project_repository_operation_evidence(
     evidence: RepositoryOperationEvidence,
     selected_protocol_minor: u32,
 ) {
+    if selected_protocol_minor < 16
+        && evidence.build_strategy == RepositoryBuildStrategy::CleanRebuild
+    {
+        return;
+    }
     if selected_protocol_minor >= 15 {
         response.fact_work = evidence.fact_work.as_ref().map(fact_work_to_wire);
     }
@@ -6339,6 +6451,9 @@ fn project_repository_operation_evidence(
         }
         RepositoryBuildStrategy::RetainedGeneration => {
             daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration
+        }
+        RepositoryBuildStrategy::CleanRebuild => {
+            daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
         }
     } as i32;
     response.fallback_reason = evidence.fallback_reason.map(|reason| {
@@ -6483,6 +6598,9 @@ const fn fact_work_cause_to_wire(
         }
         RepositoryFactWorkCause::Resolution => {
             daemon::RepositoryFactWorkCause::RepositoryFactWorkResolution
+        }
+        RepositoryFactWorkCause::UserRequestedCleanRebuild => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkUserRequestedCleanRebuild
         }
     }
 }
@@ -9876,10 +9994,61 @@ const fn repository_index_mode_tag(mode: FirstSliceIndexMode) -> u8 {
     }
 }
 
+const fn repository_index_plan_mode_tag(
+    requested: daemon::RepositoryIndexMode,
+    analysis: FirstSliceIndexMode,
+) -> u8 {
+    if matches!(
+        requested,
+        daemon::RepositoryIndexMode::RepositoryIndexRebuild
+    ) {
+        4
+    } else {
+        repository_index_mode_tag(analysis)
+    }
+}
+
 const fn repository_index_mode_to_wire(mode: FirstSliceIndexMode) -> daemon::RepositoryIndexMode {
     match mode {
         FirstSliceIndexMode::Structural => daemon::RepositoryIndexMode::RepositoryIndexStructural,
         FirstSliceIndexMode::Deep => daemon::RepositoryIndexMode::RepositoryIndexDeep,
+    }
+}
+
+const fn repository_index_response_mode(
+    mode: FirstSliceIndexMode,
+    clean_rebuild: bool,
+) -> daemon::RepositoryIndexMode {
+    if clean_rebuild {
+        daemon::RepositoryIndexMode::RepositoryIndexRebuild
+    } else {
+        repository_index_mode_to_wire(mode)
+    }
+}
+
+const fn repository_index_analysis_mode_to_wire(
+    mode: daemon::RepositoryIndexMode,
+    analysis_mode: FirstSliceIndexMode,
+) -> daemon::RepositoryIndexAnalysisMode {
+    if !matches!(mode, daemon::RepositoryIndexMode::RepositoryIndexRebuild) {
+        return daemon::RepositoryIndexAnalysisMode::Unspecified;
+    }
+    match analysis_mode {
+        FirstSliceIndexMode::Structural => {
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisStructural
+        }
+        FirstSliceIndexMode::Deep => {
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep
+        }
+    }
+}
+
+const fn repository_operation_analysis_mode(mode: RepositoryOperationMode) -> FirstSliceIndexMode {
+    match mode {
+        RepositoryOperationMode::Auto | RepositoryOperationMode::Structural => {
+            FirstSliceIndexMode::Structural
+        }
+        RepositoryOperationMode::Deep => FirstSliceIndexMode::Deep,
     }
 }
 
@@ -12885,7 +13054,21 @@ mod tests {
     }
 
     #[test]
-    fn auto_index_reuses_unchanged_deep_generation_without_semantic_child() {
+    fn clean_rebuild_preserves_deep_generation_and_auto_reuses_it() {
+        assert_eq!(
+            repository_index_plan_mode_tag(
+                daemon::RepositoryIndexMode::RepositoryIndexRebuild,
+                FirstSliceIndexMode::Structural,
+            ),
+            4
+        );
+        assert_ne!(
+            repository_index_plan_mode_tag(
+                daemon::RepositoryIndexMode::RepositoryIndexRebuild,
+                FirstSliceIndexMode::Deep,
+            ),
+            repository_index_mode_tag(FirstSliceIndexMode::Deep)
+        );
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("test runtime paths are valid");
@@ -12963,6 +13146,21 @@ mod tests {
         let deep_operation = OperationId::from_bytes([116; 16]);
         let deep_context = context(116);
         let mut no_reply = None;
+        let cold_error = repository_index(
+            &lanes,
+            resources,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: root.clone(),
+                operation: Some(operation_to_wire(OperationId::from_bytes([115; 16]))),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+            },
+            &context(115),
+            &mut no_reply,
+        )
+        .expect_err("clean rebuild requires an active repository");
+        assert_eq!(cold_error.code(), ErrorCode::InvalidArgument);
         let deep = repository_index(
             &lanes,
             resources,
@@ -12979,7 +13177,117 @@ mod tests {
         .expect("deep generation publishes");
         let deep_generation = parse_generation(deep.published_generation.as_ref())
             .expect("deep generation has a stable identity");
+        assert_eq!(
+            deep.selected_analysis_mode,
+            daemon::RepositoryIndexAnalysisMode::Unspecified as i32
+        );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+
+        let clean_operation = OperationId::from_bytes([118; 16]);
+        let clean_context = context(118);
+        let clean = repository_index(
+            &lanes,
+            resources,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: root.clone(),
+                operation: Some(operation_to_wire(clean_operation)),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+            },
+            &clean_context,
+            &mut no_reply,
+        )
+        .expect("deep clean rebuild publishes");
+        let clean_generation = parse_generation(clean.published_generation.as_ref())
+            .expect("clean generation has a stable identity");
+        assert_ne!(clean_generation, deep_generation);
+        assert_eq!(
+            parse_generation(clean.parent_generation.as_ref())
+                .expect("clean rebuild retains the active parent"),
+            deep_generation
+        );
+        assert_eq!(
+            clean.mode,
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32
+        );
+        assert_eq!(
+            clean.selected_analysis_mode,
+            daemon::RepositoryIndexAnalysisMode::RepositoryIndexAnalysisDeep as i32
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+        let repository =
+            parse_repository(clean.repository.as_ref()).expect("repository identity is valid");
+        let service_guard = read_service(&service).expect("service read lock opens");
+        let deep_status = service_guard
+            .repository_status(repository, Some(deep_generation))
+            .expect("deep generation status resolves");
+        let clean_status = service_guard
+            .repository_status(repository, Some(clean_generation))
+            .expect("clean generation status resolves");
+        assert_eq!(clean_status.logical_snapshot, deep_status.logical_snapshot);
+        drop(service_guard);
+        let clean_operation_status = repository_operation_status(
+            service.as_ref(),
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(clean_operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &clean_context,
+        )
+        .expect("clean operation status is available");
+        assert_eq!(
+            clean_operation_status.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild as i32
+        );
+        assert_eq!(clean_operation_status.reused_files, 0);
+        assert_eq!(clean_operation_status.reused_facts, 0);
+        let fact_work = clean_operation_status
+            .fact_work
+            .expect("clean grouped evidence is available");
+        assert!(fact_work
+            .planned
+            .expect("planned groups are available")
+            .groups
+            .iter()
+            .all(|group| {
+                group.disposition
+                    == daemon::RepositoryFactWorkDisposition::RepositoryFactWorkRebuild as i32
+                    && group.cause
+                        == daemon::RepositoryFactWorkCause::RepositoryFactWorkUserRequestedCleanRebuild
+                            as i32
+            }));
+        let mut legacy_context = context(119);
+        legacy_context.selected_protocol_minor = 15;
+        let legacy_status = repository_operation_status(
+            service.as_ref(),
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(clean_operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &legacy_context,
+        )
+        .expect("minor fifteen status remains decodable");
+        assert_eq!(
+            legacy_status.build_strategy,
+            daemon::RepositoryBuildStrategy::Unspecified as i32
+        );
+        assert!(legacy_status.fact_work.is_none());
+        assert!(legacy_status.invalidation_trace_json.is_none());
+        assert_eq!(legacy_status.reused_files, 0);
+        assert_eq!(legacy_status.rebuilt_files, 0);
 
         let auto_operation = OperationId::from_bytes([117; 16]);
         let auto_context = context(117);
@@ -13001,14 +13309,18 @@ mod tests {
         assert_eq!(
             parse_generation(auto.published_generation.as_ref())
                 .expect("Auto generation has a stable identity"),
-            deep_generation
+            clean_generation
         );
         assert_eq!(
             auto.mode,
             daemon::RepositoryIndexMode::RepositoryIndexDeep as i32
         );
+        assert_eq!(
+            auto.selected_analysis_mode,
+            daemon::RepositoryIndexAnalysisMode::Unspecified as i32
+        );
         assert!(auto.semantic_operation.is_none());
-        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
         assert!(matches!(
             refinement_receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -15324,6 +15636,161 @@ mod tests {
                 .expect("visible operation state maps"),
             daemon::OperationState::Failed
         );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn clean_rebuild_revalidates_parent_and_strength_before_journal_submission() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn stable_parent() -> bool { true }\n",
+        )
+        .expect("fixture source writes");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulSemanticAnalyzer {
+            calls: Arc::clone(&calls),
+            identity: content_hash(b"daemon-clean-race-semantic-analyzer"),
+        });
+        let setup_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &setup_cancellation,
+        )
+        .expect("durable semantic service initializes");
+        let initial = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &setup_cancellation,
+            )
+            .expect("structural parent publishes");
+        let service = Arc::new(RwLock::new(service));
+
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path())
+                .expect("operation journal opens"),
+        );
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(8));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovery_admission_ready: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            support_state: None,
+        };
+        let (reached, reached_receiver) = mpsc::sync_channel(1);
+        let (release, release_receiver) = mpsc::sync_channel(1);
+        let operation = OperationId::from_bytes([120; 16]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([120; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let root = fixture.path().to_string_lossy().into_owned();
+
+        let error = thread::scope(|scope| {
+            let lanes = &lanes;
+            let journal_handle = &handle;
+            let operation_metadata = &metadata;
+            let journal_runtime = &runtime;
+            let request = daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root,
+                operation: Some(operation_to_wire(operation)),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32,
+            };
+            let clean = scope.spawn(move || {
+                let hook = PublicationBoundaryHook {
+                    boundary: PublicationBoundary::BeforeMetadataReservation,
+                    fail_commit: AtomicBool::new(false),
+                    armed: AtomicBool::new(true),
+                    reached,
+                    release: release_receiver,
+                };
+                let resources = ServiceRequestResources {
+                    journal: journal_handle,
+                    metadata: operation_metadata,
+                    runtime: journal_runtime,
+                    catalog_epoch: Instant::now(),
+                    publication_hook: Some(&hook),
+                };
+                let mut reply = None;
+                repository_index(lanes, resources, request, &context, &mut reply)
+                    .expect_err("changed parent rejects the clean admission")
+            });
+            reached_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("clean admission reaches the race boundary");
+            let replacement = write_service(&service)
+                .expect("service write lock opens")
+                .index_repository_with_mode(
+                    fixture.path(),
+                    FirstSliceIndexMode::Deep,
+                    &setup_cancellation,
+                )
+                .expect("deep replacement parent publishes");
+            assert_eq!(replacement.parent, Some(initial.generation));
+            release.send(()).expect("clean admission resumes");
+            let error = clean.join().expect("clean request thread joins");
+            (error, replacement)
+        });
+        let (error, replacement) = error;
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert!(error.retryable());
+        assert!(matches!(
+            journal.status(operation),
+            Err(OperationError::NotFound)
+        ));
+        assert!(
+            lock_metadata(&metadata)
+                .expect("metadata lock opens")
+                .active_repository_operation(initial.repository)
+                .is_none()
+        );
+        let service = read_service(&service).expect("service read lock opens");
+        assert_eq!(
+            service.active_generation_for(initial.repository),
+            Some(replacement.generation)
+        );
+        assert!(
+            service
+                .active_generation_is_deep(initial.repository)
+                .expect("replacement strength resolves")
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+        drop(service);
 
         drop(handle);
         actor.join().expect("journal actor joins");
@@ -18772,6 +19239,7 @@ mod tests {
             retry_index_response(
                 &Mutex::new(metadata),
                 failed_record,
+                daemon::RepositoryIndexMode::RepositoryIndexStructural,
                 FirstSliceIndexMode::Structural,
             )
             .expect_err("failed retry replays its error"),
@@ -18796,6 +19264,7 @@ mod tests {
         let cancelled_error = retry_index_response(
             &Mutex::new(cancelled_metadata),
             cancelled_record,
+            daemon::RepositoryIndexMode::RepositoryIndexStructural,
             FirstSliceIndexMode::Structural,
         )
         .expect_err("cancelled retry is terminal");
@@ -18815,6 +19284,7 @@ mod tests {
         let interrupted_error = retry_index_response(
             &Mutex::new(interrupted_metadata),
             interrupted_record,
+            daemon::RepositoryIndexMode::RepositoryIndexStructural,
             FirstSliceIndexMode::Structural,
         )
         .expect_err("interrupted retry is terminal");

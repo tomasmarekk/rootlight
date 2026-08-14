@@ -417,6 +417,7 @@ const fn index_mode_label(mode: RepositoryIndexMode) -> &'static str {
         RepositoryIndexMode::Auto => "auto",
         RepositoryIndexMode::Structural => "structural",
         RepositoryIndexMode::Deep => "deep",
+        RepositoryIndexMode::Rebuild => "rebuild",
     }
 }
 
@@ -820,6 +821,7 @@ mod tests {
                     state: OperationState::Queued,
                     revision: 1,
                     mode,
+                    selected_analysis_mode: None,
                     parent_generation: None,
                     published_generation: None,
                     discovered_inputs: 0,

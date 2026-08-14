@@ -438,6 +438,14 @@ enum RepositoryIndexMode {
   REPOSITORY_INDEX_STRUCTURAL = 1;
   REPOSITORY_INDEX_DEEP = 2;
   REPOSITORY_INDEX_AUTO = 3;
+  REPOSITORY_INDEX_REBUILD = 4;
+}
+
+// Analysis strength preserved by one clean repository rebuild.
+enum RepositoryIndexAnalysisMode {
+  REPOSITORY_INDEX_ANALYSIS_MODE_UNSPECIFIED = 0;
+  REPOSITORY_INDEX_ANALYSIS_STRUCTURAL = 1;
+  REPOSITORY_INDEX_ANALYSIS_DEEP = 2;
 }
 
 // Requests admission of one supported whole-repository index plan.
@@ -473,6 +481,7 @@ message RepositoryIndexResponse {
   RepositoryIndexMode mode = 14;
   // Separately journaled semantic refinement created by Auto mode.
   optional rootlight.common.v1.OperationId semantic_operation = 15;
+  RepositoryIndexAnalysisMode selected_analysis_mode = 16;
 }
 
 // Action accepted by the first-slice operation status request.
@@ -507,6 +516,7 @@ enum RepositoryFactWorkCause {
   REPOSITORY_FACT_WORK_CONSERVATIVE_FALLBACK = 4;
   REPOSITORY_FACT_WORK_GENERATION_BOUND_LOWERING = 5;
   REPOSITORY_FACT_WORK_RESOLUTION = 6;
+  REPOSITORY_FACT_WORK_USER_REQUESTED_CLEAN_REBUILD = 7;
 }
 
 // Logical dependency-closure domain selected before fact construction.
@@ -634,6 +644,7 @@ enum RepositoryBuildStrategy {
   REPOSITORY_BUILD_DEPENDENCY_DIRECTED = 2;
   REPOSITORY_BUILD_CONSERVATIVE_REPOSITORY_REBUILD = 3;
   REPOSITORY_BUILD_RETAINED_GENERATION = 4;
+  REPOSITORY_BUILD_CLEAN_REBUILD = 5;
 }
 
 // Source-free reason fine-grained invalidation expanded to a full rebuild.

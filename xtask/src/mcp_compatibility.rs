@@ -293,15 +293,16 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             )
         })?;
     tools[repo_list] = v2;
-    upgrade_additive_success_example(&mut tools, "repo.index", "1.1", |data| {
+    upgrade_additive_success_example(&mut tools, "repo.index", "1.3", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "repo.status", "1.1", |data| {
+    upgrade_additive_success_example(&mut tools, "repo.status", "1.2", |data| {
         data.insert("retained_durable_bytes".to_owned(), json!(0));
+        data.insert("logical_snapshot".to_owned(), Value::Null);
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "operation.status", "1.2", |data| {
+    upgrade_additive_success_example(&mut tools, "operation.status", "1.4", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         data.insert("index_stage".to_owned(), json!("analysis"));
         let resources = data
@@ -408,6 +409,10 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
             tool.previous_output_schema_json()
         } else if tool.legacy_contract_version() == Some(output_version) {
             tool.legacy_output_schema_json()
+        } else if tool.second_legacy_contract_version() == Some(output_version) {
+            tool.second_legacy_output_schema_json()
+        } else if tool.initial_contract_version() == Some(output_version) {
+            tool.initial_output_schema_json()
         } else {
             None
         }

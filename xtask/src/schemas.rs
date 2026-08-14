@@ -44,10 +44,7 @@ use rootlight_mcp_contract::{
         RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput, RepoStatusOutputV1_0,
         RepoStatusOutputV1_1,
     },
-    vertical::{
-        OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        RepoIndexOutputV1_0, RepoIndexOutputV1_1, SymbolExplainOutputV1_1,
-    },
+    vertical::SymbolExplainOutputV1_1,
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -871,6 +868,20 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "mcp-symbol-relationships-output-1.0.schema.json",
         "mcp-tests-select-input-1.0.schema.json",
         "mcp-tests-select-output-1.0.schema.json",
+        "mcp-repo-index-input-1.0.schema.json",
+        "mcp-repo-index-output-1.0.schema.json",
+        "mcp-repo-index-input-1.1.schema.json",
+        "mcp-repo-index-output-1.1.schema.json",
+        "mcp-repo-index-input-1.2.schema.json",
+        "mcp-repo-index-output-1.2.schema.json",
+        "mcp-operation-status-input-1.0.schema.json",
+        "mcp-operation-status-output-1.0.schema.json",
+        "mcp-operation-status-input-1.1.schema.json",
+        "mcp-operation-status-output-1.1.schema.json",
+        "mcp-operation-status-input-1.2.schema.json",
+        "mcp-operation-status-output-1.2.schema.json",
+        "mcp-operation-status-input-1.3.schema.json",
+        "mcp-operation-status-output-1.3.schema.json",
     ] {
         let retained = workspace_root.join(SCHEMA_ROOT).join("json").join(name);
         write_bytes(&schema_root.join(name), &read_bytes(&retained)?)?;
@@ -886,30 +897,19 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     )?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
-    write_mcp_tool_schema::<RepoIndexInput>(&schema_root, "repo.index", "input")?;
-    write_mcp_tool_schema::<RepoIndexOutputV1_0>(&schema_root, "repo.index", "output")?;
-    write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.1")?;
-    write_mcp_tool_schema_version::<RepoIndexOutputV1_1>(
-        &schema_root,
-        "repo.index",
-        "output",
-        "1.1",
-    )?;
-    write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.2")?;
-    write_mcp_tool_schema_version::<RepoIndexOutput>(&schema_root, "repo.index", "output", "1.2")?;
-    write_mcp_tool_schema::<OperationStatusInput>(&schema_root, "operation.status", "input")?;
-    write_mcp_tool_schema::<OperationStatusOutputV1_0>(&schema_root, "operation.status", "output")?;
+    write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.3")?;
+    write_mcp_tool_schema_version::<RepoIndexOutput>(&schema_root, "repo.index", "output", "1.3")?;
     write_mcp_tool_schema_version::<OperationStatusInput>(
         &schema_root,
         "operation.status",
         "input",
-        "1.1",
+        "1.4",
     )?;
-    write_mcp_tool_schema_version::<OperationStatusOutputV1_1>(
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::OperationStatusOutput>(
         &schema_root,
         "operation.status",
         "output",
-        "1.1",
+        "1.4",
     )?;
     write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
     write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
@@ -927,30 +927,6 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     )?;
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
-    write_mcp_tool_schema_version::<OperationStatusInput>(
-        &schema_root,
-        "operation.status",
-        "input",
-        "1.2",
-    )?;
-    write_mcp_tool_schema_version::<OperationStatusOutputV1_2>(
-        &schema_root,
-        "operation.status",
-        "output",
-        "1.2",
-    )?;
-    write_mcp_tool_schema_version::<OperationStatusInput>(
-        &schema_root,
-        "operation.status",
-        "input",
-        "1.3",
-    )?;
-    write_mcp_tool_schema_version::<rootlight_mcp_contract::OperationStatusOutput>(
-        &schema_root,
-        "operation.status",
-        "output",
-        "1.3",
-    )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
     write_mcp_tool_schema_version::<RepoStatusInput>(&schema_root, "repo.status", "input", "1.1")?;
@@ -1696,6 +1672,16 @@ fn validate_generated_json_schemas(
             serde_json::json!({"root": "C:/fixture", "wait_ms": null}),
         ),
         SchemaSemanticCase::valid(
+            "mcp-repo-index-input-1.3.schema.json",
+            "current repository clean-rebuild request",
+            serde_json::json!({"root": "C:/fixture", "mode": "rebuild"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-repo-index-input-1.2.schema.json",
+            "retained repository contract rejects clean rebuild",
+            serde_json::json!({"root": "C:/fixture", "mode": "rebuild"}),
+        ),
+        SchemaSemanticCase::valid(
             "mcp-operation-status-input-1.0.schema.json",
             "bounded operation status request",
             serde_json::json!({
@@ -2253,6 +2239,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.1.schema.json"),
@@ -2261,6 +2249,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.4.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),

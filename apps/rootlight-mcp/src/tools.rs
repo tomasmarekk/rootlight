@@ -34,7 +34,8 @@ use rootlight_mcp_contract::{
     repository::{RepoListInput, RepoStatusOutput, RepoStatusOutputV1_0, RepoStatusOutputV1_1},
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        RepoIndexOutputV1_0, RepoIndexOutputV1_1, SymbolExplainOutputV1_0,
+        OperationStatusOutputV1_3, RepoIndexOutputV1_0, RepoIndexOutputV1_1, RepoIndexOutputV1_2,
+        SymbolExplainOutputV1_0,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -506,10 +507,12 @@ struct ToolContract {
     input_validator: Validator,
     previous_input_validator: Option<Validator>,
     legacy_input_validator: Option<Validator>,
+    second_legacy_input_validator: Option<Validator>,
     initial_input_validator: Option<Validator>,
     output_validator: Validator,
     previous_output_validator: Option<Validator>,
     legacy_output_validator: Option<Validator>,
+    second_legacy_output_validator: Option<Validator>,
     initial_output_validator: Option<Validator>,
 }
 
@@ -518,6 +521,7 @@ enum ContractSelection {
     Current,
     Previous,
     Legacy,
+    SecondLegacy,
     Initial,
 }
 
@@ -539,6 +543,12 @@ impl ContractSelection {
                 Some(Self::Legacy)
             }
             Some(requested)
+                if contract.tool.second_legacy_contract_version() == Some(requested)
+                    && contract.second_legacy_output_validator.is_some() =>
+            {
+                Some(Self::SecondLegacy)
+            }
+            Some(requested)
                 if contract.tool.initial_contract_version() == Some(requested)
                     && contract.initial_output_validator.is_some() =>
             {
@@ -557,6 +567,9 @@ impl ContractSelection {
             Self::Legacy => tool
                 .legacy_contract_version()
                 .expect("legacy selection requires a retained version"),
+            Self::SecondLegacy => tool
+                .second_legacy_contract_version()
+                .expect("second legacy selection requires a retained version"),
             Self::Initial => tool
                 .initial_contract_version()
                 .expect("initial selection requires a retained version"),
@@ -1121,6 +1134,25 @@ impl ToolContract {
                 })
             })
             .transpose()?;
+        let second_legacy_input_validator =
+            tool.second_legacy_input_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "second legacy input", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "second legacy input",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "second legacy input",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let initial_input_validator = tool
             .initial_input_schema_json()
             .map(|schema| {
@@ -1187,6 +1219,24 @@ impl ToolContract {
                 })
             })
             .transpose()?;
+        let second_legacy_output_validator =
+            tool.second_legacy_output_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "second legacy output", schema)
+                        .map_err(|source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "second legacy output",
+                            source,
+                        })?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "second legacy output",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let initial_output_validator = tool
             .initial_output_schema_json()
             .map(|schema| {
@@ -1229,10 +1279,12 @@ impl ToolContract {
             input_validator,
             previous_input_validator,
             legacy_input_validator,
+            second_legacy_input_validator,
             initial_input_validator,
             output_validator,
             previous_output_validator,
             legacy_output_validator,
+            second_legacy_output_validator,
             initial_output_validator,
         })
     }
@@ -1248,6 +1300,10 @@ impl ToolContract {
                 .legacy_output_validator
                 .as_ref()
                 .expect("legacy selection requires a compiled schema"),
+            ContractSelection::SecondLegacy => self
+                .second_legacy_output_validator
+                .as_ref()
+                .expect("second legacy selection requires a compiled schema"),
             ContractSelection::Initial => self
                 .initial_output_validator
                 .as_ref()
@@ -1267,9 +1323,16 @@ impl ToolContract {
                 .as_ref()
                 .or(self.previous_input_validator.as_ref())
                 .unwrap_or(&self.input_validator),
+            ContractSelection::SecondLegacy => self
+                .second_legacy_input_validator
+                .as_ref()
+                .or(self.legacy_input_validator.as_ref())
+                .or(self.previous_input_validator.as_ref())
+                .unwrap_or(&self.input_validator),
             ContractSelection::Initial => self
                 .initial_input_validator
                 .as_ref()
+                .or(self.second_legacy_input_validator.as_ref())
                 .or(self.legacy_input_validator.as_ref())
                 .or(self.previous_input_validator.as_ref())
                 .unwrap_or(&self.input_validator),
@@ -1787,9 +1850,9 @@ fn typed_selected_output_is_valid(
     match selection {
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
@@ -1809,12 +1872,17 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::SecondLegacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
@@ -2030,9 +2098,9 @@ fn typed_selected_error_output_is_valid(
     match selection {
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
@@ -2052,12 +2120,17 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::SecondLegacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
@@ -2090,11 +2163,14 @@ fn select_output_version(
     }
     match tool {
         VerticalTool::RepoIndex => match selection {
-            ContractSelection::Previous => {}
-            ContractSelection::Legacy => {
+            ContractSelection::Previous | ContractSelection::Legacy => {
+                reject_retained_rebuild_mode(data)?;
+            }
+            ContractSelection::Initial => {
+                reject_retained_rebuild_mode(data)?;
                 data.remove("semantic_operation_id");
             }
-            ContractSelection::Current | ContractSelection::Initial => return Err(()),
+            ContractSelection::Current | ContractSelection::SecondLegacy => return Err(()),
         },
         VerticalTool::RepoStatus => match selection {
             ContractSelection::Previous => {
@@ -2104,13 +2180,20 @@ fn select_output_version(
                 data.remove("logical_snapshot");
                 data.remove("retained_durable_bytes");
             }
-            ContractSelection::Current | ContractSelection::Initial => return Err(()),
+            ContractSelection::Current
+            | ContractSelection::SecondLegacy
+            | ContractSelection::Initial => return Err(()),
         },
         VerticalTool::OperationStatus => match selection {
             ContractSelection::Previous => {
-                remove_operation_fact_work(data)?;
+                strip_current_only_incremental_evidence(data)?;
             }
             ContractSelection::Legacy => {
+                strip_current_only_incremental_evidence(data)?;
+                remove_operation_fact_work(data)?;
+            }
+            ContractSelection::SecondLegacy => {
+                strip_current_only_incremental_evidence(data)?;
                 remove_operation_fact_work(data)?;
                 let resources = data
                     .get_mut("operation")
@@ -2269,8 +2352,43 @@ fn remove_operation_fact_work(data: &mut Map<String, Value>) -> Result<(), ()> {
     Ok(())
 }
 
+fn strip_current_only_incremental_evidence(data: &mut Map<String, Value>) -> Result<(), ()> {
+    let Some(incremental) = data.get("incremental") else {
+        return Ok(());
+    };
+    if incremental.is_null() {
+        return Ok(());
+    }
+    let build_strategy = incremental
+        .as_object()
+        .and_then(|incremental| incremental.get("build_strategy"))
+        .and_then(Value::as_str)
+        .ok_or(())?;
+    if build_strategy == "clean_rebuild" {
+        data.remove("incremental");
+    }
+    Ok(())
+}
+
+fn reject_retained_rebuild_mode(data: &Map<String, Value>) -> Result<(), ()> {
+    let mode = data
+        .get("accepted_plan")
+        .and_then(Value::as_object)
+        .and_then(|plan| plan.get("mode"))
+        .and_then(Value::as_str)
+        .ok_or(())?;
+    if mode == "rebuild" {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn select_public_error_version(selection: ContractSelection, error: &mut Value) -> Result<(), ()> {
-    if selection == ContractSelection::Current || error.is_null() {
+    if matches!(
+        selection,
+        ContractSelection::Current | ContractSelection::Previous
+    ) || error.is_null()
+    {
         return Ok(());
     }
     let actions = error
@@ -3730,16 +3848,16 @@ mod tests {
             observed,
             [
                 (
-                    226_009,
-                    "f777a62f3f83e26fcfc2e1e914b6c7ebaa26e242a0f0557b5823164ca7a03f37".to_owned(),
+                    227_148,
+                    "67f455c77ae4697fece1d69751cca8491328d76d134fbca650ef9b9e460cf8e5".to_owned(),
                 ),
                 (
-                    494_412,
-                    "050c52b49e0cbee197137daa5860a6d78e0567bf9fc0ca0f48ae85faf31ed5e2".to_owned(),
+                    495_551,
+                    "9164d550332bd45b55dd6a3c556f7d35eb6b5a211d510bd2d5af33577e1eac43".to_owned(),
                 ),
                 (
-                    689_099,
-                    "6bb4d8187f61af4e046411ea0833f01a057a4c47bc4ba00cb8264f3917f75c3b".to_owned(),
+                    690_659,
+                    "835a290d54be6ebc27064c56663c4aa8b354c1ad5130998d426767b025125f06".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3933,7 +4051,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "INVALID_ARGUMENT"
         );
-        assert_eq!(result["structuredContent"]["schema_version"], "1.2");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.3");
         serde_json::from_value::<RepoIndexOutput>(result["structuredContent"].clone())
             .expect("invalid input uses the advertised checked error envelope");
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
@@ -4271,7 +4389,7 @@ mod tests {
             .await;
         let result = success(response);
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["schema_version"], "1.3");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.4");
         assert_eq!(result["structuredContent"]["error"]["code"], "NOT_FOUND");
         serde_json::from_value::<OperationStatusOutput>(result["structuredContent"].clone())
             .expect("domain error uses the advertised typed envelope");
@@ -4516,7 +4634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repo_index_serves_current_and_two_retained_contracts() {
+    async fn repo_index_serves_current_and_three_retained_contracts() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
         let current = router
@@ -4537,11 +4655,11 @@ mod tests {
             .await;
         let current = success(current);
         assert_eq!(current["isError"], false);
-        assert_eq!(current["structuredContent"]["schema_version"], "1.2");
+        assert_eq!(current["structuredContent"]["schema_version"], "1.3");
         assert!(current["structuredContent"]["data"]["semantic_operation_id"].is_string());
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
 
-        for (version, semantic_operation) in [("1.1", true), ("1.0", false)] {
+        for (version, semantic_operation) in [("1.2", true), ("1.1", true), ("1.0", false)] {
             let retained = router
                 .handle(
                     request(
@@ -4567,7 +4685,7 @@ mod tests {
                 semantic_operation
             );
         }
-        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 4);
 
         for malformed in [json!("1"), json!("1.0.0"), json!(""), json!(1)] {
             let response = router
@@ -4593,7 +4711,7 @@ mod tests {
                 }
             ));
         }
-        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 4);
     }
 
     #[tokio::test]
@@ -4617,7 +4735,7 @@ mod tests {
         )
         .expect("registry compiles");
 
-        for (version, actions) in [("1.2", 2), ("1.1", 0), ("1.0", 0)] {
+        for (version, actions) in [("1.3", 2), ("1.2", 2), ("1.1", 0), ("1.0", 0)] {
             let response = router
                 .handle(
                     request(
@@ -4646,9 +4764,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operation_status_serves_current_and_three_retained_minor_contracts() {
+    async fn operation_status_serves_current_and_four_retained_minor_contracts() {
         let Value::Object(output) = json!({
-            "schema_version": "1.3",
+            "schema_version": "1.4",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -4779,6 +4897,7 @@ mod tests {
         .expect("registry compiles");
 
         for (version, retained_durable, incremental, referenced, fact_work, actions) in [
+            ("1.4", true, true, true, true, 2),
             ("1.3", true, true, true, true, 2),
             ("1.2", true, true, true, false, 0),
             ("1.1", false, true, true, false, 0),
@@ -4985,7 +5104,7 @@ mod tests {
         let contract =
             ToolContract::compile(VerticalTool::OperationStatus).expect("contract compiles");
         let output = json!({
-            "schema_version": "1.3",
+            "schema_version": "1.4",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -5078,6 +5197,161 @@ mod tests {
 
         assert_eq!(result["isError"], false);
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn clean_rebuild_input_is_rejected_by_every_retained_repo_index_contract() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let current = success(
+            router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": "repo.index",
+                            "arguments": {
+                                "root": "C:/fixture",
+                                "mode": "rebuild"
+                            }
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await,
+        );
+        assert_eq!(current["isError"], false);
+        assert_eq!(current["structuredContent"]["schema_version"], "1.3");
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+
+        for version in ["1.2", "1.1", "1.0"] {
+            let retained = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": "repo.index",
+                                "arguments": {
+                                    "root": "C:/fixture",
+                                    "mode": "rebuild"
+                                },
+                                "_meta": {
+                                    (TOOL_CONTRACT_VERSION_META_KEY): version
+                                }
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(retained["isError"], true);
+            assert_eq!(retained["structuredContent"]["schema_version"], version);
+            assert_eq!(
+                retained["structuredContent"]["error"]["code"],
+                "INVALID_ARGUMENT"
+            );
+        }
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn clean_rebuild_status_is_current_only_and_retained_versions_strip_incremental_evidence()
+    {
+        let Value::Object(output) = json!({
+            "schema_version": "1.4",
+            "data": {
+                "operation": {
+                    "kind": "repository_index",
+                    "state": "running",
+                    "stage": "analysis",
+                    "progress": {
+                        "completed_units": 1,
+                        "total_units": 2
+                    },
+                    "revision": 7,
+                    "started_at": "2026-07-18T00:00:00Z",
+                    "resources": {
+                        "peak_rss_bytes": 1024,
+                        "written_bytes": 512,
+                        "files_examined": 3,
+                        "bytes_examined": 2048,
+                        "referenced_bytes": 256,
+                        "newly_written_bytes": 512,
+                        "reserved_memory_bytes": 4096,
+                        "owned_memory_bytes": 3072,
+                        "retained_durable_bytes": 768
+                    }
+                },
+                "published_generation": null,
+                "semantic_operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
+                "index_stage": "analysis",
+                "incremental": {
+                    "build_strategy": "clean_rebuild",
+                    "fallback_reason": null,
+                    "invalidated_units": 3,
+                    "changed_inputs": 3,
+                    "changed_files": 3,
+                    "reused_files": 0,
+                    "rebuilt_files": 3,
+                    "reused_facts": 0,
+                    "rebuilt_facts": 12
+                },
+                "error": null,
+                "retry_after_ms": 50
+            }
+        }) else {
+            panic!("operation fixture is an object");
+        };
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .expect("registry compiles");
+
+        for version in ["1.4", "1.3", "1.2", "1.1", "1.0"] {
+            let result = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": "operation.status",
+                                "arguments": {
+                                    "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"
+                                },
+                                "_meta": {
+                                    (TOOL_CONTRACT_VERSION_META_KEY): version
+                                }
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"]["schema_version"], version);
+            if version == "1.4" {
+                assert_eq!(
+                    result["structuredContent"]["data"]["incremental"]["build_strategy"],
+                    "clean_rebuild"
+                );
+                assert_eq!(
+                    result["structuredContent"]["data"]["incremental"]["reused_files"],
+                    0
+                );
+                assert_eq!(
+                    result["structuredContent"]["data"]["incremental"]["reused_facts"],
+                    0
+                );
+            } else {
+                assert!(
+                    result["structuredContent"]["data"]
+                        .get("incremental")
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[tokio::test]

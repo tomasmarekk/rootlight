@@ -395,6 +395,8 @@ pub enum FirstSliceIndexOperationStrategy {
     DependencyDirected,
     /// Missing dependency evidence required a repository-wide rebuild.
     ConservativeRepositoryRebuild,
+    /// The caller requested a complete rebuild without parent reuse.
+    CleanRebuild,
     /// An identical retained generation was reactivated without rebuilding it.
     RetainedGeneration,
 }
@@ -1153,6 +1155,8 @@ pub enum FirstSliceBuildStrategy {
     DependencyDirected,
     /// Missing fine-grained declarations required a complete repository rebuild.
     ConservativeRepositoryRebuild,
+    /// The caller requested a complete rebuild without parent reuse.
+    CleanRebuild,
 }
 
 /// Count of changed typed inputs in one conservative semantic class.
@@ -1256,6 +1260,8 @@ pub enum FirstSliceFactWorkCause {
     CompleteDependencyMatch,
     /// A conservative fallback selected a repository-wide rebuild.
     ConservativeFallback,
+    /// The caller explicitly requested a complete rebuild.
+    UserRequestedCleanRebuild,
     /// Generation ownership requires fresh normalized records from parser facts.
     GenerationBoundLowering,
     /// Repository-wide semantic resolution produced or retained the records.
@@ -3298,6 +3304,44 @@ pub enum FirstSliceIndexMode {
     Deep,
 }
 
+/// Controls whether one repository generation may reuse its active parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstSliceReusePolicy {
+    /// Use verified parent baselines and artifacts when they remain compatible.
+    Incremental,
+    /// Rebuild every source and fact while retaining the active lineage parent.
+    CleanRebuild,
+}
+
+/// Orthogonal analysis-strength and reuse policy for one repository index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceIndexOptions {
+    /// Analysis strength used to construct the new generation.
+    pub mode: FirstSliceIndexMode,
+    /// Parent-reuse policy used to construct the new generation.
+    pub reuse_policy: FirstSliceReusePolicy,
+}
+
+impl FirstSliceIndexOptions {
+    /// Constructs an incremental index using the requested analysis strength.
+    #[must_use]
+    pub const fn incremental(mode: FirstSliceIndexMode) -> Self {
+        Self {
+            mode,
+            reuse_policy: FirstSliceReusePolicy::Incremental,
+        }
+    }
+
+    /// Constructs a caller-requested clean rebuild using the requested strength.
+    #[must_use]
+    pub const fn clean_rebuild(mode: FirstSliceIndexMode) -> Self {
+        Self {
+            mode,
+            reuse_policy: FirstSliceReusePolicy::CleanRebuild,
+        }
+    }
+}
+
 /// One immutable source made available to a whole-project analysis provider.
 #[derive(Debug, Clone, Copy)]
 pub struct FirstSliceProjectInput<'a> {
@@ -4911,7 +4955,26 @@ impl FirstSliceService {
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
-        let prepared = self.prepare_repository_with_mode(path, mode, cancellation)?;
+        let prepared = self.prepare_repository_with_options(
+            path,
+            FirstSliceIndexOptions::incremental(mode),
+            cancellation,
+        )?;
+        self.publish_prepared(prepared, cancellation)
+    }
+
+    /// Indexes and publishes one repository using explicit analysis and reuse policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::index_repository_with_mode`].
+    pub fn index_repository_with_options(
+        &mut self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+        let prepared = self.prepare_repository_with_options(path, options, cancellation)?;
         self.publish_prepared(prepared, cancellation)
     }
 
@@ -5006,7 +5069,29 @@ impl FirstSliceService {
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
-        self.prepare_repository_with_mode_and_progress(path, mode, cancellation, |_| {})
+        self.prepare_repository_with_options(
+            path,
+            FirstSliceIndexOptions::incremental(mode),
+            cancellation,
+        )
+    }
+
+    /// Builds one hidden generation using explicit analysis and reuse policy.
+    ///
+    /// Clean rebuild requires an active generation for the repository. It
+    /// retains that lineage parent while excluding all parent reuse inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::RepositoryNotFound`] when clean rebuild has no
+    /// active repository, or the same failures as [`Self::prepare_repository_with_mode`].
+    pub fn prepare_repository_with_options(
+        &self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_repository_with_options_and_progress(path, options, cancellation, |_| {})
     }
 
     /// Builds one hidden generation and reports monotonic coarse progress.
@@ -5025,10 +5110,30 @@ impl FirstSliceService {
         cancellation: &Cancellation,
         observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
-        let mut admission = self.admit_repository(path, cancellation)?;
-        let result = self.prepare_repository_after_admission_with_progress(
+        self.prepare_repository_with_options_and_progress(
             path,
-            mode,
+            FirstSliceIndexOptions::incremental(mode),
+            cancellation,
+            observe_progress,
+        )
+    }
+
+    /// Builds one hidden generation with explicit policy and reports progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_repository_with_options`].
+    pub fn prepare_repository_with_options_and_progress(
+        &self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        let mut admission = self.admit_repository(path, cancellation)?;
+        let result = self.prepare_repository_after_admission_with_options_and_progress(
+            path,
+            options,
             &mut admission,
             cancellation,
             observe_progress,
@@ -5056,9 +5161,31 @@ impl FirstSliceService {
         cancellation: &Cancellation,
         observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_repository_after_admission_with_options_and_progress(
+            path,
+            FirstSliceIndexOptions::incremental(mode),
+            admission,
+            cancellation,
+            observe_progress,
+        )
+    }
+
+    /// Builds one hidden generation with explicit policy under an admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_repository_with_options_and_progress`].
+    pub fn prepare_repository_after_admission_with_options_and_progress(
+        &self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        admission: &mut FirstSliceIndexAdmission,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         self.prepare_repository_with_representation_and_progress(
             path,
-            mode,
+            options,
             DurableGenerationRepresentation::Oracle,
             admission,
             cancellation,
@@ -5069,12 +5196,13 @@ impl FirstSliceService {
     fn prepare_repository_with_representation_and_progress(
         &self,
         path: &Path,
-        mode: FirstSliceIndexMode,
+        options: FirstSliceIndexOptions,
         representation: DurableGenerationRepresentation,
         admission: &mut FirstSliceIndexAdmission,
         cancellation: &Cancellation,
         mut observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        let FirstSliceIndexOptions { mode, reuse_policy } = options;
         let started = Instant::now();
         require_deadline(cancellation)?;
         cancellation
@@ -5139,8 +5267,14 @@ impl FirstSliceService {
         let parser_provider_hash = first_slice_parser_provider_hash()?;
         let provider_set_hash = self.provider_set_hash(mode)?;
         let active = self.active_by_repository.get(&repository).copied();
-        let parent_baseline =
-            active.and_then(|generation| self.incremental_baselines.get(&generation));
+        if reuse_policy == FirstSliceReusePolicy::CleanRebuild && active.is_none() {
+            return Err(FirstSliceError::RepositoryNotFound);
+        }
+        let parent_baseline = if reuse_policy == FirstSliceReusePolicy::Incremental {
+            active.and_then(|generation| self.incremental_baselines.get(&generation))
+        } else {
+            None
+        };
         let incremental_context = IncrementalDiscoveryContext::new(
             self.config.hash(),
             derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
@@ -5179,7 +5313,8 @@ impl FirstSliceService {
         // path and content fingerprint still matches the active baseline.
         // Reuse is valid only while the complete product configuration and
         // provider-set identities also match the published generation.
-        if incremental.changes().is_empty()
+        if reuse_policy == FirstSliceReusePolicy::Incremental
+            && incremental.changes().is_empty()
             && let Some(active) = active
             && let Ok(snapshot) = self.generations.generation(active)
         {
@@ -5193,7 +5328,11 @@ impl FirstSliceService {
                 return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
             }
         }
-        let cached_snapshots = incremental.take_hashed_snapshots();
+        let cached_snapshots = if reuse_policy == FirstSliceReusePolicy::Incremental {
+            incremental.take_hashed_snapshots()
+        } else {
+            Default::default()
+        };
         let (manifest, mut discovered_snapshots) = discover_with_snapshots(
             &root,
             &self.config,
@@ -5349,7 +5488,8 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Identity)?
                 .canonical_hash()
                 .map_err(|_| FirstSliceError::Identity)?;
-        if let Some(active) = active
+        if reuse_policy == FirstSliceReusePolicy::Incremental
+            && let Some(active) = active
             && let Ok(snapshot) = self.generations.generation(active)
         {
             let metadata = snapshot.metadata();
@@ -5373,7 +5513,9 @@ impl FirstSliceService {
             format_version: generation_format_version(),
         })
         .id();
-        if let Some(receipt) = self.receipts.get(&generation).cloned() {
+        if reuse_policy == FirstSliceReusePolicy::Incremental
+            && let Some(receipt) = self.receipts.get(&generation).cloned()
+        {
             check_cancellation(cancellation)?;
             return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
         }
@@ -5390,21 +5532,29 @@ impl FirstSliceService {
             &reclaimable_generations,
             cancellation,
         )?;
-        let parent_structural_artifacts = active
-            .and_then(|generation| self.structural_artifacts.generation(generation))
-            .filter(|artifacts| {
-                artifacts.iter().all(|(_, entry)| {
-                    source_analysis_limits
-                        .get(&entry.artifact.file())
-                        .is_some_and(|limits| entry.artifact.is_compatible_with_limits(limits))
+        let parent_structural_artifacts = if reuse_policy == FirstSliceReusePolicy::Incremental {
+            active
+                .and_then(|generation| self.structural_artifacts.generation(generation))
+                .filter(|artifacts| {
+                    artifacts.iter().all(|(_, entry)| {
+                        source_analysis_limits
+                            .get(&entry.artifact.file())
+                            .is_some_and(|limits| entry.artifact.is_compatible_with_limits(limits))
+                    })
                 })
-            });
-        let parent_incremental_inputs =
-            active.and_then(|generation| self.incremental_inputs.get(&generation));
+        } else {
+            None
+        };
+        let parent_incremental_inputs = if reuse_policy == FirstSliceReusePolicy::Incremental {
+            active.and_then(|generation| self.incremental_inputs.get(&generation))
+        } else {
+            None
+        };
         let mut incremental_plan = prepare_incremental_state(
             FirstSliceIncrementalPlanningContext {
                 repository,
                 has_parent: active.is_some(),
+                reuse_policy,
                 parent: parent_incremental_inputs,
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
@@ -5683,6 +5833,7 @@ impl FirstSliceService {
             FirstSliceIncrementalPlanningContext {
                 repository,
                 has_parent: active.is_some(),
+                reuse_policy,
                 parent: parent_incremental_inputs,
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
@@ -6115,7 +6266,7 @@ impl FirstSliceService {
 
         let preparation = self.prepare_repository_with_representation_and_progress(
             path,
-            FirstSliceIndexMode::Deep,
+            FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Deep),
             DurableGenerationRepresentation::RecoverySnapshot,
             admission,
             cancellation,
@@ -6892,6 +7043,9 @@ impl FirstSliceService {
                         }
                         FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
                             FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild
+                        }
+                        FirstSliceBuildStrategy::CleanRebuild => {
+                            FirstSliceIndexOperationStrategy::CleanRebuild
                         }
                     },
                     fallback_reason: incremental.evidence.fallback_reason,
@@ -10524,6 +10678,7 @@ pub enum FirstSliceStorageScope {
 struct FirstSliceIncrementalPlanningContext<'a> {
     repository: RepositoryId,
     has_parent: bool,
+    reuse_policy: FirstSliceReusePolicy,
     parent: Option<&'a InputSnapshot>,
     parent_artifacts: Option<&'a StructuralGenerationArtifacts>,
     discovery: &'a IncrementalDiscovery,
@@ -10538,6 +10693,7 @@ fn prepare_incremental_state(
     let FirstSliceIncrementalPlanningContext {
         repository,
         has_parent,
+        reuse_policy,
         parent,
         parent_artifacts,
         discovery,
@@ -10593,13 +10749,17 @@ fn prepare_incremental_state(
         cancellation,
     )
     .map_err(|error| map_incremental_error(error, cancellation))?;
-    let evidence = summarize_incremental_evidence(has_parent, discovery, source_files, &plan)?;
-    let reusable_parser_artifacts = plan
-        .artifact_decisions()
-        .iter()
-        .filter(|decision| decision.kind() == ArtifactDecisionKind::Reuse)
-        .map(|decision| decision.artifact())
-        .collect();
+    let evidence =
+        summarize_incremental_evidence(has_parent, reuse_policy, discovery, source_files, &plan)?;
+    let reusable_parser_artifacts = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
+        BTreeSet::new()
+    } else {
+        plan.artifact_decisions()
+            .iter()
+            .filter(|decision| decision.kind() == ArtifactDecisionKind::Reuse)
+            .map(|decision| decision.artifact())
+            .collect()
+    };
     Ok(PreparedIncrementalPlan {
         state: PreparedIncrementalState {
             baseline: discovery.baseline().clone(),
@@ -11463,6 +11623,7 @@ fn hash_component(hasher: &mut blake3::Hasher, component: &[u8]) -> Result<(), F
 
 fn summarize_incremental_evidence(
     has_parent: bool,
+    reuse_policy: FirstSliceReusePolicy,
     discovery: &IncrementalDiscovery,
     source_files: &BTreeSet<FileId>,
     plan: &InvalidationPlan,
@@ -11485,10 +11646,14 @@ fn summarize_incremental_evidence(
         .map(|(kind, files)| FirstSliceFileChangeCount { kind, files })
         .collect();
 
-    let fallback_reason = has_parent
-        .then(|| plan.fallback().map(|fallback| fallback.reason()))
-        .flatten();
-    let strategy = if !has_parent {
+    let fallback_reason = if reuse_policy == FirstSliceReusePolicy::Incremental && has_parent {
+        plan.fallback().map(|fallback| fallback.reason())
+    } else {
+        None
+    };
+    let strategy = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
+        FirstSliceBuildStrategy::CleanRebuild
+    } else if !has_parent {
         FirstSliceBuildStrategy::Initial
     } else if fallback_reason.is_some() {
         FirstSliceBuildStrategy::ConservativeRepositoryRebuild
@@ -11515,7 +11680,7 @@ fn summarize_incremental_evidence(
         lowered_files: 0,
         reused_normalized_facts: 0,
         rebuilt_normalized_facts: 0,
-        planned_fact_work: planned_fact_work(has_parent, source_files, plan)?,
+        planned_fact_work: planned_fact_work(has_parent, reuse_policy, source_files, plan)?,
         normalized_fact_work: Vec::new(),
         structural_cache_retained: false,
     })
@@ -11523,6 +11688,7 @@ fn summarize_incremental_evidence(
 
 fn planned_fact_work(
     has_parent: bool,
+    reuse_policy: FirstSliceReusePolicy,
     source_files: &BTreeSet<FileId>,
     plan: &InvalidationPlan,
 ) -> Result<Vec<FirstSlicePlannedFactWork>, FirstSliceError> {
@@ -11531,7 +11697,9 @@ fn planned_fact_work(
         .copied()
         .map(|file| (file_analysis_unit(file), file))
         .collect::<BTreeMap<_, _>>();
-    let rebuild_cause = if !has_parent {
+    let rebuild_cause = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
+        FirstSliceFactWorkCause::UserRequestedCleanRebuild
+    } else if !has_parent {
         FirstSliceFactWorkCause::InitialGeneration
     } else if plan.fallback().is_some() {
         FirstSliceFactWorkCause::ConservativeFallback
@@ -11547,6 +11715,16 @@ fn planned_fact_work(
         ),
         (BTreeSet<AnalysisUnitId>, BTreeSet<FileId>),
     >::new();
+    let reusable_disposition = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
+        FirstSliceFactWorkDisposition::Rebuild
+    } else {
+        FirstSliceFactWorkDisposition::Reuse
+    };
+    let reusable_cause = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
+        FirstSliceFactWorkCause::UserRequestedCleanRebuild
+    } else {
+        FirstSliceFactWorkCause::CompleteDependencyMatch
+    };
     for (disposition, cause, nodes) in [
         (
             FirstSliceFactWorkDisposition::Rebuild,
@@ -11554,8 +11732,8 @@ fn planned_fact_work(
             plan.invalidated_nodes().collect::<Vec<_>>(),
         ),
         (
-            FirstSliceFactWorkDisposition::Reuse,
-            FirstSliceFactWorkCause::CompleteDependencyMatch,
+            reusable_disposition,
+            reusable_cause,
             plan.reusable_nodes().collect::<Vec<_>>(),
         ),
     ] {
@@ -22173,6 +22351,153 @@ mod tests {
             &deletion,
             &cancellation,
         );
+    }
+
+    #[test]
+    fn clean_rebuild_preserves_logical_identity_and_rebuilds_every_fact() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, EQUIVALENCE_INITIAL).expect("initial source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(4).expect("service initializes");
+        assert!(matches!(
+            service.index_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &cancellation,
+            ),
+            Err(FirstSliceError::RepositoryNotFound)
+        ));
+        service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        fs::write(&source, EQUIVALENCE_BODY_EDIT).expect("body edit writes");
+        let incremental = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("incremental successor publishes");
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &cancellation,
+            )
+            .expect("clean rebuild prepares");
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &cancellation)
+            .expect("clean rebuild publishes");
+        let clean = committed.receipt();
+        let evidence = committed.evidence();
+
+        assert_eq!(clean.repository, incremental.repository);
+        assert_eq!(clean.parent, Some(incremental.generation));
+        assert_ne!(clean.generation, incremental.generation);
+        assert_eq!(clean.logical_snapshot, incremental.logical_snapshot);
+        assert_eq!(
+            evidence.strategy,
+            FirstSliceIndexOperationStrategy::CleanRebuild
+        );
+        assert_eq!(evidence.fallback_reason, None);
+        assert_eq!(evidence.reused_files, 0);
+        assert_eq!(evidence.reused_facts, 0);
+        assert_eq!(evidence.rebuilt_files, clean.indexed_files);
+        assert!(evidence.rebuilt_facts > 0);
+        assert!(!evidence.planned_fact_work.is_empty());
+        assert!(evidence.planned_fact_work.iter().all(|work| {
+            work.disposition() == FirstSliceFactWorkDisposition::Rebuild
+                && work.cause() == FirstSliceFactWorkCause::UserRequestedCleanRebuild
+        }));
+        assert!(evidence.normalized_fact_work.iter().all(|work| {
+            work.cause() != FirstSliceFactWorkCause::CompleteDependencyMatch
+                && work.cause() != FirstSliceFactWorkCause::UserRequestedCleanRebuild
+        }));
+    }
+
+    #[test]
+    fn clean_rebuild_preserves_deep_analysis_strength() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"clean-rebuild-project-adapter"),
+            calls: Arc::clone(&calls),
+            partitioned: false,
+            syntax_facts_bounded: false,
+        });
+        let cancellation = deadline();
+        let mut service =
+            FirstSliceService::new_with_storage(3, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("deep service initializes");
+        let deep = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &cancellation)
+            .expect("deep generation publishes");
+        let clean = service
+            .index_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Deep),
+                &cancellation,
+            )
+            .expect("deep clean rebuild publishes");
+
+        assert_eq!(clean.parent, Some(deep.generation));
+        assert_eq!(clean.logical_snapshot, deep.logical_snapshot);
+        assert!(
+            service
+                .active_generation_is_deep(clean.repository)
+                .expect("active provider identity resolves")
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_clean_rebuild_evidence_survives_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn retained() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+
+        let clean = {
+            let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_repository(fixture.path(), &cancellation)
+                .expect("initial durable generation publishes");
+            service
+                .index_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &cancellation,
+                )
+                .expect("durable clean rebuild publishes")
+        };
+
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation)
+            .expect("durable service restores");
+        let evidence = restored
+            .incremental_evidence(clean.generation)
+            .expect("clean rebuild evidence restores");
+        assert_eq!(evidence.strategy(), FirstSliceBuildStrategy::CleanRebuild);
+        assert_eq!(evidence.reused_parser_artifacts(), 0);
+        assert_eq!(evidence.reused_normalized_facts(), 0);
+        assert!(evidence.planned_fact_work().iter().all(|work| {
+            work.disposition() == FirstSliceFactWorkDisposition::Rebuild
+                && work.cause() == FirstSliceFactWorkCause::UserRequestedCleanRebuild
+        }));
     }
 
     #[test]

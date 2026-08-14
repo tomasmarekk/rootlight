@@ -107,7 +107,7 @@ use rootlight_mcp_contract::{
         OperationResourcesV1_2 as OperationResources, OperationSchemaVersion, OperationState,
         OperationStatusData, OperationStatusInput, OperationStatusSchemaVersion,
         OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
-        ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_2 as RepoIndexSuccess,
+        ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_3 as RepoIndexSuccess,
         RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
         ScopeSelector, SearchMode, SourceChunk, SourceElision, SourceEncoding,
         SourceEncodingRequest, SourceReadData, SourceReadSelector, StaleSourceReference,
@@ -6884,7 +6884,6 @@ fn normalize_repository_index(
 ) -> Result<RepositoryIndexPortRequest, ToolExecutionError> {
     if input.repository_id.is_some()
         || input.scope.is_some()
-        || matches!(input.mode, Some(IndexMode::Rebuild))
         || input
             .requested_tiers
             .as_ref()
@@ -7281,6 +7280,7 @@ fn map_repository_index(
             (IndexMode::Auto, IndexMode::Structural | IndexMode::Deep)
                 | (IndexMode::Structural, IndexMode::Structural)
                 | (IndexMode::Deep, IndexMode::Deep)
+                | (IndexMode::Rebuild, IndexMode::Rebuild)
         )
         || response.accepted_plan.parent_generation.0 != response.result.parent_generation
         || response.result.published_generation.is_some()
@@ -7305,7 +7305,7 @@ fn map_repository_index(
             .then_with(|| left.message.as_str().cmp(right.message.as_str()))
     });
     Ok(RepoIndexSuccess {
-        schema_version: OperationSchemaVersion::V1_2,
+        schema_version: OperationSchemaVersion::V1_3,
         data: RepoIndexData {
             repository_id: response.result.repository,
             operation_id: response.result.operation,
@@ -7342,7 +7342,7 @@ fn map_operation_status(
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: OperationStatusSchemaVersion::V1_3,
+        schema_version: OperationStatusSchemaVersion::V1_4,
         data: OperationStatusData {
             operation: OperationDetail {
                 kind: kind.to_owned(),
@@ -7415,6 +7415,7 @@ fn map_operation_incremental_evidence(
             client::RepositoryBuildStrategy::RetainedGeneration => {
                 OperationBuildStrategy::RetainedGeneration
             }
+            client::RepositoryBuildStrategy::CleanRebuild => OperationBuildStrategy::CleanRebuild,
         },
         fallback_reason: RequiredNullable(evidence.fallback_reason.map(|reason| match reason {
             client::RepositoryFallbackReason::MissingDependencyDeclaration => {
@@ -7624,6 +7625,10 @@ fn validate_operation_fact_work_cause(
             client::RepositoryFactWorkCause::GenerationBoundLowering
                 | client::RepositoryFactWorkCause::Resolution,
             true
+        ) | (
+            client::RepositoryFactWorkDisposition::Rebuild,
+            client::RepositoryFactWorkCause::UserRequestedCleanRebuild,
+            false
         )
     ) {
         Ok(())
@@ -7663,6 +7668,18 @@ fn validate_operation_fact_work_strategy(
                 && planned.iter().all(|group| {
                     group.disposition == client::RepositoryFactWorkDisposition::Rebuild
                         && group.cause == client::RepositoryFactWorkCause::ConservativeFallback
+                })
+                && normalized.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                })
+        }
+        client::RepositoryBuildStrategy::CleanRebuild => {
+            evidence.fallback_reason.is_none()
+                && evidence.reused_files == 0
+                && evidence.reused_facts == 0
+                && planned.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                        && group.cause == client::RepositoryFactWorkCause::UserRequestedCleanRebuild
                 })
                 && normalized.iter().all(|group| {
                     group.disposition == client::RepositoryFactWorkDisposition::Rebuild
@@ -7781,6 +7798,9 @@ const fn operation_fact_work_cause(
             OperationFactWorkCause::GenerationBoundLowering
         }
         client::RepositoryFactWorkCause::Resolution => OperationFactWorkCause::Resolution,
+        client::RepositoryFactWorkCause::UserRequestedCleanRebuild => {
+            OperationFactWorkCause::UserRequestedCleanRebuild
+        }
     }
 }
 
