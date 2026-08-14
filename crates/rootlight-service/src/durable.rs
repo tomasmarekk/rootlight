@@ -1863,9 +1863,6 @@ impl DurableCatalog {
         policy: &RestorePolicy<'_>,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
-        if policy.repair || policy.compact {
-            mark_storage_accounting_dirty(&self.storage_accounting);
-        }
         let names = private_entry_names(repository)?;
         let mut markers = BTreeMap::<u64, ActivationMarker>::new();
         let mut metadata_names = BTreeMap::<u64, OsString>::new();
@@ -1895,6 +1892,9 @@ impl DurableCatalog {
         }
 
         if policy.repair {
+            if !staging_names.is_empty() {
+                mark_storage_accounting_dirty(&self.storage_accounting);
+            }
             for staging_name in staging_names {
                 PrivateDirectory::open(repository.capability(), &staging_name)
                     .map_err(|_| FirstSliceError::CatalogCorrupt)?
@@ -1905,6 +1905,7 @@ impl DurableCatalog {
 
         if markers.is_empty() {
             if policy.repair {
+                mark_storage_accounting_dirty(&self.storage_accounting);
                 remove_generation_directories(repository, &generation_names)?;
                 remove_repository_metadata_directories(repository, metadata_names.values())?;
                 compact_source_blobs(repository, &BTreeSet::new())?;
@@ -1989,6 +1990,9 @@ impl DurableCatalog {
             restored.push(restored_generation);
         }
         if policy.repair {
+            if !corrupted.is_empty() {
+                mark_storage_accounting_dirty(&self.storage_accounting);
+            }
             for (activation_sequence, generation) in corrupted {
                 self.quarantine_generation(
                     repository_id,
@@ -2027,6 +2031,7 @@ impl DurableCatalog {
                 .collect();
         }
         if policy.compact {
+            mark_storage_accounting_dirty(&self.storage_accounting);
             compact_repository_entries(
                 repository,
                 &markers,

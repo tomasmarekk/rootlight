@@ -17735,6 +17735,63 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn healthy_active_recovery_preserves_inflight_publication_accounting() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let retained_fixture = durable_test_tempdir();
+        fs::write(
+            retained_fixture.path().join("lib.rs"),
+            "pub fn retained_during_publication() -> u32 { 1 }\n",
+        )
+        .expect("retained fixture source writes");
+        let new_fixture = durable_test_tempdir();
+        fs::write(
+            new_fixture.path().join("lib.rs"),
+            "pub fn published_during_recovery() -> u32 { 2 }\n",
+        )
+        .expect("new fixture source writes");
+        let cancellation = deadline();
+        let retained = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(retained_fixture.path(), &cancellation)
+                .expect("retained generation publishes")
+        };
+
+        let (mut service, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("deferred durable service opens");
+        let prepared = service
+            .prepare_repository(new_fixture.path(), &cancellation)
+            .expect("independent generation prepares while recovery is pending");
+        let restored = deferred
+            .restore_active_repository(retained.repository, &cancellation)
+            .expect("healthy active generation verifies without repair");
+        let published = service
+            .publish_prepared(prepared, &cancellation)
+            .expect("healthy recovery does not invalidate publication accounting");
+        service
+            .install_progressive_deferred_restore(restored, &cancellation)
+            .expect("retained generation installs after independent publication");
+
+        assert_ne!(published.repository, retained.repository);
+        assert_eq!(
+            service.active_generation_for(published.repository),
+            Some(published.generation)
+        );
+        assert_eq!(
+            service.active_generation_for(retained.repository),
+            Some(retained.generation)
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn deferred_bootstrap_leaves_generation_payloads_unopened() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
