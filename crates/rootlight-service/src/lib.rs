@@ -22079,10 +22079,14 @@ mod tests {
             )
             .expect("extension-heavy source writes");
         }
-        // Hosted Intel macOS runners need extra headroom to materialize and
-        // merge the full 10,000-extension boundary. This deadline guards
+        // macOS and Windows debug builds need extra headroom to materialize
+        // and merge the full 10,000-extension boundary. This deadline guards
         // against hangs; the test does not define a performance SLO.
-        let deadline_seconds = if cfg!(target_os = "macos") { 300 } else { 120 };
+        let deadline_seconds = if cfg!(any(target_os = "macos", target_os = "windows")) {
+            300
+        } else {
+            120
+        };
         let cancellation = Cancellation::with_deadline(
             Instant::now()
                 .checked_add(Duration::from_secs(deadline_seconds))
