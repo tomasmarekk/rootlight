@@ -358,6 +358,7 @@ pub struct FirstSliceIndexOperationEvidence {
 /// Opaque durable recovery work split between startup-active and retained-history phases.
 pub struct FirstSliceDeferredRestore {
     durable: Arc<DurableCatalog>,
+    active_targets: Vec<FirstSliceRecoveryTarget>,
 }
 
 /// One repository whose last activated generation requires background recovery.
@@ -365,6 +366,10 @@ pub struct FirstSliceDeferredRestore {
 pub struct FirstSliceRecoveryTarget {
     repository: RepositoryId,
     generation: GenerationId,
+    root_identity: ContentHash,
+    activation_sequence: u64,
+    global_activation_sequence: u64,
+    published_generation_count: u64,
 }
 
 impl FirstSliceRecoveryTarget {
@@ -387,29 +392,30 @@ pub struct FirstSliceRestoredState {
 }
 
 impl FirstSliceDeferredRestore {
-    /// Reports whether at least one durable activation requires startup restore.
+    /// Reports whether the deferred-open snapshot contains active restore work.
     ///
-    /// The check traverses only bounded private catalog metadata. Generation
-    /// payloads remain unopened until [`Self::restore_active`] performs their
-    /// integrity-checked recovery.
+    /// Deferred open has already validated the bounded activation and generation
+    /// manifests. Generation payloads remain unopened until
+    /// [`Self::restore_active`] performs their integrity-checked recovery.
     ///
     /// # Errors
     ///
-    /// Returns a typed durable catalog or retention failure.
+    /// This cached lookup does not currently fail.
     pub fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
-        self.durable.has_active_restore_work()
+        Ok(!self.active_targets.is_empty())
     }
 
     /// Lists active repositories in most-recently-activated order.
     ///
-    /// This reads only bounded activation metadata. Generation payloads remain
-    /// unopened so the daemon can publish recovery work before reconstruction.
+    /// Deferred open has already collected this bounded metadata. Generation
+    /// payloads remain unopened so the daemon can publish recovery work before
+    /// reconstruction.
     ///
     /// # Errors
     ///
-    /// Returns a typed durable catalog or retention failure.
+    /// This cached lookup does not currently fail.
     pub fn active_targets(&self) -> Result<Vec<FirstSliceRecoveryTarget>, FirstSliceError> {
-        self.durable.active_restore_targets()
+        Ok(self.active_targets.clone())
     }
 
     /// Restores the newest valid generation for one exact repository.
@@ -3443,14 +3449,39 @@ impl FirstSliceService {
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
         let maximum_generations = policy.retained_generations();
         let durable = Arc::new(DurableCatalog::open(state_root, maximum_generations)?);
-        let service = Self::new_with_storage_policy(
+        let active_targets = durable.active_restore_targets()?;
+        let mut service = Self::new_with_storage_policy(
             maximum_generations,
             MAX_RETAINED_SOURCE_BYTES,
             Some(Arc::clone(&durable)),
             project_analyzer,
             policy,
         )?;
-        Ok((service, FirstSliceDeferredRestore { durable }))
+        service.bootstrap_deferred_restore(&active_targets)?;
+        Ok((
+            service,
+            FirstSliceDeferredRestore {
+                durable,
+                active_targets,
+            },
+        ))
+    }
+
+    fn bootstrap_deferred_restore(
+        &mut self,
+        targets: &[FirstSliceRecoveryTarget],
+    ) -> Result<(), FirstSliceError> {
+        for target in targets {
+            self.restore_repository_registration(target.root_identity, target.repository)?;
+            self.activation_sequences
+                .insert(target.repository, target.activation_sequence);
+            self.published_generation_counts
+                .insert(target.repository, target.published_generation_count);
+            self.global_activation_sequence = self
+                .global_activation_sequence
+                .max(target.global_activation_sequence);
+        }
+        Ok(())
     }
 
     /// Installs fully verified durable state into an otherwise empty service.
@@ -17549,6 +17580,264 @@ mod tests {
             .source_read(receipt.generation, vec![source], &cancellation)
             .expect("restored source bytes remain readable");
         assert_eq!(read.data.generation, receipt.generation);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn deferred_bootstrap_preserves_identity_across_concurrent_publication() {
+        fn global_activation_sequence(
+            paths: &RuntimePaths,
+            receipt: &FirstSliceIndexReceipt,
+        ) -> u64 {
+            let generation = receipt.generation.to_string();
+            let repository = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string());
+            fs::read_dir(repository)
+                .expect("repository directory reads")
+                .map(|entry| entry.expect("repository entry reads"))
+                .find_map(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("activation-"))
+                        .then(|| {
+                            serde_json::from_slice::<serde_json::Value>(
+                                &fs::read(entry.path().join("activation.json"))
+                                    .expect("activation manifest reads"),
+                            )
+                            .expect("activation manifest parses")
+                        })
+                        .filter(|manifest| {
+                            manifest["generation"].as_str() == Some(generation.as_str())
+                        })
+                })
+                .and_then(|manifest| manifest["global_activation_sequence"].as_u64())
+                .expect("global activation sequence is present")
+        }
+
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let old_fixtures = [durable_test_tempdir(), durable_test_tempdir()];
+        for (ordinal, fixture) in old_fixtures.iter().enumerate() {
+            fs::write(
+                fixture.path().join("lib.rs"),
+                format!("pub fn old_{ordinal}() -> u32 {{ {ordinal} }}\n"),
+            )
+            .expect("old fixture source writes");
+        }
+        let new_fixture = durable_test_tempdir();
+        fs::write(
+            new_fixture.path().join("lib.rs"),
+            "pub fn newly_published() -> u32 { 3 }\n",
+        )
+        .expect("new fixture source writes");
+        let cancellation = deadline();
+
+        let old_receipts = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            old_fixtures
+                .iter()
+                .map(|fixture| {
+                    service
+                        .index_rust_fixture(fixture.path(), &cancellation)
+                        .expect("old durable generation publishes")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let (mut service, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("deferred durable service opens");
+        assert!(service.list_repositories().is_empty());
+        for (fixture, receipt) in old_fixtures.iter().zip(&old_receipts) {
+            assert_eq!(
+                service
+                    .registered_repository_for_root(fixture.path(), &cancellation)
+                    .expect("bootstrapped root registration resolves"),
+                Some(receipt.repository)
+            );
+        }
+
+        let new_receipt = service
+            .index_rust_fixture(new_fixture.path(), &cancellation)
+            .expect("new repository publishes before payload restore");
+        assert!(
+            old_receipts
+                .iter()
+                .all(|receipt| receipt.repository != new_receipt.repository)
+        );
+        for target in deferred
+            .active_targets()
+            .expect("bootstrapped recovery targets remain available")
+        {
+            let restored = deferred
+                .restore_active_repository(target.repository(), &cancellation)
+                .expect("old active generation verifies");
+            service
+                .install_progressive_deferred_restore(restored, &cancellation)
+                .expect("old active generation installs progressively");
+        }
+        for receipt in &old_receipts {
+            assert_eq!(
+                service.active_generation_for(receipt.repository),
+                Some(receipt.generation)
+            );
+        }
+        assert_eq!(
+            service.active_generation_for(new_receipt.repository),
+            Some(new_receipt.generation)
+        );
+        fs::write(
+            old_fixtures[0].path().join("lib.rs"),
+            "pub fn old_0_updated() -> u32 { 10 }\n",
+        )
+        .expect("old fixture update writes");
+        let updated_old_receipt = service
+            .index_rust_fixture(old_fixtures[0].path(), &cancellation)
+            .expect("restored repository publishes with its bootstrapped frontier");
+        assert_eq!(updated_old_receipt.repository, old_receipts[0].repository);
+        drop(service);
+
+        let mut activation_sequences = old_receipts
+            .iter()
+            .map(|receipt| global_activation_sequence(&paths, receipt))
+            .collect::<Vec<_>>();
+        let new_activation_sequence = global_activation_sequence(&paths, &new_receipt);
+        let updated_activation_sequence = global_activation_sequence(&paths, &updated_old_receipt);
+        assert!(
+            activation_sequences
+                .iter()
+                .all(|sequence| *sequence < new_activation_sequence)
+        );
+        assert!(updated_activation_sequence > new_activation_sequence);
+        activation_sequences.push(new_activation_sequence);
+        activation_sequences.push(updated_activation_sequence);
+        activation_sequences.sort_unstable();
+        activation_sequences.dedup();
+        assert_eq!(activation_sequences.len(), 4);
+
+        let reopened = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("fully populated catalog reopens cleanly");
+        for receipt in [&updated_old_receipt, &old_receipts[1], &new_receipt] {
+            assert_eq!(
+                reopened.active_generation_for(receipt.repository),
+                Some(receipt.generation)
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn deferred_bootstrap_leaves_generation_payloads_unopened() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn payload_probe() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("durable generation publishes")
+        };
+        let oracle = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string())
+            .join("oracle.sqlite3");
+        fs::write(oracle, b"not a sqlite database").expect("oracle payload corrupts");
+
+        let (service, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("bounded bootstrap ignores generation payload bytes");
+        assert_eq!(
+            service
+                .registered_repository_for_root(fixture.path(), &cancellation)
+                .expect("bootstrapped root registration resolves"),
+            Some(receipt.repository)
+        );
+        assert_eq!(
+            deferred
+                .active_targets()
+                .expect("bootstrap target metadata is available")
+                .iter()
+                .map(FirstSliceRecoveryTarget::repository)
+                .collect::<Vec<_>>(),
+            [receipt.repository]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn deferred_bootstrap_rejects_conflicting_retained_root_bindings() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = fixture.path().join("lib.rs");
+        fs::write(&source, "pub fn binding_probe() -> u32 { 1 }\n").expect("initial source writes");
+        let cancellation = deadline();
+        let first = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let first = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("first generation publishes");
+            fs::write(&source, "pub fn binding_probe() -> u32 { 2 }\n")
+                .expect("successor source writes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("successor generation publishes");
+            first
+        };
+        let other_root = durable_test_tempdir();
+        let other_canonical = canonical_repository_root(other_root.path(), &cancellation)
+            .expect("other root canonicalizes");
+        let other_identity =
+            repository_path_hash(&other_canonical).expect("other root identity hashes");
+        let other_path = sanitized_repository_root_path(&other_canonical)
+            .expect("other root path is persistable");
+        let manifest_path = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(first.repository.to_string())
+            .join(first.generation.to_string())
+            .join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("retained manifest reads"))
+                .expect("retained manifest parses");
+        manifest["root_identity"] =
+            serde_json::to_value(other_identity).expect("other identity serializes");
+        manifest["root_path"] = json!(other_path);
+        fs::write(
+            manifest_path,
+            serde_json::to_vec(&manifest).expect("conflicting manifest serializes"),
+        )
+        .expect("retained manifest binding changes");
+
+        assert!(matches!(
+            FirstSliceService::open_durable_deferred(2, paths.state_dir()),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

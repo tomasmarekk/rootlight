@@ -1,6 +1,7 @@
 //! Crash-safe generation publication and restoration for the first-slice service.
 
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     io::{BufWriter, Read as _, Write as _},
@@ -40,7 +41,7 @@ use super::{
     FirstSliceOperationContext, FirstSliceRecoveryTarget, PreparedIncrementalState,
     RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
     map_incremental_error, map_query_error, map_search_error, map_vfs_error,
-    project_lexical_documents_with_sources,
+    project_lexical_documents_with_sources, repository_path_hash,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -1444,29 +1445,6 @@ impl DurableCatalog {
         self.restore_with_policy(1, &BTreeSet::new(), false, true, cancellation)
     }
 
-    pub(super) fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
-        let repository_names = private_entry_names(&self.repositories)?;
-        if repository_names.len() > self.maximum_repositories {
-            return Err(FirstSliceError::Retention);
-        }
-        for repository_name in repository_names {
-            let repository_text = repository_name
-                .to_str()
-                .ok_or(FirstSliceError::CatalogCorrupt)?;
-            RepositoryId::from_str(repository_text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            let repository =
-                PrivateDirectory::open(self.repositories.capability(), &repository_name)
-                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            for entry_name in private_entry_names(&repository)? {
-                let entry_text = entry_name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
-                if parse_activation_name(entry_text).is_some() {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
     pub(super) fn active_restore_targets(
         &self,
     ) -> Result<Vec<FirstSliceRecoveryTarget>, FirstSliceError> {
@@ -1475,6 +1453,7 @@ impl DurableCatalog {
             return Err(FirstSliceError::Retention);
         }
         let mut targets = Vec::new();
+        let mut global_activation_generations = BTreeMap::new();
         for repository_name in repository_names {
             let repository_text = repository_name
                 .to_str()
@@ -1485,27 +1464,73 @@ impl DurableCatalog {
                 PrivateDirectory::open(self.repositories.capability(), &repository_name)
                     .map_err(|_| FirstSliceError::CatalogCorrupt)?;
             let mut newest = None;
+            let mut identity_candidates = BTreeMap::new();
             for entry_name in private_entry_names(&repository)? {
                 let entry_text = entry_name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
                 let Some((sequence, generation)) = parse_activation_name(entry_text) else {
                     continue;
                 };
                 let marker = read_activation_marker(&repository, entry_name, sequence, generation)?;
+                if let Some(global_sequence) = marker.manifest.global_activation_sequence
+                    && global_activation_generations
+                        .insert(global_sequence, generation)
+                        .is_some()
+                {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
                 let ordering = marker
                     .manifest
                     .global_activation_sequence
                     .unwrap_or(marker.sequence);
-                if newest.is_none_or(|(current, _, _)| ordering > current) {
-                    newest = Some((ordering, marker.sequence, generation));
+                let published_generation_count = marker
+                    .manifest
+                    .published_generation_count
+                    .unwrap_or(marker.sequence);
+                identity_candidates
+                    .entry(generation)
+                    .and_modify(|current: &mut (u64, u64)| {
+                        *current = (*current).max((ordering, marker.sequence));
+                    })
+                    .or_insert((ordering, marker.sequence));
+                if newest.is_none_or(|(current, _, _, _)| ordering > current) {
+                    newest = Some((
+                        ordering,
+                        marker.sequence,
+                        published_generation_count,
+                        generation,
+                    ));
                 }
             }
-            if let Some((ordering, sequence, generation)) = newest {
+            if let Some((ordering, sequence, published_generation_count, generation)) = newest {
+                let mut identity_candidates = identity_candidates.into_iter().collect::<Vec<_>>();
+                identity_candidates.sort_unstable_by_key(|(generation, ordering)| {
+                    (Reverse(*ordering), *generation)
+                });
+                let mut root_identity = None;
+                // Payload recovery may quarantine malformed generations. Every readable
+                // predecessor must still agree on the repository binding before publication.
+                for (candidate, _) in identity_candidates {
+                    let Some(identity) =
+                        read_generation_bootstrap_identity(&repository, repository_id, candidate)?
+                    else {
+                        continue;
+                    };
+                    if root_identity.is_some_and(|current| current != identity) {
+                        return Err(FirstSliceError::CatalogCorrupt);
+                    }
+                    root_identity = Some(identity);
+                }
+                let root_identity = root_identity.ok_or(FirstSliceError::CatalogCorrupt)?;
                 targets.push((
                     ordering,
                     sequence,
                     FirstSliceRecoveryTarget {
                         repository: repository_id,
                         generation,
+                        root_identity,
+                        activation_sequence: sequence,
+                        global_activation_sequence: ordering,
+                        published_generation_count,
                     },
                 ));
             }
@@ -3537,6 +3562,65 @@ fn read_activation_marker(
         sequence,
         manifest,
     })
+}
+
+fn read_generation_bootstrap_identity(
+    repository: &PrivateDirectory<'_>,
+    repository_id: RepositoryId,
+    generation: GenerationId,
+) -> Result<Option<ContentHash>, FirstSliceError> {
+    let Ok(generation_directory) =
+        PrivateDirectory::open(repository.capability(), OsStr::new(&generation.to_string()))
+    else {
+        return Ok(None);
+    };
+    let Ok(bytes) =
+        generation_directory.read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
+    else {
+        return Ok(None);
+    };
+    let Ok(manifest) = serde_json::from_slice::<DurableGenerationManifest>(&bytes) else {
+        return Ok(None);
+    };
+    let version_is_valid = matches!(
+        (manifest.version, manifest.source_storage),
+        (LEGACY_GENERATION_MANIFEST_VERSION, None)
+            | (
+                GENERATION_MANIFEST_VERSION,
+                Some(DurableSourceStorage {
+                    version: SOURCE_STORAGE_VERSION,
+                }),
+            )
+    );
+    if manifest.receipt.repository != repository_id
+        || manifest.receipt.generation != generation
+        || !valid_repository_root_path(manifest.root_path.as_deref())
+        || !version_is_valid
+    {
+        return Ok(None);
+    }
+    // Persisted U+FFFD may represent a lossy OS path, so only lossless root
+    // spellings can provide the redundant identity binding.
+    if manifest.version == GENERATION_MANIFEST_VERSION
+        && let Some(root_path) = manifest.root_path.as_deref()
+        && !root_path.contains('\u{fffd}')
+        && (!Path::new(root_path).is_absolute()
+            || persisted_repository_path_hash(root_path)? != manifest.root_identity)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(Some(manifest.root_identity))
+}
+
+fn persisted_repository_path_hash(root_path: &str) -> Result<ContentHash, FirstSliceError> {
+    #[cfg(not(windows))]
+    let identity_path = PathBuf::from(root_path);
+    #[cfg(windows)]
+    let identity_path = root_path.strip_prefix(r"\\").map_or_else(
+        || PathBuf::from(format!(r"\\?\{root_path}")),
+        |unc| PathBuf::from(format!(r"\\?\UNC\{unc}")),
+    );
+    repository_path_hash(&identity_path).map_err(|_| FirstSliceError::CatalogCorrupt)
 }
 
 fn read_repository_metadata(
