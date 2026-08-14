@@ -85,7 +85,8 @@ use rootlight_service::{
     FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
     FirstSliceRecoveryTarget, FirstSliceService, FirstSliceStoragePolicy,
     FirstSliceSupportInventory, FirstSliceWorkingTreeSelection, HistoryChangeKind,
-    PlanChangeObjective, SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
+    SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -414,7 +415,19 @@ impl InstalledProjectAnalyzer {
             })?;
             let progress = project_partition_progress(&batch)?;
             match self.execute_partition(request, session, batch, cancellation) {
-                Ok((document, isolated)) => {
+                Ok((document, isolated, analyzed)) => {
+                    if project_partition_needs_syntax_split(&document, analyzed.len())
+                        && let Some((left, right)) = split_project_partition(analyzed)
+                    {
+                        pending
+                            .try_reserve(2)
+                            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+                        // Match output-limit retry ordering so progress and
+                        // merged identities remain deterministic.
+                        pending.push(right);
+                        pending.push(left);
+                        continue;
+                    }
                     append(document, isolated, progress.0, progress.1)?;
                 }
                 Err(ProjectPartitionError::OutputLimit(oversized)) => {
@@ -441,7 +454,8 @@ impl InstalledProjectAnalyzer {
         session: &NegotiatedSession,
         inputs: Vec<adapter::ProjectInput>,
         cancellation: &Cancellation,
-    ) -> Result<(NormalizedIrDocument, bool), ProjectPartitionError> {
+    ) -> Result<(NormalizedIrDocument, bool, Vec<adapter::ProjectInput>), ProjectPartitionError>
+    {
         let mut request_id = [0_u8; ADAPTER_NONCE_BYTES];
         getrandom::fill(&mut request_id).map_err(|_| {
             ProjectPartitionError::Analysis(FirstSliceProjectAnalysisError::Identity)
@@ -486,8 +500,20 @@ impl InstalledProjectAnalyzer {
         Ok((
             output.document().clone(),
             output.isolation().permits_deep_adapter(),
+            project_request.inputs,
         ))
     }
+}
+
+fn project_partition_needs_syntax_split(
+    document: &NormalizedIrDocument,
+    input_count: usize,
+) -> bool {
+    input_count > 1
+        && document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
 }
 
 enum ProjectPartitionError {
@@ -5100,12 +5126,10 @@ fn repository_index_with_intent(
             }
         }
     })();
-    if result.as_ref().is_err_and(|error| {
-        matches!(
-            error.code(),
-            ErrorCode::AdapterFailed | ErrorCode::ResourceExhausted
-        )
-    }) && matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
+    if result
+        .as_ref()
+        .is_err_and(semantic_refinement_degrades_adapter)
+        && matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
         && let Some(state) = lanes.support_state.as_deref()
     {
         state.set_adapter_status(HealthStatus::Degraded);
@@ -5115,6 +5139,13 @@ fn repository_index_with_intent(
         settle_unpublished_index_admission(&service, admission)?;
     }
     result
+}
+
+fn semantic_refinement_degrades_adapter(error: &PublicError) -> bool {
+    matches!(
+        error.code(),
+        ErrorCode::AdapterFailed | ErrorCode::ResourceExhausted
+    )
 }
 
 fn settle_unpublished_index_admission(
@@ -9914,6 +9945,13 @@ fn build_service_error(
             "adapter",
             "analysis",
         ),
+        FirstSliceError::IncompleteCoverage => (
+            ErrorCode::IncompleteCoverage,
+            "semantic refinement coverage is incomplete",
+            false,
+            "incomplete_coverage",
+            "analysis",
+        ),
         FirstSliceError::AdapterWallTimeLimit => (
             ErrorCode::ResourceExhausted,
             "project adapter wall-time limit was reached",
@@ -10179,6 +10217,12 @@ fn build_service_error(
                 PublicValue::Boolean(true),
             )
             .next_action(NextAction::CollectSupportBundle);
+    }
+    if error == FirstSliceError::IncompleteCoverage {
+        builder = builder.detail(
+            static_detail_key("structural_fallback"),
+            PublicValue::Boolean(true),
+        );
     }
     if error == FirstSliceError::AdapterWallTimeLimit {
         builder = builder
@@ -10595,10 +10639,10 @@ mod tests {
     use rootlight_daemon_core::{ControlService, DaemonLimits, JournalActor};
     use rootlight_ids::FactId;
     use rootlight_ir::{
-        BuildContextIdentity, Confidence, CoverageScope, EvidenceKind, FactDomain, FactEvidence,
-        FileIdentityClaim, FileRecord, ProducerIdentity, ProducerKind, ProvenanceRecord,
-        RelationRecord, derive_coverage_record_id, derive_provenance_record_id,
-        new_file_identity_claim_envelope,
+        BuildContextIdentity, Confidence, CoverageScope, DiagnosticRecord, DiagnosticSeverity,
+        EvidenceKind, FactDomain, FactEvidence, FileIdentityClaim, FileRecord, ProducerIdentity,
+        ProducerKind, ProvenanceRecord, RelationRecord, derive_coverage_record_id,
+        derive_provenance_record_id, new_file_identity_claim_envelope,
     };
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use rootlight_runtime::RuntimePaths;
@@ -11419,6 +11463,33 @@ mod tests {
     }
 
     #[test]
+    fn syntax_fact_limit_splits_only_multi_file_partitions() {
+        let repository = RepositoryId::from_bytes([31; 16]);
+        let generation = GenerationId::from_bytes([32; 20]);
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.diagnostics.push(DiagnosticRecord {
+            id: FactId::from_bytes([33; 20]),
+            repository,
+            generation,
+            code: PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC.to_owned(),
+            message: "bounded syntax fixture".to_owned(),
+            severity: DiagnosticSeverity::Warning,
+            source: None,
+            coverage_effect: CoverageStatus::Bounded,
+            provenance: FactId::from_bytes([34; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+
+        assert!(project_partition_needs_syntax_split(&document, 2));
+        assert!(!project_partition_needs_syntax_split(&document, 1));
+        document.diagnostics.clear();
+        assert!(!project_partition_needs_syntax_split(&document, 2));
+    }
+
+    #[test]
     fn project_partition_buffer_enforces_the_adapter_file_ceiling() {
         let mut buffer =
             ProjectPartitionBuffer::new(128, 8, 2).expect("partition buffer initializes");
@@ -11576,6 +11647,19 @@ mod tests {
             Some(&PublicValue::Label(static_safe_label("adapter_process")))
         );
         assert_eq!(process.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+
+        let incomplete = repository_index_error(FirstSliceError::IncompleteCoverage, context);
+        assert_eq!(incomplete.code(), ErrorCode::IncompleteCoverage);
+        assert!(!incomplete.retryable());
+        assert_eq!(
+            incomplete
+                .details()
+                .get(&static_detail_key("structural_fallback")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(incomplete.next_actions(), &[NextAction::InspectOperation]);
+        assert!(!semantic_refinement_degrades_adapter(&incomplete));
+        assert!(semantic_refinement_degrades_adapter(&process));
     }
 
     #[test]

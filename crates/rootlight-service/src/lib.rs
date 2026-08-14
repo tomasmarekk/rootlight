@@ -38,13 +38,13 @@ use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION, TreeSitterAnalyzer,
     TreeSitterProvider, TreeSitterStructuralArtifact,
 };
-use rootlight_adapters::{
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RuntimeTraceImportRequest, SemanticProjectLanguage,
-    import_runtime_trace,
-};
 pub use rootlight_adapters::{
-    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceLimits, RuntimeTraceOverlay,
-    RuntimeTraceProvenance, RuntimeTraceRelation, RuntimeTraceRelationKind, RuntimeTraceResource,
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
+    RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
+    RuntimeTraceRelationKind, RuntimeTraceResource,
+};
+use rootlight_adapters::{
+    RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
@@ -4517,10 +4517,12 @@ impl FirstSliceService {
     ///
     /// Returns [`FirstSliceError::Catalog`] when durable publication is
     /// unavailable, [`FirstSliceError::Adapter`] when no deep analyzer is
-    /// configured or semantic refinement falls back, and the normal bounded
-    /// indexing failures from [`Self::index_repository_with_mode`]. At least
-    /// two retained generations are required so the structural parent remains
-    /// queryable after refinement.
+    /// configured or the adapter fails, [`FirstSliceError::IncompleteCoverage`]
+    /// when bounded output cannot preserve the structural declaration set, and
+    /// the normal bounded indexing failures from
+    /// [`Self::index_repository_with_mode`]. At least two retained generations
+    /// are required so the structural parent remains queryable after
+    /// refinement.
     pub fn index_repository_two_stage(
         &mut self,
         path: &Path,
@@ -5194,6 +5196,17 @@ impl FirstSliceService {
             structurally_examined_bytes,
             &mut observe_progress,
         )?;
+        if representation == DurableGenerationRepresentation::RecoverySnapshot
+            && let Some(error) = document
+                .diagnostics
+                .iter()
+                .find_map(|diagnostic| project_fallback_error(&diagnostic.code))
+        {
+            // A semantic refinement must decide eligibility before opening
+            // durable staging; otherwise an honest fallback rewrites a complete
+            // structural candidate that can never become active.
+            return Err(error);
+        }
         let semantic_inputs = first_slice_semantic_inputs(&document, &source_files, cancellation)?;
         let final_incremental_plan = prepare_incremental_state(
             FirstSliceIncrementalPlanningContext {
@@ -5519,9 +5532,11 @@ impl FirstSliceService {
     ///
     /// Returns [`FirstSliceError::Catalog`] when durable publication is
     /// unavailable, [`FirstSliceError::Adapter`] when deep analysis is
-    /// unavailable or falls back, [`FirstSliceError::Identity`] when the active
-    /// lineage changed during preparation, and the normal bounded preparation
-    /// failures from [`Self::prepare_repository_with_mode`].
+    /// unavailable or fails, [`FirstSliceError::IncompleteCoverage`] when
+    /// bounded output cannot preserve the structural declaration set,
+    /// [`FirstSliceError::Identity`] when the active lineage changed during
+    /// preparation, and the normal bounded preparation failures from
+    /// [`Self::prepare_repository_with_mode`].
     pub fn prepare_semantic_refinement(
         &self,
         path: &Path,
@@ -5760,14 +5775,21 @@ impl FirstSliceService {
                                 self.analysis_limits.ir(),
                             ) {
                                 Ok(document) => {
-                                    if document.diagnostics.iter().any(|diagnostic| {
-                                        diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
-                                            || diagnostic.code
-                                                == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
-                                    }) || !project_document_preserves_structural_declarations(
-                                        &fallback_documents,
-                                        &document,
-                                    )? {
+                                    let syntax_facts_bounded =
+                                        document.diagnostics.iter().any(|diagnostic| {
+                                            diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
+                                        });
+                                    let aggregate_facts_truncated =
+                                        document.diagnostics.iter().any(|diagnostic| {
+                                            diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
+                                        });
+                                    if aggregate_facts_truncated
+                                        || !project_document_preserves_structural_declarations(
+                                            &fallback_documents,
+                                            &document,
+                                            syntax_facts_bounded,
+                                        )?
+                                    {
                                         fallback_error =
                                             Some(FirstSliceProjectAnalysisError::Capacity);
                                     } else {
@@ -9597,6 +9619,9 @@ pub enum FirstSliceError {
     /// Parser or normalized adapter output failed.
     #[error("first-slice analysis failed")]
     Adapter,
+    /// Bounded semantic output could not safely replace structural evidence.
+    #[error("first-slice semantic refinement coverage is incomplete")]
+    IncompleteCoverage,
     /// The isolated project adapter crossed its configured wall-time ceiling.
     #[error("first-slice project adapter wall-time limit was reached")]
     AdapterWallTimeLimit,
@@ -11517,13 +11542,14 @@ struct ProjectDeclarationKey {
 fn project_document_preserves_structural_declarations(
     structural_documents: &[NormalizedIrDocument],
     project_document: &NormalizedIrDocument,
+    require_explicit_check: bool,
 ) -> Result<bool, FirstSliceError> {
     let entity_coverage_is_bounded = project_document.coverage_records.iter().any(|coverage| {
         coverage.domain == IrFactDomain::Entities
             && coverage.status != CoverageStatus::Complete
             && coverage.skipped > 0
     });
-    if !entity_coverage_is_bounded {
+    if !require_explicit_check && !entity_coverage_is_bounded {
         return Ok(true);
     }
     let structural = project_declaration_keys(
@@ -11961,6 +11987,7 @@ fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
         "project-adapter-output-limit-fallback" => Some(FirstSliceError::AdapterOutputLimit),
         "project-adapter-memory-limit-fallback" => Some(FirstSliceError::AdapterMemoryLimit),
         "project-adapter-process-fallback" => Some(FirstSliceError::AdapterProcessFailure),
+        "project-adapter-capacity-fallback" => Some(FirstSliceError::IncompleteCoverage),
         _ if is_project_fallback_code(code) => Some(FirstSliceError::Adapter),
         _ => None,
     }
@@ -15613,10 +15640,14 @@ mod tests {
                     scope: CoverageScope::File(input.file()),
                     domain: rootlight_ir::FactDomain::Relations,
                     tier: AnalysisTier::TierB,
-                    status: CoverageStatus::Complete,
-                    discovered: 1,
+                    status: if self.syntax_facts_bounded {
+                        CoverageStatus::Bounded
+                    } else {
+                        CoverageStatus::Complete
+                    },
+                    discovered: if self.syntax_facts_bounded { 2 } else { 1 },
                     indexed: 1,
-                    skipped: 0,
+                    skipped: if self.syntax_facts_bounded { 1 } else { 0 },
                     provenance: provenance_id,
                     evidence: FactEvidence {
                         source: Some(source.clone()),
@@ -16214,6 +16245,10 @@ mod tests {
             project_fallback_error("project-adapter-analysis-fallback"),
             Some(FirstSliceError::Adapter)
         );
+        assert_eq!(
+            project_fallback_error("project-adapter-capacity-fallback"),
+            Some(FirstSliceError::IncompleteCoverage)
+        );
         assert_eq!(project_fallback_error("unrelated-diagnostic"), None);
     }
 
@@ -16321,11 +16356,11 @@ mod tests {
     }
 
     #[test]
-    fn bounded_project_syntax_keeps_structural_symbols_queryable() {
+    fn bounded_project_syntax_publishes_when_no_declarations_are_lost() {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
             fixture.path(),
-            &[("src/value.py", "def python_value():\n    return 1\n")],
+            &[("src/value.py", "print('bounded project syntax')\n")],
         );
         let calls = Arc::new(AtomicUsize::new(0));
         let analyzer = Arc::new(SuccessfulProjectAnalyzer {
@@ -16340,17 +16375,56 @@ mod tests {
 
         let receipt = service
             .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
-            .expect("structural fallback publishes after syntax fact truncation");
+            .expect("bounded project output publishes when it preserves declarations");
+        let status = service
+            .repository_status(receipt.repository, Some(receipt.generation))
+            .expect("bounded project status resolves");
         assert!(
             service
                 .generations
                 .generation(receipt.generation)
-                .expect("fallback generation remains retained")
+                .expect("bounded project generation remains retained")
                 .document()
                 .diagnostics
                 .iter()
-                .all(|diagnostic| diagnostic.code != PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
+                .any(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
         );
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "python"
+                && coverage.tier == "tier_b"
+                && coverage.status == "bounded"
+        }));
+        assert!(
+            receipt
+                .diagnostics
+                .iter()
+                .all(|diagnostic| { diagnostic.code != "project-adapter-capacity-fallback" })
+        );
+    }
+
+    #[test]
+    fn bounded_project_syntax_falls_back_when_a_declaration_is_lost() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"bounded-declaration-project-adapter"),
+            calls: Arc::clone(&calls),
+            partitioned: false,
+            syntax_facts_bounded: true,
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("direct deep indexing publishes an honest structural fallback");
         let located = service
             .code_locate(
                 receipt.generation,
@@ -16360,15 +16434,85 @@ mod tests {
                 0,
                 &deadline(),
             )
-            .expect("structural fallback remains queryable");
+            .expect("structural declaration remains queryable");
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(located.data.hits.len(), 1);
-        assert_eq!(located.data.hits[0].language, "python");
         assert!(receipt.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "project-adapter-capacity-fallback"
                 && diagnostic.message == "project analysis for python used structural fallback"
         }));
+    }
+
+    #[test]
+    fn unsafe_bounded_semantic_output_stops_before_durable_persistence() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::write(
+            repository_root.join("value.py"),
+            "def structural_survivor():\n    return 1\n",
+        )
+        .expect("bounded semantic fixture writes");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(CapacityProjectAnalyzer {
+            identity: content_hash(b"unsafe-bounded-project-adapter"),
+            calls: Arc::clone(&calls),
+        });
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("durable project service initializes");
+        limit_service_ir_entities(&mut service, 2);
+        let structural = service
+            .index_repository_with_mode(
+                &repository_root,
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .expect("structural generation publishes");
+        let before = service
+            .support_inventory_snapshot()
+            .expect("pre-refinement storage inventory verifies");
+        let mut progress = Vec::new();
+
+        let error = match service.prepare_semantic_refinement_with_progress(
+            &repository_root,
+            structural.generation,
+            &cancellation,
+            |observed| progress.push(observed),
+        ) {
+            Ok(_) => panic!("unsafe bounded output cannot refine the structural generation"),
+            Err(error) => error,
+        };
+        let after = service
+            .support_inventory_snapshot()
+            .expect("post-refinement storage inventory verifies");
+
+        assert_eq!(error, FirstSliceError::IncompleteCoverage);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(progress.iter().all(|observed| observed.stage
+            != FirstSliceIndexStage::Persistence
+            && observed.written_bytes == 0));
+        assert_eq!(after.generations, before.generations);
+        assert_eq!(after.total_storage_bytes, before.total_storage_bytes);
+        assert_eq!(after.unreclaimed_temporary_bytes, 0);
+        assert_eq!(
+            service.active_generation_for(structural.repository),
+            Some(structural.generation)
+        );
     }
 
     #[test]
@@ -18059,7 +18203,7 @@ mod tests {
                     structural.generation,
                     &cancellation,
                 ),
-                Err(FirstSliceError::Adapter)
+                Err(FirstSliceError::IncompleteCoverage)
             ));
             structural
         };
