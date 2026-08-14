@@ -481,8 +481,14 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     generated: false,
                 })
                 .collect();
+            let mut context = query_context(repository, generation, true);
+            context.coverage_gaps = vec![CoverageGap {
+                reason: "unsupported".to_owned(),
+                language: Some("css".to_owned()),
+                files: 4,
+            }];
             Ok(SourceRead {
-                context: query_context(repository, generation, true),
+                context,
                 chunks,
                 total_source_bytes: 0,
                 truncated: false,
@@ -1124,6 +1130,12 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     };
     assert_eq!(source.coverage.languages.len(), 1);
     assert_eq!(source.coverage.languages[0].language, "rust");
+    assert_eq!(source.warnings.len(), 1);
+    assert_eq!(source.warnings[0].code.as_str(), "coverage_unsupported");
+    assert_eq!(
+        source.warnings[0].message.as_str(),
+        "recognized source language has partial structural coverage affected-files 4 language css"
+    );
 
     let calls = calls.lock().expect("fake call recorder is not poisoned");
     assert_eq!(calls.len(), 5);
@@ -1661,14 +1673,36 @@ fn every_partial_coverage_reason_has_a_stable_mcp_warning() {
         ("generated", "coverage_generated"),
         ("stale", "coverage_stale"),
     ] {
-        assert_eq!(
-            coverage_gap_warning(reason)
-                .expect("installed coverage reason maps")
-                .0,
-            expected
+        let gap = CoverageGap {
+            reason: reason.to_owned(),
+            language: Some("css".to_owned()),
+            files: 3,
+        };
+        let warning = coverage_gap_warning(&gap).expect("installed coverage reason maps");
+        assert_eq!(warning.code.as_str(), expected);
+        assert!(
+            warning
+                .message
+                .as_str()
+                .ends_with("affected-files 3 language css")
         );
     }
-    assert!(coverage_gap_warning("future-reason").is_err());
+    assert!(
+        coverage_gap_warning(&CoverageGap {
+            reason: "future-reason".to_owned(),
+            language: None,
+            files: 1,
+        })
+        .is_err()
+    );
+    assert!(
+        coverage_gap_warning(&CoverageGap {
+            reason: "binary".to_owned(),
+            language: None,
+            files: 0,
+        })
+        .is_err()
+    );
 
     let mut context = query_context(repository(), GenerationSelector::Active, true);
     context.coverage_gaps = vec![
@@ -1690,6 +1724,14 @@ fn every_partial_coverage_reason_has_a_stable_mcp_warning() {
         .map(|warning| warning.code.as_str())
         .collect::<Vec<_>>();
     assert_eq!(warning_codes, ["coverage_unsupported", "coverage_binary"]);
+    assert_eq!(
+        metadata.warnings()[0].message.as_str(),
+        "recognized source language has partial structural coverage affected-files 1 language css"
+    );
+    assert_eq!(
+        metadata.warnings()[1].message.as_str(),
+        "binary inputs were omitted from text analysis affected-files 2 language repository-wide"
+    );
 }
 
 #[test]

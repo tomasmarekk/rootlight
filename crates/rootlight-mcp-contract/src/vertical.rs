@@ -1692,7 +1692,8 @@ pub struct UsageSummary {
 pub struct ResponseWarning {
     /// Stable warning code.
     pub code: SafeLabel,
-    /// Rootlight-generated source-free explanation.
+    /// Rootlight-generated source-free explanation with optional bounded
+    /// aggregate scope such as a canonical language and affected-file count.
     pub message: SourceFreeMessage,
 }
 

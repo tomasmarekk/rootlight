@@ -1718,12 +1718,7 @@ fn read_metadata(
         .try_reserve_exact(context.coverage_gaps.len())
         .map_err(|_| ClientPortError::Executor)?;
     for gap in &context.coverage_gaps {
-        let (code, message) = coverage_gap_warning(&gap.reason)?;
-        warnings.push(ResponseWarning {
-            code: SafeLabel::parse(code).map_err(|_| ClientPortError::InvalidResponse)?,
-            message: SourceFreeMessage::parse(message)
-                .map_err(|_| ClientPortError::InvalidResponse)?,
-        });
+        warnings.push(coverage_gap_warning(gap)?);
     }
     Ok(ReadResponseMetadata::new(
         context.repository.to_string(),
@@ -1736,8 +1731,10 @@ fn read_metadata(
     ))
 }
 
-fn coverage_gap_warning(reason: &str) -> Result<(&'static str, &'static str), ClientPortError> {
-    match reason {
+fn coverage_gap_warning(
+    gap: &rootlight_client::CoverageGap,
+) -> Result<ResponseWarning, ClientPortError> {
+    let (code, base_message) = match gap.reason.as_str() {
         "unsupported" => Ok((
             "coverage_unsupported",
             "recognized source language has partial structural coverage",
@@ -1779,7 +1776,26 @@ fn coverage_gap_warning(reason: &str) -> Result<(&'static str, &'static str), Cl
             "selected generation does not have current structural and semantic coverage",
         )),
         _ => Err(ClientPortError::InvalidResponse),
+    }?;
+    if gap.files == 0 {
+        return Err(ClientPortError::InvalidResponse);
     }
+    let language = match gap.language.as_deref() {
+        Some(language) => SafeLabel::parse(language)
+            .map_err(|_| ClientPortError::InvalidResponse)?
+            .as_str()
+            .to_owned(),
+        None => "repository-wide".to_owned(),
+    };
+    let message = format!(
+        "{base_message} affected-files {} language {language}",
+        gap.files
+    );
+    Ok(ResponseWarning {
+        code: SafeLabel::parse(code).map_err(|_| ClientPortError::InvalidResponse)?,
+        message: SourceFreeMessage::parse(&message)
+            .map_err(|_| ClientPortError::InvalidResponse)?,
+    })
 }
 
 const fn query_freshness(freshness: QueryFreshness) -> Freshness {
