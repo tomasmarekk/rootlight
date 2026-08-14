@@ -6983,17 +6983,53 @@ impl FirstSliceService {
         self.durable_operations.values().cloned()
     }
 
-    /// Returns bounded source-free indexing facts for production diagnostics.
+    /// Returns bounded source-free indexing facts after a verified durable scan.
+    ///
+    /// Durable callers should reserve this catalog-wide content revalidation for
+    /// recovery and explicit integrity work. Automatic post-mutation refreshes
+    /// should use [`Self::support_inventory_snapshot_from_accounting`].
     ///
     /// # Errors
     ///
-    /// Returns [`FirstSliceError::CatalogCorrupt`] when retained repository
-    /// metadata is internally inconsistent, or [`FirstSliceError::Limits`]
-    /// when a retained count cannot be represented by the support contract.
+    /// Returns a durable catalog, retention, or corruption failure when physical
+    /// storage cannot be read and verified, or [`FirstSliceError::Limits`] when
+    /// a retained count cannot be represented by the support contract.
     pub fn support_inventory_snapshot(
         &self,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
-        self.support_inventory_snapshot_inner(true)
+        let storage = self
+            .durable
+            .as_ref()
+            .map(|durable| durable.storage_inventory())
+            .transpose()?;
+        self.support_inventory_snapshot_inner(storage)
+    }
+
+    /// Returns bounded source-free indexing facts from reconciled storage accounting.
+    ///
+    /// This projection is intended for automatic refreshes after Rootlight-owned
+    /// mutations. Explicit integrity checks should use
+    /// [`Self::support_inventory_snapshot`] so they revalidate durable contents.
+    /// A `None` snapshot leaves the last published support state unchanged while
+    /// accounting is cold, dirty, or covered by an in-flight reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a durable catalog failure when accounted state is internally
+    /// inconsistent, or [`FirstSliceError::Limits`] when a retained count cannot
+    /// be represented by the support contract. Physical fields remain unknown
+    /// while accounting awaits explicit reconciliation.
+    pub fn support_inventory_snapshot_from_accounting(
+        &self,
+    ) -> Result<Option<FirstSliceSupportInventory>, FirstSliceError> {
+        let storage = match self.durable.as_ref() {
+            Some(durable) => match durable.storage_inventory_cached()? {
+                Some(storage) => Some(storage),
+                None => return Ok(None),
+            },
+            None => return self.support_inventory_snapshot_inner(None).map(Some),
+        };
+        self.support_inventory_snapshot_inner(storage).map(Some)
     }
 
     /// Returns bounded source-free indexing facts without scanning durable storage.
@@ -7008,12 +7044,12 @@ impl FirstSliceService {
     pub fn support_inventory_snapshot_without_storage_scan(
         &self,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
-        self.support_inventory_snapshot_inner(false)
+        self.support_inventory_snapshot_inner(None)
     }
 
     fn support_inventory_snapshot_inner(
         &self,
-        measure_durable_storage: bool,
+        storage: Option<durable::DurableStorageInventory>,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
         let languages: Vec<_> = self.analyzers.keys().cloned().collect();
         let mut adapters = vec![FirstSliceSupportAdapter {
@@ -7096,14 +7132,6 @@ impl FirstSliceService {
         }
 
         let has_durable_storage = self.durable.is_some();
-        let storage = if measure_durable_storage {
-            self.durable
-                .as_ref()
-                .map(|durable| durable.storage_inventory())
-                .transpose()?
-        } else {
-            None
-        };
         let (
             total_storage_bytes,
             shared_bytes,
@@ -19467,6 +19495,83 @@ mod tests {
         assert_eq!(active.generation, second.generation);
         assert_eq!(active.parent, Some(first.generation));
         assert_eq!(active.disk_bytes, second.retained_durable_bytes);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn accounted_support_inventory_matches_verified_after_publish_and_delete() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn accounted_inventory_probe() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+
+        let accounted_after_publish = service
+            .support_inventory_snapshot_from_accounting()
+            .expect("accounted inventory builds after publication")
+            .expect("published accounting is reconciled");
+        let verified_after_publish = service
+            .support_inventory_snapshot()
+            .expect("verified inventory builds after publication");
+        assert_support_storage_inventory_eq(&accounted_after_publish, &verified_after_publish);
+        assert_eq!(accounted_after_publish.repositories.len(), 1);
+        assert_eq!(accounted_after_publish.generations.len(), 1);
+
+        service
+            .delete_repository(receipt.repository)
+            .expect("repository history deletes");
+        let accounted_after_delete = service
+            .support_inventory_snapshot_from_accounting()
+            .expect("accounted inventory builds after deletion")
+            .expect("deleted accounting remains reconciled");
+        let verified_after_delete = service
+            .support_inventory_snapshot()
+            .expect("verified inventory builds after deletion");
+        assert_support_storage_inventory_eq(&accounted_after_delete, &verified_after_delete);
+        assert!(accounted_after_delete.repositories.is_empty());
+        assert!(accounted_after_delete.generations.is_empty());
+    }
+
+    fn assert_support_storage_inventory_eq(
+        accounted: &FirstSliceSupportInventory,
+        verified: &FirstSliceSupportInventory,
+    ) {
+        assert_eq!(accounted.repositories.len(), verified.repositories.len());
+        assert_eq!(accounted.generations.len(), verified.generations.len());
+        assert_eq!(accounted.total_storage_bytes, verified.total_storage_bytes);
+        assert_eq!(accounted.shared_bytes, verified.shared_bytes);
+        assert_eq!(accounted.reclaimable_bytes, verified.reclaimable_bytes);
+        assert_eq!(
+            accounted.unreclaimed_temporary_bytes,
+            verified.unreclaimed_temporary_bytes
+        );
+        let accounted_disk_margin = accounted
+            .disk_margin_bytes
+            .expect("accounted inventory reports the durable disk margin");
+        let verified_disk_margin = verified
+            .disk_margin_bytes
+            .expect("verified inventory reports the durable disk margin");
+        let accounted_admission_margin = accounted
+            .admission_margin_bytes
+            .expect("accounted inventory reports the admission margin");
+        let verified_admission_margin = verified
+            .admission_margin_bytes
+            .expect("verified inventory reports the admission margin");
+        assert!(accounted_admission_margin <= accounted_disk_margin);
+        assert!(verified_admission_margin <= verified_disk_margin);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

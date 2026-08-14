@@ -3091,7 +3091,7 @@ fn refresh_recovery_support_inventory(
             .read()
             .map_err(|_| FirstSliceHostError::ThreadPanicked)
             .and_then(|service| {
-                index_support_inventory(&service).map_err(FirstSliceHostError::Service)
+                verified_index_support_inventory(&service).map_err(FirstSliceHostError::Service)
             })?;
         state
             .replace_index_support_inventory(inventory)
@@ -9415,11 +9415,19 @@ fn operation_progress(observed: FirstSliceIndexProgress) -> Result<Progress, Pub
     Progress::new(completed, total).map_err(|_| internal_error())
 }
 
-fn index_support_inventory(
+fn verified_index_support_inventory(
     service: &FirstSliceService,
 ) -> Result<IndexSupportInventory, FirstSliceError> {
     let snapshot = service.support_inventory_snapshot()?;
     Ok(map_index_support_inventory(snapshot))
+}
+
+fn accounted_index_support_inventory(
+    service: &FirstSliceService,
+) -> Result<Option<IndexSupportInventory>, FirstSliceError> {
+    service
+        .support_inventory_snapshot_from_accounting()
+        .map(|snapshot| snapshot.map(map_index_support_inventory))
 }
 
 fn startup_index_support_inventory(
@@ -9511,17 +9519,20 @@ fn refresh_index_support_inventory(
         return;
     };
     let inventory = match service.read() {
-        Ok(service) => index_support_inventory(&service),
+        Ok(service) => accounted_index_support_inventory(&service),
         Err(_) => {
             state.set_catalog_status(HealthStatus::Degraded);
             return;
         }
     };
-    if inventory.is_err()
-        || inventory
-            .is_ok_and(|inventory| state.replace_index_support_inventory(inventory).is_err())
-    {
-        state.set_catalog_status(HealthStatus::Degraded);
+    match inventory {
+        Ok(Some(inventory)) => {
+            if state.replace_index_support_inventory(inventory).is_err() {
+                state.set_catalog_status(HealthStatus::Degraded);
+            }
+        }
+        Ok(None) => {}
+        Err(_) => state.set_catalog_status(HealthStatus::Degraded),
     }
 }
 
@@ -10779,9 +10790,60 @@ mod tests {
         assert_eq!(startup.disk_margin_bytes, None);
         assert_eq!(startup.admission_margin_bytes, None);
         assert!(matches!(
-            index_support_inventory(&service),
+            verified_index_support_inventory(&service),
             Err(FirstSliceError::CatalogCorrupt)
         ));
+    }
+
+    #[test]
+    fn automatic_and_recovery_support_helpers_select_accounted_and_verified_storage() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let (service, _) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred durable service opens");
+
+        assert_eq!(accounted_index_support_inventory(&service), Ok(None));
+
+        let verified = verified_index_support_inventory(&service)
+            .expect("recovery support inventory verifies durable storage");
+        assert_eq!(verified.total_storage_bytes, Some(0));
+        assert!(verified.disk_margin_bytes.is_some());
+        assert!(verified.admission_margin_bytes.is_some());
+
+        let reconciled_accounted = accounted_index_support_inventory(&service)
+            .expect("automatic support inventory reuses reconciled accounting")
+            .expect("verified recovery established accounting");
+        assert_eq!(
+            reconciled_accounted.total_storage_bytes,
+            verified.total_storage_bytes
+        );
+        assert_eq!(reconciled_accounted.shared_bytes, verified.shared_bytes);
+        assert_eq!(
+            reconciled_accounted.reclaimable_bytes,
+            verified.reclaimable_bytes
+        );
+        assert_eq!(
+            reconciled_accounted.unreclaimed_temporary_bytes,
+            verified.unreclaimed_temporary_bytes
+        );
+        let accounted_disk_margin = reconciled_accounted
+            .disk_margin_bytes
+            .expect("reconciled accounting reports a disk margin");
+        let verified_disk_margin = verified
+            .disk_margin_bytes
+            .expect("verified storage reports a disk margin");
+        let accounted_admission_margin = reconciled_accounted
+            .admission_margin_bytes
+            .expect("reconciled accounting reports an admission margin");
+        let verified_admission_margin = verified
+            .admission_margin_bytes
+            .expect("verified storage reports an admission margin");
+        assert!(accounted_admission_margin <= accounted_disk_margin);
+        assert!(verified_admission_margin <= verified_disk_margin);
     }
 
     #[test]

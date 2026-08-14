@@ -203,26 +203,29 @@ pub(super) struct DurableCatalog {
     maximum_generations_per_repository: usize,
     maximum_repositories: usize,
     staging_bytes: Arc<AtomicU64>,
-    storage_reservations: Arc<Mutex<DurableStorageReservations>>,
-    verified_source_blobs: Mutex<BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>>,
+    storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
 }
 
 pub(super) struct DurablePreparedGeneration {
     staging: Option<PrivateDirectory<'static>>,
     staging_path: PathBuf,
     repository: Option<PrivateDirectory<'static>>,
+    repository_id: RepositoryId,
     generation: GenerationId,
     staging_bytes: Arc<AtomicU64>,
     accounted_bytes: AtomicU64,
     incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
     source_storage: Mutex<Option<DurableSourceStorage>>,
     created_source_blobs: Mutex<BTreeSet<ContentHash>>,
+    storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
 }
 
 pub(super) struct DurablePublishedGeneration {
     directory: Option<PublishedPrivateDirectory>,
     repository: PrivateDirectory<'static>,
+    repository_id: RepositoryId,
     generation: GenerationId,
+    storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
 }
 
 pub(super) struct RestoredGeneration {
@@ -348,7 +351,7 @@ struct DurableStorageReservationEntry {
 }
 
 pub(super) struct DurableStorageReservation {
-    reservations: Arc<Mutex<DurableStorageReservations>>,
+    accounting: Arc<Mutex<DurableStorageAccounting>>,
     id: u64,
 }
 
@@ -357,6 +360,7 @@ pub(super) struct DurableSealedGeneration {
     repository: RepositoryId,
     materialized_bytes: u64,
     manifest_written_bytes: u64,
+    scanned_generation: ScannedGeneration,
 }
 
 pub(super) struct DurableStorageAdmittedGeneration {
@@ -374,8 +378,8 @@ impl std::fmt::Debug for DurableStorageReservation {
 
 impl Drop for DurableStorageReservation {
     fn drop(&mut self) {
-        if let Ok(mut reservations) = self.reservations.lock() {
-            reservations.entries.remove(&self.id);
+        if let Ok(mut accounting) = self.accounting.lock() {
+            accounting.reservations.entries.remove(&self.id);
         }
     }
 }
@@ -473,7 +477,7 @@ enum RecoverySnapshotEncoding {
     Gzip,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableActivationManifest {
     version: u16,
@@ -511,10 +515,16 @@ impl From<DurableOperationContextV2> for FirstSliceOperationContext {
     }
 }
 
+#[derive(Clone)]
 struct ActivationMarker {
     name: OsString,
     sequence: u64,
     manifest: DurableActivationManifest,
+}
+
+struct PublishedActivationMarker {
+    marker: ActivationMarker,
+    bytes: u64,
 }
 
 struct GenerationRestoreRequest<'a> {
@@ -531,6 +541,7 @@ struct StorageScanBudget {
     visited_entries: usize,
 }
 
+#[derive(Clone)]
 struct ScannedGeneration {
     repository: RepositoryId,
     generation: GenerationId,
@@ -539,6 +550,7 @@ struct ScannedGeneration {
     source_blobs: BTreeMap<ContentHash, u64>,
 }
 
+#[derive(Clone)]
 struct ScannedSourceBlob {
     bytes: u64,
     payload_bytes: u64,
@@ -552,7 +564,7 @@ struct VerifiedSourceBlobMetadata {
     file_index: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ScannedRepositoryStorage {
     repository: Option<RepositoryId>,
     generations: BTreeMap<GenerationId, ScannedGeneration>,
@@ -561,6 +573,37 @@ struct ScannedRepositoryStorage {
     marker_bytes: BTreeMap<u64, u64>,
     source_blobs: BTreeMap<ContentHash, ScannedSourceBlob>,
     temporary_bytes: u64,
+}
+
+struct DurableStorageAccounting {
+    reservations: DurableStorageReservations,
+    repositories: Option<BTreeMap<RepositoryId, ScannedRepositoryStorage>>,
+    quarantine_bytes: u64,
+    dirty: bool,
+    verified_source_blobs: BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
+    #[cfg(test)]
+    full_scan_count: u64,
+    #[cfg(test)]
+    repository_scan_count: u64,
+}
+
+impl Default for DurableStorageAccounting {
+    fn default() -> Self {
+        Self {
+            reservations: DurableStorageReservations {
+                next_id: 0,
+                entries: BTreeMap::new(),
+            },
+            repositories: None,
+            quarantine_bytes: 0,
+            dirty: false,
+            verified_source_blobs: BTreeMap::new(),
+            #[cfg(test)]
+            full_scan_count: 0,
+            #[cfg(test)]
+            repository_scan_count: 0,
+        }
+    }
 }
 
 struct RecoverySnapshotWriter<W> {
@@ -832,8 +875,7 @@ impl DurableCatalog {
             maximum_generations_per_repository,
             maximum_repositories,
             staging_bytes: Arc::new(AtomicU64::new(0)),
-            storage_reservations: Arc::new(Mutex::new(DurableStorageReservations::default())),
-            verified_source_blobs: Mutex::new(BTreeMap::new()),
+            storage_accounting: Arc::new(Mutex::new(DurableStorageAccounting::default())),
         })
     }
 
@@ -842,9 +884,23 @@ impl DurableCatalog {
         repository: RepositoryId,
         generation: GenerationId,
     ) -> Result<DurablePreparedGeneration, FirstSliceError> {
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
         let repository_name = repository.to_string();
         let repository_directory =
             ensure_private_directory(self.repositories.capability(), OsStr::new(&repository_name))?;
+        if !accounting.dirty
+            && let Some(repositories) = accounting.repositories.as_mut()
+        {
+            repositories
+                .entry(repository)
+                .or_insert_with(|| ScannedRepositoryStorage {
+                    repository: Some(repository),
+                    ..ScannedRepositoryStorage::default()
+                });
+        }
         let repository_path = self.repositories_path.join(&repository_name);
         let staging_name = random_staging_name(generation)?;
         let staging =
@@ -855,12 +911,14 @@ impl DurableCatalog {
             staging: Some(staging),
             staging_path,
             repository: Some(repository_directory),
+            repository_id: repository,
             generation,
             staging_bytes: Arc::clone(&self.staging_bytes),
             accounted_bytes: AtomicU64::new(0),
             incremental_state: Mutex::new(None),
             source_storage: Mutex::new(None),
             created_source_blobs: Mutex::new(BTreeSet::new()),
+            storage_accounting: Arc::clone(&self.storage_accounting),
         })
     }
 
@@ -875,22 +933,27 @@ impl DurableCatalog {
         >,
         FirstSliceError,
     > {
-        let mut reservations = self
-            .storage_reservations
+        let mut accounting = self
+            .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let inventory = self.storage_inventory()?;
-        let admission = match check_storage_admission(&inventory, &reservations, repository, policy)
-        {
-            Ok(admission) => admission,
-            Err(failure) => return Ok(Err(failure)),
-        };
-        reservations.next_id = reservations
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let inventory = self.inventory_for_admission(&mut accounting, available_bytes)?;
+        let admission =
+            match check_storage_admission(&inventory, &accounting.reservations, repository, policy)
+            {
+                Ok(admission) => admission,
+                Err(failure) => return Ok(Err(failure)),
+            };
+        accounting.reservations.next_id = accounting
+            .reservations
             .next_id
             .checked_add(1)
             .ok_or(FirstSliceError::Limits)?;
-        let id = reservations.next_id;
-        if reservations
+        let id = accounting.reservations.next_id;
+        if accounting
+            .reservations
             .entries
             .insert(
                 id,
@@ -907,7 +970,7 @@ impl DurableCatalog {
         Ok(Ok((
             admission,
             DurableStorageReservation {
-                reservations: Arc::clone(&self.storage_reservations),
+                accounting: Arc::clone(&self.storage_accounting),
                 id,
             },
         )))
@@ -919,17 +982,37 @@ impl DurableCatalog {
         policy: DurableStorageAdmissionPolicy,
     ) -> Result<Result<DurableStorageAdmission, DurableStorageAdmissionFailure>, FirstSliceError>
     {
-        let mut reservations = self
-            .storage_reservations
+        let mut accounting = self
+            .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let current = reservations
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        if accounting.dirty || accounting.repositories.is_none() {
+            return Err(FirstSliceError::Retention);
+        }
+        let current = accounting
+            .reservations
             .entries
             .remove(&reservation.id)
             .ok_or(FirstSliceError::Retention)?;
-        let inventory = self.storage_inventory()?;
-        let result = check_storage_admission(&inventory, &reservations, current.repository, policy);
-        reservations.entries.insert(
+        let inventory = match self.inventory_for_admission(&mut accounting, available_bytes) {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                accounting
+                    .reservations
+                    .entries
+                    .insert(reservation.id, current);
+                return Err(error);
+            }
+        };
+        let result = check_storage_admission(
+            &inventory,
+            &accounting.reservations,
+            current.repository,
+            policy,
+        );
+        accounting.reservations.entries.insert(
             reservation.id,
             DurableStorageReservationEntry {
                 repository: current.repository,
@@ -956,19 +1039,75 @@ impl DurableCatalog {
         >,
         FirstSliceError,
     > {
-        let mut reservations = self
-            .storage_reservations
+        let mut accounting = self
+            .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let current = reservations
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let current = accounting
+            .reservations
             .entries
             .remove(&reservation.id)
             .ok_or(FirstSliceError::Retention)?;
         if current.repository != sealed.repository || current.repository_bytes != 0 {
-            reservations.entries.insert(reservation.id, current);
+            accounting
+                .reservations
+                .entries
+                .insert(reservation.id, current);
             return Err(FirstSliceError::Retention);
         }
-        let inventory = self.storage_inventory()?;
+        if accounting.dirty || accounting.repositories.is_none() {
+            accounting
+                .reservations
+                .entries
+                .insert(reservation.id, current);
+            return Err(FirstSliceError::Retention);
+        }
+        let repository_directory = sealed.prepared.repository();
+        let mut budget = StorageScanBudget::new();
+        let replacement = match scan_repository_storage(
+            sealed.repository,
+            repository_directory,
+            &mut budget,
+            &mut accounting.verified_source_blobs,
+        ) {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                accounting.dirty = true;
+                accounting
+                    .reservations
+                    .entries
+                    .insert(reservation.id, current);
+                return Err(error);
+            }
+        };
+        let live_source_blobs = replacement
+            .source_blobs
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        {
+            accounting.repository_scan_count = accounting.repository_scan_count.saturating_add(1);
+        }
+        let previous = accounting
+            .repositories
+            .as_mut()
+            .ok_or(FirstSliceError::Retention)?
+            .insert(sealed.repository, replacement);
+        let inventory = match inventory_from_accounting(&accounting, available_bytes) {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                restore_repository_accounting(&mut accounting, sealed.repository, previous);
+                accounting.dirty = true;
+                accounting
+                    .reservations
+                    .entries
+                    .insert(reservation.id, current);
+                return Err(error);
+            }
+        };
         let observed_repository_bytes = inventory
             .repositories
             .iter()
@@ -987,18 +1126,26 @@ impl DurableCatalog {
             .checked_add(policy.required_repository_bytes)
             .ok_or(FirstSliceError::Limits)?;
         let other_repository_reservations =
-            reservations.entries.values().fold(0_u64, |total, entry| {
-                if entry.repository == sealed.repository {
-                    total.saturating_add(entry.repository_bytes)
-                } else {
-                    total
-                }
-            });
+            accounting
+                .reservations
+                .entries
+                .values()
+                .fold(0_u64, |total, entry| {
+                    if entry.repository == sealed.repository {
+                        total.saturating_add(entry.repository_bytes)
+                    } else {
+                        total
+                    }
+                });
         let projected_repository_bytes = observed_repository_bytes
             .saturating_add(other_repository_reservations)
             .saturating_add(policy.required_repository_bytes);
         if projected_repository_bytes > policy.maximum_repository_bytes {
-            reservations.entries.insert(reservation.id, current);
+            restore_repository_accounting(&mut accounting, sealed.repository, previous);
+            accounting
+                .reservations
+                .entries
+                .insert(reservation.id, current);
             return Ok(Err(DurableStorageAdmissionFailure {
                 scope: DurableStorageAdmissionScope::RepositoryBudget,
                 required_bytes: candidate_bytes,
@@ -1015,13 +1162,20 @@ impl DurableCatalog {
             maximum_storage_bytes: policy.maximum_storage_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         };
-        if let Err(failure) =
-            check_storage_admission(&inventory, &reservations, sealed.repository, catalog_policy)
-        {
-            reservations.entries.insert(reservation.id, current);
+        if let Err(failure) = check_storage_admission(
+            &inventory,
+            &accounting.reservations,
+            sealed.repository,
+            catalog_policy,
+        ) {
+            restore_repository_accounting(&mut accounting, sealed.repository, previous);
+            accounting
+                .reservations
+                .entries
+                .insert(reservation.id, current);
             return Ok(Err(failure));
         }
-        reservations.entries.insert(
+        accounting.reservations.entries.insert(
             reservation.id,
             DurableStorageReservationEntry {
                 repository: current.repository,
@@ -1029,6 +1183,11 @@ impl DurableCatalog {
                 repository_bytes: policy.required_repository_bytes,
             },
         );
+        accounting
+            .verified_source_blobs
+            .retain(|(repository, digest), _| {
+                *repository != sealed.repository || live_source_blobs.contains(digest)
+            });
         Ok(Ok((
             DurableStorageAdmission {
                 required_bytes: candidate_bytes,
@@ -1055,19 +1214,171 @@ impl DurableCatalog {
     pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
-        let mut verified_source_blobs = self
-            .verified_source_blobs
+        let mut accounting = self
+            .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        // Scanning the committed tree makes crash recovery, publication, and compaction visible
-        // without trusting counters that may not have been flushed before process termination.
-        scan_storage_inventory(
+        accounting.verified_source_blobs.clear();
+        let scanned = scan_storage_state(
             &self.repositories,
             &self.quarantine,
             self.maximum_repositories,
+            &mut accounting.verified_source_blobs,
+        );
+        let (repositories, quarantine_bytes) = match scanned {
+            Ok(scanned) => scanned,
+            Err(error) => {
+                accounting.dirty = true;
+                return Err(error);
+            }
+        };
+        #[cfg(test)]
+        {
+            accounting.full_scan_count = accounting.full_scan_count.saturating_add(1);
+        }
+        let built = build_storage_inventory(
+            repositories.values().cloned().collect(),
+            quarantine_bytes,
             available_bytes,
-            &mut verified_source_blobs,
-        )
+        );
+        let inventory = match built {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                accounting.dirty = true;
+                return Err(error);
+            }
+        };
+        if accounting.reservations.entries.is_empty() {
+            accounting.repositories = Some(repositories);
+            accounting.quarantine_bytes = quarantine_bytes;
+            accounting.dirty = false;
+        }
+        Ok(inventory)
+    }
+
+    pub(super) fn storage_inventory_cached(
+        &self,
+    ) -> Result<Option<DurableStorageInventory>, FirstSliceError> {
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        if accounting.dirty
+            || accounting.repositories.is_none()
+            || !accounting.reservations.entries.is_empty()
+        {
+            return Ok(None);
+        }
+        inventory_from_accounting(&accounting, available_bytes).map(Some)
+    }
+
+    fn inventory_for_admission(
+        &self,
+        accounting: &mut DurableStorageAccounting,
+        available_bytes: u64,
+    ) -> Result<DurableStorageInventory, FirstSliceError> {
+        if accounting.dirty || accounting.repositories.is_none() {
+            // An in-flight reservation may already be materializing bytes that a
+            // scan cannot attribute to that reservation. Refuse instead of
+            // combining an ambiguous scan with the live reservation ledger.
+            if !accounting.reservations.entries.is_empty() {
+                return Err(FirstSliceError::Retention);
+            }
+            accounting.dirty = true;
+            accounting.verified_source_blobs.clear();
+            let (repositories, quarantine_bytes) = scan_storage_state(
+                &self.repositories,
+                &self.quarantine,
+                self.maximum_repositories,
+                &mut accounting.verified_source_blobs,
+            )?;
+            let inventory = build_storage_inventory(
+                repositories.values().cloned().collect(),
+                quarantine_bytes,
+                available_bytes,
+            )?;
+            accounting.repositories = Some(repositories);
+            accounting.quarantine_bytes = quarantine_bytes;
+            accounting.dirty = false;
+            #[cfg(test)]
+            {
+                accounting.full_scan_count = accounting.full_scan_count.saturating_add(1);
+            }
+            return Ok(inventory);
+        }
+        inventory_from_accounting(accounting, available_bytes)
+    }
+
+    fn reconcile_repository_accounting(
+        &self,
+        accounting: &mut DurableStorageAccounting,
+        repository: RepositoryId,
+        directory: &PrivateDirectory<'_>,
+    ) -> Result<(), FirstSliceError> {
+        if accounting.dirty || accounting.repositories.is_none() {
+            if !accounting.reservations.entries.is_empty() {
+                return Err(FirstSliceError::Retention);
+            }
+            accounting.dirty = true;
+            accounting.verified_source_blobs.clear();
+            let (repositories, quarantine_bytes) = scan_storage_state(
+                &self.repositories,
+                &self.quarantine,
+                self.maximum_repositories,
+                &mut accounting.verified_source_blobs,
+            )?;
+            let available_bytes = fs2::available_space(&self.repositories_path)
+                .map_err(|_| FirstSliceError::Catalog)?;
+            build_storage_inventory(
+                repositories.values().cloned().collect(),
+                quarantine_bytes,
+                available_bytes,
+            )?;
+            accounting.repositories = Some(repositories);
+            accounting.quarantine_bytes = quarantine_bytes;
+            accounting.dirty = false;
+            #[cfg(test)]
+            {
+                accounting.full_scan_count = accounting.full_scan_count.saturating_add(1);
+            }
+            return Ok(());
+        }
+        let mut budget = StorageScanBudget::new();
+        let scanned = scan_repository_storage(
+            repository,
+            directory,
+            &mut budget,
+            &mut accounting.verified_source_blobs,
+        )?;
+        let live_source_blobs = scanned
+            .source_blobs
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let previous = accounting
+            .repositories
+            .as_mut()
+            .ok_or(FirstSliceError::Retention)?
+            .insert(repository, scanned);
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        if let Err(error) = inventory_from_accounting(accounting, available_bytes) {
+            restore_repository_accounting(accounting, repository, previous);
+            accounting.dirty = true;
+            return Err(error);
+        }
+        accounting
+            .verified_source_blobs
+            .retain(|(candidate, digest), _| {
+                *candidate != repository || live_source_blobs.contains(digest)
+            });
+        #[cfg(test)]
+        {
+            accounting.repository_scan_count = accounting.repository_scan_count.saturating_add(1);
+        }
+        Ok(())
     }
 
     pub(super) fn read_source(
@@ -1349,80 +1660,161 @@ impl DurableCatalog {
         operation: Option<FirstSliceOperationContext>,
     ) -> Result<u64, FirstSliceError> {
         let repository_name = repository.to_string();
-        let repository =
+        let repository_directory =
             PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let generation_name = generation.to_string();
-        let _generation =
-            PrivateDirectory::open(repository.capability(), OsStr::new(&generation_name))
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        publish_activation_marker(
-            &repository,
+        let _generation = PrivateDirectory::open(
+            repository_directory.capability(),
+            OsStr::new(&generation_name),
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        validate_activation_accounting(
+            &accounting,
+            repository,
+            generation,
+            repository_activation_sequence,
+        )?;
+        let published = publish_activation_marker(
+            &repository_directory,
             generation,
             repository_activation_sequence,
             global_activation_sequence,
             published_generation_count,
             operation,
-        )
+        );
+        match published {
+            Ok(published) => {
+                if let Err(error) = account_activation_marker(
+                    &mut accounting,
+                    repository,
+                    published.marker,
+                    published.bytes,
+                ) {
+                    accounting.dirty = true;
+                    Err(error)
+                } else {
+                    Ok(published.bytes)
+                }
+            }
+            Err(error) => {
+                accounting.dirty = true;
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn write_repository_metadata(
         &self,
         metadata: DurableRepositoryMetadata,
     ) -> Result<u64, FirstSliceError> {
-        if metadata.version != REPOSITORY_METADATA_VERSION
-            || metadata.sequence == 0
-            || !valid_repository_metadata(&metadata)
-        {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        let repository = PrivateDirectory::open(
-            self.repositories.capability(),
-            OsStr::new(&metadata.repository.to_string()),
-        )
-        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let staging_name = random_metadata_staging_name(metadata.sequence)?;
-        let staging = PrivateDirectory::create(repository.capability(), OsStr::new(&staging_name))
-            .map_err(|_| FirstSliceError::Catalog)?;
-        let bytes = serde_json::to_vec(&metadata).map_err(|_| FirstSliceError::Catalog)?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
-            return Err(FirstSliceError::Limits);
-        }
-        {
-            let mut file = staging
-                .create_file(OsStr::new(REPOSITORY_METADATA_FILENAME))
-                .map_err(|_| FirstSliceError::Catalog)?;
-            file.write_all(&bytes)
-                .map_err(|_| FirstSliceError::Catalog)?;
-            file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
-        }
-        staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
-        let name = metadata_name(metadata.sequence);
-        match staging.publish_noreplace(repository.capability(), OsStr::new(&name)) {
-            Ok(published) => published.sync_all().map_err(|_| FirstSliceError::Catalog)?,
-            Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
-                directory.remove().map_err(|_| FirstSliceError::Catalog)?;
-                return Err(FirstSliceError::Catalog);
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let result = (|| {
+            if metadata.version != REPOSITORY_METADATA_VERSION
+                || metadata.sequence == 0
+                || !valid_repository_metadata(&metadata)
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
             }
-            Err(_) => return Err(FirstSliceError::Catalog),
+            let repository = PrivateDirectory::open(
+                self.repositories.capability(),
+                OsStr::new(&metadata.repository.to_string()),
+            )
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            if accounting.dirty || accounting.repositories.is_none() {
+                self.reconcile_repository_accounting(
+                    &mut accounting,
+                    metadata.repository,
+                    &repository,
+                )?;
+            }
+            let staging_name = random_metadata_staging_name(metadata.sequence)?;
+            let staging =
+                PrivateDirectory::create(repository.capability(), OsStr::new(&staging_name))
+                    .map_err(|_| FirstSliceError::Catalog)?;
+            let bytes = serde_json::to_vec(&metadata).map_err(|_| FirstSliceError::Catalog)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+                return Err(FirstSliceError::Limits);
+            }
+            {
+                let mut file = staging
+                    .create_file(OsStr::new(REPOSITORY_METADATA_FILENAME))
+                    .map_err(|_| FirstSliceError::Catalog)?;
+                file.write_all(&bytes)
+                    .map_err(|_| FirstSliceError::Catalog)?;
+                file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            }
+            staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            let name = metadata_name(metadata.sequence);
+            match staging.publish_noreplace(repository.capability(), OsStr::new(&name)) {
+                Ok(published) => published.sync_all().map_err(|_| FirstSliceError::Catalog)?,
+                Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
+                    directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+                    return Err(FirstSliceError::Catalog);
+                }
+                Err(_) => return Err(FirstSliceError::Catalog),
+            }
+            compact_repository_metadata(&repository, metadata.sequence)?;
+            let written_bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+            if let Some(repository) = accounting
+                .repositories
+                .as_mut()
+                .and_then(|repositories| repositories.get_mut(&metadata.repository))
+            {
+                repository.metadata_bytes.clear();
+                repository
+                    .metadata_bytes
+                    .insert(metadata.sequence, written_bytes);
+            } else {
+                // The metadata publication is already durable. Preserve its
+                // successful contract and force later accounting to reconcile.
+                accounting.dirty = true;
+            }
+            Ok(written_bytes)
+        })();
+        if result.is_err() {
+            accounting.dirty = true;
         }
-        compact_repository_metadata(&repository, metadata.sequence)?;
-        u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
+        result
     }
 
     pub(super) fn remove_repository(
         &self,
         repository: RepositoryId,
     ) -> Result<(), FirstSliceError> {
-        let directory = PrivateDirectory::open(
-            self.repositories.capability(),
-            OsStr::new(&repository.to_string()),
-        )
-        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        directory.remove().map_err(|_| FirstSliceError::Catalog)?;
-        self.repositories
-            .sync_all()
-            .map_err(|_| FirstSliceError::Catalog)
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let result = (|| {
+            let directory = PrivateDirectory::open(
+                self.repositories.capability(),
+                OsStr::new(&repository.to_string()),
+            )
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+            self.repositories
+                .sync_all()
+                .map_err(|_| FirstSliceError::Catalog)?;
+            if let Some(repositories) = accounting.repositories.as_mut() {
+                repositories.remove(&repository);
+            }
+            accounting
+                .verified_source_blobs
+                .retain(|(candidate, _), _| *candidate != repository);
+            Ok(())
+        })();
+        if result.is_err() {
+            accounting.dirty = true;
+        }
+        result
     }
 
     fn restore_repository(
@@ -1433,6 +1825,9 @@ impl DurableCatalog {
         policy: &RestorePolicy<'_>,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        if policy.repair || policy.compact {
+            mark_storage_accounting_dirty(&self.storage_accounting);
+        }
         let names = private_entry_names(repository)?;
         let mut markers = BTreeMap::<u64, ActivationMarker>::new();
         let mut metadata_names = BTreeMap::<u64, OsString>::new();
@@ -1691,53 +2086,67 @@ impl DurableCatalog {
         repository: RepositoryId,
         retained: &BTreeSet<GenerationId>,
     ) -> Result<(), FirstSliceError> {
-        let repository_name = repository.to_string();
-        let repository =
-            PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let names = private_entry_names(&repository)?;
-        let mut markers = BTreeMap::<u64, ActivationMarker>::new();
-        let mut generation_names = BTreeSet::new();
-        for name in names {
-            let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
-            if text.starts_with(STAGING_PREFIX) {
-                continue;
-            }
-            if let Some((sequence, generation)) = parse_activation_name(text) {
-                let marker = read_activation_marker(&repository, name, sequence, generation)?;
-                if markers.insert(sequence, marker).is_some() {
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let result = (|| {
+            let repository_name = repository.to_string();
+            let repository_directory = PrivateDirectory::open(
+                self.repositories.capability(),
+                OsStr::new(&repository_name),
+            )
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let names = private_entry_names(&repository_directory)?;
+            let mut markers = BTreeMap::<u64, ActivationMarker>::new();
+            let mut generation_names = BTreeSet::new();
+            for name in names {
+                let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+                if text.starts_with(STAGING_PREFIX) {
+                    continue;
+                }
+                if let Some((sequence, generation)) = parse_activation_name(text) {
+                    let marker =
+                        read_activation_marker(&repository_directory, name, sequence, generation)?;
+                    if markers.insert(sequence, marker).is_some() {
+                        return Err(FirstSliceError::CatalogCorrupt);
+                    }
+                } else if parse_metadata_name(text).is_some() || text == SOURCE_BLOBS_DIRECTORY {
+                    continue;
+                } else if let Ok(generation) = GenerationId::from_str(text) {
+                    generation_names.insert(generation);
+                } else {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
-            } else if parse_metadata_name(text).is_some() || text == SOURCE_BLOBS_DIRECTORY {
-                continue;
-            } else if let Ok(generation) = GenerationId::from_str(text) {
-                generation_names.insert(generation);
-            } else {
+            }
+            if !retained.is_subset(&generation_names)
+                || markers
+                    .values()
+                    .any(|marker| !generation_names.contains(&marker.manifest.generation))
+            {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
+            let retained_marker_names = retained_activation_marker_names(&markers, retained);
+            if retained.iter().any(|generation| {
+                !markers
+                    .values()
+                    .any(|marker| marker.manifest.generation == *generation)
+            }) {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            compact_repository_entries(
+                &repository_directory,
+                &markers,
+                &generation_names,
+                retained,
+                &retained_marker_names,
+            )?;
+            self.reconcile_repository_accounting(&mut accounting, repository, &repository_directory)
+        })();
+        if result.is_err() {
+            accounting.dirty = true;
         }
-        if !retained.is_subset(&generation_names)
-            || markers
-                .values()
-                .any(|marker| !generation_names.contains(&marker.manifest.generation))
-        {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        let retained_marker_names = retained_activation_marker_names(&markers, retained);
-        if retained.iter().any(|generation| {
-            !markers
-                .values()
-                .any(|marker| marker.manifest.generation == *generation)
-        }) {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        compact_repository_entries(
-            &repository,
-            &markers,
-            &generation_names,
-            retained,
-            &retained_marker_names,
-        )
+        result
     }
 }
 
@@ -1999,15 +2408,29 @@ impl DurablePreparedGeneration {
         let manifest_bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
         self.account_staging_bytes(manifest_bytes)?;
         let materialized_bytes = self.accounted_bytes.load(Ordering::Acquire);
+        let mut budget = StorageScanBudget::new();
+        let scanned_generation =
+            scan_generation_storage(repository, self.generation, self.staging(), &mut budget)?;
         Ok(DurableSealedGeneration {
             prepared: self,
             repository,
             materialized_bytes,
             manifest_written_bytes: manifest_bytes,
+            scanned_generation,
         })
     }
 
-    pub(super) fn publish(mut self) -> Result<DurablePublishedGeneration, FirstSliceError> {
+    fn publish(
+        mut self,
+        scanned_generation: ScannedGeneration,
+    ) -> Result<DurablePublishedGeneration, FirstSliceError> {
+        let accounting_handle = Arc::clone(&self.storage_accounting);
+        let mut accounting = accounting_handle
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        if accounting.dirty || accounting.repositories.is_none() {
+            return Err(FirstSliceError::Retention);
+        }
         let staging = self.staging.take().ok_or(FirstSliceError::Catalog)?;
         let generation_name = self.generation.to_string();
         let directory = match staging
@@ -2015,19 +2438,57 @@ impl DurablePreparedGeneration {
         {
             Ok(directory) => directory,
             Err(PublishError::NotCommitted { .. }) => {
+                accounting.dirty = true;
                 self.release_staging_bytes();
                 return Err(FirstSliceError::Catalog);
             }
             Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
-                directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+                accounting.dirty = true;
                 self.release_staging_bytes();
+                if directory.remove().is_err()
+                    && let Ok(mut created) = self.created_source_blobs.lock()
+                {
+                    // The committed generation may still reference these blobs.
+                    created.clear();
+                }
                 return Err(FirstSliceError::Catalog);
             }
             Err(_) => {
+                accounting.dirty = true;
                 self.release_staging_bytes();
                 return Err(FirstSliceError::Catalog);
             }
         };
+        let accounting_result = (|| {
+            let repository_accounting = accounting
+                .repositories
+                .as_mut()
+                .and_then(|repositories| repositories.get_mut(&self.repository_id))
+                .ok_or(FirstSliceError::Retention)?;
+            repository_accounting.temporary_bytes = repository_accounting
+                .temporary_bytes
+                .checked_sub(scanned_generation.tree_bytes)
+                .ok_or(FirstSliceError::Retention)?;
+            if repository_accounting
+                .generations
+                .insert(self.generation, scanned_generation)
+                .is_some()
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            Ok(())
+        })();
+        if let Err(error) = accounting_result {
+            accounting.dirty = true;
+            self.release_staging_bytes();
+            if directory.remove().is_err()
+                && let Ok(mut created) = self.created_source_blobs.lock()
+            {
+                // The committed generation may still reference these blobs.
+                created.clear();
+            }
+            return Err(error);
+        }
         self.release_staging_bytes();
         self.created_source_blobs
             .lock()
@@ -2037,7 +2498,9 @@ impl DurablePreparedGeneration {
         Ok(DurablePublishedGeneration {
             directory: Some(directory),
             repository,
+            repository_id: self.repository_id,
             generation: self.generation,
+            storage_accounting: Arc::clone(&self.storage_accounting),
         })
     }
 
@@ -2094,7 +2557,7 @@ impl DurableSealedGeneration {
 
 impl DurableStorageAdmittedGeneration {
     pub(super) fn publish(self) -> Result<DurablePublishedGeneration, FirstSliceError> {
-        self.sealed.prepared.publish()
+        self.sealed.prepared.publish(self.sealed.scanned_generation)
     }
 }
 
@@ -2106,14 +2569,43 @@ impl DurablePublishedGeneration {
         published_generation_count: u64,
         operation: Option<FirstSliceOperationContext>,
     ) -> Result<u64, FirstSliceError> {
-        publish_activation_marker(
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        validate_activation_accounting(
+            &accounting,
+            self.repository_id,
+            self.generation,
+            repository_activation_sequence,
+        )?;
+        let published = publish_activation_marker(
             &self.repository,
             self.generation,
             repository_activation_sequence,
             global_activation_sequence,
             published_generation_count,
             operation,
-        )
+        );
+        match published {
+            Ok(published) => {
+                if let Err(error) = account_activation_marker(
+                    &mut accounting,
+                    self.repository_id,
+                    published.marker,
+                    published.bytes,
+                ) {
+                    accounting.dirty = true;
+                    Err(error)
+                } else {
+                    Ok(published.bytes)
+                }
+            }
+            Err(error) => {
+                accounting.dirty = true;
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn disarm(mut self) {
@@ -2121,16 +2613,42 @@ impl DurablePublishedGeneration {
     }
 
     pub(super) fn discard(mut self) -> Result<(), FirstSliceError> {
-        self.directory
+        let mut accounting = self
+            .storage_accounting
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let result = self
+            .directory
             .take()
             .ok_or(FirstSliceError::Catalog)?
             .remove()
-            .map_err(|_| FirstSliceError::Catalog)
+            .map_err(|_| FirstSliceError::Catalog);
+        match result {
+            Ok(()) => {
+                let removed = accounting
+                    .repositories
+                    .as_mut()
+                    .and_then(|repositories| repositories.get_mut(&self.repository_id))
+                    .and_then(|repository| repository.generations.remove(&self.generation));
+                if removed.is_none() {
+                    accounting.dirty = true;
+                    return Err(FirstSliceError::Retention);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                accounting.dirty = true;
+                Err(error)
+            }
+        }
     }
 }
 
 impl Drop for DurablePreparedGeneration {
     fn drop(&mut self) {
+        if self.staging.is_some() {
+            mark_storage_accounting_dirty(&self.storage_accounting);
+        }
         if let Some(staging) = self.staging.take() {
             // The primary preparation error remains authoritative; restart
             // recovery removes this validated staging tree if cleanup fails.
@@ -2151,6 +2669,14 @@ impl Drop for DurablePreparedGeneration {
                 }
             }
             let _ = blobs.sync_all();
+        }
+    }
+}
+
+impl Drop for DurablePublishedGeneration {
+    fn drop(&mut self) {
+        if self.directory.is_some() {
+            mark_storage_accounting_dirty(&self.storage_accounting);
         }
     }
 }
@@ -2321,22 +2847,119 @@ impl StorageScanBudget {
     }
 }
 
-fn scan_storage_inventory(
+fn inventory_from_accounting(
+    accounting: &DurableStorageAccounting,
+    available_bytes: u64,
+) -> Result<DurableStorageInventory, FirstSliceError> {
+    let repositories = accounting
+        .repositories
+        .as_ref()
+        .ok_or(FirstSliceError::Retention)?;
+    build_storage_inventory(
+        repositories.values().cloned().collect(),
+        accounting.quarantine_bytes,
+        available_bytes,
+    )
+}
+
+fn restore_repository_accounting(
+    accounting: &mut DurableStorageAccounting,
+    repository: RepositoryId,
+    previous: Option<ScannedRepositoryStorage>,
+) {
+    let Some(repositories) = accounting.repositories.as_mut() else {
+        accounting.dirty = true;
+        return;
+    };
+    if let Some(previous) = previous {
+        repositories.insert(repository, previous);
+    } else {
+        repositories.remove(&repository);
+    }
+}
+
+fn mark_storage_accounting_dirty(accounting: &Arc<Mutex<DurableStorageAccounting>>) {
+    if let Ok(mut accounting) = accounting.lock() {
+        accounting.dirty = true;
+    }
+}
+
+fn validate_activation_accounting(
+    accounting: &DurableStorageAccounting,
+    repository: RepositoryId,
+    generation: GenerationId,
+    sequence: u64,
+) -> Result<(), FirstSliceError> {
+    if accounting.dirty {
+        return Err(FirstSliceError::Retention);
+    }
+    let repository = accounting
+        .repositories
+        .as_ref()
+        .and_then(|repositories| repositories.get(&repository))
+        .ok_or(FirstSliceError::Retention)?;
+    if !repository.generations.contains_key(&generation)
+        || repository.markers.contains_key(&sequence)
+        || repository.marker_bytes.contains_key(&sequence)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
+}
+
+fn account_activation_marker(
+    accounting: &mut DurableStorageAccounting,
+    repository: RepositoryId,
+    marker: ActivationMarker,
+    bytes: u64,
+) -> Result<(), FirstSliceError> {
+    if accounting.dirty {
+        return Err(FirstSliceError::Retention);
+    }
+    let repository = accounting
+        .repositories
+        .as_mut()
+        .and_then(|repositories| repositories.get_mut(&repository))
+        .ok_or(FirstSliceError::Retention)?;
+    if !repository
+        .generations
+        .contains_key(&marker.manifest.generation)
+    {
+        accounting.dirty = true;
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let generations = repository.generations.keys().copied().collect();
+    let retained = retained_activation_marker_names(&repository.markers, &generations);
+    repository
+        .markers
+        .retain(|_, existing| retained.contains(&existing.name));
+    repository
+        .marker_bytes
+        .retain(|sequence, _| repository.markers.contains_key(sequence));
+    if repository
+        .marker_bytes
+        .insert(marker.sequence, bytes)
+        .is_some()
+        || repository.markers.insert(marker.sequence, marker).is_some()
+    {
+        accounting.dirty = true;
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
+}
+
+fn scan_storage_state(
     repositories: &PrivateDirectory<'_>,
     quarantine: &PrivateDirectory<'_>,
     maximum_repositories: usize,
-    available_bytes: u64,
     verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
-) -> Result<DurableStorageInventory, FirstSliceError> {
+) -> Result<(BTreeMap<RepositoryId, ScannedRepositoryStorage>, u64), FirstSliceError> {
     let repository_names = private_entry_names(repositories)?;
     if repository_names.len() > maximum_repositories {
         return Err(FirstSliceError::Retention);
     }
     let mut budget = StorageScanBudget::new();
-    let mut scanned_repositories = Vec::new();
-    scanned_repositories
-        .try_reserve_exact(repository_names.len())
-        .map_err(|_| FirstSliceError::Retention)?;
+    let mut scanned_repositories = BTreeMap::new();
     for repository_name in repository_names {
         budget.visit()?;
         let repository_text = repository_name
@@ -2346,18 +2969,21 @@ fn scan_storage_inventory(
             RepositoryId::from_str(repository_text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let repository = PrivateDirectory::open(repositories.capability(), &repository_name)
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        scanned_repositories.push(scan_repository_storage(
+        let scanned = scan_repository_storage(
             repository_id,
             &repository,
             &mut budget,
             verified_source_blobs,
-        )?);
+        )?;
+        if scanned_repositories
+            .insert(repository_id, scanned)
+            .is_some()
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
     }
-    build_storage_inventory(
-        scanned_repositories,
-        directory_tree_bytes(quarantine, &mut budget)?,
-        available_bytes,
-    )
+    let quarantine_bytes = directory_tree_bytes(quarantine, &mut budget)?;
+    Ok((scanned_repositories, quarantine_bytes))
 }
 
 fn scan_repository_storage(
@@ -3603,7 +4229,7 @@ fn publish_activation_marker(
     global_activation_sequence: u64,
     published_generation_count: u64,
     operation: Option<FirstSliceOperationContext>,
-) -> Result<u64, FirstSliceError> {
+) -> Result<PublishedActivationMarker, FirstSliceError> {
     if repository_activation_sequence == 0
         || global_activation_sequence == 0
         || published_generation_count == 0
@@ -3640,7 +4266,15 @@ fn publish_activation_marker(
     match staging.publish_noreplace(repository.capability(), OsStr::new(&marker_name)) {
         Ok(marker) => {
             marker.sync_all().map_err(|_| FirstSliceError::Catalog)?;
-            u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
+            let bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+            Ok(PublishedActivationMarker {
+                marker: ActivationMarker {
+                    name: OsString::from(marker_name),
+                    sequence: repository_activation_sequence,
+                    manifest,
+                },
+                bytes,
+            })
         }
         Err(PublishError::NotCommitted { .. }) => Err(FirstSliceError::Catalog),
         Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
@@ -3785,6 +4419,15 @@ mod tests {
         {
             TempDir::new().expect("durable test directory is available")
         }
+    }
+
+    fn assert_inventory_equal_ignoring_available(
+        mut left: DurableStorageInventory,
+        mut right: DurableStorageInventory,
+    ) {
+        left.available_bytes = 0;
+        right.available_bytes = 0;
+        assert_eq!(left, right);
     }
 
     #[test]
@@ -4039,6 +4682,13 @@ mod tests {
             repository,
             materialized_bytes,
             manifest_written_bytes: 0,
+            scanned_generation: ScannedGeneration {
+                repository,
+                generation,
+                parent: None,
+                tree_bytes: materialized_bytes,
+                source_blobs: BTreeMap::new(),
+            },
         };
 
         let (admission, _admitted) = durable
@@ -4062,10 +4712,11 @@ mod tests {
         );
         assert_eq!(admission.observed_bytes, 0);
         let reservations = durable
-            .storage_reservations
+            .storage_accounting
             .lock()
             .expect("reservation ledger remains available");
         let entry = reservations
+            .reservations
             .entries
             .get(&reservation.id)
             .expect("reservation remains held through publication");
@@ -4168,6 +4819,437 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            durable
+                .storage_inventory_cached()
+                .expect("accounted inventory reads"),
+            None,
+            "in-flight reservations hide physical accounting"
+        );
+        let accounting = durable
+            .storage_accounting
+            .lock()
+            .expect("storage accounting remains available");
+        assert_eq!(accounting.full_scan_count, 1);
+        assert_eq!(accounting.repository_scan_count, 0);
+    }
+
+    #[test]
+    fn activation_preflights_accounting_and_dirty_compaction_reconciles() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn activation_accounting() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let repository = PrivateDirectory::open(
+            durable.repositories.capability(),
+            OsStr::new(&receipt.repository.to_string()),
+        )
+        .expect("repository directory opens");
+        mark_storage_accounting_dirty(&durable.storage_accounting);
+        let before = private_entry_names(&repository).expect("repository entries read");
+
+        assert_eq!(
+            durable.activate_existing(receipt.repository, receipt.generation, 2, 2, 1, None),
+            Err(FirstSliceError::Retention)
+        );
+        assert_eq!(
+            private_entry_names(&repository).expect("repository entries remain readable"),
+            before,
+            "failed accounting preflight must not publish an activation marker"
+        );
+
+        durable
+            .compact_repository(receipt.repository, &BTreeSet::from([receipt.generation]))
+            .expect("dirty accounting reconciles after durable cleanup");
+        durable
+            .activate_existing(receipt.repository, receipt.generation, 2, 2, 1, None)
+            .expect("activation succeeds after reconciliation");
+        assert!(
+            durable
+                .storage_inventory_cached()
+                .expect("accounted inventory reads")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dirty_accounting_with_an_active_reservation_fails_closed() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let repository = RepositoryId::from_bytes([31; 16]);
+        let policy = DurableStorageAdmissionPolicy {
+            required_catalog_bytes: 1024,
+            required_repository_bytes: 0,
+            maximum_repository_bytes: u64::MAX,
+            maximum_storage_bytes: u64::MAX,
+            minimum_free_bytes: 0,
+        };
+        let reservation = durable
+            .ensure_staging_capacity(repository, policy)
+            .expect("cold accounting reconciles")
+            .expect("capacity is admitted")
+            .1;
+        mark_storage_accounting_dirty(&durable.storage_accounting);
+
+        assert!(matches!(
+            durable.ensure_staging_capacity(repository, policy),
+            Err(FirstSliceError::Retention)
+        ));
+        assert!(matches!(
+            durable.resize_staging_reservation(&reservation, policy),
+            Err(FirstSliceError::Retention)
+        ));
+        durable
+            .release_staging_reservation(reservation)
+            .expect("reservation releases");
+        let replacement = durable
+            .ensure_staging_capacity(repository, policy)
+            .expect("dirty accounting reconciles after the ledger drains")
+            .expect("capacity is admitted")
+            .1;
+        drop(replacement);
+
+        let accounting = durable
+            .storage_accounting
+            .lock()
+            .expect("storage accounting remains available");
+        assert_eq!(accounting.full_scan_count, 2);
+        assert_eq!(accounting.repository_scan_count, 0);
+    }
+
+    #[test]
+    fn admission_reseed_build_failure_remains_dirty() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn admission_reseed() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let blobs = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(SOURCE_BLOBS_DIRECTORY);
+        let blob = fs::read_dir(blobs)
+            .expect("source blobs read")
+            .next()
+            .expect("one source blob exists")
+            .expect("source blob entry reads");
+        fs::remove_dir_all(blob.path()).expect("referenced blob is removed");
+        mark_storage_accounting_dirty(&durable.storage_accounting);
+
+        assert!(matches!(
+            durable.ensure_staging_capacity(
+                RepositoryId::from_bytes([41; 16]),
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: 1024,
+                    required_repository_bytes: 0,
+                    maximum_repository_bytes: u64::MAX,
+                    maximum_storage_bytes: u64::MAX,
+                    minimum_free_bytes: 0,
+                },
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert_eq!(durable.storage_inventory_cached(), Ok(None));
+        assert!(
+            durable
+                .storage_accounting
+                .lock()
+                .expect("storage accounting remains available")
+                .dirty
+        );
+    }
+
+    #[test]
+    fn dirty_reconcile_rejects_missing_referenced_blob_without_clearing_dirty() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn dirty_reconcile() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let repository = PrivateDirectory::open(
+            durable.repositories.capability(),
+            OsStr::new(&receipt.repository.to_string()),
+        )
+        .expect("repository directory opens");
+        let blobs = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(SOURCE_BLOBS_DIRECTORY);
+        let blob = fs::read_dir(blobs)
+            .expect("source blobs read")
+            .next()
+            .expect("one source blob exists")
+            .expect("source blob entry reads");
+        fs::remove_dir_all(blob.path()).expect("referenced blob is removed");
+        mark_storage_accounting_dirty(&durable.storage_accounting);
+        let mut accounting = durable
+            .storage_accounting
+            .lock()
+            .expect("storage accounting remains available");
+
+        assert_eq!(
+            durable.reconcile_repository_accounting(
+                &mut accounting,
+                receipt.repository,
+                &repository,
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert!(accounting.dirty);
+    }
+
+    #[test]
+    fn dirty_accounting_with_foreign_reservation_does_not_publish_metadata() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn metadata_preflight() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let reservation = durable
+            .ensure_staging_capacity(
+                RepositoryId::from_bytes([42; 16]),
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: 1024,
+                    required_repository_bytes: 0,
+                    maximum_repository_bytes: u64::MAX,
+                    maximum_storage_bytes: u64::MAX,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("accounting remains readable")
+            .expect("foreign reservation is admitted")
+            .1;
+        mark_storage_accounting_dirty(&durable.storage_accounting);
+        let repository = PrivateDirectory::open(
+            durable.repositories.capability(),
+            OsStr::new(&receipt.repository.to_string()),
+        )
+        .expect("repository directory opens");
+        let before = private_entry_names(&repository).expect("repository entries read");
+
+        assert_eq!(
+            durable.write_repository_metadata(DurableRepositoryMetadata {
+                version: REPOSITORY_METADATA_VERSION,
+                sequence: 1,
+                repository: receipt.repository,
+                root_path: None,
+                alias: Some("blocked rename".to_owned()),
+            }),
+            Err(FirstSliceError::Retention)
+        );
+        assert_eq!(
+            private_entry_names(&repository).expect("repository entries remain readable"),
+            before
+        );
+        drop(reservation);
+    }
+
+    #[test]
+    fn successful_generation_uses_one_full_scan_and_bounded_target_reconciles() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn cached_accounting() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+
+        let accounted = durable
+            .storage_inventory_cached()
+            .expect("accounted inventory reads")
+            .expect("successful publication leaves clean accounting");
+        {
+            let accounting = durable
+                .storage_accounting
+                .lock()
+                .expect("storage accounting remains available");
+            assert_eq!(accounting.full_scan_count, 1);
+            assert_eq!(accounting.repository_scan_count, 2);
+        }
+        let verified = durable
+            .storage_inventory()
+            .expect("verified inventory scans");
+        assert_inventory_equal_ignoring_available(accounted, verified);
+        let accounting = durable
+            .storage_accounting
+            .lock()
+            .expect("storage accounting remains available");
+        assert_eq!(accounting.full_scan_count, 2);
+        assert_eq!(accounting.repository_scan_count, 2);
+    }
+
+    #[test]
+    fn failed_finalize_rolls_back_accounting_and_reconciles_after_cleanup() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let repository = RepositoryId::from_bytes([53; 16]);
+        let generation = GenerationId::from_bytes([59; 20]);
+        let reservation = durable
+            .ensure_staging_capacity(
+                repository,
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: 16 * 1024,
+                    required_repository_bytes: 0,
+                    maximum_repository_bytes: u64::MAX,
+                    maximum_storage_bytes: u64::MAX,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("inventory remains readable")
+            .expect("staging capacity is admitted")
+            .1;
+        let prepared = durable
+            .begin_generation(repository, generation)
+            .expect("staging generation opens");
+        let baseline = durable
+            .storage_inventory()
+            .expect("in-flight inventory establishes the physical baseline");
+        fs::write(prepared.path().join("staged.bin"), vec![0_u8; 1024])
+            .expect("staged payload writes");
+        prepared
+            .account_external_staging_bytes(1024)
+            .expect("staged payload is accounted");
+        let sealed = DurableSealedGeneration {
+            prepared,
+            repository,
+            materialized_bytes: 1024,
+            manifest_written_bytes: 0,
+            scanned_generation: ScannedGeneration {
+                repository,
+                generation,
+                parent: None,
+                tree_bytes: 1024,
+                source_blobs: BTreeMap::new(),
+            },
+        };
+        let result = durable
+            .finalize_repository_capacity(
+                &reservation,
+                sealed,
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: 16 * 1024,
+                    required_repository_bytes: DURABLE_PUBLICATION_RESIDUAL_BYTES,
+                    maximum_repository_bytes: 1024,
+                    maximum_storage_bytes: u64::MAX,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("target inventory remains readable");
+        assert!(matches!(
+            result,
+            Err(DurableStorageAdmissionFailure {
+                scope: DurableStorageAdmissionScope::RepositoryBudget,
+                ..
+            })
+        ));
+        durable
+            .release_staging_reservation(reservation)
+            .expect("reservation releases");
+        assert_eq!(
+            durable
+                .storage_inventory_cached()
+                .expect("accounted inventory reads"),
+            None
+        );
+        let verified = durable
+            .storage_inventory()
+            .expect("post-cleanup inventory verifies");
+        assert_inventory_equal_ignoring_available(baseline, verified);
+        let accounting = durable
+            .storage_accounting
+            .lock()
+            .expect("storage accounting remains available");
+        assert_eq!(accounting.full_scan_count, 3);
+        assert_eq!(accounting.repository_scan_count, 1);
     }
 
     #[test]
@@ -4220,6 +5302,41 @@ mod tests {
             let third = service
                 .index_rust_fixture(fixture.path(), &cancellation)
                 .expect("third generation publishes");
+            let durable = service.durable.as_ref().expect("durable catalog exists");
+            let cached_digests = durable
+                .storage_accounting
+                .lock()
+                .expect("storage accounting remains available")
+                .verified_source_blobs
+                .keys()
+                .filter_map(|(repository, digest)| {
+                    (*repository == third.repository).then_some(*digest)
+                })
+                .collect::<BTreeSet<_>>();
+            let live_digests = fs::read_dir(
+                paths
+                    .state_dir()
+                    .join(DURABLE_DIRECTORY)
+                    .join(REPOSITORIES_DIRECTORY)
+                    .join(third.repository.to_string())
+                    .join(SOURCE_BLOBS_DIRECTORY),
+            )
+            .expect("source blobs read")
+            .map(|entry| {
+                let entry = entry.expect("source blob entry reads");
+                ContentHash::from_str(
+                    entry
+                        .file_name()
+                        .to_str()
+                        .expect("source blob name is Unicode"),
+                )
+                .expect("source blob name is a digest")
+            })
+            .collect::<BTreeSet<_>>();
+            assert_eq!(
+                cached_digests, live_digests,
+                "target reconciliation prunes deleted blob verification entries"
+            );
             (first, second, third)
         };
 
@@ -4321,7 +5438,62 @@ mod tests {
     }
 
     #[test]
-    fn storage_inventory_revalidates_changed_cached_blob() {
+    fn verified_inventory_build_failure_invalidates_accounting() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn missing_inventory_blob() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let catalog = service.durable.as_ref().expect("durable catalog exists");
+        assert!(
+            catalog
+                .storage_inventory_cached()
+                .expect("accounted inventory reads")
+                .is_some()
+        );
+        let blobs = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(SOURCE_BLOBS_DIRECTORY);
+        let blob = fs::read_dir(blobs)
+            .expect("source blobs read")
+            .next()
+            .expect("one source blob exists")
+            .expect("source blob entry reads");
+        fs::remove_dir_all(blob.path()).expect("referenced blob is removed");
+
+        assert_eq!(
+            catalog.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            catalog.storage_inventory_cached(),
+            Ok(None),
+            "failed aggregation invalidates accounted support evidence"
+        );
+    }
+
+    #[test]
+    fn verified_inventory_revalidates_changed_blob_from_disk() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -4365,15 +5537,16 @@ mod tests {
             .expect("cold inventory verifies source content");
         assert_eq!(
             catalog
-                .verified_source_blobs
+                .storage_accounting
                 .lock()
                 .expect("verified blob cache remains available")
+                .verified_source_blobs
                 .len(),
             1
         );
         catalog
             .storage_inventory()
-            .expect("unchanged warm inventory remains valid");
+            .expect("a repeated full verification remains valid");
         let restored = catalog
             .restore_active(&cancellation)
             .expect("active generation restores");
@@ -4390,6 +5563,11 @@ mod tests {
             Err(FirstSliceError::CatalogCorrupt)
         );
         assert_eq!(
+            catalog.storage_inventory_cached(),
+            Ok(None),
+            "failed verification invalidates accounted support evidence"
+        );
+        assert_eq!(
             catalog.read_source(receipt.repository, receipt.generation, file, &cancellation),
             Err(FirstSliceError::CatalogCorrupt)
         );
@@ -4398,6 +5576,71 @@ mod tests {
         assert_eq!(
             reopened.storage_inventory(),
             Err(FirstSliceError::CatalogCorrupt)
+        );
+    }
+
+    #[test]
+    fn targeted_reconcile_revalidates_changed_cached_blob() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn targeted_cache() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let payload_path = fs::read_dir(
+            paths
+                .state_dir()
+                .join(DURABLE_DIRECTORY)
+                .join(REPOSITORIES_DIRECTORY)
+                .join(receipt.repository.to_string())
+                .join(SOURCE_BLOBS_DIRECTORY),
+        )
+        .expect("source blobs read")
+        .next()
+        .expect("one source blob exists")
+        .expect("source blob entry reads")
+        .path()
+        .join(SOURCE_BLOB_PAYLOAD_FILENAME);
+        assert_eq!(
+            durable
+                .storage_accounting
+                .lock()
+                .expect("verified blob cache remains available")
+                .verified_source_blobs
+                .len(),
+            1
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let mut corrupted = fs::read(&payload_path).expect("source blob reads");
+        corrupted[0] ^= 1;
+        fs::write(&payload_path, corrupted).expect("same-length corruption writes");
+
+        assert_eq!(
+            durable.compact_repository(receipt.repository, &BTreeSet::from([receipt.generation]),),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(durable.storage_inventory_cached(), Ok(None));
+        assert!(
+            durable
+                .storage_accounting
+                .lock()
+                .expect("storage accounting remains available")
+                .dirty
         );
     }
 
