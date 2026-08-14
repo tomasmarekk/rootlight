@@ -97,7 +97,7 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 11] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 12] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -109,6 +109,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 11] = [
     ("1.9", "protobuf/1.9/rootlight.desc"),
     ("1.10", "protobuf/1.10/rootlight.desc"),
     ("1.11", "protobuf/1.11/rootlight.desc"),
+    ("1.14", "protobuf/1.14/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
     "Cargo.lock",

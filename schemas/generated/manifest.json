@@ -141,6 +141,10 @@
       "blake3": "fcf05d4ec36c9af69eb8b94cb1e11717e3d379d0ad1153b958a337e727188d4e"
     },
     {
+      "path": "tests/fixtures/compatibility/protobuf/1.14/rootlight.desc",
+      "blake3": "71b396f8b45a1e5dccf4b66b06636767175339106c0eb7f3102f5917710eae55"
+    },
+    {
       "path": "tests/fixtures/compatibility/protobuf/1.2/rootlight.desc",
       "blake3": "a27a639334294015dbb590686a3684ac013628b129f80abe1f9857382c966d2c"
     },
@@ -214,7 +218,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "8dc40901c0b232cf9159d21bd4c861fb4e4474956f5947667a61a01f2e66878a"
+      "blake3": "cd219c1567ea1c5611e06a63d33d05f6c7ede079bb57c4baf51333b478cc2000"
     }
   ],
   "artifacts": [
