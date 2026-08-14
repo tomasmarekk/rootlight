@@ -987,7 +987,8 @@ impl FirstSliceDaemon {
             publish(signal).map_err(FirstSliceHostError::StartupSignal)?;
         }
         let durable_contexts = Self::load_startup_repository_contexts(&journal).await?;
-        let inventory = index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
+        let inventory =
+            startup_index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
         support_state
             .replace_index_support_inventory(inventory)
             .map_err(FirstSliceHostError::Journal)?;
@@ -9421,6 +9422,13 @@ fn index_support_inventory(
     Ok(map_index_support_inventory(snapshot))
 }
 
+fn startup_index_support_inventory(
+    service: &FirstSliceService,
+) -> Result<IndexSupportInventory, FirstSliceError> {
+    let snapshot = service.support_inventory_snapshot_without_storage_scan()?;
+    Ok(map_index_support_inventory(snapshot))
+}
+
 fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSupportInventory {
     let generation_format = snapshot.generation_format.clone();
     IndexSupportInventory {
@@ -9489,7 +9497,7 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
         shared_bytes: snapshot.shared_bytes,
         pinned_bytes: snapshot.pinned_bytes,
         reclaimable_bytes: snapshot.reclaimable_bytes,
-        total_storage_bytes: Some(snapshot.total_storage_bytes),
+        total_storage_bytes: snapshot.total_storage_bytes,
         admission_margin_bytes: snapshot.admission_margin_bytes,
         effective_retention_generations: Some(snapshot.effective_retention_generations),
     }
@@ -10713,7 +10721,7 @@ mod tests {
             generations: Vec::new(),
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
-            total_storage_bytes: 0,
+            total_storage_bytes: None,
             shared_bytes: Some(0),
             reclaimable_bytes: Some(0),
             pinned_bytes: None,
@@ -10739,8 +10747,41 @@ mod tests {
         assert_eq!(mapped.disk_margin_bytes, Some(1024));
         assert_eq!(mapped.active_generation_bytes, Some(0));
         assert_eq!(mapped.predecessor_generation_bytes, Some(0));
-        assert_eq!(mapped.total_storage_bytes, Some(0));
+        assert_eq!(mapped.total_storage_bytes, None);
         assert_eq!(mapped.effective_retention_generations, Some(2));
+    }
+
+    #[test]
+    fn startup_support_inventory_defers_durable_storage_scan() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let (service, _) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred durable service opens");
+        fs::write(
+            paths
+                .state_dir()
+                .join("first-slice")
+                .join("repositories")
+                .join("not-a-repository"),
+            b"invalid inventory entry",
+        )
+        .expect("invalid durable entry writes");
+
+        let startup = startup_index_support_inventory(&service)
+            .expect("startup inventory avoids durable storage");
+        assert!(!startup.adapters.is_empty());
+        assert!(!startup.languages.is_empty());
+        assert_eq!(startup.total_storage_bytes, None);
+        assert_eq!(startup.disk_margin_bytes, None);
+        assert_eq!(startup.admission_margin_bytes, None);
+        assert!(matches!(
+            index_support_inventory(&service),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
     }
 
     #[test]

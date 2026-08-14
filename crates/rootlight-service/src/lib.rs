@@ -589,8 +589,8 @@ pub struct FirstSliceSupportInventory {
     pub generation_format: String,
     /// Total allocated bytes reported by retained generation receipts.
     pub generation_disk_bytes: u64,
-    /// Total physical bytes retained by immutable generation trees.
-    pub total_storage_bytes: u64,
+    /// Total physical bytes retained by immutable generation trees, when measured.
+    pub total_storage_bytes: Option<u64>,
     /// Physical bytes stored once and referenced by multiple generation trees.
     pub shared_bytes: Option<u64>,
     /// Physical bytes eligible for safe reclamation.
@@ -6993,6 +6993,28 @@ impl FirstSliceService {
     pub fn support_inventory_snapshot(
         &self,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        self.support_inventory_snapshot_inner(true)
+    }
+
+    /// Returns bounded source-free indexing facts without scanning durable storage.
+    ///
+    /// This startup projection deliberately leaves physical storage measurements
+    /// unknown so daemon readiness cannot depend on catalog-wide blob verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same in-memory consistency and limit failures as
+    /// [`Self::support_inventory_snapshot`].
+    pub fn support_inventory_snapshot_without_storage_scan(
+        &self,
+    ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        self.support_inventory_snapshot_inner(false)
+    }
+
+    fn support_inventory_snapshot_inner(
+        &self,
+        measure_durable_storage: bool,
+    ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
         let languages: Vec<_> = self.analyzers.keys().cloned().collect();
         let mut adapters = vec![FirstSliceSupportAdapter {
             name: "tree-sitter".to_owned(),
@@ -7073,11 +7095,15 @@ impl FirstSliceService {
             });
         }
 
-        let storage = self
-            .durable
-            .as_ref()
-            .map(|durable| durable.storage_inventory())
-            .transpose()?;
+        let has_durable_storage = self.durable.is_some();
+        let storage = if measure_durable_storage {
+            self.durable
+                .as_ref()
+                .map(|durable| durable.storage_inventory())
+                .transpose()?
+        } else {
+            None
+        };
         let (
             total_storage_bytes,
             shared_bytes,
@@ -7090,7 +7116,7 @@ impl FirstSliceService {
             admission_margin_bytes,
         ) = storage.map_or(
             (
-                generation_disk_bytes,
+                (!has_durable_storage).then_some(generation_disk_bytes),
                 None,
                 None,
                 None,
@@ -7109,7 +7135,7 @@ impl FirstSliceService {
                     .maximum_catalog_bytes
                     .saturating_sub(inventory.total_physical_bytes);
                 (
-                    inventory.total_physical_bytes,
+                    Some(inventory.total_physical_bytes),
                     Some(inventory.shared_source_bytes),
                     Some(inventory.reclaimable_bytes),
                     inventory.pinned_bytes,
@@ -19328,7 +19354,7 @@ mod tests {
         );
         assert_eq!(
             inventory.total_storage_bytes,
-            receipt.oracle_allocated_bytes
+            Some(receipt.oracle_allocated_bytes)
         );
         assert_eq!(inventory.effective_retention_generations, 2);
         let repository = &inventory.repositories[0];
@@ -19426,7 +19452,11 @@ mod tests {
                 .checked_add(second.retained_durable_bytes)
                 .expect("fixture retained-byte total fits")
         );
-        assert!(inventory.total_storage_bytes >= inventory.generation_disk_bytes);
+        assert!(
+            inventory
+                .total_storage_bytes
+                .is_some_and(|bytes| bytes >= inventory.generation_disk_bytes)
+        );
         assert!(inventory.shared_bytes.is_some());
         assert!(inventory.reclaimable_bytes.is_some());
         let active = inventory
@@ -19437,6 +19467,42 @@ mod tests {
         assert_eq!(active.generation, second.generation);
         assert_eq!(active.parent, Some(first.generation));
         assert_eq!(active.disk_bytes, second.retained_durable_bytes);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn lightweight_support_inventory_skips_durable_storage_scan() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let (service, _) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred durable service opens");
+        fs::write(
+            paths
+                .state_dir()
+                .join("first-slice")
+                .join("repositories")
+                .join("not-a-repository"),
+            b"invalid inventory entry",
+        )
+        .expect("invalid durable entry writes");
+
+        let lightweight = service
+            .support_inventory_snapshot_without_storage_scan()
+            .expect("lightweight support inventory avoids durable storage");
+        assert!(!lightweight.adapters.is_empty());
+        assert!(!lightweight.languages.is_empty());
+        assert_eq!(lightweight.effective_retention_generations, 2);
+        assert_eq!(lightweight.total_storage_bytes, None);
+        assert_eq!(lightweight.disk_margin_bytes, None);
+        assert_eq!(lightweight.admission_margin_bytes, None);
+        assert!(matches!(
+            service.support_inventory_snapshot(),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
     }
 
     #[test]
