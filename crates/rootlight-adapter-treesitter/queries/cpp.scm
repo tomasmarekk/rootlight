@@ -49,6 +49,10 @@
         (field_identifier)
       ] @call_name))
 ]
+((function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @test_attribute))
+  (#match? @test_attribute "^(TEST|TEST_F)$"))
 [
   (identifier)
   (field_identifier)

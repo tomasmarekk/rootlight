@@ -870,6 +870,11 @@ fn semantic_language(value: &str) -> Result<SemanticProjectLanguage, AdapterHost
         "javascript" => Ok(SemanticProjectLanguage::JavaScript),
         "python" => Ok(SemanticProjectLanguage::Python),
         "go" => Ok(SemanticProjectLanguage::Go),
+        "java" => Ok(SemanticProjectLanguage::Java),
+        "cpp" => Ok(SemanticProjectLanguage::Cpp),
+        "csharp" => Ok(SemanticProjectLanguage::CSharp),
+        "php" => Ok(SemanticProjectLanguage::Php),
+        "c" => Ok(SemanticProjectLanguage::C),
         _ => Err(AdapterHostError::ProjectRequest),
     }
 }
@@ -1137,6 +1142,18 @@ mod tests {
             semantic_language("typescript").expect("language is supported"),
             SemanticProjectLanguage::TypeScript
         );
+        for (label, language) in [
+            ("java", SemanticProjectLanguage::Java),
+            ("cpp", SemanticProjectLanguage::Cpp),
+            ("csharp", SemanticProjectLanguage::CSharp),
+            ("php", SemanticProjectLanguage::Php),
+            ("c", SemanticProjectLanguage::C),
+        ] {
+            assert_eq!(
+                semantic_language(label).expect("reviewed project language is supported"),
+                language
+            );
+        }
         assert!(matches!(
             semantic_language("TypeScript"),
             Err(AdapterHostError::ProjectRequest)

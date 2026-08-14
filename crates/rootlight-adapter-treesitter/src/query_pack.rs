@@ -219,8 +219,13 @@ impl QueryPack {
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
             expected.sort_unstable();
-        } else if supports_terminal_call_name(family) {
-            expected.push(TERMINAL_CALL_NAME_CAPTURE);
+        } else {
+            if supports_terminal_call_name(family) {
+                expected.push(TERMINAL_CALL_NAME_CAPTURE);
+            }
+            if supports_test_attribute(family) {
+                expected.push("test_attribute");
+            }
             expected.sort_unstable();
         }
         let mut observed = query.capture_names().to_vec();
@@ -331,12 +336,19 @@ impl QueryPack {
                 let syntax = match role {
                     StructuralRole::ScopeTrait => "rust.impl_trait",
                     StructuralRole::ScopeType => "rust.impl_type",
-                    StructuralRole::TestAttribute => "rust.test_attribute",
+                    StructuralRole::TestAttribute => match family {
+                        GrammarFamily::Rust => "rust.test_attribute",
+                        GrammarFamily::Java => "java.test_attribute",
+                        GrammarFamily::Cpp => "cpp.test_attribute",
+                        _ => return Err(query_failure("query-test-attribute-family")),
+                    },
                     StructuralRole::ScopedCall => "rust.scoped_call",
                     StructuralRole::CallName => match family {
                         GrammarFamily::C => "c.call_name",
                         GrammarFamily::Cpp => "cpp.call_name",
                         GrammarFamily::CSharp => "csharp.call_name",
+                        GrammarFamily::Go => "go.call_name",
+                        GrammarFamily::Java => "java.call_name",
                         GrammarFamily::Php => "php.call_name",
                         _ => return Err(query_failure("query-call-name-family")),
                     },
@@ -412,8 +424,17 @@ fn query_failure(code: &'static str) -> AdapterError {
 const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
     matches!(
         family,
-        GrammarFamily::C | GrammarFamily::Cpp | GrammarFamily::CSharp | GrammarFamily::Php
+        GrammarFamily::C
+            | GrammarFamily::Cpp
+            | GrammarFamily::CSharp
+            | GrammarFamily::Go
+            | GrammarFamily::Java
+            | GrammarFamily::Php
     )
+}
+
+const fn supports_test_attribute(family: GrammarFamily) -> bool {
+    matches!(family, GrammarFamily::Cpp | GrammarFamily::Java)
 }
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
@@ -721,8 +742,13 @@ mod tests {
             if family == GrammarFamily::Rust {
                 expected.extend(RUST_SPECIAL_CAPTURES);
                 expected.sort_unstable();
-            } else if supports_terminal_call_name(family) {
-                expected.push(TERMINAL_CALL_NAME_CAPTURE);
+            } else {
+                if supports_terminal_call_name(family) {
+                    expected.push(TERMINAL_CALL_NAME_CAPTURE);
+                }
+                if supports_test_attribute(family) {
+                    expected.push("test_attribute");
+                }
                 expected.sort_unstable();
             }
             assert_eq!(names, expected);

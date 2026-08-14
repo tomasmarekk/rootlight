@@ -651,6 +651,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         "go" => &[
             ("go.block.scope", 1),
             ("go.call.call", 1),
+            ("go.call_name.call_name", 1),
             ("go.comment.comment", 1),
             ("go.comment.documentation", 2),
             ("go.constant.declaration", 1),

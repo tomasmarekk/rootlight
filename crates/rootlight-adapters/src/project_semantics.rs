@@ -49,6 +49,9 @@ pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limi
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
 const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
     "additional parser diagnostics were omitted by the project diagnostic limit";
+const GO_GIN_ROUTE_INCOMPLETE_CODE: &str = "go-gin-route-incomplete";
+const GO_GIN_ROUTE_INCOMPLETE_MESSAGE: &str =
+    "Gin route syntax was retained without an exact literal route binding";
 
 const ALL_DOMAINS: [FactDomain; 8] = [
     FactDomain::Files,
@@ -75,6 +78,16 @@ pub enum SemanticProjectLanguage {
     Python,
     /// Go packages, imports, declarations, embedding, and calls.
     Go,
+    /// Java packages, declarations, annotations, inheritance, and calls.
+    Java,
+    /// C++ namespaces, declarations, templates, linkage, and calls.
+    Cpp,
+    /// C# namespaces, declarations, inheritance, and calls.
+    CSharp,
+    /// PHP namespaces, declarations, imports, and calls.
+    Php,
+    /// C translation units, declarations, linkage, and calls.
+    C,
 }
 
 impl SemanticProjectLanguage {
@@ -97,12 +110,19 @@ impl SemanticProjectLanguage {
             Self::JavaScript => "javascript",
             Self::Python => "python",
             Self::Go => "go",
+            Self::Java => "java",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Php => "php",
+            Self::C => "c",
         }
     }
 
     const fn inferred_call_confidence(self) -> u16 {
         match self {
-            Self::Rust | Self::Go => STATIC_CALL_CONFIDENCE,
+            Self::Rust | Self::Go | Self::Java | Self::Cpp | Self::CSharp | Self::Php | Self::C => {
+                STATIC_CALL_CONFIDENCE
+            }
             Self::TypeScript => TYPESCRIPT_CALL_CONFIDENCE,
             Self::JavaScript | Self::Python => DYNAMIC_CALL_CONFIDENCE,
         }
@@ -183,6 +203,77 @@ impl SemanticProjectLanguage {
                     EntityKind::Variable
                 } else if header.starts_with("func (") || is_nested {
                     EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            }
+            Self::Java => {
+                if header.contains("interface ") {
+                    EntityKind::Interface
+                } else if header.contains("class ") {
+                    EntityKind::Class
+                } else if header.contains("record ") {
+                    EntityKind::Struct
+                } else if header.contains("enum ") {
+                    EntityKind::Enum
+                } else if is_nested {
+                    EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            }
+            Self::Cpp => {
+                if header.contains("class ") {
+                    EntityKind::Class
+                } else if header.contains("struct ") || header.contains("union ") {
+                    EntityKind::Struct
+                } else if header.contains("enum ") {
+                    EntityKind::Enum
+                } else if starts_with_word(header, "typedef") || header.contains("using ") {
+                    EntityKind::TypeAlias
+                } else if is_nested {
+                    EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            }
+            Self::CSharp => {
+                if header.contains("interface ") {
+                    EntityKind::Interface
+                } else if header.contains("class ") {
+                    EntityKind::Class
+                } else if header.contains("struct ") || header.contains("record ") {
+                    EntityKind::Struct
+                } else if header.contains("enum ") {
+                    EntityKind::Enum
+                } else if is_nested {
+                    EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            }
+            Self::Php => {
+                if header.contains("interface ") {
+                    EntityKind::Interface
+                } else if header.contains("trait ") {
+                    EntityKind::Trait
+                } else if header.contains("class ") {
+                    EntityKind::Class
+                } else if header.contains("enum ") {
+                    EntityKind::Enum
+                } else if is_nested {
+                    EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            }
+            Self::C => {
+                if header.contains("struct ") || header.contains("union ") {
+                    EntityKind::Struct
+                } else if header.contains("enum ") {
+                    EntityKind::Enum
+                } else if starts_with_word(header, "typedef") {
+                    EntityKind::TypeAlias
                 } else {
                     EntityKind::Function
                 }
@@ -574,7 +665,10 @@ struct SemanticEntity {
     symbol: SymbolId,
     name: String,
     kind: EntityKind,
+    visibility: EntityVisibility,
     declaring_type: Option<String>,
+    arity: Option<usize>,
+    is_test: bool,
     file: FileId,
     span: SourceSpan,
     source: SourceRef,
@@ -593,6 +687,7 @@ struct DeclarationDraft {
     parent_declaration: Option<u64>,
     scope_identity: Option<[u8; 32]>,
     declaring_type: Option<String>,
+    arity: Option<usize>,
     is_test: bool,
     source: SourceRef,
 }
@@ -636,6 +731,8 @@ struct OccurrenceDraft {
     file: FileId,
     name: String,
     qualifier: Option<String>,
+    call_text: Option<String>,
+    arity: Option<usize>,
     syntax_kind: String,
     role: OccurrenceRole,
     enclosing_declaration: Option<u64>,
@@ -821,7 +918,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 symbol: module_symbol,
                 name: module_name,
                 kind: EntityKind::Module,
+                visibility: EntityVisibility::Unknown,
                 declaring_type: None,
+                arity: None,
+                is_test: false,
                 file: source.span().file(),
                 span: module_span,
                 source: source.clone(),
@@ -907,12 +1007,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .iter()
                 .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
                 .collect::<Vec<_>>();
-            let rust_test_declarations = if self.analyzer.language == SemanticProjectLanguage::Rust
-            {
-                rust_test_declarations(&facts)
-            } else {
-                BTreeSet::new()
-            };
+            let positive_test_declarations =
+                positive_test_declarations(self.analyzer.language, &facts);
+            let terminal_call_names = terminal_call_names(&facts);
             declaration_facts.sort_by_key(|fact| {
                 (
                     fact.depth(),
@@ -1030,7 +1127,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     symbol,
                     name,
                     kind: EntityKind::Namespace,
+                    visibility: EntityVisibility::Private,
                     declaring_type: None,
+                    arity: None,
+                    is_test: false,
                     file: source.span().file(),
                     span: source.span(),
                     source,
@@ -1041,6 +1141,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
 
             let mut selected_definition_spans = BTreeSet::new();
             let mut declaration_kinds = BTreeMap::<u64, EntityKind>::new();
+            let mut declaration_names = BTreeMap::<u64, String>::new();
             for (declaration_index, declaration) in declaration_facts.iter().enumerate() {
                 check_periodically(declaration_index, self.cancellation)?;
                 let definition = facts
@@ -1097,7 +1198,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     None
                 };
                 let declaring_type = rust_impl_scope
-                    .and_then(|scope| rust_impl_types.get(&scope.local_id()).cloned());
+                    .and_then(|scope| rust_impl_types.get(&scope.local_id()).cloned())
+                    .or_else(|| {
+                        parent_declaration
+                            .and_then(|parent| declaration_names.get(&parent).cloned())
+                    });
                 let is_type_member = parent_declaration
                     .and_then(|parent| declaration_kinds.get(&parent))
                     .is_some_and(|kind| {
@@ -1124,6 +1229,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .language
                     .entity_kind(declaration_text, is_type_member);
                 declaration_kinds.insert(declaration.local_id(), kind);
+                declaration_names.insert(declaration.local_id(), name.to_owned());
                 let signature = if supports_symbol_signature(kind) {
                     signature_captures
                         .get(&declaration.local_id())
@@ -1139,6 +1245,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 } else {
                     String::new()
                 };
+                let arity = parameter_arity(&signature);
                 self.declarations.push(DeclarationDraft {
                     local_id: declaration.local_id(),
                     file: definition.span().file(),
@@ -1151,7 +1258,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     parent_declaration,
                     scope_identity,
                     declaring_type,
-                    is_test: rust_test_declarations.contains(&declaration.local_id())
+                    arity,
+                    is_test: positive_test_declarations.contains(&declaration.local_id())
                         || declaration_is_test(
                             self.analyzer.language,
                             self.path_by_file
@@ -1182,11 +1290,30 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         }
                     }
                     SyntaxFactKind::Occurrence => {
-                        let Some(observed_name) = source_text(bytes, fact.span()) else {
+                        if is_call_name_fact(fact) {
+                            continue;
+                        }
+                        let Some(observed_text) = source_text(bytes, fact.span()) else {
                             continue;
                         };
                         let call = is_call_fact(fact);
-                        let Some(parsed_name) = occurrence_name(observed_name, call) else {
+                        let terminal_name = terminal_call_names
+                            .get(&fact.local_id())
+                            .and_then(|terminal| facts_by_id.get(terminal))
+                            .and_then(|terminal| source_text(bytes, terminal.span()));
+                        let parsed_name = if call {
+                            terminal_name
+                                .and_then(|name| {
+                                    is_identifier(name).then(|| ParsedOccurrenceName {
+                                        name,
+                                        qualifier: call_receiver(observed_text, name),
+                                    })
+                                })
+                                .or_else(|| occurrence_name(observed_text, true))
+                        } else {
+                            occurrence_name(observed_text, false)
+                        };
+                        let Some(parsed_name) = parsed_name else {
                             continue;
                         };
                         if self.analyzer.language == SemanticProjectLanguage::Go
@@ -1225,6 +1352,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             file: fact.span().file(),
                             name: parsed_name.name.to_owned(),
                             qualifier: parsed_name.qualifier.map(str::to_owned),
+                            call_text: call.then(|| observed_text.to_owned()),
+                            arity: call.then(|| call_arity(observed_text)).flatten(),
                             syntax_kind: fact.syntax_kind().as_str().to_owned(),
                             role,
                             enclosing_declaration,
@@ -1389,7 +1518,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 symbol,
                 name: draft.name,
                 kind: draft.kind,
+                visibility: draft.visibility,
                 declaring_type: draft.declaring_type,
+                arity: draft.arity,
+                is_test: draft.is_test,
                 file: draft.file,
                 span: draft.span,
                 source: draft.source,
@@ -1454,6 +1586,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         .copied()
                 })
                 .or(draft.enclosing);
+            self.materialize_go_route(&draft, &definitions)?;
             let mut record = OccurrenceRecord {
                 id: FactId::from_bytes([0; 20]),
                 repository: draft.source.repository(),
@@ -1525,6 +1658,175 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             }
         }
         Ok(())
+    }
+
+    fn materialize_go_route(
+        &mut self,
+        occurrence: &OccurrenceDraft,
+        definitions: &BTreeMap<String, Vec<SemanticEntity>>,
+    ) -> Result<(), AdapterError> {
+        if self.analyzer.language != SemanticProjectLanguage::Go
+            || occurrence.role != OccurrenceRole::CallSite
+        {
+            return Ok(());
+        }
+        let Some(call) = occurrence.call_text.as_deref() else {
+            return Ok(());
+        };
+        let Some(receiver) = occurrence.qualifier.as_deref() else {
+            return Ok(());
+        };
+        let Some(verb) = gin_http_verb(&occurrence.name) else {
+            return Ok(());
+        };
+        let gin_aliases = self
+            .imports
+            .iter()
+            .filter(|import| {
+                import.file == occurrence.file && import.module == "github.com/gin-gonic/gin"
+            })
+            .flat_map(|import| &import.bindings)
+            .filter_map(|binding| match binding {
+                ImportBinding::Namespace { local } => Some(local.as_str()),
+                ImportBinding::Named { .. }
+                | ImportBinding::Wildcard
+                | ImportBinding::SideEffect => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if gin_aliases.is_empty() {
+            return Ok(());
+        }
+        let input = self.input_for_file(occurrence.file)?;
+        if !reviewed_gin_receiver(
+            input.source().bytes(),
+            occurrence,
+            receiver,
+            &gin_aliases,
+            &self.occurrences,
+        ) {
+            return Ok(());
+        }
+
+        let Some(arguments) = call_arguments(call) else {
+            return self.push_go_route_diagnostic(occurrence);
+        };
+        let Some(path) = arguments
+            .first()
+            .and_then(|argument| literal_route_path(argument))
+        else {
+            return self.push_go_route_diagnostic(occurrence);
+        };
+        let handler_symbols = arguments
+            .iter()
+            .skip(1)
+            .flat_map(|argument| tokenize_identifiers(argument))
+            .filter_map(|name| definitions.get(&name))
+            .flatten()
+            .filter(|entity| {
+                matches!(entity.kind, EntityKind::Function | EntityKind::Method)
+                    && self
+                        .package_by_file
+                        .get(&entity.file)
+                        .zip(self.package_by_file.get(&occurrence.file))
+                        .is_some_and(|(candidate, current)| candidate == current)
+            })
+            .map(|entity| entity.symbol)
+            .collect::<BTreeSet<_>>();
+        if handler_symbols.len() != 1 {
+            return self.push_go_route_diagnostic(occurrence);
+        }
+        let handler = handler_symbols
+            .first()
+            .copied()
+            .ok_or_else(|| provider_failure("go-gin-handler"))?;
+        let route_name = format!("{verb} {path}");
+        let module = self
+            .module_by_file
+            .get(&occurrence.file)
+            .copied()
+            .ok_or_else(|| provider_failure("project-module"))?;
+        let claim = self.symbol_claim(
+            EntityKind::Route,
+            ContainerRef::Entity(module),
+            &route_name,
+            &route_name,
+            None,
+        );
+        let route = claim.symbol;
+        if !self.entities.iter().any(|entity| entity.symbol == route) {
+            let provenance = self.provenance_for_file(occurrence.file)?;
+            self.records.push(IrRecord::Entity(EntityRecord {
+                id: route,
+                repository: occurrence.source.repository(),
+                generation: occurrence.source.generation(),
+                kind: EntityKind::Route,
+                language: self.analyzer.language.as_str().to_owned(),
+                tier: STRUCTURAL_TIER,
+                canonical_name: route_name.clone(),
+                display_name: route_name.clone(),
+                qualified_name: format!(
+                    "{}::{route_name}",
+                    self.path_by_file
+                        .get(&occurrence.file)
+                        .map(String::as_str)
+                        .unwrap_or_default()
+                ),
+                container: Some(ContainerRef::Entity(module)),
+                visibility: EntityVisibility::Public,
+                flags: vec![EntityFlag::Synthetic],
+                provenance,
+                evidence: direct_evidence(occurrence.source.clone()),
+            }));
+            self.records.push(IrRecord::Extension(
+                new_symbol_identity_claim_envelope(
+                    &claim,
+                    occurrence.source.generation(),
+                    provenance,
+                    occurrence.source.clone(),
+                )
+                .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
+            ));
+            self.entities.push(SemanticEntity {
+                symbol: route,
+                name: route_name,
+                kind: EntityKind::Route,
+                visibility: EntityVisibility::Public,
+                declaring_type: None,
+                arity: None,
+                is_test: false,
+                file: occurrence.file,
+                span: occurrence.source.span(),
+                source: occurrence.source.clone(),
+            });
+            self.state_mut_by_file(occurrence.file)?
+                .increment(FactDomain::Entities)?;
+            self.state_mut_by_file(occurrence.file)?
+                .increment(FactDomain::Extensions)?;
+        }
+        self.push_relation(
+            occurrence.file,
+            RelationEndpoint::Entity(handler),
+            RelationPredicate::ServesRoute,
+            RelationEndpoint::Entity(route),
+            STATIC_CALL_CONFIDENCE,
+            EvidenceKind::Derived,
+            occurrence.source.clone(),
+        )
+    }
+
+    fn push_go_route_diagnostic(
+        &mut self,
+        occurrence: &OccurrenceDraft,
+    ) -> Result<(), AdapterError> {
+        let diagnostic = AdapterDiagnostic::new(
+            DiagnosticCode::new(GO_GIN_ROUTE_INCOMPLETE_CODE)
+                .map_err(|_| provider_failure("project-diagnostic-code"))?,
+            DiagnosticSeverity::Info,
+            Some(occurrence.source.clone()),
+            CoverageStatus::Bounded,
+        );
+        let input = self.input_for_file(occurrence.file)?.clone();
+        self.push_diagnostic(&input, &diagnostic)
     }
 
     fn materialize_inheritance(&mut self) -> Result<(), AdapterError> {
@@ -2052,6 +2354,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 kind: ResolutionKind::Binding,
             };
         }
+        if let Some(resolution) = self.resolve_reviewed_static_call(occurrence, definitions) {
+            return resolution;
+        }
         if let Some(qualifier) = occurrence.qualifier.as_deref() {
             let mut namespace_symbols = BTreeSet::new();
             for import in self
@@ -2248,6 +2553,89 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         }
     }
 
+    fn resolve_reviewed_static_call(
+        &self,
+        occurrence: &OccurrenceDraft,
+        definitions: &BTreeMap<String, Vec<SemanticEntity>>,
+    ) -> Option<ResolutionCandidates> {
+        if occurrence.role != OccurrenceRole::CallSite {
+            return None;
+        }
+        if !matches!(
+            self.analyzer.language,
+            SemanticProjectLanguage::Java
+                | SemanticProjectLanguage::Cpp
+                | SemanticProjectLanguage::CSharp
+                | SemanticProjectLanguage::Php
+                | SemanticProjectLanguage::C
+        ) {
+            return None;
+        }
+        let candidates = definitions.get(&occurrence.name)?;
+        let caller_type = occurrence
+            .enclosing_declaration
+            .and_then(|declaration| {
+                self.symbol_by_declaration
+                    .get(&(occurrence.file, declaration))
+            })
+            .and_then(|symbol| self.entities.iter().find(|entity| entity.symbol == *symbol))
+            .and_then(|entity| entity.declaring_type.as_deref());
+        let qualifier = occurrence.qualifier.as_deref();
+        let receiver_type = qualifier.and_then(|qualifier| {
+            self.input_for_file(occurrence.file).ok().and_then(|input| {
+                local_receiver_type(
+                    input.source().bytes(),
+                    occurrence.source.span().start_byte(),
+                    qualifier,
+                )
+            })
+        });
+        let symbols = candidates
+            .iter()
+            .filter(|entity| call_arity_matches(occurrence.arity, entity.arity))
+            .filter(|entity| match self.analyzer.language {
+                SemanticProjectLanguage::Java => {
+                    entity.kind == EntityKind::Method
+                        && match qualifier {
+                            Some("this") => entity.declaring_type.as_deref() == caller_type,
+                            Some(_) => entity.declaring_type.as_deref() == receiver_type.as_deref(),
+                            None => entity.declaring_type.as_deref() == caller_type,
+                        }
+                }
+                SemanticProjectLanguage::Cpp => {
+                    entity.kind == EntityKind::Method
+                        && qualifier.is_some()
+                        && entity.declaring_type.as_deref() == receiver_type.as_deref()
+                }
+                SemanticProjectLanguage::CSharp => {
+                    entity.kind == EntityKind::Method
+                        && qualifier.is_none()
+                        && entity.declaring_type.as_deref() == caller_type
+                }
+                SemanticProjectLanguage::Php => {
+                    entity.kind == EntityKind::Method
+                        && qualifier == Some("$this")
+                        && entity.declaring_type.as_deref() == caller_type
+                }
+                SemanticProjectLanguage::C => {
+                    qualifier.is_none()
+                        && entity.kind == EntityKind::Function
+                        && entity.visibility == EntityVisibility::Public
+                }
+                SemanticProjectLanguage::Rust
+                | SemanticProjectLanguage::TypeScript
+                | SemanticProjectLanguage::JavaScript
+                | SemanticProjectLanguage::Python
+                | SemanticProjectLanguage::Go => false,
+            })
+            .map(|entity| entity.symbol)
+            .collect::<BTreeSet<_>>();
+        Some(ResolutionCandidates {
+            symbols: symbols.into_iter().collect(),
+            kind: ResolutionKind::Binding,
+        })
+    }
+
     fn add_occurrence_relations(
         &mut self,
         occurrence: &OccurrenceRecord,
@@ -2271,6 +2659,23 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 RelationEndpoint::Occurrence(occurrence.id),
                 predicate,
                 RelationEndpoint::Entity(*candidate),
+                occurrence.confidence.get(),
+                EvidenceKind::Derived,
+                occurrence.source.clone(),
+            )?;
+        }
+        if let (OccurrenceRole::CallSite, OccurrenceTarget::Resolved { symbol: tested }, Some(test)) =
+            (occurrence.role, &occurrence.target, occurrence.enclosing)
+            && self
+                .entities
+                .iter()
+                .any(|entity| entity.symbol == test && entity.is_test)
+        {
+            self.push_relation(
+                occurrence.file,
+                RelationEndpoint::Entity(test),
+                RelationPredicate::Tests,
+                RelationEndpoint::Entity(*tested),
                 occurrence.confidence.get(),
                 EvidenceKind::Derived,
                 occurrence.source.clone(),
@@ -2333,7 +2738,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             symbol,
             name: name.to_owned(),
             kind: EntityKind::ExternalSymbol,
+            visibility: EntityVisibility::Unknown,
             declaring_type: None,
+            arity: None,
+            is_test: false,
             file,
             span: source.span(),
             source: source.clone(),
@@ -2381,6 +2789,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 "project syntax facts exceeded the bounded semantic limit"
             }
             PROJECT_DIAGNOSTICS_TRUNCATED_CODE => PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE,
+            GO_GIN_ROUTE_INCOMPLETE_CODE => GO_GIN_ROUTE_INCOMPLETE_MESSAGE,
             _ => "parser recovered from malformed or incomplete syntax",
         };
         let mut record = DiagnosticRecord {
@@ -2538,6 +2947,31 @@ fn infer_visibility(
                 EntityVisibility::Private
             }
         }
+        SemanticProjectLanguage::Java | SemanticProjectLanguage::CSharp => {
+            if header.contains("public ") {
+                EntityVisibility::Public
+            } else if header.contains("private ") {
+                EntityVisibility::Private
+            } else {
+                EntityVisibility::Restricted
+            }
+        }
+        SemanticProjectLanguage::Cpp | SemanticProjectLanguage::C => {
+            if header.trim_start().starts_with("static ") {
+                EntityVisibility::Private
+            } else {
+                EntityVisibility::Public
+            }
+        }
+        SemanticProjectLanguage::Php => {
+            if header.contains("private ") {
+                EntityVisibility::Private
+            } else if header.contains("protected ") {
+                EntityVisibility::Restricted
+            } else {
+                EntityVisibility::Public
+            }
+        }
     }
 }
 
@@ -2587,7 +3021,41 @@ fn source_text(bytes: &[u8], span: SourceSpan) -> Option<&str> {
     std::str::from_utf8(bytes.get(start..end)?).ok()
 }
 
-fn rust_test_declarations(facts: &[SyntaxFact]) -> BTreeSet<u64> {
+fn positive_test_declarations(
+    language: SemanticProjectLanguage,
+    facts: &[SyntaxFact],
+) -> BTreeSet<u64> {
+    match language {
+        SemanticProjectLanguage::Rust => adjacent_test_declarations(
+            facts,
+            "rust.test_attribute.test_attribute",
+            "rust.function.declaration",
+        ),
+        SemanticProjectLanguage::Java => enclosing_test_declarations(
+            facts,
+            "java.test_attribute.test_attribute",
+            "java.method.declaration",
+        ),
+        SemanticProjectLanguage::Cpp => enclosing_test_declarations(
+            facts,
+            "cpp.test_attribute.test_attribute",
+            "cpp.function.declaration",
+        ),
+        SemanticProjectLanguage::TypeScript
+        | SemanticProjectLanguage::JavaScript
+        | SemanticProjectLanguage::Python
+        | SemanticProjectLanguage::Go
+        | SemanticProjectLanguage::CSharp
+        | SemanticProjectLanguage::Php
+        | SemanticProjectLanguage::C => BTreeSet::new(),
+    }
+}
+
+fn adjacent_test_declarations(
+    facts: &[SyntaxFact],
+    attribute_label: &str,
+    declaration_label: &str,
+) -> BTreeSet<u64> {
     let mut source_order = facts.iter().collect::<Vec<_>>();
     source_order.sort_unstable_by_key(|fact| {
         (
@@ -2600,13 +3068,13 @@ fn rust_test_declarations(facts: &[SyntaxFact]) -> BTreeSet<u64> {
     let mut pending_parents = BTreeSet::new();
     let mut tests = BTreeSet::new();
     for fact in source_order {
-        if fact.syntax_kind().as_str() == "rust.test_attribute.test_attribute" {
+        if fact.syntax_kind().as_str() == attribute_label {
             pending_parents.insert(fact.parent());
             continue;
         }
         if fact.kind() == SyntaxFactKind::Declaration
             && pending_parents.remove(&fact.parent())
-            && fact.syntax_kind().as_str() == "rust.function.declaration"
+            && fact.syntax_kind().as_str() == declaration_label
         {
             tests.insert(fact.local_id());
         }
@@ -2614,7 +3082,46 @@ fn rust_test_declarations(facts: &[SyntaxFact]) -> BTreeSet<u64> {
     tests
 }
 
+fn enclosing_test_declarations(
+    facts: &[SyntaxFact],
+    attribute_label: &str,
+    declaration_label: &str,
+) -> BTreeSet<u64> {
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    facts
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == attribute_label)
+        .filter_map(|attribute| {
+            let mut parent = attribute.parent();
+            let mut remaining = facts.len();
+            while let Some(parent_id) = parent {
+                if remaining == 0 {
+                    return None;
+                }
+                remaining -= 1;
+                let candidate = facts_by_id.get(&parent_id).copied()?;
+                if candidate.kind() == SyntaxFactKind::Declaration
+                    && candidate.syntax_kind().as_str() == declaration_label
+                {
+                    return Some(candidate.local_id());
+                }
+                parent = candidate.parent();
+            }
+            None
+        })
+        .collect()
+}
+
 fn declaration_is_test(language: SemanticProjectLanguage, path: &str, name: &str) -> bool {
+    if matches!(
+        language,
+        SemanticProjectLanguage::Java | SemanticProjectLanguage::Cpp
+    ) {
+        return false;
+    }
     let path = path.replace('\\', "/").to_ascii_lowercase();
     let file_name = path.rsplit('/').next().unwrap_or(path.as_str());
     let test_path = path
@@ -2633,7 +3140,12 @@ fn declaration_is_test(language: SemanticProjectLanguage, path: &str, name: &str
             SemanticProjectLanguage::Rust
             | SemanticProjectLanguage::TypeScript
             | SemanticProjectLanguage::JavaScript
-            | SemanticProjectLanguage::Go => false,
+            | SemanticProjectLanguage::Go
+            | SemanticProjectLanguage::Java
+            | SemanticProjectLanguage::Cpp
+            | SemanticProjectLanguage::CSharp
+            | SemanticProjectLanguage::Php
+            | SemanticProjectLanguage::C => false,
         }
 }
 
@@ -2726,6 +3238,50 @@ fn is_call_fact(fact: &SyntaxFact) -> bool {
     label.ends_with(".call") || label.ends_with(".scoped_call")
 }
 
+fn is_call_name_fact(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str().ends_with(".call_name")
+}
+
+fn terminal_call_names(facts: &[SyntaxFact]) -> BTreeMap<u64, u64> {
+    let mut captures = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact) || is_call_name_fact(fact))
+        .collect::<Vec<_>>();
+    captures.sort_unstable_by(|left, right| {
+        left.span()
+            .start_byte()
+            .cmp(&right.span().start_byte())
+            .then_with(|| right.span().end_byte().cmp(&left.span().end_byte()))
+            .then_with(|| is_call_name_fact(left).cmp(&is_call_name_fact(right)))
+            .then_with(|| left.local_id().cmp(&right.local_id()))
+    });
+
+    let mut active_calls = Vec::<&SyntaxFact>::new();
+    let mut names_by_call = BTreeMap::<u64, Option<u64>>::new();
+    for capture in captures {
+        while active_calls
+            .last()
+            .is_some_and(|call| !contains_span(call.span(), capture.span()))
+        {
+            active_calls.pop();
+        }
+        if is_call_name_fact(capture) {
+            if let Some(call) = active_calls.last() {
+                names_by_call
+                    .entry(call.local_id())
+                    .and_modify(|name| *name = None)
+                    .or_insert(Some(capture.local_id()));
+            }
+        } else {
+            active_calls.push(capture);
+        }
+    }
+    names_by_call
+        .into_iter()
+        .filter_map(|(call, name)| name.map(|name| (call, name)))
+        .collect()
+}
+
 fn is_definition_fact(fact: &SyntaxFact) -> bool {
     fact.syntax_kind().as_str().ends_with(".definition")
 }
@@ -2759,6 +3315,198 @@ fn occurrence_name(value: &str, call: bool) -> Option<ParsedOccurrenceName<'_>> 
             qualifier: Some(qualifier),
         })
     })
+}
+
+fn call_receiver<'call>(call: &'call str, terminal_name: &str) -> Option<&'call str> {
+    let open = call.find('(')?;
+    let prefix = call.get(..open)?.trim_end();
+    let terminal_start = prefix.rfind(terminal_name)?;
+    let before_terminal = prefix.get(..terminal_start)?.trim_end();
+    let before_terminal = before_terminal
+        .strip_suffix("template")
+        .unwrap_or(before_terminal)
+        .trim_end();
+    let receiver = [".", "::", "->"]
+        .into_iter()
+        .find_map(|separator| before_terminal.strip_suffix(separator))
+        .map(str::trim)?;
+    let receiver = receiver
+        .rsplit_once(['.', ':', '>', ' '])
+        .map_or(receiver, |(_, tail)| tail)
+        .trim();
+    (is_identifier(receiver) || receiver == "$this").then_some(receiver)
+}
+
+const fn gin_http_verb(name: &str) -> Option<&'static str> {
+    match name.as_bytes() {
+        b"GET" => Some("GET"),
+        b"POST" => Some("POST"),
+        b"PUT" => Some("PUT"),
+        b"PATCH" => Some("PATCH"),
+        b"DELETE" => Some("DELETE"),
+        b"HEAD" => Some("HEAD"),
+        b"OPTIONS" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+fn reviewed_gin_receiver(
+    bytes: &[u8],
+    route: &OccurrenceDraft,
+    receiver: &str,
+    aliases: &BTreeSet<&str>,
+    occurrences: &[OccurrenceDraft],
+) -> bool {
+    occurrences.iter().any(|initializer| {
+        if initializer.file != route.file
+            || initializer.role != OccurrenceRole::CallSite
+            || initializer.source.span().start_byte() >= route.source.span().start_byte()
+            || initializer.enclosing_declaration != route.enclosing_declaration
+            || !matches!(initializer.name.as_str(), "Default" | "New")
+            || !initializer
+                .qualifier
+                .as_deref()
+                .is_some_and(|qualifier| aliases.contains(qualifier))
+        {
+            return false;
+        }
+        let Ok(start) = usize::try_from(initializer.source.span().start_byte()) else {
+            return false;
+        };
+        let Ok(end) = usize::try_from(initializer.source.span().end_byte()) else {
+            return false;
+        };
+        let line_start = bytes
+            .get(..start)
+            .and_then(|prefix| prefix.iter().rposition(|byte| *byte == b'\n'))
+            .map_or(0, |newline| newline + 1);
+        let line_end = bytes
+            .get(end..)
+            .and_then(|suffix| suffix.iter().position(|byte| *byte == b'\n'))
+            .and_then(|newline| end.checked_add(newline))
+            .unwrap_or(bytes.len());
+        let Ok(line) = std::str::from_utf8(bytes.get(line_start..line_end).unwrap_or_default())
+        else {
+            return false;
+        };
+        let compact = line
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let Some(call) = initializer.call_text.as_deref() else {
+            return false;
+        };
+        let expected = format!("{receiver}:={call}");
+        compact == expected || compact == format!("{expected};")
+    })
+}
+
+fn call_arguments(call: &str) -> Option<Vec<&str>> {
+    let open = call.find('(')?;
+    let close = call.rfind(')')?;
+    if open >= close {
+        return None;
+    }
+    let body = call.get(open + 1..close)?;
+    let mut arguments = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_u8;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, character) in body.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && active_quote != '`' {
+                escaped = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' | '`' => quote = Some(character),
+            '(' | '[' | '{' => depth = depth.checked_add(1)?,
+            ')' | ']' | '}' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                let argument = body.get(start..offset)?.trim();
+                if argument.is_empty() {
+                    return None;
+                }
+                arguments.push(argument);
+                if arguments.len() > 64 {
+                    return None;
+                }
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
+    let argument = body.get(start..)?.trim();
+    if !argument.is_empty() {
+        arguments.push(argument);
+    }
+    (!arguments.is_empty() && arguments.len() <= 64).then_some(arguments)
+}
+
+fn literal_route_path(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let quote = value.chars().next()?;
+    if !matches!(quote, '"' | '`') || value.chars().last()? != quote {
+        return None;
+    }
+    let inner = value.get(quote.len_utf8()..value.len().checked_sub(quote.len_utf8())?)?;
+    (!inner.is_empty() && inner.starts_with('/') && !inner.contains(['\\', '\r', '\n', '"', '`']))
+        .then_some(inner)
+}
+
+fn call_arity_matches(call: Option<usize>, declaration: Option<usize>) -> bool {
+    matches!((call, declaration), (Some(call), Some(declaration)) if call == declaration)
+}
+
+fn local_receiver_type(bytes: &[u8], call_start: u64, receiver: &str) -> Option<String> {
+    if !is_identifier(receiver) || receiver == "$this" {
+        return None;
+    }
+    let call_start = usize::try_from(call_start).ok()?;
+    let prefix = std::str::from_utf8(bytes.get(..call_start)?).ok()?;
+    let tokens = tokenize_identifiers(prefix);
+    tokens
+        .windows(2)
+        .rev()
+        .find(|pair| pair[1] == receiver && is_identifier(&pair[0]))
+        .map(|pair| pair[0].clone())
+}
+
+fn parameter_arity(signature: &str) -> Option<usize> {
+    delimited_arity(signature, '(', ')')
+}
+
+fn call_arity(call: &str) -> Option<usize> {
+    delimited_arity(call, '(', ')')
+}
+
+fn delimited_arity(value: &str, open: char, close: char) -> Option<usize> {
+    let start = value.find(open)?;
+    let end = value.rfind(close)?;
+    let body = value.get(start + open.len_utf8()..end)?.trim();
+    if body.is_empty() {
+        return Some(0);
+    }
+    let mut depth = 0_u32;
+    let mut arity = 1_usize;
+    for character in body.chars() {
+        match character {
+            '(' | '[' | '{' | '<' => depth = depth.checked_add(1)?,
+            ')' | ']' | '}' | '>' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => arity = arity.checked_add(1)?,
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(arity)
 }
 
 fn is_identifier(value: &str) -> bool {
@@ -2861,6 +3609,11 @@ fn parse_import(
         }
         SemanticProjectLanguage::Python => parse_python_imports(text),
         SemanticProjectLanguage::Go => parse_go_imports(text),
+        SemanticProjectLanguage::Java
+        | SemanticProjectLanguage::Cpp
+        | SemanticProjectLanguage::CSharp
+        | SemanticProjectLanguage::Php
+        | SemanticProjectLanguage::C => Vec::new(),
     }
 }
 
@@ -3202,6 +3955,11 @@ fn module_matches(
             parent.ends_with(module)
                 || parent.ends_with(module.rsplit('/').next().unwrap_or(module))
         }
+        SemanticProjectLanguage::Java
+        | SemanticProjectLanguage::Cpp
+        | SemanticProjectLanguage::CSharp
+        | SemanticProjectLanguage::Php
+        | SemanticProjectLanguage::C => false,
     }
 }
 
@@ -3275,7 +4033,20 @@ fn inheritance_names(
                 .map(|name| (RelationPredicate::Embeds, name))
                 .collect()
         }
-        SemanticProjectLanguage::Rust => Vec::new(),
+        SemanticProjectLanguage::Java
+        | SemanticProjectLanguage::Cpp
+        | SemanticProjectLanguage::CSharp
+        | SemanticProjectLanguage::Php => {
+            keyword_targets(header, "extends", RelationPredicate::Extends)
+                .into_iter()
+                .chain(keyword_targets(
+                    header,
+                    "implements",
+                    RelationPredicate::Implements,
+                ))
+                .collect()
+        }
+        SemanticProjectLanguage::Rust | SemanticProjectLanguage::C => Vec::new(),
     }
 }
 

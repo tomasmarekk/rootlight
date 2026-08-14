@@ -169,7 +169,7 @@ const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/2";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/3";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -181,7 +181,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/3";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/4";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -200,12 +200,17 @@ const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
 // additional fallback grammars that must not be advertised for the host.
-const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 5] = [
+const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 10] = [
     SemanticProjectLanguage::Rust,
     SemanticProjectLanguage::TypeScript,
     SemanticProjectLanguage::JavaScript,
     SemanticProjectLanguage::Python,
     SemanticProjectLanguage::Go,
+    SemanticProjectLanguage::Java,
+    SemanticProjectLanguage::Cpp,
+    SemanticProjectLanguage::CSharp,
+    SemanticProjectLanguage::Php,
+    SemanticProjectLanguage::C,
 ];
 
 fn project_adapter_supports_language(language: &str) -> bool {
@@ -16843,7 +16848,7 @@ mod tests {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
             fixture.path(),
-            &[("src/value.c", "int c_value(void) { return 1; }\n")],
+            &[("src/Value.kt", "fun kotlinValue(): Int = 1\n")],
         );
         let calls = Arc::new(AtomicUsize::new(0));
         let analyzer = Arc::new(FailingProjectAnalyzer {
@@ -16870,7 +16875,9 @@ mod tests {
                 .any(|diagnostic| diagnostic.code.starts_with("project-adapter-"))
         );
         assert!(status.coverage.iter().any(|coverage| {
-            coverage.language == "c" && coverage.tier == "tier_d" && coverage.status == "complete"
+            coverage.language == "kotlin"
+                && coverage.tier == "tier_d"
+                && coverage.status == "complete"
         }));
     }
 
@@ -20998,9 +21005,25 @@ mod tests {
             .expect("project adapter is advertised");
         assert_eq!(
             project.languages,
-            ["rust", "typescript", "javascript", "python", "go"]
+            [
+                "rust",
+                "typescript",
+                "javascript",
+                "python",
+                "go",
+                "java",
+                "cpp",
+                "csharp",
+                "php",
+                "c",
+            ]
         );
-        assert!(!project.languages.iter().any(|language| language == "java"));
+        assert!(
+            !project
+                .languages
+                .iter()
+                .any(|language| language == "kotlin")
+        );
         assert!(
             inventory
                 .adapters

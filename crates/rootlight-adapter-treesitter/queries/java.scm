@@ -44,8 +44,12 @@
   ")")
 
 (block) @scope
+(method_invocation) @call
 (method_invocation
-  name: (identifier) @call)
+  name: (identifier) @call_name)
+((marker_annotation
+  name: (identifier) @test_attribute)
+  (#eq? @test_attribute "Test"))
 (identifier) @reference
 [(line_comment) (block_comment)] @comment
 

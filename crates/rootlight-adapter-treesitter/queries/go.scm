@@ -31,12 +31,13 @@
 
 (block) @scope
 
+(call_expression) @call
 (call_expression
   function: [
-    (identifier)
+    (identifier) @call_name
     (selector_expression
-      field: (field_identifier))
-  ] @call)
+      field: (field_identifier) @call_name)
+  ])
 
 [(identifier) (field_identifier) (type_identifier) (package_identifier)] @reference
 (comment) @comment

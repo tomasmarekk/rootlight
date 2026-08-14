@@ -513,6 +513,284 @@ fn go_project_semantics_do_not_cross_package_directories() {
     }));
 }
 
+#[test]
+fn java_test_calls_require_annotation_and_exact_receiver_type() {
+    let fixture = ProjectFixture::new(
+        ["src/FibonacciSearch.java", "src/FibonacciSearchTest.java"],
+        [
+            concat!(
+                "class FibonacciSearch {\n",
+                "  int search(int[] values, int target) { return target; }\n",
+                "}\n",
+                "class OtherSearch {\n",
+                "  int search(int[] values, int target) { return -1; }\n",
+                "}\n",
+            ),
+            concat!(
+                "import org.junit.jupiter.api.Test;\n",
+                "class FibonacciSearchTest {\n",
+                "  @Test void findsValue() {\n",
+                "    FibonacciSearch search = new FibonacciSearch();\n",
+                "    search.search(new int[]{1, 2}, 2);\n",
+                "  }\n",
+                "  void helper() {\n",
+                "    FibonacciSearch search = new FibonacciSearch();\n",
+                "    search.search(new int[]{1, 2}, 2);\n",
+                "  }\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Java,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "search"
+                && entity.qualified_name.contains("FibonacciSearch::search")
+        })
+        .expect("Java target is materialized");
+    let spurious = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "search" && entity.qualified_name.contains("OtherSearch::search")
+        })
+        .expect("same-terminal Java decoy is materialized");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "findsValue")
+        .expect("annotated Java test is materialized");
+    let helper = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "helper")
+        .expect("unannotated Java helper is materialized");
+
+    assert!(test.flags.contains(&EntityFlag::Test));
+    assert!(!helper.flags.contains(&EntityFlag::Test));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
+            && relation.predicate == RelationPredicate::Tests
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+            && relation.evidence.source.is_some()
+    }));
+    assert!(!output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(helper.id)
+            && relation.predicate == RelationPredicate::Tests
+    }));
+    assert!(!output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(spurious.id)
+    }));
+}
+
+#[test]
+fn cpp_gtest_calls_require_positive_macro_and_exact_local_type() {
+    let fixture = ProjectFixture::new(
+        ["src/raw_props.cpp", "src/raw_props_test.cpp"],
+        [
+            concat!(
+                "class RawProps {\n",
+                "public:\n",
+                "  bool has(int key) { return key > 0; }\n",
+                "};\n",
+                "class OtherProps {\n",
+                "public:\n",
+                "  bool has(int key) { return false; }\n",
+                "};\n",
+            ),
+            concat!(
+                "TEST(RawProps, Has) {\n",
+                "  RawProps props;\n",
+                "  props.has(1);\n",
+                "}\n",
+                "TEST_F(RawPropsFixture, Has) {\n",
+                "  RawProps props;\n",
+                "  props.has(2);\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Cpp,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "has" && entity.qualified_name.contains("RawProps::has")
+        })
+        .expect("C++ target is materialized");
+    let spurious = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "has" && entity.qualified_name.contains("OtherProps::has")
+        })
+        .expect("same-terminal C++ decoy is materialized");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.flags.contains(&EntityFlag::Test))
+        .expect("reviewed TEST macro is classified");
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.flags.contains(&EntityFlag::Test))
+            .count(),
+        2,
+        "both TEST and TEST_F are positively classified"
+    );
+
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
+            && relation.predicate == RelationPredicate::Tests
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+    }));
+    assert!(!output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(spurious.id)
+    }));
+}
+
+#[test]
+fn go_gin_literal_route_requires_reviewed_import_receiver_path_and_handler() {
+    let fixture = ProjectFixture::new(
+        ["routes/other.go", "routes/routes.go"],
+        [
+            "package routes\n",
+            concat!(
+                "package routes\n",
+                "import \"github.com/gin-gonic/gin\"\n",
+                "func Generate() {}\n",
+                "func Register() {\n",
+                "  router := gin.Default()\n",
+                "  router.POST(\"/api/generate\", middleware.Wrap(Generate))\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Go,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let handler = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "Generate")
+        .expect("Gin handler is materialized");
+    let route = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Route && entity.display_name == "POST /api/generate"
+        })
+        .expect("literal Gin route is synthesized");
+
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(handler.id)
+            && relation.predicate == RelationPredicate::ServesRoute
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(route.id)
+            && relation.evidence.source.is_some()
+    }));
+
+    let dynamic = ProjectFixture::new(
+        ["routes/other.go", "routes/routes.go"],
+        [
+            "package routes\n",
+            concat!(
+                "package routes\n",
+                "import \"github.com/gin-gonic/gin\"\n",
+                "func Generate() {}\n",
+                "func Register(path string) {\n",
+                "  router := gin.Default()\n",
+                "  router.POST(path, Generate)\n",
+                "  handler := Generate\n",
+                "  router.POST(\"/api/generate\", handler)\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Go,
+    );
+    let dynamic_output = analyze_with_real_parser(&dynamic);
+    assert!(
+        !dynamic_output
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Route)
+    );
+    assert!(
+        dynamic_output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "go-gin-route-incomplete")
+    );
+}
+
+#[test]
+fn reviewed_csharp_php_and_c_calls_resolve_only_through_static_rules() {
+    for (language, paths, sources, caller_name) in [
+        (
+            SemanticProjectLanguage::CSharp,
+            ["src/Other.cs", "src/Worker.cs"],
+            [
+                "class Other {}\n",
+                "class Worker { int Target(int value) { return value; } int Run() { return Target(1); } }\n",
+            ],
+            "Run",
+        ),
+        (
+            SemanticProjectLanguage::Php,
+            ["src/Other.php", "src/Worker.php"],
+            [
+                "<?php class Other {}\n",
+                "<?php class Worker { function target($value) { return $value; } function run() { return $this->target(1); } }\n",
+            ],
+            "run",
+        ),
+        (
+            SemanticProjectLanguage::C,
+            ["src/other.c", "src/worker.c"],
+            [
+                "static int target(int value) { return value + 1; }\n",
+                "int target(int value) { return value; }\nint run(void) { return target(1); }\n",
+            ],
+            "run",
+        ),
+    ] {
+        let fixture = ProjectFixture::new(paths, sources, language);
+        let output = analyze_with_real_parser(&fixture);
+        let caller = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.display_name == caller_name)
+            .expect("reviewed caller is materialized");
+        assert!(
+            output.document().occurrences.iter().any(|occurrence| {
+                occurrence.role == OccurrenceRole::CallSite
+                    && occurrence.enclosing == Some(caller.id)
+                    && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "{} call did not resolve through its reviewed rule",
+            language.as_str()
+        );
+    }
+}
+
 fn assert_real_parser_symbol_identity(
     fixture: &ProjectFixture,
     language: &str,

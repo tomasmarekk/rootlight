@@ -614,12 +614,36 @@ fn annotated_call<'document>(
             .ok_or_else(|| quality("call span is outside its source"))?,
     )
     .map_err(|_| quality("call span is not UTF-8"))?;
-    if !observed.ends_with(name) {
+    if !authoritative_call_span_has_terminal(observed, name) {
         return Err(quality(format!(
             "annotated call {name} has a different authoritative span"
         )));
     }
     Ok(occurrence)
+}
+
+fn authoritative_call_span_has_terminal(observed: &str, name: &str) -> bool {
+    let observed = observed.trim();
+    if call_span_component_has_terminal(observed, name) {
+        return true;
+    }
+    let Some(arguments_start) = observed.find('(') else {
+        return false;
+    };
+    if !observed.ends_with(')') {
+        return false;
+    }
+    call_span_component_has_terminal(&observed[..arguments_start], name)
+}
+
+fn call_span_component_has_terminal(component: &str, name: &str) -> bool {
+    let Some(prefix) = component.trim_end().strip_suffix(name) else {
+        return false;
+    };
+    prefix
+        .chars()
+        .next_back()
+        .is_none_or(|value| !value.is_alphanumeric() && value != '_' && value != '$')
 }
 
 fn target_symbol(
@@ -1857,6 +1881,30 @@ struct LanguageExecutionEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_call_span_accepts_full_calls_without_suffix_collisions() {
+        assert!(authoritative_call_span_has_terminal(
+            "dep_a.FixtureNode01()",
+            "FixtureNode01"
+        ));
+        assert!(authoritative_call_span_has_terminal(
+            "FixtureNode01",
+            "FixtureNode01"
+        ));
+        assert!(authoritative_call_span_has_terminal(
+            "receiver.fixture_node_09",
+            "fixture_node_09"
+        ));
+        assert!(!authoritative_call_span_has_terminal(
+            "OtherFixtureNode01()",
+            "FixtureNode01"
+        ));
+        assert!(!authoritative_call_span_has_terminal(
+            "FixtureNode01 + value",
+            "FixtureNode01"
+        ));
+    }
 
     #[test]
     fn production_holdout_is_deterministic_bounded_and_truthful() {

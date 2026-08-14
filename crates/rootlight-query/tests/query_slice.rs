@@ -323,6 +323,62 @@ fn dispatch_candidate_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {
     (snapshot, seed, target)
 }
 
+fn test_and_route_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId, SymbolId, SymbolId) {
+    let base = fixture_snapshot();
+    let metadata = base.metadata();
+    let mut document = base.document().clone();
+    let production = document.entities[0].id;
+    let source = document.entities[0]
+        .evidence
+        .source
+        .clone()
+        .expect("fixture entity has source evidence");
+    let provenance = document.provenance[0].id;
+
+    let mut clone_entity = |seed: u8, name: &str, kind| {
+        let symbol = SymbolId::from_bytes([seed; 20]);
+        let mut entity = document.entities[0].clone();
+        entity.id = symbol;
+        entity.kind = kind;
+        entity.canonical_name = name.to_owned();
+        entity.display_name = name.to_owned();
+        entity.qualified_name = format!("crate::{name}");
+        document.entities.push(entity);
+        symbol
+    };
+    let test = clone_entity(0xb1, "behavior_test", rootlight_ir::EntityKind::Function);
+    let handler = clone_entity(0xb2, "handler", rootlight_ir::EntityKind::Function);
+    let route = clone_entity(0xb3, "POST /api/generate", rootlight_ir::EntityKind::Route);
+    for (id, subject, predicate, object) in [
+        (0xb4, test, RelationPredicate::Tests, production),
+        (0xb5, handler, RelationPredicate::ServesRoute, route),
+    ] {
+        document.relations.push(RelationRecord {
+            id: FactId::from_bytes([id; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            subject: RelationEndpoint::Entity(subject),
+            predicate,
+            object: RelationEndpoint::Entity(object),
+            confidence: Confidence::new(900).expect("fixture confidence is valid"),
+            evidence_kind: EvidenceKind::Derived,
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+    }
+    let snapshot = GenerationSnapshot::new(
+        metadata,
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("test and route fixture is canonical");
+    (snapshot, production, test, handler, route)
+}
+
 fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
     let entity = &snapshot.document().entities[0];
     let source = entity
@@ -930,6 +986,54 @@ fn symbol_relationships_returns_tier_d_dispatch_as_weak_non_exact_call() {
     assert_eq!(group.items[0].symbol, target);
     assert_eq!(group.items[0].confidence, 399);
     assert_eq!(group.items[0].source_refs.len(), 1);
+}
+
+#[test]
+fn symbol_relationships_preserves_test_and_route_direction_counterparts_and_sources() {
+    let (snapshot, production, test, handler, route) = test_and_route_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+
+    for (seed, family, direction, expected) in [
+        (
+            production,
+            RelationFamily::Tests,
+            RelationDirection::Inbound,
+            test,
+        ),
+        (
+            handler,
+            RelationFamily::CallsRoute,
+            RelationDirection::Outbound,
+            route,
+        ),
+    ] {
+        let plan = service
+            .plan_symbol_relationships(
+                BTreeSet::from([seed]),
+                vec![family],
+                Some(direction),
+                0,
+                10,
+                0,
+                QueryBudget::new(),
+            )
+            .expect("reviewed relationship plan is admitted");
+        let response = service
+            .execute_symbol_relationships(&plan, &Cancellation::new())
+            .expect("reviewed relationship query succeeds");
+        let group = response
+            .data
+            .groups
+            .first()
+            .expect("one relationship group is returned");
+        assert_eq!(group.seed, seed);
+        assert_eq!(group.family, family);
+        assert_eq!(group.direction, direction);
+        assert_eq!(group.items.len(), 1);
+        assert_eq!(group.items[0].symbol, expected);
+        assert_eq!(group.items[0].source_refs.len(), 1);
+    }
 }
 
 #[test]
