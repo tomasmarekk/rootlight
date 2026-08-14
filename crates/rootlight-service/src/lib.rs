@@ -9800,8 +9800,36 @@ pub enum FirstSliceResource {
     Repositories,
     /// Supported source files selected for one generation.
     SourceFiles,
+    /// Filesystem entries visited during deterministic discovery.
+    DiscoveryEntries,
     /// Aggregate retained source bytes selected for one generation.
     SourceBytes,
+    /// Bytes in one repository-relative path.
+    PathBytes,
+    /// Components in one repository-relative path.
+    PathComponents,
+    /// Process memory needed by one bounded repository operation.
+    MemoryBytes,
+    /// Files in one incremental metadata baseline or authoritative scan.
+    IncrementalFiles,
+    /// Typed fingerprints in one incremental generation snapshot.
+    IncrementalInputs,
+    /// Reusable artifacts in one incremental generation snapshot.
+    IncrementalArtifacts,
+    /// Fact nodes produced by one reusable incremental artifact.
+    IncrementalArtifactOutputs,
+    /// Declared incremental analysis passes.
+    IncrementalPasses,
+    /// Scoped fact nodes in the incremental dependency graph.
+    IncrementalDependencyNodes,
+    /// Typed edges in the incremental dependency graph.
+    IncrementalDependencyEdges,
+    /// Edge visits during incremental fixed-point closure.
+    IncrementalClosureWork,
+    /// Source-free incremental invalidation trace entries.
+    IncrementalTraceEntries,
+    /// Canonical bytes in one incremental logical-equivalence component.
+    IncrementalLogicalBytes,
     /// Top-level normalized IR records.
     Records,
     /// Normalized file records.
@@ -9879,7 +9907,21 @@ impl FirstSliceResource {
         match self {
             Self::Repositories => "repositories",
             Self::SourceFiles => "source_files",
+            Self::DiscoveryEntries => "discovery_entries",
             Self::SourceBytes => "source_bytes",
+            Self::PathBytes => "path_bytes",
+            Self::PathComponents => "path_components",
+            Self::MemoryBytes => "memory_bytes",
+            Self::IncrementalFiles => "incremental_files",
+            Self::IncrementalInputs => "incremental_inputs",
+            Self::IncrementalArtifacts => "incremental_artifacts",
+            Self::IncrementalArtifactOutputs => "incremental_artifact_outputs",
+            Self::IncrementalPasses => "incremental_passes",
+            Self::IncrementalDependencyNodes => "incremental_dependency_nodes",
+            Self::IncrementalDependencyEdges => "incremental_dependency_edges",
+            Self::IncrementalClosureWork => "incremental_closure_work",
+            Self::IncrementalTraceEntries => "incremental_trace_entries",
+            Self::IncrementalLogicalBytes => "incremental_logical_bytes",
             Self::Records => "records",
             Self::Files => "files",
             Self::Entities => "entities",
@@ -10078,6 +10120,15 @@ pub enum FirstSliceError {
     /// Generation or source retention cannot admit more state.
     #[error("first-slice retention is exhausted")]
     Retention,
+    /// Repository filesystem access failed in a way that may be transient.
+    #[error("first-slice repository access is temporarily unavailable")]
+    RepositoryIo,
+    /// A bounded resource could not be reserved, but no numeric bound was available.
+    #[error("first-slice resource {resource:?} is temporarily unavailable")]
+    ResourceUnavailable {
+        /// Closed source-free resource label.
+        resource: FirstSliceResource,
+    },
     /// A configured integer or duration is not representable.
     #[error("first-slice limits are invalid")]
     Limits,
@@ -10088,6 +10139,16 @@ pub enum FirstSliceError {
         resource: FirstSliceResource,
         /// Safe observed count or byte total.
         observed: u64,
+        /// Configured count or byte ceiling.
+        limit: u64,
+    },
+    /// One explicit bounded resource crossed a ceiling whose exact observation was discarded.
+    #[error("first-slice resource {resource:?} estimated at least {estimated} above limit {limit}")]
+    EstimatedResourceLimit {
+        /// Closed source-free resource label.
+        resource: FirstSliceResource,
+        /// Safe lower-bound estimate for the rejected observation.
+        estimated: u64,
         /// Configured count or byte ceiling.
         limit: u64,
     },
@@ -13629,6 +13690,18 @@ fn resource_limit(resource: FirstSliceResource, observed: usize, limit: usize) -
     }
 }
 
+fn estimated_resource_limit(
+    resource: FirstSliceResource,
+    estimated: u64,
+    limit: u64,
+) -> FirstSliceError {
+    FirstSliceError::EstimatedResourceLimit {
+        resource,
+        estimated,
+        limit,
+    }
+}
+
 fn checked_combined_length(
     current: usize,
     additional: usize,
@@ -13669,10 +13742,15 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
         return cancelled;
     }
     match error {
-        DiscoveryError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
-        DiscoveryError::Vfs(VfsError::Cancelled(reason)) => FirstSliceError::Cancelled(reason),
-        DiscoveryError::Incremental(error) => map_incremental_error(error, cancellation),
-        DiscoveryError::IncrementalDrift => FirstSliceError::DiscoveryDrift,
+        DiscoveryError::InvalidLimits => FirstSliceError::Limits,
+        DiscoveryError::InvalidPolicy | DiscoveryError::InvalidPattern { .. } => {
+            FirstSliceError::Configuration
+        }
+        DiscoveryError::EntryLimit { maximum } => resource_limit(
+            FirstSliceResource::DiscoveryEntries,
+            maximum.saturating_add(1),
+            maximum,
+        ),
         DiscoveryError::RetainedSnapshotByteLimit { observed, maximum } => {
             FirstSliceError::ResourceLimit {
                 resource: FirstSliceResource::SourceBytes,
@@ -13680,19 +13758,11 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
                 limit: maximum,
             }
         }
-        DiscoveryError::EntryLimit { maximum } => FirstSliceError::ResourceLimit {
-            resource: FirstSliceResource::Files,
-            observed: u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
-            limit: u64::try_from(maximum).unwrap_or(u64::MAX),
-        },
-        DiscoveryError::Vfs(VfsError::DirectoryEntryLimit { maximum }) => {
-            FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::Files,
-                observed: u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
-                limit: u64::try_from(maximum).unwrap_or(u64::MAX),
-            }
-        }
-        _ => FirstSliceError::Discovery,
+        DiscoveryError::Vfs(error) => map_vfs_error(error, cancellation),
+        DiscoveryError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        DiscoveryError::Incremental(error) => map_incremental_error(error, cancellation),
+        DiscoveryError::IncrementalDrift => FirstSliceError::DiscoveryDrift,
+        DiscoveryError::SerializeManifest(_) => FirstSliceError::Discovery,
     }
 }
 
@@ -13722,6 +13792,36 @@ fn map_incremental_error(error: IncrementalError, cancellation: &Cancellation) -
     }
     match error {
         IncrementalError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        IncrementalError::InvalidLimit { .. } => FirstSliceError::Limits,
+        IncrementalError::ResourceLimit {
+            resource,
+            observed,
+            limit,
+        } => resource_limit(incremental_resource(resource), observed, limit),
+        IncrementalError::InvalidPassId
+        | IncrementalError::DuplicateInput { .. }
+        | IncrementalError::DuplicateArtifact { .. }
+        | IncrementalError::DuplicateArtifactOutput { .. }
+        | IncrementalError::DuplicateArtifactDependency { .. }
+        | IncrementalError::EmptyArtifactPart { .. }
+        | IncrementalError::ArtifactDependencyMismatch { .. }
+        | IncrementalError::ArtifactUnknownOutput { .. }
+        | IncrementalError::DuplicatePass { .. }
+        | IncrementalError::EmptyPassOutputs { .. }
+        | IncrementalError::UndeclaredInputKind { .. }
+        | IncrementalError::UndeclaredInputDomain { .. }
+        | IncrementalError::UndeclaredOutputDomain { .. }
+        | IncrementalError::UnknownPass { .. }
+        | IncrementalError::UnknownFactNode { .. }
+        | IncrementalError::DuplicateFile { .. }
+        | IncrementalError::PathIdentityCollision { .. }
+        | IncrementalError::MissingHash { .. }
+        | IncrementalError::UnexpectedHash { .. }
+        | IncrementalError::DuplicateLogicalDomain { .. }
+        | IncrementalError::MissingLogicalDomain { .. }
+        | IncrementalError::LogicalInequality
+        | IncrementalError::SerializeTrace(_)
+        | IncrementalError::DuplicateIdentity { .. } => FirstSliceError::Incremental,
         _ => FirstSliceError::Incremental,
     }
 }
@@ -13732,13 +13832,73 @@ fn map_vfs_error(error: VfsError, cancellation: &Cancellation) -> FirstSliceErro
     }
     match error {
         VfsError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
-        // Discovery and analysis share one source-file ceiling. Reaching this
-        // variant on the second snapshot therefore means the file grew after
-        // the manifest observation and should be retried as snapshot drift.
-        VfsError::FileTooLarge { .. } => FirstSliceError::DiscoveryDrift,
+        VfsError::PathTooLong { maximum } => estimated_resource_limit(
+            FirstSliceResource::PathBytes,
+            u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
+            u64::try_from(maximum).unwrap_or(u64::MAX),
+        ),
+        VfsError::TooManyPathComponents { maximum } => estimated_resource_limit(
+            FirstSliceResource::PathComponents,
+            u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1),
+            u64::try_from(maximum).unwrap_or(u64::MAX),
+        ),
+        VfsError::DirectoryEntryLimit { maximum } => resource_limit(
+            FirstSliceResource::Files,
+            maximum.saturating_add(1),
+            maximum,
+        ),
+        VfsError::FileTooLarge { maximum } => estimated_resource_limit(
+            FirstSliceResource::SourceBytes,
+            maximum.saturating_add(1),
+            maximum,
+        ),
         VfsError::InvalidByteLimit => FirstSliceError::Limits,
-        VfsError::MemoryUnavailable => FirstSliceError::Retention,
-        _ => FirstSliceError::Repository,
+        VfsError::MemoryUnavailable => FirstSliceError::ResourceUnavailable {
+            resource: FirstSliceResource::MemoryBytes,
+        },
+        VfsError::OpenRoot { .. }
+        | VfsError::OpenDirectory { .. }
+        | VfsError::ReadDirectory { .. }
+        | VfsError::OpenFile { .. }
+        | VfsError::ReadFile { .. } => FirstSliceError::RepositoryIo,
+        VfsError::RootNotDirectory => FirstSliceError::Repository,
+        VfsError::LinkedPath
+        | VfsError::NotRegularFile
+        | VfsError::UnstableFile
+        | VfsError::StaleContentHash => FirstSliceError::DiscoveryDrift,
+        VfsError::InvalidRelativePath
+        | VfsError::InvalidRootPath
+        | VfsError::SourceReferenceMismatch
+        | VfsError::InvalidSourceSpan
+        | VfsError::PersistedFileIdentityMismatch
+        | VfsError::PersistedContentHashMismatch => FirstSliceError::Discovery,
+    }
+}
+
+const fn incremental_resource(resource: rootlight_incremental::ResourceKind) -> FirstSliceResource {
+    match resource {
+        rootlight_incremental::ResourceKind::Files => FirstSliceResource::IncrementalFiles,
+        rootlight_incremental::ResourceKind::Inputs => FirstSliceResource::IncrementalInputs,
+        rootlight_incremental::ResourceKind::Artifacts => FirstSliceResource::IncrementalArtifacts,
+        rootlight_incremental::ResourceKind::ArtifactOutputs => {
+            FirstSliceResource::IncrementalArtifactOutputs
+        }
+        rootlight_incremental::ResourceKind::Passes => FirstSliceResource::IncrementalPasses,
+        rootlight_incremental::ResourceKind::DependencyNodes => {
+            FirstSliceResource::IncrementalDependencyNodes
+        }
+        rootlight_incremental::ResourceKind::DependencyEdges => {
+            FirstSliceResource::IncrementalDependencyEdges
+        }
+        rootlight_incremental::ResourceKind::ClosureWork => {
+            FirstSliceResource::IncrementalClosureWork
+        }
+        rootlight_incremental::ResourceKind::TraceEntries => {
+            FirstSliceResource::IncrementalTraceEntries
+        }
+        rootlight_incremental::ResourceKind::LogicalBytes => {
+            FirstSliceResource::IncrementalLogicalBytes
+        }
     }
 }
 
@@ -13765,6 +13925,13 @@ fn map_adapter_error(error: AdapterError, cancellation: &Cancellation) -> FirstS
         AdapterError::RejectedRequest(RequestError::TooManyIncludedRanges { observed, limit }) => {
             resource_limit(FirstSliceResource::IncludedRanges, observed, limit)
         }
+        AdapterError::RejectedRequest(RequestError::ProjectLimit {
+            resource,
+            observed,
+            limit,
+        }) => adapter_resource(resource).map_or(FirstSliceError::Adapter, |resource| {
+            resource_limit(resource, observed, limit)
+        }),
         AdapterError::RejectedRequest(RequestError::ProviderLimit {
             resource,
             observed,
@@ -20032,7 +20199,7 @@ mod tests {
         assert_eq!(
             map_discovery_error(DiscoveryError::EntryLimit { maximum: 90 }, &cancellation,),
             FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::Files,
+                resource: FirstSliceResource::DiscoveryEntries,
                 observed: 91,
                 limit: 90,
             }
@@ -20055,7 +20222,11 @@ mod tests {
                 },
                 &cancellation,
             ),
-            FirstSliceError::DiscoveryDrift
+            FirstSliceError::EstimatedResourceLimit {
+                resource: FirstSliceResource::SourceBytes,
+                estimated: rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES.saturating_add(1),
+                limit: rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES,
+            }
         );
         assert_eq!(
             map_query_error(
@@ -20076,6 +20247,70 @@ mod tests {
         assert_eq!(
             map_query_error(QueryError::SymbolNotFound, &cancellation),
             FirstSliceError::SymbolNotFound
+        );
+    }
+
+    #[test]
+    fn incremental_vfs_and_project_limits_keep_typed_admission_evidence() {
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            map_incremental_error(
+                IncrementalError::ResourceLimit {
+                    resource: rootlight_incremental::ResourceKind::DependencyEdges,
+                    observed: 101,
+                    limit: 100,
+                },
+                &cancellation,
+            ),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::IncrementalDependencyEdges,
+                observed: 101,
+                limit: 100,
+            }
+        );
+        assert_eq!(
+            map_incremental_error(
+                IncrementalError::InvalidLimit {
+                    resource: rootlight_incremental::ResourceKind::Files,
+                    value: 0,
+                    hard_maximum: 1_000,
+                },
+                &cancellation,
+            ),
+            FirstSliceError::Limits
+        );
+        assert_eq!(
+            map_discovery_error(
+                DiscoveryError::Vfs(VfsError::MemoryUnavailable),
+                &cancellation,
+            ),
+            FirstSliceError::ResourceUnavailable {
+                resource: FirstSliceResource::MemoryBytes,
+            }
+        );
+        assert_eq!(
+            map_discovery_error(
+                DiscoveryError::Vfs(VfsError::OpenFile {
+                    source: std::io::Error::other("private path"),
+                }),
+                &cancellation,
+            ),
+            FirstSliceError::RepositoryIo
+        );
+        assert_eq!(
+            map_adapter_error(
+                AdapterError::RejectedRequest(RequestError::ProjectLimit {
+                    resource: ResourceKind::ProjectFiles,
+                    observed: 17,
+                    limit: 16,
+                }),
+                &cancellation,
+            ),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::ProjectFiles,
+                observed: 17,
+                limit: 16,
+            }
         );
     }
     const EQUIVALENCE_SURFACE_EDIT: &str =

@@ -9884,6 +9884,13 @@ fn build_service_error(
             "repository_access",
             "discovery",
         ),
+        FirstSliceError::RepositoryIo => (
+            ErrorCode::Busy,
+            "repository access is temporarily unavailable",
+            true,
+            "repository_io",
+            "discovery",
+        ),
         FirstSliceError::Discovery => (
             ErrorCode::Internal,
             "repository discovery failed",
@@ -9912,6 +9919,13 @@ fn build_service_error(
             "retention_limit",
             "executing",
         ),
+        FirstSliceError::ResourceUnavailable { .. } => (
+            ErrorCode::ResourceExhausted,
+            "first-slice resource is temporarily unavailable",
+            true,
+            "resource_unavailable",
+            "executing",
+        ),
         FirstSliceError::ResourceLimit { resource, .. } => {
             let failure_stage = if resource == rootlight_service::FirstSliceResource::Repositories {
                 "admission"
@@ -9926,6 +9940,13 @@ fn build_service_error(
                 failure_stage,
             )
         }
+        FirstSliceError::EstimatedResourceLimit { .. } => (
+            ErrorCode::ResourceExhausted,
+            "first-slice resource limit was reached",
+            false,
+            "resource_limit",
+            "executing",
+        ),
         FirstSliceError::GenerationMemoryLimit { .. } => (
             ErrorCode::ResourceExhausted,
             "generation memory limit was reached",
@@ -9934,10 +9955,10 @@ fn build_service_error(
             "admission",
         ),
         FirstSliceError::Limits => (
-            ErrorCode::ResourceExhausted,
-            "first-slice safety limit was reached",
+            ErrorCode::Internal,
+            "first-slice internal limit validation failed",
             false,
-            "safety_limit",
+            "limit_validation",
             "executing",
         ),
         FirstSliceError::InsufficientDiskSpace { .. } => (
@@ -9992,28 +10013,28 @@ fn build_service_error(
         FirstSliceError::AdapterWallTimeLimit => (
             ErrorCode::ResourceExhausted,
             "project adapter wall-time limit was reached",
-            true,
+            false,
             "adapter_wall_time_limit",
             "analysis",
         ),
         FirstSliceError::AdapterInputLimit => (
             ErrorCode::ResourceExhausted,
             "project adapter input limit was reached",
-            true,
+            false,
             "adapter_input_limit",
             "analysis",
         ),
         FirstSliceError::AdapterOutputLimit => (
             ErrorCode::ResourceExhausted,
             "project adapter output limit was reached",
-            true,
+            false,
             "adapter_output_limit",
             "analysis",
         ),
         FirstSliceError::AdapterMemoryLimit => (
             ErrorCode::ResourceExhausted,
             "project adapter memory limit was reached",
-            true,
+            false,
             "adapter_memory_limit",
             "analysis",
         ),
@@ -10129,8 +10150,36 @@ fn build_service_error(
                 static_detail_key("observed"),
                 PublicValue::Unsigned(observed),
             )
+            .detail(
+                static_detail_key("estimated"),
+                PublicValue::Unsigned(observed),
+            )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
             .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::EstimatedResourceLimit {
+        resource,
+        estimated,
+        limit,
+    } = error
+    {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label(resource.as_str())),
+            )
+            .detail(
+                static_detail_key("estimated"),
+                PublicValue::Unsigned(estimated),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::ResourceUnavailable { resource } = error {
+        builder = builder.detail(
+            static_detail_key("resource"),
+            PublicValue::Label(static_safe_label(resource.as_str())),
+        );
     }
     if let FirstSliceError::GenerationMemoryLimit {
         breakdown,
@@ -10318,14 +10367,7 @@ fn build_service_error(
         builder = builder.next_action(NextAction::RebuildRepository);
     }
     if retryable {
-        builder = if matches!(
-            error,
-            FirstSliceError::AdapterWallTimeLimit
-                | FirstSliceError::AdapterInputLimit
-                | FirstSliceError::AdapterOutputLimit
-                | FirstSliceError::AdapterMemoryLimit
-                | FirstSliceError::AdapterProcessFailure
-        ) {
+        builder = if error == FirstSliceError::AdapterProcessFailure {
             builder.retry_after(retry_after())
         } else {
             builder.retryable()
@@ -10336,6 +10378,7 @@ fn build_service_error(
         error,
         FirstSliceError::Discovery
             | FirstSliceError::Incremental
+            | FirstSliceError::Limits
             | FirstSliceError::Adapter
             | FirstSliceError::Resolution
             | FirstSliceError::Identity
@@ -11668,8 +11711,8 @@ mod tests {
         let wall_time = repository_index_error(FirstSliceError::AdapterWallTimeLimit, context);
 
         assert_eq!(wall_time.code(), ErrorCode::ResourceExhausted);
-        assert!(wall_time.retryable());
-        assert_eq!(wall_time.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+        assert!(!wall_time.retryable());
+        assert_eq!(wall_time.retry_after_ms(), None);
         assert_eq!(
             wall_time.details().get(&static_detail_key("resource")),
             Some(&PublicValue::Label(static_safe_label(
@@ -11691,14 +11734,13 @@ mod tests {
             &[
                 NextAction::InspectOperation,
                 NextAction::CollectSupportBundle,
-                NextAction::Retry,
             ]
         );
 
         let output = repository_index_error(FirstSliceError::AdapterOutputLimit, context);
         assert_eq!(output.code(), ErrorCode::ResourceExhausted);
-        assert!(output.retryable());
-        assert_eq!(output.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+        assert!(!output.retryable());
+        assert_eq!(output.retry_after_ms(), None);
         assert_eq!(
             output.details().get(&static_detail_key("resource")),
             Some(&PublicValue::Label(static_safe_label(
@@ -11720,12 +11762,23 @@ mod tests {
             &[
                 NextAction::InspectOperation,
                 NextAction::CollectSupportBundle,
-                NextAction::Retry,
             ]
         );
 
+        for bounded in [
+            FirstSliceError::AdapterInputLimit,
+            FirstSliceError::AdapterMemoryLimit,
+        ] {
+            let error = repository_index_error(bounded, context);
+            assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+            assert!(!error.retryable());
+            assert_eq!(error.retry_after_ms(), None);
+            assert!(!error.next_actions().contains(&NextAction::Retry));
+        }
+
         let process = repository_index_error(FirstSliceError::AdapterProcessFailure, context);
         assert_eq!(process.code(), ErrorCode::AdapterFailed);
+        assert!(process.retryable());
         assert_eq!(
             process.details().get(&static_detail_key("resource")),
             Some(&PublicValue::Label(static_safe_label("adapter_process")))
@@ -11851,13 +11904,19 @@ mod tests {
             Some(&PublicValue::Unsigned(1024))
         );
 
-        for error in [FirstSliceError::Retention, FirstSliceError::Limits] {
-            let bounded = build_service_error(error, None);
-            assert_eq!(bounded.code(), ErrorCode::ResourceExhausted);
-            assert!(!bounded.retryable());
-            assert_eq!(bounded.retry_after_ms(), None);
-            assert_eq!(bounded.next_actions(), &[]);
-        }
+        let retention = build_service_error(FirstSliceError::Retention, None);
+        assert_eq!(retention.code(), ErrorCode::ResourceExhausted);
+        assert!(!retention.retryable());
+        assert_eq!(retention.retry_after_ms(), None);
+        assert_eq!(retention.next_actions(), &[]);
+
+        let invalid_limits = build_service_error(FirstSliceError::Limits, None);
+        assert_eq!(invalid_limits.code(), ErrorCode::Internal);
+        assert!(!invalid_limits.retryable());
+        assert_eq!(
+            invalid_limits.next_actions(),
+            &[NextAction::CollectSupportBundle]
+        );
 
         let repository_capacity = build_service_error(
             FirstSliceError::ResourceLimit {
@@ -11873,6 +11932,75 @@ mod tests {
                 .get(&static_detail_key("failure_stage")),
             Some(&PublicValue::Label(static_safe_label("admission")))
         );
+    }
+
+    #[test]
+    fn admission_error_families_preserve_bounded_public_details_and_retry_truth() {
+        let entries = build_service_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::DiscoveryEntries,
+                observed: 91,
+                limit: 90,
+            },
+            None,
+        );
+        assert_eq!(entries.code(), ErrorCode::ResourceExhausted);
+        assert!(!entries.retryable());
+        assert_eq!(
+            entries.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("discovery_entries")))
+        );
+        assert_eq!(
+            entries.details().get(&static_detail_key("observed")),
+            Some(&PublicValue::Unsigned(91))
+        );
+        assert_eq!(
+            entries.details().get(&static_detail_key("estimated")),
+            Some(&PublicValue::Unsigned(91))
+        );
+        assert_eq!(
+            entries.details().get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(90))
+        );
+
+        let file_bytes = build_service_error(
+            FirstSliceError::EstimatedResourceLimit {
+                resource: rootlight_service::FirstSliceResource::SourceBytes,
+                estimated: 1_025,
+                limit: 1_024,
+            },
+            None,
+        );
+        assert_eq!(file_bytes.code(), ErrorCode::ResourceExhausted);
+        assert!(!file_bytes.retryable());
+        assert_eq!(
+            file_bytes.details().get(&static_detail_key("estimated")),
+            Some(&PublicValue::Unsigned(1_025))
+        );
+        assert_eq!(
+            file_bytes.details().get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(1_024))
+        );
+
+        let memory = build_service_error(
+            FirstSliceError::ResourceUnavailable {
+                resource: rootlight_service::FirstSliceResource::MemoryBytes,
+            },
+            None,
+        );
+        assert_eq!(memory.code(), ErrorCode::ResourceExhausted);
+        assert!(memory.retryable());
+        assert_eq!(memory.next_actions(), &[NextAction::Retry]);
+        assert_eq!(
+            memory.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("memory_bytes")))
+        );
+
+        let io = build_service_error(FirstSliceError::RepositoryIo, None);
+        assert_eq!(io.code(), ErrorCode::Busy);
+        assert!(io.retryable());
+        assert_eq!(io.message(), "repository access is temporarily unavailable");
+        assert_eq!(io.next_actions(), &[NextAction::Retry]);
     }
 
     #[test]
@@ -12335,10 +12463,9 @@ mod tests {
                 .get(&static_detail_key("structural_fallback")),
             Some(&PublicValue::Boolean(true))
         );
-        assert_eq!(
-            semantic_error.retry_after_ms(),
-            Some(u64::from(RETRY_AFTER_MS))
-        );
+        assert!(!semantic_error.retryable());
+        assert_eq!(semantic_error.retry_after_ms(), None);
+        assert!(!semantic_error.next_actions().contains(&NextAction::Retry));
         assert!(semantic_record.progress.completed > 0);
         assert_eq!(semantic_record.progress.total, 6);
         let semantic_context = journal
