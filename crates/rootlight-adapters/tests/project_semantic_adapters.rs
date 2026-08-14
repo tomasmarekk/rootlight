@@ -4,6 +4,7 @@
 //! classes as audited query packs, keeping these contract tests deterministic.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     sync::Arc,
@@ -1170,6 +1171,121 @@ fn oversized_project_fact_sets_commit_bounded_tier_b_output() {
 }
 
 #[test]
+fn singleton_retains_large_declaration_identity_set_and_bounds_candidate_fanout() {
+    let mut source = String::new();
+    for index in 0..300 {
+        source.push_str(&format!(
+            "function ping(argument_{index}: number): number {{ return {index}; }}\n"
+        ));
+    }
+    source.push_str("ping()\n");
+    source.push_str(&"run()\n".repeat(300));
+    let fixture = ProjectFixture::new(
+        ["src/large.ts"],
+        [source.as_str()],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let mut ir_limits = IrLimits::default();
+    ir_limits.max_nested_items_per_record = 8;
+    let limits = limits_with_ir_limits(ir_limits);
+    let request = fixture.request(&limits, AnalysisTier::TierB);
+    let analyzer = analyzer(SemanticProjectLanguage::TypeScript, fixture.build_context);
+
+    let output = execute_project_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("large singleton declaration identity set commits bounded output");
+
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "project-syntax-fact-limit"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+    let ping_symbols = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.display_name == "ping")
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ping_symbols.len(),
+        300,
+        "the optional syntax budget cannot discard declaration identities"
+    );
+    let signatures = output
+        .document()
+        .extensions
+        .iter()
+        .filter_map(|envelope| decode_symbol_identity_claim_envelope(envelope).ok())
+        .filter(|claim| ping_symbols.contains(&claim.symbol))
+        .map(|claim| claim.signature_discriminator)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        signatures.len(),
+        300,
+        "each retained declaration keeps its unique signature discriminator"
+    );
+    let call_sites = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect::<Vec<_>>();
+    assert!(
+        call_sites.len() <= 256,
+        "optional occurrences remain subject to the fixed syntax budget"
+    );
+    let candidate_occurrence = call_sites
+        .iter()
+        .copied()
+        .find(|occurrence| {
+            matches!(
+                &occurrence.target,
+                OccurrenceTarget::Candidates {
+                    total_count: 300,
+                    completeness: CoverageStatus::Bounded,
+                    ..
+                }
+            )
+        })
+        .expect("the retained ping call reports bounded candidates");
+    let OccurrenceTarget::Candidates {
+        symbols,
+        total_count,
+        completeness,
+    } = &candidate_occurrence.target
+    else {
+        unreachable!("candidate occurrence was selected above");
+    };
+    assert_eq!(symbols.len(), 8);
+    assert_eq!(*total_count, 300);
+    assert_eq!(*completeness, CoverageStatus::Bounded);
+    assert!(symbols.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        output
+            .document()
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject
+                    == rootlight_ir::RelationEndpoint::Occurrence(candidate_occurrence.id)
+                    && relation.predicate == RelationPredicate::DispatchCandidate
+            })
+            .count(),
+        symbols.len(),
+        "only the bounded canonical candidate sample produces relations"
+    );
+}
+
+#[test]
 fn excessive_parser_diagnostics_commit_a_bounded_summary() {
     let fixture = ProjectFixture::new(
         ["dep.py", "main.py"],
@@ -1565,7 +1681,11 @@ struct ProjectFixture {
 }
 
 impl ProjectFixture {
-    fn new(paths: [&str; 2], sources: [&str; 2], language: SemanticProjectLanguage) -> Self {
+    fn new<const N: usize>(
+        paths: [&str; N],
+        sources: [&str; N],
+        language: SemanticProjectLanguage,
+    ) -> Self {
         let current = std::env::current_dir().expect("current directory is available");
         let temporary = tempdir_in(current).expect("temporary directory is available");
         for (path, source) in paths.into_iter().zip(sources) {

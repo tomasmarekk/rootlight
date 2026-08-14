@@ -41,9 +41,7 @@ const STATIC_CALL_CONFIDENCE: u16 = 850;
 const TYPESCRIPT_CALL_CONFIDENCE: u16 = 800;
 const DYNAMIC_CALL_CONFIDENCE: u16 = 650;
 const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
-// One syntax fact can expand into several related IR records. Bound the input
-// set before that expansion so the isolated transaction can always be framed.
-const MAX_PROJECT_SYNTAX_FACTS: usize = 256;
+const MAX_OPTIONAL_PROJECT_SYNTAX_FACTS: usize = 256;
 /// Diagnostic emitted when project analysis had to discard syntax facts.
 pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limit";
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
@@ -438,27 +436,35 @@ impl SemanticProjectAnalyzer {
 }
 
 fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), AdapterError> {
-    let maximum_facts = project_syntax_fact_limit(parsed.len());
-    let total_facts = parsed.iter().try_fold(0_usize, |total, input| {
+    let maximum_optional_facts = project_optional_syntax_fact_limit(parsed.len());
+    let total_optional_facts = parsed.iter().try_fold(0_usize, |total, input| {
+        let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
+        let optional = input
+            .facts
+            .len()
+            .checked_sub(mandatory)
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
         total
-            .checked_add(input.facts.len())
+            .checked_add(optional)
             .ok_or_else(|| provider_failure("project-fact-accounting"))
     })?;
-    if total_facts <= maximum_facts {
+    if total_optional_facts <= maximum_optional_facts {
         return Ok(());
     }
 
     let code = DiagnosticCode::new(PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
-    let mut remaining_facts = maximum_facts;
+    let mut remaining_optional_facts = maximum_optional_facts;
     let mut remaining_inputs = parsed.len();
     for input in parsed {
-        let allowance = remaining_facts
+        let allowance = remaining_optional_facts
             .checked_add(remaining_inputs.saturating_sub(1))
             .and_then(|value| value.checked_div(remaining_inputs))
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
-        if input.facts.len() > allowance {
-            retain_project_syntax_facts(&mut input.facts, allowance);
+        let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
+        let original_len = input.facts.len();
+        retain_project_syntax_facts(&mut input.facts, allowance);
+        if input.facts.len() < original_len {
             input.diagnostics.push(AdapterDiagnostic::new(
                 code.clone(),
                 DiagnosticSeverity::Warning,
@@ -467,8 +473,13 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
             ));
             input.parse_status = merge_status(input.parse_status, CoverageStatus::Bounded);
         }
-        remaining_facts = remaining_facts
-            .checked_sub(input.facts.len())
+        let retained_optional = input
+            .facts
+            .len()
+            .checked_sub(mandatory)
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+        remaining_optional_facts = remaining_optional_facts
+            .checked_sub(retained_optional)
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
         remaining_inputs = remaining_inputs
             .checked_sub(1)
@@ -477,10 +488,8 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
     Ok(())
 }
 
-const fn project_syntax_fact_limit(_input_count: usize) -> usize {
-    // Partition width cannot raise this cap because candidate relations may
-    // expand combinatorially after syntax facts have been admitted.
-    MAX_PROJECT_SYNTAX_FACTS
+const fn project_optional_syntax_fact_limit(_input_count: usize) -> usize {
+    MAX_OPTIONAL_PROJECT_SYNTAX_FACTS
 }
 
 fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
@@ -488,48 +497,10 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
         .iter()
         .map(|fact| (fact.local_id(), fact))
         .collect::<BTreeMap<_, _>>();
-    let mut selected = BTreeSet::new();
+    // Identity closures are a required linear minimum; only syntax that can
+    // expand optional relationship evidence is charged against the fixed cap.
+    let mut selected = mandatory_project_syntax_fact_ids(facts);
     let mut remaining = allowance;
-
-    // Definitions carry the most useful stable identity for exact lookup.
-    // Prefer shallow declarations and retain their complete ancestry so the
-    // reduced fact graph stays valid rather than producing dangling parents.
-    let mut declarations = facts
-        .iter()
-        .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
-        .collect::<Vec<_>>();
-    declarations.sort_by_key(|fact| {
-        (
-            fact.depth(),
-            fact.span().start_byte(),
-            span_len(fact.span()),
-        )
-    });
-    for declaration in declarations {
-        let Some(definition) = facts
-            .iter()
-            .filter(|fact| {
-                fact.kind() == SyntaxFactKind::Occurrence
-                    && !is_call_fact(fact)
-                    && contains_span(declaration.span(), fact.span())
-            })
-            .min_by_key(|fact| {
-                (
-                    !is_definition_fact(fact),
-                    fact.span().start_byte(),
-                    span_len(fact.span()),
-                )
-            })
-        else {
-            continue;
-        };
-        select_syntax_fact_group(
-            [declaration, definition],
-            &facts_by_id,
-            &mut selected,
-            &mut remaining,
-        );
-    }
 
     for kind in [
         SyntaxFactKind::Import,
@@ -551,6 +522,80 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
         }
     }
     facts.retain(|fact| selected.contains(&fact.local_id()));
+}
+
+fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::new();
+    for fact in facts.iter().filter(|fact| {
+        fact.kind() == SyntaxFactKind::Declaration
+            || is_definition_fact(fact)
+            || is_symbol_signature_fact(fact)
+            || is_identity_capture_fact(fact)
+    }) {
+        select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
+    }
+    for declaration in facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
+    {
+        if let Some(definition) = facts
+            .iter()
+            .filter(|fact| {
+                fact.kind() == SyntaxFactKind::Occurrence
+                    && !is_call_fact(fact)
+                    && contains_span(declaration.span(), fact.span())
+            })
+            .min_by_key(|fact| {
+                (
+                    !is_definition_fact(fact),
+                    fact.span().start_byte(),
+                    span_len(fact.span()),
+                )
+            })
+        {
+            select_mandatory_syntax_fact_group(
+                [declaration, definition],
+                &facts_by_id,
+                &mut selected,
+            );
+        }
+    }
+    selected
+}
+
+fn is_identity_capture_fact(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "rust.impl_trait.scope_trait"
+            | "rust.impl_type.scope_type"
+            | "rust.test_attribute.test_attribute"
+            | "java.test_attribute.test_attribute"
+            | "cpp.test_attribute.test_attribute"
+    )
+}
+
+fn select_mandatory_syntax_fact_group<'fact>(
+    facts: impl IntoIterator<Item = &'fact SyntaxFact>,
+    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
+    selected: &mut BTreeSet<u64>,
+) {
+    for fact in facts {
+        let mut current = Some(fact);
+        let mut traversed = 0_usize;
+        while let Some(candidate) = current {
+            if traversed >= facts_by_id.len() || !selected.insert(candidate.local_id()) {
+                break;
+            }
+            traversed += 1;
+            current = candidate
+                .parent()
+                .and_then(|parent| facts_by_id.get(&parent).copied());
+        }
+    }
 }
 
 fn select_syntax_fact_group<'fact>(
@@ -749,6 +794,14 @@ enum ResolutionKind {
 #[derive(Debug, Clone)]
 struct ResolutionCandidates {
     symbols: Vec<SymbolId>,
+    kind: ResolutionKind,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedResolutionCandidates {
+    symbols: Vec<SymbolId>,
+    total_count: u64,
+    completeness: CoverageStatus,
     kind: ResolutionKind,
 }
 
@@ -1562,7 +1615,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         for index in 0..self.occurrences.len() {
             check_periodically(index, self.cancellation)?;
             let draft = self.occurrences[index].clone();
-            let resolution = self.resolve_occurrence(&draft, &definitions, &import_targets, false);
+            let resolution = bound_resolution_candidates(
+                self.resolve_occurrence(&draft, &definitions, &import_targets, false),
+                self.request.limits().ir().max_nested_items_per_record,
+            )?;
             let candidates = &resolution.symbols;
             let confidence_value = match draft.role {
                 OccurrenceRole::Definition => EXACT_CONFIDENCE,
@@ -1576,7 +1632,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                 }
             };
-            let target = occurrence_target(&draft.name, &resolution)?;
+            let target = occurrence_target(&draft.name, &resolution);
             let provenance = self.provenance_for_file(draft.file)?;
             let enclosing = draft
                 .enclosing_declaration
@@ -2975,30 +3031,46 @@ fn infer_visibility(
     }
 }
 
-fn occurrence_target(
-    name: &str,
-    resolution: &ResolutionCandidates,
-) -> Result<OccurrenceTarget, AdapterError> {
-    let mut symbols = resolution.symbols.clone();
-    symbols.sort_unstable();
-    symbols.dedup();
-    match symbols.as_slice() {
-        [] => Ok(OccurrenceTarget::Unresolved {
+fn occurrence_target(name: &str, resolution: &BoundedResolutionCandidates) -> OccurrenceTarget {
+    if resolution.total_count == 0 {
+        return OccurrenceTarget::Unresolved {
             text_hash: content_hash(name.as_bytes()),
-        }),
-        [symbol] if resolution.kind == ResolutionKind::Binding => {
-            Ok(OccurrenceTarget::Resolved { symbol: *symbol })
-        }
-        symbols => Ok(OccurrenceTarget::Candidates {
-            symbols: symbols.to_vec(),
-            total_count: u64::try_from(symbols.len())
-                .map_err(|_| provider_failure("project-candidate-count"))?,
-            completeness: match resolution.kind {
-                ResolutionKind::Binding => CoverageStatus::Complete,
-                ResolutionKind::DynamicDispatch => CoverageStatus::Unknown,
-            },
-        }),
+        };
     }
+    if let [symbol] = resolution.symbols.as_slice()
+        && resolution.total_count == 1
+        && resolution.kind == ResolutionKind::Binding
+        && resolution.completeness == CoverageStatus::Complete
+    {
+        return OccurrenceTarget::Resolved { symbol: *symbol };
+    }
+    OccurrenceTarget::Candidates {
+        symbols: resolution.symbols.clone(),
+        total_count: resolution.total_count,
+        completeness: resolution.completeness,
+    }
+}
+
+fn bound_resolution_candidates(
+    mut resolution: ResolutionCandidates,
+    maximum_symbols: usize,
+) -> Result<BoundedResolutionCandidates, AdapterError> {
+    resolution.symbols.sort_unstable();
+    resolution.symbols.dedup();
+    let total_count = u64::try_from(resolution.symbols.len())
+        .map_err(|_| provider_failure("project-candidate-count"))?;
+    let truncated = resolution.symbols.len() > maximum_symbols;
+    resolution.symbols.truncate(maximum_symbols);
+    Ok(BoundedResolutionCandidates {
+        symbols: resolution.symbols,
+        total_count,
+        completeness: match resolution.kind {
+            ResolutionKind::Binding if truncated => CoverageStatus::Bounded,
+            ResolutionKind::Binding => CoverageStatus::Complete,
+            ResolutionKind::DynamicDispatch => CoverageStatus::Unknown,
+        },
+        kind: resolution.kind,
+    })
 }
 
 fn confidence(value: u16) -> Result<Confidence, AdapterError> {
@@ -4225,17 +4297,18 @@ mod tests {
     use rootlight_ir::{CoverageStatus, EntityVisibility, OccurrenceTarget};
 
     use super::{
-        ImportBinding, MAX_PROJECT_SYNTAX_FACTS, ParsedOccurrenceName, ResolutionCandidates,
-        ResolutionKind, SemanticProjectLanguage, infer_visibility, occurrence_name,
-        occurrence_target, parse_import, project_syntax_fact_limit,
+        ImportBinding, MAX_OPTIONAL_PROJECT_SYNTAX_FACTS, ParsedOccurrenceName,
+        ResolutionCandidates, ResolutionKind, SemanticProjectLanguage, bound_resolution_candidates,
+        infer_visibility, occurrence_name, occurrence_target, parse_import,
+        project_optional_syntax_fact_limit,
     };
 
     #[test]
-    fn project_syntax_fact_limit_does_not_scale_with_partition_width() {
+    fn project_optional_syntax_fact_limit_does_not_scale_with_partition_width() {
         for input_count in [1, 512, usize::MAX] {
             assert_eq!(
-                project_syntax_fact_limit(input_count),
-                MAX_PROJECT_SYNTAX_FACTS
+                project_optional_syntax_fact_limit(input_count),
+                MAX_OPTIONAL_PROJECT_SYNTAX_FACTS
             );
         }
     }
@@ -4463,8 +4536,10 @@ mod tests {
             symbols: vec![symbol],
             kind: ResolutionKind::DynamicDispatch,
         };
+        let dynamic =
+            bound_resolution_candidates(dynamic, 8).expect("dynamic candidates are bounded");
         assert_eq!(
-            occurrence_target("run", &dynamic).expect("dynamic target is valid"),
+            occurrence_target("run", &dynamic),
             OccurrenceTarget::Candidates {
                 symbols: vec![symbol],
                 total_count: 1,
@@ -4476,8 +4551,10 @@ mod tests {
             symbols: vec![symbol],
             kind: ResolutionKind::Binding,
         };
+        let binding =
+            bound_resolution_candidates(binding, 8).expect("binding candidates are bounded");
         assert_eq!(
-            occurrence_target("run", &binding).expect("binding target is valid"),
+            occurrence_target("run", &binding),
             OccurrenceTarget::Resolved { symbol }
         );
     }
@@ -4490,13 +4567,37 @@ mod tests {
             symbols: vec![last, first, last],
             kind: ResolutionKind::Binding,
         };
+        let resolution =
+            bound_resolution_candidates(resolution, 8).expect("candidates are bounded");
 
         assert_eq!(
-            occurrence_target("duplicate", &resolution).expect("candidate target is valid"),
+            occurrence_target("duplicate", &resolution),
             OccurrenceTarget::Candidates {
                 symbols: vec![first, last],
                 total_count: 2,
                 completeness: CoverageStatus::Complete,
+            }
+        );
+    }
+
+    #[test]
+    fn occurrence_candidates_retain_total_count_when_the_sample_is_bounded() {
+        let first = SymbolId::from_bytes([1; 20]);
+        let middle = SymbolId::from_bytes([5; 20]);
+        let last = SymbolId::from_bytes([9; 20]);
+        let resolution = ResolutionCandidates {
+            symbols: vec![last, middle, first, last],
+            kind: ResolutionKind::Binding,
+        };
+        let resolution =
+            bound_resolution_candidates(resolution, 2).expect("candidates are bounded");
+
+        assert_eq!(
+            occurrence_target("duplicate", &resolution),
+            OccurrenceTarget::Candidates {
+                symbols: vec![first, middle],
+                total_count: 3,
+                completeness: CoverageStatus::Bounded,
             }
         );
     }
