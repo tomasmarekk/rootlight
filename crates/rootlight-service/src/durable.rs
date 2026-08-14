@@ -542,6 +542,14 @@ struct StorageScanBudget {
     visited_entries: usize,
 }
 
+#[derive(Clone, Copy)]
+enum SourceBlobScan {
+    /// Establish exact physical accounting without reading immutable payload bytes.
+    AccountPhysicalBytes,
+    /// Recompute content identities before integrity-sensitive reporting.
+    VerifyContent,
+}
+
 #[derive(Clone)]
 struct ScannedGeneration {
     repository: RepositoryId,
@@ -1072,6 +1080,7 @@ impl DurableCatalog {
             repository_directory,
             &mut budget,
             &mut accounting.verified_source_blobs,
+            SourceBlobScan::AccountPhysicalBytes,
         ) {
             Ok(replacement) => replacement,
             Err(error) => {
@@ -1225,6 +1234,7 @@ impl DurableCatalog {
             &self.quarantine,
             self.maximum_repositories,
             &mut accounting.verified_source_blobs,
+            SourceBlobScan::VerifyContent,
         );
         let (repositories, quarantine_bytes) = match scanned {
             Ok(scanned) => scanned,
@@ -1294,6 +1304,7 @@ impl DurableCatalog {
                 &self.quarantine,
                 self.maximum_repositories,
                 &mut accounting.verified_source_blobs,
+                SourceBlobScan::AccountPhysicalBytes,
             )?;
             let inventory = build_storage_inventory(
                 repositories.values().cloned().collect(),
@@ -1329,6 +1340,7 @@ impl DurableCatalog {
                 &self.quarantine,
                 self.maximum_repositories,
                 &mut accounting.verified_source_blobs,
+                SourceBlobScan::AccountPhysicalBytes,
             )?;
             let available_bytes = fs2::available_space(&self.repositories_path)
                 .map_err(|_| FirstSliceError::Catalog)?;
@@ -1352,6 +1364,7 @@ impl DurableCatalog {
             directory,
             &mut budget,
             &mut accounting.verified_source_blobs,
+            SourceBlobScan::AccountPhysicalBytes,
         )?;
         let live_source_blobs = scanned
             .source_blobs
@@ -2978,6 +2991,7 @@ fn scan_storage_state(
     quarantine: &PrivateDirectory<'_>,
     maximum_repositories: usize,
     verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
+    source_blob_scan: SourceBlobScan,
 ) -> Result<(BTreeMap<RepositoryId, ScannedRepositoryStorage>, u64), FirstSliceError> {
     let repository_names = private_entry_names(repositories)?;
     if repository_names.len() > maximum_repositories {
@@ -2999,6 +3013,7 @@ fn scan_storage_state(
             &repository,
             &mut budget,
             verified_source_blobs,
+            source_blob_scan,
         )?;
         if scanned_repositories
             .insert(repository_id, scanned)
@@ -3016,6 +3031,7 @@ fn scan_repository_storage(
     repository: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
     verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
+    source_blob_scan: SourceBlobScan,
 ) -> Result<ScannedRepositoryStorage, FirstSliceError> {
     let mut scanned = ScannedRepositoryStorage {
         repository: Some(repository_id),
@@ -3060,6 +3076,7 @@ fn scan_repository_storage(
                 budget,
                 &mut scanned,
                 verified_source_blobs,
+                source_blob_scan,
             )?;
         } else if let Ok(generation) = GenerationId::from_str(text) {
             let generation_directory = PrivateDirectory::open(repository.capability(), &name)
@@ -3146,6 +3163,7 @@ fn scan_source_blob_storage(
     budget: &mut StorageScanBudget,
     scanned: &mut ScannedRepositoryStorage,
     verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
+    source_blob_scan: SourceBlobScan,
 ) -> Result<(), FirstSliceError> {
     let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
@@ -3173,8 +3191,9 @@ fn scan_source_blob_storage(
         }
         let verification_key = (repository_id, digest);
         let metadata_before = source_blob_verification_metadata(&payload_metadata);
-        if metadata_before.is_none()
-            || verified_source_blobs.get(&verification_key).copied() != metadata_before
+        if matches!(source_blob_scan, SourceBlobScan::VerifyContent)
+            && (metadata_before.is_none()
+                || verified_source_blobs.get(&verification_key).copied() != metadata_before)
         {
             let payload = blob
                 .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), payload_bytes)
@@ -5417,9 +5436,13 @@ mod tests {
                 .expect("source blob name is a digest")
             })
             .collect::<BTreeSet<_>>();
-            assert_eq!(
-                cached_digests, live_digests,
-                "target reconciliation prunes deleted blob verification entries"
+            assert!(
+                cached_digests.is_subset(&live_digests),
+                "target accounting retains verification only for live blobs"
+            );
+            assert!(
+                !cached_digests.contains(&content_hash_bytes(first_changed.as_bytes())),
+                "target accounting prunes the compacted blob verification entry"
             );
             (first, second, third)
         };
@@ -5511,10 +5534,29 @@ mod tests {
             .next()
             .expect("one source blob exists")
             .expect("source blob entry reads");
-        fs::write(blob.path().join(SOURCE_BLOB_PAYLOAD_FILENAME), b"corrupt")
-            .expect("source blob is corrupted");
+        let payload_path = blob.path().join(SOURCE_BLOB_PAYLOAD_FILENAME);
+        let mut corrupted = fs::read(&payload_path).expect("source blob reads");
+        corrupted[0] ^= 1;
+        fs::write(&payload_path, corrupted).expect("same-length corruption writes");
 
         let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
+        let reservation = catalog
+            .ensure_staging_capacity(
+                RepositoryId::from_bytes([67; 16]),
+                DurableStorageAdmissionPolicy {
+                    required_catalog_bytes: 1024,
+                    required_repository_bytes: 0,
+                    maximum_repository_bytes: u64::MAX,
+                    maximum_storage_bytes: u64::MAX,
+                    minimum_free_bytes: 0,
+                },
+            )
+            .expect("physical accounting does not claim content verification")
+            .expect("unchanged physical size remains admissible")
+            .1;
+        catalog
+            .release_staging_reservation(reservation)
+            .expect("reservation releases");
         assert_eq!(
             catalog.storage_inventory(),
             Err(FirstSliceError::CatalogCorrupt)
@@ -5664,7 +5706,7 @@ mod tests {
     }
 
     #[test]
-    fn targeted_reconcile_revalidates_changed_cached_blob() {
+    fn targeted_accounting_defers_changed_blob_verification() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -5700,31 +5742,28 @@ mod tests {
         .expect("source blob entry reads")
         .path()
         .join(SOURCE_BLOB_PAYLOAD_FILENAME);
-        assert_eq!(
-            durable
-                .storage_accounting
-                .lock()
-                .expect("verified blob cache remains available")
-                .verified_source_blobs
-                .len(),
-            1
-        );
         std::thread::sleep(Duration::from_millis(20));
         let mut corrupted = fs::read(&payload_path).expect("source blob reads");
         corrupted[0] ^= 1;
         fs::write(&payload_path, corrupted).expect("same-length corruption writes");
 
-        assert_eq!(
-            durable.compact_repository(receipt.repository, &BTreeSet::from([receipt.generation]),),
-            Err(FirstSliceError::CatalogCorrupt)
-        );
-        assert_eq!(durable.storage_inventory_cached(), Ok(None));
+        durable
+            .compact_repository(receipt.repository, &BTreeSet::from([receipt.generation]))
+            .expect("physical accounting remains independent of payload integrity");
         assert!(
             durable
-                .storage_accounting
-                .lock()
-                .expect("storage accounting remains available")
-                .dirty
+                .storage_inventory_cached()
+                .expect("accounted inventory reads")
+                .is_some()
+        );
+        assert_eq!(
+            durable.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            durable.storage_inventory_cached(),
+            Ok(None),
+            "failed verified inventory invalidates physical accounting"
         );
     }
 
