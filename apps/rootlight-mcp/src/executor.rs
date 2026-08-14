@@ -7154,8 +7154,12 @@ where
             explain_request.repository,
             explain_request.generation,
         )?;
-        if response.result.truncated
-            || !response.result.unresolved_symbols.is_empty()
+        if response.result.truncated {
+            return Err(ToolExecutionError::new(authoritative_error(
+                MappedDomainFailure::budget_exceeded(),
+            )));
+        }
+        if !response.result.unresolved_symbols.is_empty()
             || response.result.symbols.len() != selectors.len()
         {
             return Err(ToolExecutionError::new(invalid_arguments.clone()));

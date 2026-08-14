@@ -8782,6 +8782,78 @@ async fn explain_source_reference_without_line_hint_composes_with_source_read() 
 }
 
 #[tokio::test]
+async fn source_read_classifies_truncated_symbol_resolution_as_budget_exhaustion() {
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    response.result.unresolved_symbols.clear();
+    response.result.truncated = true;
+    response.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Results,
+        client::ContinuationGuidance::SplitRequest,
+    );
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+
+    let error = execute(
+        &harness.executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "references": [
+                {"symbol_id": symbol()},
+                {"symbol_id": missing_symbol()}
+            ]
+        }),
+    )
+    .await
+    .expect_err("bounded symbol resolution cannot prove every source selector");
+
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("bounded symbol resolution returns a checked public error"),
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert!(
+        matches!(calls.as_slice(), [ObservedCall::SymbolExplain(_)]),
+        "source retrieval must not run after bounded symbol resolution"
+    );
+}
+
+#[tokio::test]
+async fn source_read_preserves_invalid_argument_for_unresolved_symbol_selector() {
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    response.result.symbols.clear();
+    response.result.unresolved_symbols = vec![missing_symbol()];
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+
+    let error = execute(
+        &harness.executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"symbol_id": missing_symbol()}]
+        }),
+    )
+    .await
+    .expect_err("a genuinely unresolved symbol selector is invalid");
+
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::InvalidArgument)
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert!(
+        matches!(calls.as_slice(), [ObservedCall::SymbolExplain(_)]),
+        "source retrieval must not run for an unresolved symbol selector"
+    );
+}
+
+#[tokio::test]
 async fn maps_expanded_source_range_as_the_returned_verified_reference() {
     let requested = source_reference(5, 10, 2, 2);
     let response = SourceReadPortResponse::new(

@@ -645,7 +645,7 @@ fn supported_profiles_preserve_standalone_and_batch_semantics(fixture: &mut Retr
         json!({
             "references": [{"source_ref": fixture.source_refs[1].clone()}],
             "context_lines_before": 1,
-            "context_lines_after": 1,
+            "context_lines_after": 12,
             "include_line_numbers": true
         }),
     );

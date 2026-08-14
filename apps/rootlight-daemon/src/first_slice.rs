@@ -8378,6 +8378,9 @@ fn source_read(
         .with_context_lines_before(context_lines_before)
         .with_context_lines_after(context_lines_after)
         .with_encoding(encoding);
+    let source_budget = service_budget(context)
+        .with_source_max_context_lines(context_lines_before.max(context_lines_after))
+        .map_err(service_error)?;
     let include_line_numbers = request.include_line_numbers.unwrap_or(true);
     let mut references = Vec::new();
     references
@@ -8398,7 +8401,7 @@ fn source_read(
             generation.generation,
             references,
             options,
-            service_budget(context),
+            source_budget,
             &context.cancellation,
         )
         .map_err(service_error)?;
