@@ -40,6 +40,16 @@
   (member_call_expression)
   (nullsafe_member_call_expression)
 ] @call
+[
+  (function_call_expression
+    function: (name) @call_name)
+  (scoped_call_expression
+    name: (name) @call_name)
+  (member_call_expression
+    name: (name) @call_name)
+  (nullsafe_member_call_expression
+    name: (name) @call_name)
+]
 [(name) (qualified_name) (variable_name)] @reference
 (comment) @comment
 

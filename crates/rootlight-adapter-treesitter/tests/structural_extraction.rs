@@ -697,6 +697,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         "c" => &[
             ("c.block.scope", 1),
             ("c.call.call", 1),
+            ("c.call_name.call_name", 1),
             ("c.comment.documentation", 1),
             ("c.field_identifier.reference", 1),
             ("c.file.root", 1),
@@ -713,6 +714,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         "cpp" => &[
             ("cpp.block.scope", 1),
             ("cpp.call.call", 1),
+            ("cpp.call_name.call_name", 1),
             ("cpp.class.declaration", 1),
             ("cpp.comment.documentation", 1),
             ("cpp.declaration_list.scope", 1),
@@ -732,6 +734,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         "csharp" => &[
             ("csharp.block.scope", 1),
             ("csharp.call.call", 1),
+            ("csharp.call_name.call_name", 1),
             ("csharp.class.declaration", 1),
             ("csharp.comment.documentation", 1),
             ("csharp.file.root", 1),
@@ -762,6 +765,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         "php" => &[
             ("php.block.scope", 1),
             ("php.call.call", 1),
+            ("php.call_name.call_name", 1),
             ("php.comment.documentation", 1),
             ("php.declaration_list.scope", 1),
             ("php.encapsed_string.string", 1),

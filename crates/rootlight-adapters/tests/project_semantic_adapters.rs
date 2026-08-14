@@ -275,6 +275,73 @@ fn call_occurrences_are_owned_by_the_declaring_function() {
 }
 
 #[test]
+fn rust_type_qualified_calls_select_only_the_qualified_impl() {
+    let fixture = ProjectFixture::new(
+        ["src/cli.rs", "src/lib.rs"],
+        [
+            concat!(
+                "pub struct CliOptions;\n",
+                "impl CliOptions {\n",
+                "    pub fn from_flags() -> Self { Self }\n",
+                "}\n",
+                "pub struct CliFactory;\n",
+                "impl CliFactory {\n",
+                "    pub fn from_flags() -> Self { Self }\n",
+                "}\n",
+                "pub fn check() {\n",
+                "    let _ = CliFactory::from_flags();\n",
+                "}\n",
+            ),
+            "",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let mut methods = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Method && entity.display_name == "from_flags")
+        .collect::<Vec<_>>();
+    methods.sort_by_key(|entity| {
+        entity
+            .evidence
+            .source
+            .as_ref()
+            .expect("method has source evidence")
+            .span()
+            .start_byte()
+    });
+    let [options_method, factory_method] = methods.as_slice() else {
+        panic!("both same-name impl methods are materialized");
+    };
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.syntactic_text_hash == content_hash(b"from_flags")
+        })
+        .expect("type-qualified call is materialized");
+    assert_eq!(
+        call.target,
+        OccurrenceTarget::Resolved {
+            symbol: factory_method.id
+        }
+    );
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+            && relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(factory_method.id)
+    }));
+    assert!(output.document().relations.iter().all(|relation| {
+        relation.subject != rootlight_ir::RelationEndpoint::Occurrence(call.id)
+            || relation.object != rootlight_ir::RelationEndpoint::Entity(options_method.id)
+    }));
+}
+
+#[test]
 fn python_same_module_calls_resolve_to_the_declared_function() {
     let fixture = ProjectFixture::new(
         ["Lib/bisect.py", "Lib/__init__.py"],

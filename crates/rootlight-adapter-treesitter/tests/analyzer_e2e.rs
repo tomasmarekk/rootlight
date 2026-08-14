@@ -452,6 +452,76 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
 }
 
 #[test]
+fn reviewed_terminal_call_names_keep_complete_call_evidence() {
+    let cases = [
+        (
+            CASES[6],
+            "const char *uv_err_name(int error);\nvoid echo(int error) { uv_err_name(error); }\n",
+            "uv_err_name",
+            "uv_err_name(error)",
+        ),
+        (
+            CASES[7],
+            "struct Props {};\nstruct Parser { template<class T> void prepare(); };\nvoid test(Parser& parser) { parser.prepare<Props>(); }\n",
+            "prepare",
+            "parser.prepare<Props>()",
+        ),
+        (
+            CASES[8],
+            "class WildcardPattern { static void Init(string value, object options) {} bool IsMatch(string value, object options) { WildcardPattern.Init(value, options); return true; } }\n",
+            "Init",
+            "WildcardPattern.Init(value, options)",
+        ),
+        (
+            CASES[10],
+            "<?php class Container { private function resolveDependencies($dependencies) {} public function build($dependencies) { $this->resolveDependencies($dependencies); } }\n",
+            "resolveDependencies",
+            "$this->resolveDependencies($dependencies)",
+        ),
+    ];
+    let provider = Arc::new(provider());
+    let limits = limits();
+
+    for (case, source, terminal, complete_call) in cases {
+        let fixture = Fixture::new(case, source.as_bytes());
+        let analyzer = analyzer(&provider, case);
+        let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+        let expected_hash = content_hash(terminal.as_bytes());
+        let call = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::CallSite
+                    && occurrence.syntactic_text_hash == expected_hash
+            })
+            .unwrap_or_else(|| panic!("{} terminal call is captured", case.name));
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Unresolved {
+                text_hash: expected_hash
+            }
+        );
+        let span = call.source.span();
+        let start = usize::try_from(span.start_byte()).expect("call start fits");
+        let end = usize::try_from(span.end_byte()).expect("call end fits");
+        assert_eq!(
+            source.get(start..end),
+            Some(complete_call),
+            "{} retains receiver and argument evidence",
+            case.name
+        );
+        assert!(output.document().relations.iter().all(|relation| {
+            !matches!(
+                relation.predicate,
+                RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+            )
+        }));
+    }
+}
+
+#[test]
 fn definition_evidence_covers_complete_go_and_rust_declarations() {
     const GO_SOURCE: &str =
         "package api\n\nfunc (handler Handler) GenerateHandler() {\n\tserve()\n}\n";

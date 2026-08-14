@@ -27,6 +27,13 @@
 (parameter_list) @signature
 (compound_statement) @scope
 (call_expression) @call
+[
+  (call_expression
+    function: (identifier) @call_name)
+  (call_expression
+    function: (field_expression
+      field: (field_identifier) @call_name))
+]
 [(identifier) (field_identifier) (type_identifier)] @reference
 (comment) @comment
 

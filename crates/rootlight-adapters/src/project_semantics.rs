@@ -574,6 +574,7 @@ struct SemanticEntity {
     symbol: SymbolId,
     name: String,
     kind: EntityKind,
+    declaring_type: Option<String>,
     file: FileId,
     span: SourceSpan,
     source: SourceRef,
@@ -591,6 +592,7 @@ struct DeclarationDraft {
     visibility: EntityVisibility,
     parent_declaration: Option<u64>,
     scope_identity: Option<[u8; 32]>,
+    declaring_type: Option<String>,
     is_test: bool,
     source: SourceRef,
 }
@@ -819,6 +821,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 symbol: module_symbol,
                 name: module_name,
                 kind: EntityKind::Module,
+                declaring_type: None,
                 file: source.span().file(),
                 span: module_span,
                 source: source.clone(),
@@ -931,6 +934,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 )
             });
             let mut rust_impl_identities = BTreeMap::new();
+            let mut rust_impl_types = BTreeMap::new();
             if self.analyzer.language == SemanticProjectLanguage::Rust {
                 for scope in &scope_facts {
                     if scope.syntax_kind().as_str() != "rust.impl.scope" {
@@ -971,6 +975,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     let identity = derive_rust_impl_scope_identity(parent, header.header())
                         .map_err(|_| provider_failure("project-rust-impl-identity"))?;
                     rust_impl_identities.insert(scope.local_id(), identity);
+                    if let Some(type_name) = rust_impl_self_type_name(self_type) {
+                        rust_impl_types.insert(scope.local_id(), type_name.to_owned());
+                    }
                 }
             }
             let mut scope_symbols = BTreeMap::new();
@@ -1023,6 +1030,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     symbol,
                     name,
                     kind: EntityKind::Namespace,
+                    declaring_type: None,
                     file: source.span().file(),
                     span: source.span(),
                     source,
@@ -1088,6 +1096,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 } else {
                     None
                 };
+                let declaring_type = rust_impl_scope
+                    .and_then(|scope| rust_impl_types.get(&scope.local_id()).cloned());
                 let is_type_member = parent_declaration
                     .and_then(|parent| declaration_kinds.get(&parent))
                     .is_some_and(|kind| {
@@ -1140,6 +1150,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     visibility,
                     parent_declaration,
                     scope_identity,
+                    declaring_type,
                     is_test: rust_test_declarations.contains(&declaration.local_id())
                         || declaration_is_test(
                             self.analyzer.language,
@@ -1378,6 +1389,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 symbol,
                 name: draft.name,
                 kind: draft.kind,
+                declaring_type: draft.declaring_type,
                 file: draft.file,
                 span: draft.span,
                 source: draft.source,
@@ -2095,7 +2107,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                     | EntityKind::TypeAlias
                             )
                         });
-                if !qualifier_is_type {
+                if qualifier_is_type {
+                    let symbols = definitions
+                        .get(&occurrence.name)
+                        .into_iter()
+                        .flatten()
+                        .filter(|entity| {
+                            entity.kind == EntityKind::Method
+                                && entity.declaring_type.as_deref() == Some(qualifier_tail)
+                        })
+                        .map(|entity| entity.symbol)
+                        .collect::<BTreeSet<_>>();
+                    return ResolutionCandidates {
+                        symbols: symbols.into_iter().collect(),
+                        kind: ResolutionKind::Binding,
+                    };
+                } else {
                     let module = qualifier
                         .trim_start_matches("crate::")
                         .trim_start_matches("self::")
@@ -2306,6 +2333,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             symbol,
             name: name.to_owned(),
             kind: EntityKind::ExternalSymbol,
+            declaring_type: None,
             file,
             span: source.span(),
             source: source.clone(),
@@ -2611,6 +2639,19 @@ fn declaration_is_test(language: SemanticProjectLanguage, path: &str, name: &str
 
 fn project_directory(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+fn rust_impl_self_type_name(self_type: &str) -> Option<&str> {
+    let self_type = self_type.trim();
+    if self_type.starts_with('<') {
+        return None;
+    }
+    let ungeneric = self_type
+        .split_once('<')
+        .map_or(self_type, |(prefix, _)| prefix)
+        .trim();
+    let name = ungeneric.rsplit("::").next()?.trim();
+    is_identifier(name).then_some(name)
 }
 
 fn enclosing_scope(

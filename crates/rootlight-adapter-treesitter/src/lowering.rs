@@ -1009,6 +1009,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .iter()
             .map(|fact| (fact.local_id(), fact))
             .collect();
+        let terminal_call_names = terminal_call_names(self.parse_output.facts(), cancellation)?;
 
         let file_claim = FileIdentityClaim {
             file: file.id,
@@ -1154,8 +1155,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
             if let Some(role) = occurrence_role(fact) {
                 let text = self.text_for_span(fact.span())?;
-                let resolution_text =
-                    structural_resolution_text(self.request.language().as_str(), fact, text);
+                let terminal_call_name = terminal_call_names
+                    .get(&fact.local_id())
+                    .and_then(|local_id| facts_by_id.get(local_id))
+                    .map(|terminal| self.text_for_span(terminal.span()))
+                    .transpose()?;
+                let resolution_text = structural_resolution_text(
+                    self.request.language().as_str(),
+                    fact,
+                    text,
+                    terminal_call_name,
+                );
                 let enclosing = entity_plan
                     .nearest_entity_ancestor
                     .get(&fact.local_id())
@@ -2103,7 +2113,15 @@ fn unresolved_occurrence(
     Ok(record)
 }
 
-fn structural_resolution_text<'a>(language: &str, fact: &SyntaxFact, text: &'a str) -> &'a str {
+fn structural_resolution_text<'a>(
+    language: &str,
+    fact: &SyntaxFact,
+    text: &'a str,
+    terminal_call_name: Option<&'a str>,
+) -> &'a str {
+    if let Some(terminal_call_name) = terminal_call_name {
+        return terminal_call_name;
+    }
     // Structural resolution matches entity-name hashes. The full scoped Rust
     // spelling remains available through the occurrence's source span.
     if language == "rust" && fact.syntax_kind().as_str().ends_with(".scoped_call") {
@@ -2115,6 +2133,51 @@ fn structural_resolution_text<'a>(language: &str, fact: &SyntaxFact, text: &'a s
     } else {
         text
     }
+}
+
+fn terminal_call_names(
+    facts: &[SyntaxFact],
+    cancellation: &Cancellation,
+) -> Result<HashMap<u64, u64>, AdapterError> {
+    let mut captures = facts
+        .iter()
+        .filter(|fact| is_call_capture(fact) || is_call_name_capture(fact))
+        .collect::<Vec<_>>();
+    captures.sort_unstable_by(|left, right| {
+        left.span()
+            .start_byte()
+            .cmp(&right.span().start_byte())
+            .then_with(|| right.span().end_byte().cmp(&left.span().end_byte()))
+            .then_with(|| is_call_name_capture(left).cmp(&is_call_name_capture(right)))
+            .then_with(|| left.local_id().cmp(&right.local_id()))
+    });
+
+    let mut active_calls = Vec::<&SyntaxFact>::new();
+    let mut names_by_call = HashMap::<u64, Option<u64>>::new();
+    for (index, capture) in captures.into_iter().enumerate() {
+        check_periodically(index, cancellation)?;
+        while active_calls
+            .last()
+            .is_some_and(|call| !span_contains(call.span(), capture.span()))
+        {
+            active_calls.pop();
+        }
+        if is_call_name_capture(capture) {
+            if let Some(call) = active_calls.last() {
+                names_by_call
+                    .entry(call.local_id())
+                    .and_modify(|name| *name = None)
+                    .or_insert(Some(capture.local_id()));
+            }
+        } else {
+            active_calls.push(capture);
+        }
+    }
+
+    Ok(names_by_call
+        .into_iter()
+        .filter_map(|(call, name)| name.map(|name| (call, name)))
+        .collect())
 }
 
 fn containment_relation(
@@ -2622,6 +2685,20 @@ fn is_definition_capture(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str().ends_with(".definition")
 }
 
+fn is_call_capture(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str().ends_with(".call")
+}
+
+fn is_call_name_capture(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str().ends_with(".call_name")
+}
+
+fn span_contains(container: SourceSpan, child: SourceSpan) -> bool {
+    container.file() == child.file()
+        && container.start_byte() <= child.start_byte()
+        && container.end_byte() >= child.end_byte()
+}
+
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature && fact.syntax_kind().as_str().ends_with(".signature")
 }
@@ -2669,6 +2746,7 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,
+        SyntaxFactKind::Occurrence if is_call_name_capture(fact) => None,
         SyntaxFactKind::Occurrence if fact.syntax_kind().as_str().contains("call") => {
             Some(OccurrenceRole::CallSite)
         }

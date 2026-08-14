@@ -33,6 +33,20 @@
 [(parameter_list) (type_parameter_list)] @signature
 (block) @scope
 (invocation_expression) @call
+[
+  (invocation_expression
+    function: (identifier) @call_name)
+  (invocation_expression
+    function: (generic_name
+      (identifier) @call_name))
+  (invocation_expression
+    function: (member_access_expression
+      name: (identifier) @call_name))
+  (invocation_expression
+    function: (member_access_expression
+      name: (generic_name
+        (identifier) @call_name)))
+]
 (identifier) @reference
 (comment) @comment
 

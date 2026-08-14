@@ -30,6 +30,26 @@
 [(compound_statement) (declaration_list)] @scope
 (call_expression) @call
 [
+  (call_expression
+    function: (identifier) @call_name)
+  (call_expression
+    function: (template_function
+      name: (identifier) @call_name))
+  (call_expression
+    function: (field_expression
+      field: (field_identifier) @call_name))
+  (call_expression
+    function: (field_expression
+      field: (template_method
+        name: (field_identifier) @call_name)))
+  (call_expression
+    function: (qualified_identifier
+      name: [
+        (identifier)
+        (field_identifier)
+      ] @call_name))
+]
+[
   (identifier)
   (field_identifier)
   (type_identifier)

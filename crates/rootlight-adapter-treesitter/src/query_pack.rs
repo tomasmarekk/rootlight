@@ -36,6 +36,7 @@ const EXPECTED_CAPTURES: [&str; 12] = [
 ];
 const RUST_SPECIAL_CAPTURES: [&str; 4] =
     ["scope_trait", "scope_type", "scoped_call", "test_attribute"];
+const TERMINAL_CALL_NAME_CAPTURE: &str = "call_name";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StructuralRole {
@@ -49,6 +50,7 @@ pub(crate) enum StructuralRole {
     ScopeType,
     Definition,
     Call,
+    CallName,
     ScopedCall,
     Reference,
     Comment,
@@ -70,6 +72,7 @@ impl StructuralRole {
             "scope_type" => Some(Self::ScopeType),
             "definition" => Some(Self::Definition),
             "call" => Some(Self::Call),
+            "call_name" => Some(Self::CallName),
             "scoped_call" => Some(Self::ScopedCall),
             "reference" => Some(Self::Reference),
             "comment" => Some(Self::Comment),
@@ -90,7 +93,7 @@ impl StructuralRole {
             }
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
-            Self::Definition | Self::Call | Self::ScopedCall | Self::Reference => {
+            Self::Definition | Self::Call | Self::CallName | Self::ScopedCall | Self::Reference => {
                 SyntaxFactKind::Occurrence
             }
             Self::Comment | Self::Documentation => SyntaxFactKind::Comment,
@@ -110,6 +113,7 @@ impl StructuralRole {
             Self::ScopeType => "scope_type",
             Self::Definition => "definition",
             Self::Call => "call",
+            Self::CallName => "call_name",
             Self::ScopedCall => "scoped_call",
             Self::Reference => "reference",
             Self::Comment => "comment",
@@ -139,7 +143,9 @@ impl StructuralRole {
             Self::Import => 5,
             Self::Documentation => 6,
             Self::Call | Self::ScopedCall => 7,
-            Self::Reference => 8,
+            // A retained terminal name is safe only when its containing call
+            // survived the same bounded extraction.
+            Self::CallName | Self::Reference => 8,
             Self::Comment => 9,
             Self::StringLiteral => 10,
         }
@@ -212,6 +218,9 @@ impl QueryPack {
         let mut expected = EXPECTED_CAPTURES.to_vec();
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
+            expected.sort_unstable();
+        } else if supports_terminal_call_name(family) {
+            expected.push(TERMINAL_CALL_NAME_CAPTURE);
             expected.sort_unstable();
         }
         let mut observed = query.capture_names().to_vec();
@@ -324,6 +333,13 @@ impl QueryPack {
                     StructuralRole::ScopeType => "rust.impl_type",
                     StructuralRole::TestAttribute => "rust.test_attribute",
                     StructuralRole::ScopedCall => "rust.scoped_call",
+                    StructuralRole::CallName => match family {
+                        GrammarFamily::C => "c.call_name",
+                        GrammarFamily::Cpp => "cpp.call_name",
+                        GrammarFamily::CSharp => "csharp.call_name",
+                        GrammarFamily::Php => "php.call_name",
+                        _ => return Err(query_failure("query-call-name-family")),
+                    },
                     StructuralRole::Call => match family {
                         GrammarFamily::Rust => "rust.call",
                         GrammarFamily::Python => "python.call",
@@ -391,6 +407,13 @@ fn query_failure(code: &'static str) -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new(code).expect("built-in query failure code is valid"),
     }
+}
+
+const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
+    matches!(
+        family,
+        GrammarFamily::C | GrammarFamily::Cpp | GrammarFamily::CSharp | GrammarFamily::Php
+    )
 }
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
@@ -697,6 +720,9 @@ mod tests {
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if family == GrammarFamily::Rust {
                 expected.extend(RUST_SPECIAL_CAPTURES);
+                expected.sort_unstable();
+            } else if supports_terminal_call_name(family) {
+                expected.push(TERMINAL_CALL_NAME_CAPTURE);
                 expected.sort_unstable();
             }
             assert_eq!(names, expected);
