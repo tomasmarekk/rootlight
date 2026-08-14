@@ -1531,7 +1531,7 @@
           "$ref": "#/$defs/SafeLabel"
         },
         "message": {
-          "description": "Rootlight-generated source-free explanation.",
+          "description": "Rootlight-generated source-free explanation with optional bounded\naggregate scope such as a canonical language and affected-file count.",
           "$ref": "#/$defs/SourceFreeMessage"
         }
       },
