@@ -74,15 +74,16 @@ use rootlight_incremental::{
 };
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageScope, CoverageStatus,
-    DiagnosticRecord, DiagnosticSeverity, EntityKind, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain, FactEvidence, FactRef,
-    FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
-    LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRole, ProducerIdentity,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason, SourceMappingKind,
-    SourceRef, SourceSpan, derive_coverage_record_id, derive_diagnostic_record_id,
-    derive_provenance_record_id, derive_skipped_region_id, new_file_identity_claim_envelope,
+    AnalysisTier, BuildContextIdentity, CanonicalNormalizedFileChunk, CoverageRecord,
+    CoverageScope, CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityKind, EntityRecord,
+    ExtensionEnvelope, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain,
+    FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
+    LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
+    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
+    RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason,
+    SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, derive_coverage_record_id,
+    derive_diagnostic_record_id, derive_provenance_record_id, derive_skipped_region_id,
+    new_file_identity_claim_envelope,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -339,7 +340,10 @@ pub struct FirstSliceIndexOperationEvidence {
     pub reused_files: u64,
     /// Source files parsed into fresh immutable parser artifacts.
     pub rebuilt_files: u64,
-    /// Generation-bound normalized records reused without reconstruction.
+    /// Final normalized records retained through verified identity rebind.
+    ///
+    /// Rebind reconstructs generation-owned identities and references while
+    /// avoiding analyzer and lowering recomputation.
     pub reused_facts: u64,
     /// Normalized facts rebuilt for the published generation.
     pub rebuilt_facts: u64,
@@ -1129,7 +1133,7 @@ pub enum FirstSliceFactWorkCause {
     InitialGeneration,
     /// A declared dependency edge selected the scope.
     DependencyClosure,
-    /// The planner proved the scope is outside the invalidation closure.
+    /// The planner excluded the scope, or verified normalized records survived rebind.
     CompleteDependencyMatch,
     /// A conservative fallback selected a repository-wide rebuild.
     ConservativeFallback,
@@ -1189,7 +1193,7 @@ impl FirstSlicePlannedFactWork {
     }
 }
 
-/// Normalized records actually rebuilt during generation construction.
+/// Normalized records retained by verified rebind or rebuilt during construction.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirstSliceNormalizedFactWork {
@@ -1213,7 +1217,7 @@ impl FirstSliceNormalizedFactWork {
         &self.provider_pass
     }
 
-    /// Returns why the records were rebuilt.
+    /// Returns why the records were rebound or rebuilt.
     #[must_use]
     pub const fn cause(&self) -> FirstSliceFactWorkCause {
         self.cause
@@ -1365,10 +1369,11 @@ impl FirstSliceIncrementalEvidence {
         self.lowered_files
     }
 
-    /// Returns generation-bound normalized records reused without reconstruction.
+    /// Returns exact final normalized records retained from verified chunk rebind.
     ///
-    /// Parser artifact reuse alone does not increase this counter because
-    /// lowering that artifact constructs fresh records and identities.
+    /// Rebind reconstructs generation-owned identities and references but
+    /// avoids analyzer and lowering recomputation. Records later replaced or
+    /// removed by project composition or resolution do not increase this count.
     #[must_use]
     pub const fn reused_normalized_facts(&self) -> u64 {
         self.reused_normalized_facts
@@ -1386,7 +1391,7 @@ impl FirstSliceIncrementalEvidence {
         &self.planned_fact_work
     }
 
-    /// Returns actually rebuilt records grouped by IR domain, pass, and cause.
+    /// Returns rebound and rebuilt records grouped by IR domain, pass, and cause.
     #[must_use]
     pub fn normalized_fact_work(&self) -> &[FirstSliceNormalizedFactWork] {
         &self.normalized_fact_work
@@ -1941,6 +1946,168 @@ pub struct FirstSliceSourceCoverage {
 struct StructuralArtifactEntry {
     id: ArtifactId,
     artifact: Arc<TreeSitterStructuralArtifact>,
+    normalized: Option<Arc<CanonicalNormalizedFileChunk>>,
+}
+
+impl StructuralArtifactEntry {
+    fn accounted_bytes(&self) -> Result<usize, FirstSliceError> {
+        self.artifact
+            .accounted_bytes()
+            .checked_add(
+                self.normalized
+                    .as_ref()
+                    .map_or(0, |chunk| chunk.encoded_bytes()),
+            )
+            .ok_or(FirstSliceError::Retention)
+    }
+}
+
+#[derive(Default)]
+struct ReusedNormalizedRecords {
+    // Generation-bound fact IDs content-bind their complete records. File and
+    // symbol IDs are stable across generations, so those records require exact
+    // equality before final accounting can call them retained.
+    files: BTreeMap<FileId, FileRecord>,
+    entities: BTreeMap<SymbolId, EntityRecord>,
+    occurrences: BTreeSet<FactId>,
+    relations: BTreeSet<FactId>,
+    provenance: BTreeSet<FactId>,
+    source_mappings: BTreeSet<FactId>,
+    coverage_records: BTreeSet<FactId>,
+    skipped_regions: BTreeSet<FactId>,
+    diagnostics: BTreeSet<FactId>,
+    extensions: BTreeSet<FactId>,
+}
+
+impl ReusedNormalizedRecords {
+    fn insert_document(&mut self, document: &NormalizedIrDocument) -> Result<(), FirstSliceError> {
+        for record in &document.files {
+            if self.files.insert(record.id, record.clone()).is_some() {
+                return Err(FirstSliceError::Identity);
+            }
+        }
+        for record in &document.entities {
+            if self.entities.insert(record.id, record.clone()).is_some() {
+                return Err(FirstSliceError::Identity);
+            }
+        }
+        self.occurrences
+            .extend(document.occurrences.iter().map(|record| record.id));
+        self.relations
+            .extend(document.relations.iter().map(|record| record.id));
+        self.provenance
+            .extend(document.provenance.iter().map(|record| record.id));
+        self.source_mappings
+            .extend(document.source_mappings.iter().map(|record| record.id));
+        self.coverage_records
+            .extend(document.coverage_records.iter().map(|record| record.id));
+        self.skipped_regions
+            .extend(document.skipped_regions.iter().map(|record| record.id));
+        self.diagnostics
+            .extend(document.diagnostics.iter().map(|record| record.id));
+        self.extensions
+            .extend(document.extensions.iter().map(|record| record.id));
+        Ok(())
+    }
+
+    fn retained_count(&self, document: &NormalizedIrDocument) -> Result<usize, FirstSliceError> {
+        [
+            document
+                .files
+                .iter()
+                .filter(|record| self.contains_file(record))
+                .count(),
+            document
+                .entities
+                .iter()
+                .filter(|record| self.contains_entity(record))
+                .count(),
+            document
+                .occurrences
+                .iter()
+                .filter(|record| self.contains_occurrence(record))
+                .count(),
+            document
+                .relations
+                .iter()
+                .filter(|record| self.contains_relation(record))
+                .count(),
+            document
+                .provenance
+                .iter()
+                .filter(|record| self.contains_provenance(record))
+                .count(),
+            document
+                .source_mappings
+                .iter()
+                .filter(|record| self.contains_source_mapping(record))
+                .count(),
+            document
+                .coverage_records
+                .iter()
+                .filter(|record| self.contains_coverage(record))
+                .count(),
+            document
+                .skipped_regions
+                .iter()
+                .filter(|record| self.contains_skipped(record))
+                .count(),
+            document
+                .diagnostics
+                .iter()
+                .filter(|record| self.contains_diagnostic(record))
+                .count(),
+            document
+                .extensions
+                .iter()
+                .filter(|record| self.contains_extension(record))
+                .count(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, |total, count| {
+            total.checked_add(count).ok_or(FirstSliceError::Limits)
+        })
+    }
+
+    fn contains_file(&self, record: &FileRecord) -> bool {
+        self.files.get(&record.id) == Some(record)
+    }
+
+    fn contains_entity(&self, record: &EntityRecord) -> bool {
+        self.entities.get(&record.id) == Some(record)
+    }
+
+    fn contains_occurrence(&self, record: &OccurrenceRecord) -> bool {
+        self.occurrences.contains(&record.id)
+    }
+
+    fn contains_relation(&self, record: &RelationRecord) -> bool {
+        self.relations.contains(&record.id)
+    }
+
+    fn contains_provenance(&self, record: &ProvenanceRecord) -> bool {
+        self.provenance.contains(&record.id)
+    }
+
+    fn contains_source_mapping(&self, record: &SourceMappingRecord) -> bool {
+        self.source_mappings.contains(&record.id)
+    }
+
+    fn contains_coverage(&self, record: &CoverageRecord) -> bool {
+        self.coverage_records.contains(&record.id)
+    }
+
+    fn contains_skipped(&self, record: &SkippedRegion) -> bool {
+        self.skipped_regions.contains(&record.id)
+    }
+
+    fn contains_diagnostic(&self, record: &DiagnosticRecord) -> bool {
+        self.diagnostics.contains(&record.id)
+    }
+
+    fn contains_extension(&self, record: &ExtensionEnvelope) -> bool {
+        self.extensions.contains(&record.id)
+    }
 }
 
 struct StructuralGenerationArtifacts {
@@ -1973,7 +2140,7 @@ impl StructuralGenerationArtifacts {
                 return Err(FirstSliceError::Incremental);
             }
             accounted_bytes = accounted_bytes
-                .checked_add(entry.artifact.accounted_bytes())
+                .checked_add(entry.accounted_bytes()?)
                 .ok_or(FirstSliceError::Retention)?;
             if accounted_bytes > maximum_bytes {
                 return Err(FirstSliceError::Retention);
@@ -5086,6 +5253,8 @@ impl FirstSliceService {
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
         let mut reused_parser_artifact_bytes = 0usize;
+        let mut reused_normalized_records = ReusedNormalizedRecords::default();
+        let mut lowered_files = 0usize;
         let mut analyzed_files = 0_u64;
         let mut analyzed_bytes = 0_u64;
         let mut last_reported_analyzed_files = 0_u64;
@@ -5130,7 +5299,7 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Adapter)?
             .with_generated_status(input.generated);
             let artifact_id = parser_artifact_id(snapshot.file());
-            let (output, artifact) = if incremental_plan
+            let (file_document, artifact, normalized, normalized_reused) = if incremental_plan
                 .reusable_parser_artifacts
                 .contains(&artifact_id)
             {
@@ -5138,35 +5307,66 @@ impl FirstSliceService {
                     .and_then(|artifacts| artifacts.get(snapshot.file()))
                     .filter(|entry| entry.id == artifact_id)
                     .ok_or(FirstSliceError::Incremental)?;
-                match analyzer.analyze_from_artifact(
-                    &request,
-                    &entry.artifact,
-                    self.extensions.clone(),
-                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                    cancellation,
-                ) {
-                    Ok(output) => {
-                        reused_parser_artifacts = reused_parser_artifacts
-                            .checked_add(1)
-                            .ok_or(FirstSliceError::Limits)?;
-                        reused_parser_artifact_bytes = reused_parser_artifact_bytes
-                            .checked_add(entry.artifact.accounted_bytes())
-                            .ok_or(FirstSliceError::Limits)?;
-                        (output, Some(Arc::clone(&entry.artifact)))
-                    }
-                    Err(error) if is_invalid_utf8_adapter_failure(&error) => (
-                        analyzer
-                            .analyze_unsupported_encoding(
-                                &request,
-                                self.extensions.clone(),
-                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                                cancellation,
-                            )
-                            .map_err(|error| map_adapter_error(error, cancellation))?,
-                        None,
-                    ),
-                    Err(error) => return Err(map_adapter_error(error, cancellation)),
+                // Normalized reuse is optional. Any policy, limit, extension,
+                // or identity rejection returns to the verified lowering path.
+                let rebound = entry.normalized.as_ref().and_then(|chunk| {
+                    chunk
+                        .rebind(generation, self.analysis_limits.ir(), &self.extensions)
+                        .ok()
+                        .map(|document| (document, Arc::clone(chunk)))
+                });
+                let (document, artifact, normalized, normalized_reused, parser_reused) =
+                    if let Some((document, normalized)) = rebound {
+                        (
+                            document,
+                            Some(Arc::clone(&entry.artifact)),
+                            Some(normalized),
+                            true,
+                            true,
+                        )
+                    } else {
+                        match analyzer.analyze_from_artifact(
+                            &request,
+                            &entry.artifact,
+                            self.extensions.clone(),
+                            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                            cancellation,
+                        ) {
+                            Ok(output) => (
+                                output.document().clone(),
+                                Some(Arc::clone(&entry.artifact)),
+                                None,
+                                false,
+                                true,
+                            ),
+                            Err(error) if is_invalid_utf8_adapter_failure(&error) => (
+                                analyzer
+                                    .analyze_unsupported_encoding(
+                                        &request,
+                                        self.extensions.clone(),
+                                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                        cancellation,
+                                    )
+                                    .map_err(|error| map_adapter_error(error, cancellation))?
+                                    .document()
+                                    .clone(),
+                                None,
+                                None,
+                                false,
+                                false,
+                            ),
+                            Err(error) => return Err(map_adapter_error(error, cancellation)),
+                        }
+                    };
+                if parser_reused {
+                    reused_parser_artifacts = reused_parser_artifacts
+                        .checked_add(1)
+                        .ok_or(FirstSliceError::Limits)?;
+                    reused_parser_artifact_bytes = reused_parser_artifact_bytes
+                        .checked_add(entry.artifact.accounted_bytes())
+                        .ok_or(FirstSliceError::Limits)?;
                 }
+                (document, artifact, normalized, normalized_reused)
             } else {
                 match analyzer.analyze_and_capture(
                     &request,
@@ -5177,7 +5377,12 @@ impl FirstSliceService {
                     Ok((output, artifact)) => {
                         parsed_files =
                             parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
-                        (output, Some(Arc::new(artifact)))
+                        (
+                            output.document().clone(),
+                            Some(Arc::new(artifact)),
+                            None,
+                            false,
+                        )
                     }
                     Err(error) if is_invalid_utf8_adapter_failure(&error) => (
                         analyzer
@@ -5187,31 +5392,53 @@ impl FirstSliceService {
                                 MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                                 cancellation,
                             )
-                            .map_err(|error| map_adapter_error(error, cancellation))?,
+                            .map_err(|error| map_adapter_error(error, cancellation))?
+                            .document()
+                            .clone(),
                         None,
+                        None,
+                        false,
                     ),
                     Err(error) => return Err(map_adapter_error(error, cancellation)),
                 }
             };
+            if !normalized_reused {
+                lowered_files = lowered_files
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+            } else {
+                reused_normalized_records.insert_document(&file_document)?;
+            }
+            let normalized = normalized.or_else(|| {
+                CanonicalNormalizedFileChunk::new(
+                    &file_document,
+                    self.analysis_limits.ir(),
+                    &self.extensions,
+                )
+                .ok()
+                .map(Arc::new)
+            });
             let language_documents = structural_documents.entry(language.clone()).or_default();
             language_documents
                 .try_reserve(1)
                 .map_err(|_| FirstSliceError::Limits)?;
-            language_documents.push(output.document().clone());
+            language_documents.push(file_document);
             if let Some(artifact) = artifact
                 && structural_retention_complete
             {
+                let entry = StructuralArtifactEntry {
+                    id: artifact_id,
+                    artifact,
+                    normalized,
+                };
                 let admitted_bytes = structural_artifact_bytes
-                    .checked_add(artifact.accounted_bytes())
+                    .checked_add(entry.accounted_bytes()?)
                     .ok_or(FirstSliceError::Retention)?;
                 if admitted_bytes <= structural_artifact_budget {
                     structural_entries
                         .try_reserve(1)
                         .map_err(|_| FirstSliceError::Retention)?;
-                    structural_entries.push(StructuralArtifactEntry {
-                        id: artifact_id,
-                        artifact,
-                    });
+                    structural_entries.push(entry);
                     structural_artifact_bytes = admitted_bytes;
                 } else {
                     structural_entries.clear();
@@ -5331,7 +5558,7 @@ impl FirstSliceService {
         incremental_plan.state.evidence.reused_parser_artifact_bytes =
             u64::try_from(reused_parser_artifact_bytes).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.lowered_files =
-            u64::try_from(sources.len()).map_err(|_| FirstSliceError::Limits)?;
+            u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
         let structural_artifacts = StructuralGenerationArtifacts::new(
             structural_entries,
             structural_artifact_budget,
@@ -5346,11 +5573,18 @@ impl FirstSliceService {
             cancellation,
         )?;
         let normalized_facts = normalized_record_count(&document)?;
-        incremental_plan.state.evidence.reused_normalized_facts = 0;
+        // Count only rebound records that remain exact after project
+        // composition and resolution; replaced candidates are rebuilt work.
+        let reused_normalized_facts = reused_normalized_records.retained_count(&document)?;
+        let rebuilt_normalized_facts = normalized_facts
+            .checked_sub(reused_normalized_facts)
+            .ok_or(FirstSliceError::Identity)?;
+        incremental_plan.state.evidence.reused_normalized_facts =
+            u64::try_from(reused_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.rebuilt_normalized_facts =
-            u64::try_from(normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+            u64::try_from(rebuilt_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.normalized_fact_work =
-            normalized_fact_work(&document, cancellation)?;
+            normalized_fact_work(&document, &reused_normalized_records, cancellation)?;
         let mut incremental = incremental_plan.state;
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
         let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
@@ -13130,6 +13364,7 @@ fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, Fir
 
 fn normalized_fact_work(
     document: &NormalizedIrDocument,
+    reused_records: &ReusedNormalizedRecords,
     cancellation: &Cancellation,
 ) -> Result<Vec<FirstSliceNormalizedFactWork>, FirstSliceError> {
     let provenance = document
@@ -13141,7 +13376,8 @@ fn normalized_fact_work(
         BTreeMap::<(IrFactDomain, String, FirstSliceFactWorkCause), (u64, BTreeSet<FileId>)>::new();
     let mut record = |domain: IrFactDomain,
                       provenance_id: FactId,
-                      files: BTreeSet<FileId>|
+                      files: BTreeSet<FileId>,
+                      reused: bool|
      -> Result<(), FirstSliceError> {
         check_cancellation(cancellation)?;
         let producer = provenance
@@ -13149,7 +13385,12 @@ fn normalized_fact_work(
             .ok_or(FirstSliceError::Identity)?
             .producer
             .name();
-        let (provider_pass, cause) = normalized_provider_work(producer);
+        let (provider_pass, rebuilt_cause) = normalized_provider_work(producer);
+        let cause = if reused {
+            FirstSliceFactWorkCause::CompleteDependencyMatch
+        } else {
+            rebuilt_cause
+        };
         let group = groups
             .entry((domain, provider_pass.to_owned(), cause))
             .or_default();
@@ -13165,6 +13406,7 @@ fn normalized_fact_work(
             IrFactDomain::Files,
             file.provenance,
             BTreeSet::from([file.id]),
+            reused_records.contains_file(file),
         )?;
     }
     for entity in &document.entities {
@@ -13172,6 +13414,7 @@ fn normalized_fact_work(
             IrFactDomain::Entities,
             entity.provenance,
             evidence_files(&entity.evidence),
+            reused_records.contains_entity(entity),
         )?;
     }
     for occurrence in &document.occurrences {
@@ -13179,6 +13422,7 @@ fn normalized_fact_work(
             IrFactDomain::Occurrences,
             occurrence.provenance,
             BTreeSet::from([occurrence.file]),
+            reused_records.contains_occurrence(occurrence),
         )?;
     }
     for relation in &document.relations {
@@ -13186,6 +13430,7 @@ fn normalized_fact_work(
             IrFactDomain::Relations,
             relation.provenance,
             evidence_files(&relation.evidence),
+            reused_records.contains_relation(relation),
         )?;
     }
     for provenance_record in &document.provenance {
@@ -13195,13 +13440,19 @@ fn normalized_fact_work(
             .chain(&provenance_record.evidence_sources)
             .map(|source| source.span().file())
             .collect();
-        record(IrFactDomain::Provenance, provenance_record.id, files)?;
+        record(
+            IrFactDomain::Provenance,
+            provenance_record.id,
+            files,
+            reused_records.contains_provenance(provenance_record),
+        )?;
     }
     for mapping in &document.source_mappings {
         record(
             IrFactDomain::SourceMappings,
             mapping.provenance,
             BTreeSet::from([mapping.from.span().file(), mapping.to.span().file()]),
+            reused_records.contains_source_mapping(mapping),
         )?;
     }
     for coverage in &document.coverage_records {
@@ -13209,13 +13460,19 @@ fn normalized_fact_work(
         if let CoverageScope::File(file) = coverage.scope {
             files.insert(file);
         }
-        record(coverage.domain, coverage.provenance, files)?;
+        record(
+            coverage.domain,
+            coverage.provenance,
+            files,
+            reused_records.contains_coverage(coverage),
+        )?;
     }
     for skipped in &document.skipped_regions {
         record(
             IrFactDomain::Diagnostics,
             skipped.provenance,
             BTreeSet::from([skipped.source.span().file()]),
+            reused_records.contains_skipped(skipped),
         )?;
     }
     for diagnostic in &document.diagnostics {
@@ -13223,6 +13480,7 @@ fn normalized_fact_work(
             IrFactDomain::Diagnostics,
             diagnostic.provenance,
             evidence_files(&diagnostic.evidence),
+            reused_records.contains_diagnostic(diagnostic),
         )?;
     }
     for extension in &document.extensions {
@@ -13230,6 +13488,7 @@ fn normalized_fact_work(
             IrFactDomain::Extensions,
             extension.provenance,
             evidence_files(&extension.evidence),
+            reused_records.contains_extension(extension),
         )?;
     }
 
@@ -20893,6 +21152,36 @@ mod tests {
         let first = service
             .index_rust_fixture(fixture.path(), &cancellation)
             .expect("initial generation publishes");
+        let first_artifacts = service
+            .structural_artifacts
+            .generation(first.generation)
+            .expect("initial structural cache remains retained");
+        let unchanged_file = service
+            .generations
+            .generation(first.generation)
+            .expect("initial generation remains retained")
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "src/malformed.rs")
+            .map(|file| file.id)
+            .expect("unchanged malformed file is indexed");
+        let cached = first_artifacts
+            .get(unchanged_file)
+            .expect("unchanged parser artifact remains retained");
+        assert!(cached.normalized.is_some());
+        assert!(
+            cached
+                .accounted_bytes()
+                .expect("combined cache charge fits")
+                > cached.artifact.accounted_bytes()
+        );
+        let unchanged_chunk = Arc::clone(
+            cached
+                .normalized
+                .as_ref()
+                .expect("initial normalized chunk remains retained"),
+        );
 
         fs::write(&changed, "pub fn changed() -> u32 { 2 }\n").expect("body edit writes");
         let second = service
@@ -20910,8 +21199,8 @@ mod tests {
         assert_eq!(evidence.parsed_files(), 1);
         assert_eq!(evidence.reused_parser_artifacts(), 1);
         assert!(evidence.reused_parser_artifact_bytes() > 0);
-        assert_eq!(evidence.lowered_files(), 2);
-        assert_eq!(evidence.reused_normalized_facts(), 0);
+        assert_eq!(evidence.lowered_files(), 1);
+        assert!(evidence.reused_normalized_facts() > 0);
         assert!(evidence.rebuilt_normalized_facts() > 0);
         assert_eq!(
             evidence
@@ -20919,7 +21208,10 @@ mod tests {
                 .iter()
                 .map(FirstSliceNormalizedFactWork::facts)
                 .sum::<u64>(),
-            evidence.rebuilt_normalized_facts()
+            evidence
+                .reused_normalized_facts()
+                .checked_add(evidence.rebuilt_normalized_facts())
+                .expect("normalized evidence total fits")
         );
         assert!(evidence.normalized_fact_work().iter().any(|work| {
             work.provider_pass() == LOWERING_PASS_ID
@@ -20927,6 +21219,30 @@ mod tests {
                 && work.files() > 0
                 && work.facts() > 0
         }));
+        assert!(evidence.normalized_fact_work().iter().any(|work| {
+            work.provider_pass() == LOWERING_PASS_ID
+                && work.cause() == FirstSliceFactWorkCause::CompleteDependencyMatch
+                && work.files() > 0
+                && work.facts() > 0
+        }));
+        assert_eq!(
+            evidence
+                .normalized_fact_work()
+                .iter()
+                .filter(|work| work.cause() == FirstSliceFactWorkCause::CompleteDependencyMatch)
+                .map(FirstSliceNormalizedFactWork::facts)
+                .sum::<u64>(),
+            evidence.reused_normalized_facts()
+        );
+        assert_eq!(
+            evidence
+                .normalized_fact_work()
+                .iter()
+                .filter(|work| work.cause() != FirstSliceFactWorkCause::CompleteDependencyMatch)
+                .map(FirstSliceNormalizedFactWork::facts)
+                .sum::<u64>(),
+            evidence.rebuilt_normalized_facts()
+        );
         assert!(evidence.planned_fact_work().iter().any(|work| {
             work.disposition() == FirstSliceFactWorkDisposition::Rebuild
                 && work.domain() == FactDomain::Body
@@ -20960,6 +21276,35 @@ mod tests {
             .generation(second.generation)
             .expect("successor remains retained");
         let document = snapshot.document();
+        let mut expected_reuse = ReusedNormalizedRecords::default();
+        expected_reuse
+            .insert_document(
+                &unchanged_chunk
+                    .rebind(
+                        second.generation,
+                        service.analysis_limits.ir(),
+                        &service.extensions,
+                    )
+                    .expect("unchanged chunk rebinds for the successor"),
+            )
+            .expect("rebound chunk has unique normalized records");
+        assert_eq!(
+            usize::try_from(evidence.reused_normalized_facts())
+                .expect("reuse evidence fits the platform"),
+            expected_reuse
+                .retained_count(document)
+                .expect("final retained reuse count fits")
+        );
+        assert_eq!(
+            normalized_record_count(document).expect("final normalized count fits"),
+            usize::try_from(
+                evidence
+                    .reused_normalized_facts()
+                    .checked_add(evidence.rebuilt_normalized_facts())
+                    .expect("final evidence total fits")
+            )
+            .expect("final evidence total fits the platform")
+        );
         let malformed = document
             .files
             .iter()
@@ -21155,7 +21500,8 @@ mod tests {
         );
         assert_eq!(evidence.parsed_files(), 0);
         assert_eq!(evidence.reused_parser_artifacts(), 1);
-        assert_eq!(evidence.lowered_files(), 1);
+        assert_eq!(evidence.lowered_files(), 0);
+        assert!(evidence.reused_normalized_facts() > 0);
         assert!(evidence.structural_cache_retained());
         assert_eq!(service.receipts.len(), 2);
         assert_eq!(service.incremental_inputs.len(), 2);
@@ -21211,6 +21557,70 @@ mod tests {
         assert_eq!(successor.lowered_files(), 1);
         assert!(!successor.structural_cache_retained());
         assert_eq!(service.structural_artifacts.retained_bytes, 0);
+    }
+
+    #[test]
+    fn unavailable_normalized_chunk_falls_back_to_parser_artifact_lowering() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn stable() -> u32 { 1 }\n",
+        )
+        .expect("Rust source writes");
+        let readme = fixture.path().join("README.md");
+        fs::write(&readme, "first\n").expect("unsupported source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        let artifacts = service
+            .structural_artifacts
+            .committed
+            .get_mut(&first.generation)
+            .expect("initial structural cache remains retained");
+        let entry = artifacts
+            .by_file
+            .values_mut()
+            .next()
+            .expect("initial parser artifact remains retained");
+        let normalized_bytes = entry
+            .normalized
+            .take()
+            .expect("initial normalized chunk remains retained")
+            .encoded_bytes();
+        artifacts.accounted_bytes = artifacts
+            .accounted_bytes
+            .checked_sub(normalized_bytes)
+            .expect("generation cache charge includes the chunk");
+        service.structural_artifacts.retained_bytes = service
+            .structural_artifacts
+            .retained_bytes
+            .checked_sub(normalized_bytes)
+            .expect("aggregate cache charge includes the chunk");
+
+        fs::write(&readme, "second\n").expect("unsupported source changes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor publishes through the lowering fallback");
+        let evidence = service
+            .incremental_evidence(second.generation)
+            .expect("successor evidence remains retained");
+
+        assert_eq!(evidence.parsed_files(), 0);
+        assert_eq!(evidence.reused_parser_artifacts(), 1);
+        assert_eq!(evidence.lowered_files(), 1);
+        assert_eq!(evidence.reused_normalized_facts(), 0);
+        assert!(evidence.rebuilt_normalized_facts() > 0);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            first.generation,
+            &second,
+            &cancellation,
+        );
     }
 
     #[test]
@@ -22016,12 +22426,11 @@ mod tests {
             FirstSliceBuildStrategy::DependencyDirected
         );
         assert_eq!(evidence.fallback_reason(), None);
-        assert_eq!(
-            evidence
-                .parsed_files()
-                .checked_add(evidence.reused_parser_artifacts()),
-            Some(evidence.lowered_files())
-        );
+        let structural_inputs = evidence
+            .parsed_files()
+            .checked_add(evidence.reused_parser_artifacts())
+            .expect("structural input count fits");
+        assert!(evidence.lowered_files() <= structural_inputs);
         assert!(evidence.structural_cache_retained());
 
         let mut fresh = FirstSliceService::new(2).expect("fresh comparison service initializes");

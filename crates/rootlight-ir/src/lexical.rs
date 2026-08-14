@@ -201,6 +201,16 @@ impl LexicalEvidenceV1 {
     }
 }
 
+pub(crate) fn rebind_lexical_evidence_subject(
+    evidence: &LexicalEvidenceV1,
+    subject: FactRef,
+) -> Result<LexicalEvidenceV1, LexicalExtensionError> {
+    let mut rebound = evidence.clone();
+    rebound.subject = subject;
+    rebound.validate()?;
+    Ok(rebound)
+}
+
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for LexicalEvidenceV1 {
     fn schema_name() -> std::borrow::Cow<'static, str> {

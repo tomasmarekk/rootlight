@@ -12,6 +12,7 @@
 mod identity;
 mod lexical;
 mod normalized;
+mod rebind;
 mod validation;
 
 pub use identity::{
@@ -53,6 +54,7 @@ pub use normalized::{
     decode_ir_document_with_checkpoint, decode_legacy_ir_document,
     decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
+pub use rebind::{CanonicalNormalizedFileChunk, NormalizedRebindError};
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
     UnknownNoncriticalExtensionPolicy, canonicalize_ir_document, validate_ir_document,

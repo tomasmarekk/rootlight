@@ -832,13 +832,31 @@ fn restore_input_snapshot(
 fn validate_incremental_evidence(
     evidence: &FirstSliceIncrementalEvidence,
 ) -> Result<(), FirstSliceError> {
+    let structural_inputs = evidence
+        .parsed_files
+        .checked_add(evidence.reused_parser_artifacts)
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    // Unsupported encodings can produce a bounded document without either a
+    // successful parse or a reusable artifact, so only the opposite delta
+    // proves that lowering was skipped through normalized rebind.
+    let skipped_lowering = structural_inputs.saturating_sub(evidence.lowered_files);
+    let planned_reused_lowering_files = evidence
+        .planned_fact_work
+        .iter()
+        .filter(|work| {
+            work.disposition == super::FirstSliceFactWorkDisposition::Reuse
+                && work.cause == super::FirstSliceFactWorkCause::CompleteDependencyMatch
+                && work.provider_pass == super::LOWERING_PASS_ID
+        })
+        .map(|work| work.files)
+        .max()
+        .unwrap_or(0);
     if evidence.input_changes.len() > 9
         || evidence.file_changes.len() > 6
         || evidence.invalidated_domains.len() > 9
-        || evidence
-            .parsed_files
-            .checked_add(evidence.reused_parser_artifacts)
-            .is_none_or(|total| total > evidence.lowered_files)
+        || skipped_lowering > 0
+            && evidence.reused_normalized_facts == 0
+            && planned_reused_lowering_files < skipped_lowering
         || evidence.reused_parser_artifacts == 0 && evidence.reused_parser_artifact_bytes != 0
     {
         return Err(FirstSliceError::CatalogCorrupt);
@@ -4661,6 +4679,87 @@ mod tests {
     }
 
     #[test]
+    fn incremental_evidence_round_trip_accepts_normalized_rebind_outcomes() {
+        let evidence = FirstSliceIncrementalEvidence {
+            strategy: crate::FirstSliceBuildStrategy::DependencyDirected,
+            input_changes: Vec::new(),
+            file_changes: Vec::new(),
+            hashed_files: 1,
+            invalidated_domains: Vec::new(),
+            invalidated_units: 1,
+            fallback_reason: None,
+            trace_entries: 0,
+            invalidation_trace: Vec::new(),
+            parsed_files: 1,
+            reused_parser_artifacts: 1,
+            reused_parser_artifact_bytes: 128,
+            reused_durable_artifact_bytes: 0,
+            lowered_files: 1,
+            reused_normalized_facts: 12,
+            rebuilt_normalized_facts: 9,
+            planned_fact_work: Vec::new(),
+            normalized_fact_work: Vec::new(),
+            structural_cache_retained: true,
+        };
+        let state = DurableIncrementalState {
+            version: INCREMENTAL_STATE_VERSION,
+            baseline_files: Vec::new(),
+            baseline_inputs: Vec::new(),
+            analysis_inputs: Vec::new(),
+            evidence,
+        };
+        let encoded = serde_json::to_vec(&state).expect("durable incremental state serializes");
+        let restored: DurableIncrementalState =
+            serde_json::from_slice(&encoded).expect("durable incremental state deserializes");
+
+        validate_incremental_evidence(&restored.evidence)
+            .expect("verified normalized rebind evidence remains valid");
+        assert_eq!(restored.evidence.lowered_files, 1);
+        assert_eq!(restored.evidence.reused_normalized_facts, 12);
+
+        let mut missing_reuse_proof = restored.evidence.clone();
+        missing_reuse_proof.reused_normalized_facts = 0;
+        assert_eq!(
+            validate_incremental_evidence(&missing_reuse_proof),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+
+        let mut semantic_replaced = restored.evidence.clone();
+        semantic_replaced.reused_normalized_facts = 0;
+        semantic_replaced.planned_fact_work = vec![crate::FirstSlicePlannedFactWork {
+            disposition: crate::FirstSliceFactWorkDisposition::Reuse,
+            domain: rootlight_incremental::FactDomain::Body,
+            provider_pass: crate::LOWERING_PASS_ID.to_owned(),
+            cause: crate::FirstSliceFactWorkCause::CompleteDependencyMatch,
+            files: 1,
+            analysis_units: 1,
+        }];
+        let semantic_state = DurableIncrementalState {
+            version: INCREMENTAL_STATE_VERSION,
+            baseline_files: Vec::new(),
+            baseline_inputs: Vec::new(),
+            analysis_inputs: Vec::new(),
+            evidence: semantic_replaced,
+        };
+        let encoded =
+            serde_json::to_vec(&semantic_state).expect("semantic replacement state serializes");
+        let semantic_restored: DurableIncrementalState =
+            serde_json::from_slice(&encoded).expect("semantic replacement state deserializes");
+        validate_incremental_evidence(&semantic_restored.evidence)
+            .expect("planned structural reuse survives complete semantic replacement");
+        assert_eq!(semantic_restored.evidence.reused_normalized_facts, 0);
+
+        let mut unsupported_encoding = restored.evidence;
+        unsupported_encoding.parsed_files = 0;
+        unsupported_encoding.reused_parser_artifacts = 0;
+        unsupported_encoding.reused_parser_artifact_bytes = 0;
+        unsupported_encoding.lowered_files = 1;
+        unsupported_encoding.reused_normalized_facts = 0;
+        validate_incremental_evidence(&unsupported_encoding)
+            .expect("bounded unsupported encoding lowering remains valid");
+    }
+
+    #[test]
     fn activation_names_round_trip_exact_sequence_and_generation() {
         let repository = derive_repository(b"durable-activation").id();
         let generation = derive_generation(GenerationIdentity {
@@ -5417,6 +5516,13 @@ mod tests {
         let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
         let repository = RepositoryId::from_bytes([53; 16]);
         let generation = GenerationId::from_bytes([59; 20]);
+        let prepared = durable
+            .begin_generation(repository, generation)
+            .expect("staging generation opens");
+        let baseline = durable
+            .storage_inventory()
+            .expect("unreserved inventory establishes the physical baseline");
+        assert_eq!(baseline.inflight_catalog_reservation_bytes, 0);
         let reservation = durable
             .ensure_staging_capacity(
                 repository,
@@ -5431,12 +5537,11 @@ mod tests {
             .expect("inventory remains readable")
             .expect("staging capacity is admitted")
             .1;
-        let prepared = durable
-            .begin_generation(repository, generation)
-            .expect("staging generation opens");
-        let baseline = durable
-            .storage_inventory()
-            .expect("in-flight inventory establishes the physical baseline");
+        let reserved = durable
+            .storage_inventory_cached()
+            .expect("reserved accounting remains readable")
+            .expect("reservation keeps accounting reconciled");
+        assert_eq!(reserved.inflight_catalog_reservation_bytes, 16 * 1024);
         fs::write(prepared.path().join("staged.bin"), vec![0_u8; 1024])
             .expect("staged payload writes");
         prepared
@@ -5475,6 +5580,10 @@ mod tests {
                 ..
             })
         ));
+        let rejected = durable
+            .storage_inventory()
+            .expect("failed finalization retains conservative admission accounting");
+        assert_eq!(rejected.inflight_catalog_reservation_bytes, 16 * 1024);
         durable
             .release_staging_reservation(reservation)
             .expect("reservation releases");
@@ -5487,6 +5596,7 @@ mod tests {
         let verified = durable
             .storage_inventory()
             .expect("post-cleanup inventory verifies");
+        assert_eq!(verified.inflight_catalog_reservation_bytes, 0);
         assert_inventory_equal_ignoring_available(baseline, verified);
         let accounting = durable
             .storage_accounting
