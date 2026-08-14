@@ -563,6 +563,28 @@ pub struct FirstSliceSupportRepository {
     pub relationships: u64,
     /// Immutable generations currently retained for this repository.
     pub generation_count: u32,
+    /// Reconciled physical bytes attributed to this repository.
+    pub storage_bytes: Option<u64>,
+    /// Active immutable generation bytes attributed to this repository.
+    pub active_generation_bytes: Option<u64>,
+    /// Direct active-predecessor bytes attributed to this repository.
+    pub predecessor_generation_bytes: Option<u64>,
+    /// Other retained immutable generation bytes attributed to this repository.
+    pub other_retained_generation_bytes: Option<u64>,
+    /// Source-pool bytes referenced by retained generations.
+    pub source_pool_bytes: Option<u64>,
+    /// Source-pool bytes referenced by multiple retained generations.
+    pub shared_source_bytes: Option<u64>,
+    /// Unpublished temporary bytes attributed to this repository.
+    pub temporary_bytes: Option<u64>,
+    /// Reclaimable bytes attributed to this repository.
+    pub reclaimable_bytes: Option<u64>,
+    /// Live durable metadata bytes attributed to this repository.
+    pub repository_overhead_bytes: Option<u64>,
+    /// Repository-budget bytes reserved by in-flight publications.
+    pub inflight_reservation_bytes: Option<u64>,
+    /// Current repository-budget headroom after in-flight reservations.
+    pub repository_headroom_bytes: Option<u64>,
 }
 
 /// Source-free immutable generation facts for production support evidence.
@@ -607,14 +629,57 @@ pub struct FirstSliceSupportInventory {
     pub active_generation_bytes: Option<u64>,
     /// Immutable bytes owned by direct active predecessors.
     pub predecessor_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by other retained generations.
+    pub other_retained_generation_bytes: Option<u64>,
+    /// Physical source-pool bytes referenced by retained generations.
+    pub source_pool_bytes: Option<u64>,
     /// Bytes currently owned by unpublished durable staging trees.
     pub unreclaimed_temporary_bytes: u64,
+    /// Live durable marker and metadata bytes.
+    pub repository_overhead_bytes: Option<u64>,
+    /// Isolated corrupt or untrusted durable bytes.
+    pub quarantine_bytes: Option<u64>,
+    /// Whether durable pinning is implemented by this installation.
+    pub pinning_supported: bool,
+    /// Catalog-budget bytes reserved by in-flight publications.
+    pub inflight_catalog_reservation_bytes: Option<u64>,
+    /// Repository-budget bytes reserved by in-flight publications.
+    pub inflight_repository_reservation_bytes: Option<u64>,
     /// Free bytes on the durable repository volume when persistence is enabled.
     pub disk_margin_bytes: Option<u64>,
     /// Bytes remaining after configured catalog and filesystem admission margins.
     pub admission_margin_bytes: Option<u64>,
+    /// Minimum current repository-budget headroom.
+    pub repository_headroom_bytes: Option<u64>,
+    /// Current durable-catalog headroom after in-flight reservations.
+    pub catalog_headroom_bytes: Option<u64>,
+    /// Current filesystem headroom after minimum-free and reservations.
+    pub filesystem_headroom_bytes: Option<u64>,
+    /// Provenance of the physical storage accounting.
+    pub storage_accounting_state: FirstSliceStorageAccountingState,
+    /// Effective maximum physical bytes per repository.
+    pub maximum_repository_storage_bytes: u64,
+    /// Effective maximum physical bytes in the durable catalog.
+    pub maximum_catalog_storage_bytes: u64,
+    /// Effective minimum free bytes preserved on the durable volume.
+    pub minimum_free_disk_bytes: u64,
     /// Effective maximum retained generations per repository.
     pub effective_retention_generations: u32,
+    /// Effective source reservation multiplier.
+    pub source_reservation_factor: u64,
+    /// Effective semantic-oracle reservation multiplier.
+    pub oracle_reservation_factor: u64,
+}
+
+/// Provenance of storage measurements in a support snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstSliceStorageAccountingState {
+    /// Physical accounting is unavailable without a durable storage read.
+    Unavailable,
+    /// Physical accounting was reconciled from Rootlight-owned mutations.
+    Reconciled,
+    /// Physical accounting was rebuilt by a content-verifying durable scan.
+    VerifiedScan,
 }
 
 /// Immutable storage settings used by durable recovery, admission, and support evidence.
@@ -7055,7 +7120,12 @@ impl FirstSliceService {
             .as_ref()
             .map(|durable| durable.storage_inventory())
             .transpose()?;
-        self.support_inventory_snapshot_inner(storage)
+        let accounting_state = if storage.is_some() {
+            FirstSliceStorageAccountingState::VerifiedScan
+        } else {
+            FirstSliceStorageAccountingState::Unavailable
+        };
+        self.support_inventory_snapshot_inner(storage, accounting_state)
     }
 
     /// Returns bounded source-free indexing facts from reconciled storage accounting.
@@ -7080,9 +7150,17 @@ impl FirstSliceService {
                 Some(storage) => Some(storage),
                 None => return Ok(None),
             },
-            None => return self.support_inventory_snapshot_inner(None).map(Some),
+            None => {
+                return self
+                    .support_inventory_snapshot_inner(
+                        None,
+                        FirstSliceStorageAccountingState::Unavailable,
+                    )
+                    .map(Some);
+            }
         };
-        self.support_inventory_snapshot_inner(storage).map(Some)
+        self.support_inventory_snapshot_inner(storage, FirstSliceStorageAccountingState::Reconciled)
+            .map(Some)
     }
 
     /// Returns bounded source-free indexing facts without scanning durable storage.
@@ -7097,12 +7175,13 @@ impl FirstSliceService {
     pub fn support_inventory_snapshot_without_storage_scan(
         &self,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
-        self.support_inventory_snapshot_inner(None)
+        self.support_inventory_snapshot_inner(None, FirstSliceStorageAccountingState::Unavailable)
     }
 
     fn support_inventory_snapshot_inner(
         &self,
         storage: Option<durable::DurableStorageInventory>,
+        storage_accounting_state: FirstSliceStorageAccountingState,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
         let languages: Vec<_> = self.analyzers.keys().cloned().collect();
         let mut adapters = vec![FirstSliceSupportAdapter {
@@ -7146,6 +7225,26 @@ impl FirstSliceService {
                 .collect();
             let generation_count = u32::try_from(self.retained_generation_count(*repository))
                 .map_err(|_| FirstSliceError::Limits)?;
+            let repository_storage = storage.as_ref().and_then(|inventory| {
+                inventory
+                    .repositories
+                    .iter()
+                    .find(|storage| storage.repository == *repository)
+            });
+            let repository_headroom_bytes = storage.as_ref().map(|inventory| {
+                durable::storage_headroom(
+                    inventory,
+                    *repository,
+                    durable::DurableStorageAdmissionPolicy {
+                        required_catalog_bytes: 0,
+                        required_repository_bytes: 0,
+                        maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
+                        maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
+                        minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+                    },
+                )
+                .repository_bytes
+            });
             repositories.push(FirstSliceSupportRepository {
                 repository: *repository,
                 languages,
@@ -7157,6 +7256,22 @@ impl FirstSliceService {
                 relationships: u64::try_from(snapshot.document().relations.len())
                     .map_err(|_| FirstSliceError::Limits)?,
                 generation_count,
+                storage_bytes: repository_storage.map(|storage| storage.physical_bytes),
+                active_generation_bytes: repository_storage
+                    .map(|storage| storage.active_generation_bytes),
+                predecessor_generation_bytes: repository_storage
+                    .map(|storage| storage.predecessor_generation_bytes),
+                other_retained_generation_bytes: repository_storage
+                    .map(|storage| storage.other_retained_generation_bytes),
+                source_pool_bytes: repository_storage.map(|storage| storage.source_pool_bytes),
+                shared_source_bytes: repository_storage.map(|storage| storage.shared_source_bytes),
+                temporary_bytes: repository_storage.map(|storage| storage.temporary_bytes),
+                reclaimable_bytes: repository_storage.map(|storage| storage.reclaimable_bytes),
+                repository_overhead_bytes: repository_storage
+                    .map(|storage| storage.repository_overhead_bytes),
+                inflight_reservation_bytes: repository_storage
+                    .map(|storage| storage.inflight_reservation_bytes),
+                repository_headroom_bytes,
             });
         }
 
@@ -7184,50 +7299,75 @@ impl FirstSliceService {
             });
         }
 
-        let has_durable_storage = self.durable.is_some();
-        let (
-            total_storage_bytes,
-            shared_bytes,
-            reclaimable_bytes,
-            pinned_bytes,
-            active_generation_bytes,
-            predecessor_generation_bytes,
-            unreclaimed_temporary_bytes,
-            disk_margin_bytes,
-            admission_margin_bytes,
-        ) = storage.map_or(
-            (
-                (!has_durable_storage).then_some(generation_disk_bytes),
-                None,
-                None,
-                None,
-                None,
-                None,
-                0,
-                None,
-                None,
-            ),
-            |inventory| {
-                let filesystem_margin = inventory
-                    .available_bytes
-                    .saturating_sub(self.storage_policy.minimum_free_disk_bytes);
-                let catalog_margin = self
-                    .storage_policy
-                    .maximum_catalog_bytes
-                    .saturating_sub(inventory.total_physical_bytes);
-                (
-                    Some(inventory.total_physical_bytes),
-                    Some(inventory.shared_source_bytes),
-                    Some(inventory.reclaimable_bytes),
-                    inventory.pinned_bytes,
-                    Some(inventory.active_generation_bytes),
-                    Some(inventory.predecessor_generation_bytes),
-                    inventory.temporary_bytes,
-                    Some(inventory.available_bytes),
-                    Some(filesystem_margin.min(catalog_margin)),
-                )
-            },
+        let admission_policy = durable::DurableStorageAdmissionPolicy {
+            required_catalog_bytes: 0,
+            required_repository_bytes: 0,
+            maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
+            maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
+            minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+        };
+        let storage_headroom = storage.as_ref().map(|inventory| {
+            inventory
+                .repositories
+                .iter()
+                .map(|repository| {
+                    durable::storage_headroom(inventory, repository.repository, admission_policy)
+                })
+                .reduce(|left, right| durable::DurableStorageHeadroom {
+                    repository_bytes: left.repository_bytes.min(right.repository_bytes),
+                    catalog_bytes: left.catalog_bytes.min(right.catalog_bytes),
+                    filesystem_bytes: left.filesystem_bytes.min(right.filesystem_bytes),
+                    admission_bytes: left.admission_bytes.min(right.admission_bytes),
+                })
+                .unwrap_or_else(|| {
+                    durable::storage_headroom(
+                        inventory,
+                        RepositoryId::from_bytes([0; 16]),
+                        admission_policy,
+                    )
+                })
+        });
+        let total_storage_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.total_physical_bytes);
+        let shared_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.shared_source_bytes);
+        let reclaimable_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.reclaimable_bytes);
+        let pinned_bytes = Some(
+            storage
+                .as_ref()
+                .map_or(0, |inventory| inventory.pinned_bytes),
         );
+        let active_generation_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.active_generation_bytes);
+        let predecessor_generation_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.predecessor_generation_bytes);
+        let other_retained_generation_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.other_retained_generation_bytes);
+        let source_pool_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.source_pool_bytes);
+        let unreclaimed_temporary_bytes = storage
+            .as_ref()
+            .map_or(0, |inventory| inventory.temporary_bytes);
+        let repository_overhead_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.repository_overhead_bytes);
+        let quarantine_bytes = storage.as_ref().map(|inventory| inventory.quarantine_bytes);
+        let inflight_catalog_reservation_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.inflight_catalog_reservation_bytes);
+        let inflight_repository_reservation_bytes = storage
+            .as_ref()
+            .map(|inventory| inventory.inflight_repository_reservation_bytes);
+        let disk_margin_bytes = storage.as_ref().map(|inventory| inventory.available_bytes);
+        let admission_margin_bytes = storage_headroom.map(|headroom| headroom.admission_bytes);
         Ok(FirstSliceSupportInventory {
             adapters,
             languages: language_capabilities()
@@ -7271,11 +7411,27 @@ impl FirstSliceService {
             pinned_bytes,
             active_generation_bytes,
             predecessor_generation_bytes,
+            other_retained_generation_bytes,
+            source_pool_bytes,
             unreclaimed_temporary_bytes,
+            repository_overhead_bytes,
+            quarantine_bytes,
+            pinning_supported: false,
+            inflight_catalog_reservation_bytes,
+            inflight_repository_reservation_bytes,
             disk_margin_bytes,
             admission_margin_bytes,
+            repository_headroom_bytes: storage_headroom.map(|headroom| headroom.repository_bytes),
+            catalog_headroom_bytes: storage_headroom.map(|headroom| headroom.catalog_bytes),
+            filesystem_headroom_bytes: storage_headroom.map(|headroom| headroom.filesystem_bytes),
+            storage_accounting_state,
+            maximum_repository_storage_bytes: self.storage_policy.maximum_repository_bytes,
+            maximum_catalog_storage_bytes: self.storage_policy.maximum_catalog_bytes,
+            minimum_free_disk_bytes: self.storage_policy.minimum_free_disk_bytes,
             effective_retention_generations: u32::try_from(self.maximum_generations_per_repository)
                 .map_err(|_| FirstSliceError::Limits)?,
+            source_reservation_factor: self.storage_policy.source_reservation_factor,
+            oracle_reservation_factor: self.storage_policy.oracle_reservation_factor,
         })
     }
 
@@ -19870,10 +20026,13 @@ mod tests {
             inventory.generation_disk_bytes,
             receipt.oracle_allocated_bytes
         );
+        assert_eq!(inventory.total_storage_bytes, None);
         assert_eq!(
-            inventory.total_storage_bytes,
-            Some(receipt.oracle_allocated_bytes)
+            inventory.storage_accounting_state,
+            FirstSliceStorageAccountingState::Unavailable
         );
+        assert!(!inventory.pinning_supported);
+        assert_eq!(inventory.pinned_bytes, Some(0));
         assert_eq!(inventory.effective_retention_generations, 2);
         let repository = &inventory.repositories[0];
         assert_eq!(repository.repository, receipt.repository);
@@ -20039,11 +20198,33 @@ mod tests {
         accounted: &FirstSliceSupportInventory,
         verified: &FirstSliceSupportInventory,
     ) {
+        assert_eq!(
+            accounted.storage_accounting_state,
+            FirstSliceStorageAccountingState::Reconciled
+        );
+        assert_eq!(
+            verified.storage_accounting_state,
+            FirstSliceStorageAccountingState::VerifiedScan
+        );
         assert_eq!(accounted.repositories.len(), verified.repositories.len());
         assert_eq!(accounted.generations.len(), verified.generations.len());
         assert_eq!(accounted.total_storage_bytes, verified.total_storage_bytes);
         assert_eq!(accounted.shared_bytes, verified.shared_bytes);
         assert_eq!(accounted.reclaimable_bytes, verified.reclaimable_bytes);
+        assert_eq!(
+            accounted.other_retained_generation_bytes,
+            verified.other_retained_generation_bytes
+        );
+        assert_eq!(accounted.source_pool_bytes, verified.source_pool_bytes);
+        assert_eq!(
+            accounted.repository_overhead_bytes,
+            verified.repository_overhead_bytes
+        );
+        assert_eq!(accounted.quarantine_bytes, verified.quarantine_bytes);
+        assert_eq!(
+            accounted.inflight_catalog_reservation_bytes,
+            verified.inflight_catalog_reservation_bytes
+        );
         assert_eq!(
             accounted.unreclaimed_temporary_bytes,
             verified.unreclaimed_temporary_bytes
@@ -20062,6 +20243,37 @@ mod tests {
             .expect("verified inventory reports the admission margin");
         assert!(accounted_admission_margin <= accounted_disk_margin);
         assert!(verified_admission_margin <= verified_disk_margin);
+        for inventory in [accounted, verified] {
+            let reconciled = inventory.active_generation_bytes.unwrap_or(0)
+                + inventory.predecessor_generation_bytes.unwrap_or(0)
+                + inventory.other_retained_generation_bytes.unwrap_or(0)
+                + inventory.source_pool_bytes.unwrap_or(0)
+                + inventory.unreclaimed_temporary_bytes
+                + inventory.reclaimable_bytes.unwrap_or(0)
+                + inventory.repository_overhead_bytes.unwrap_or(0)
+                + inventory.quarantine_bytes.unwrap_or(0);
+            assert_eq!(inventory.total_storage_bytes, Some(reconciled));
+            assert_eq!(inventory.pinned_bytes, Some(0));
+            assert!(!inventory.pinning_supported);
+            assert_eq!(
+                inventory.admission_margin_bytes,
+                Some(
+                    inventory
+                        .repository_headroom_bytes
+                        .expect("repository headroom is measured")
+                        .min(
+                            inventory
+                                .catalog_headroom_bytes
+                                .expect("catalog headroom is measured"),
+                        )
+                        .min(
+                            inventory
+                                .filesystem_headroom_bytes
+                                .expect("filesystem headroom is measured"),
+                        ),
+                )
+            );
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

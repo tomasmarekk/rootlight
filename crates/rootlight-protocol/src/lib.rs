@@ -28,9 +28,9 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 13;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 14;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.13";
+pub const PROTOCOL_VERSION: &str = "1.14";
 /// Schema version for a complete effective first-slice request budget.
 pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
 /// Hard transport admission maximum for logical rows.

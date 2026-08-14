@@ -44,7 +44,7 @@ use rootlight_ir::{
 };
 use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
-    SupportLanguageCapabilityInventory, SupportRepositoryInventory,
+    SupportLanguageCapabilityInventory, SupportRepositoryInventory, SupportStorageAccountingState,
 };
 #[cfg(test)]
 use rootlight_operations::RecoveryClass;
@@ -83,9 +83,9 @@ use rootlight_service::{
     FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
     FirstSliceOperationContext, FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError,
     FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
-    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceStoragePolicy,
-    FirstSliceSupportInventory, FirstSliceWorkingTreeSelection, HistoryChangeKind,
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
+    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceStorageAccountingState,
+    FirstSliceStoragePolicy, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
+    HistoryChangeKind, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -9597,6 +9597,17 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
                 symbol_count: repository.symbols,
                 relationship_count: repository.relationships,
                 generation_count: repository.generation_count,
+                storage_bytes: repository.storage_bytes,
+                active_generation_bytes: repository.active_generation_bytes,
+                predecessor_generation_bytes: repository.predecessor_generation_bytes,
+                other_retained_generation_bytes: repository.other_retained_generation_bytes,
+                source_pool_bytes: repository.source_pool_bytes,
+                shared_source_bytes: repository.shared_source_bytes,
+                temporary_bytes: repository.temporary_bytes,
+                reclaimable_bytes: repository.reclaimable_bytes,
+                repository_overhead_bytes: repository.repository_overhead_bytes,
+                inflight_reservation_bytes: repository.inflight_reservation_bytes,
+                repository_headroom_bytes: repository.repository_headroom_bytes,
             })
             .collect(),
         generations: snapshot
@@ -9621,12 +9632,38 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
         disk_margin_bytes: snapshot.disk_margin_bytes,
         active_generation_bytes: snapshot.active_generation_bytes,
         predecessor_generation_bytes: snapshot.predecessor_generation_bytes,
+        other_retained_generation_bytes: snapshot.other_retained_generation_bytes,
+        source_pool_bytes: snapshot.source_pool_bytes,
         shared_bytes: snapshot.shared_bytes,
         pinned_bytes: snapshot.pinned_bytes,
         reclaimable_bytes: snapshot.reclaimable_bytes,
         total_storage_bytes: snapshot.total_storage_bytes,
         admission_margin_bytes: snapshot.admission_margin_bytes,
         effective_retention_generations: Some(snapshot.effective_retention_generations),
+        repository_overhead_bytes: snapshot.repository_overhead_bytes,
+        quarantine_bytes: snapshot.quarantine_bytes,
+        pinning_supported: Some(snapshot.pinning_supported),
+        inflight_catalog_reservation_bytes: snapshot.inflight_catalog_reservation_bytes,
+        inflight_repository_reservation_bytes: snapshot.inflight_repository_reservation_bytes,
+        repository_headroom_bytes: snapshot.repository_headroom_bytes,
+        catalog_headroom_bytes: snapshot.catalog_headroom_bytes,
+        filesystem_headroom_bytes: snapshot.filesystem_headroom_bytes,
+        storage_accounting_state: Some(match snapshot.storage_accounting_state {
+            FirstSliceStorageAccountingState::Unavailable => {
+                SupportStorageAccountingState::Unavailable
+            }
+            FirstSliceStorageAccountingState::Reconciled => {
+                SupportStorageAccountingState::Reconciled
+            }
+            FirstSliceStorageAccountingState::VerifiedScan => {
+                SupportStorageAccountingState::VerifiedScan
+            }
+        }),
+        maximum_repository_storage_bytes: Some(snapshot.maximum_repository_storage_bytes),
+        maximum_durable_catalog_bytes: Some(snapshot.maximum_catalog_storage_bytes),
+        minimum_free_disk_bytes: Some(snapshot.minimum_free_disk_bytes),
+        source_reservation_factor: Some(snapshot.source_reservation_factor),
+        oracle_reservation_factor: Some(snapshot.oracle_reservation_factor),
     }
 }
 
@@ -10860,20 +10897,47 @@ mod tests {
                 symbols: 5,
                 relationships: 7,
                 generation_count: 1,
+                storage_bytes: Some(64),
+                active_generation_bytes: Some(0),
+                predecessor_generation_bytes: Some(0),
+                other_retained_generation_bytes: Some(0),
+                source_pool_bytes: Some(0),
+                shared_source_bytes: Some(0),
+                temporary_bytes: Some(64),
+                reclaimable_bytes: Some(0),
+                repository_overhead_bytes: Some(0),
+                inflight_reservation_bytes: Some(0),
+                repository_headroom_bytes: Some(960),
             }],
             generations: Vec::new(),
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
-            total_storage_bytes: None,
+            total_storage_bytes: Some(64),
             shared_bytes: Some(0),
             reclaimable_bytes: Some(0),
-            pinned_bytes: None,
+            pinned_bytes: Some(0),
             active_generation_bytes: Some(0),
             predecessor_generation_bytes: Some(0),
+            other_retained_generation_bytes: Some(0),
+            source_pool_bytes: Some(0),
             unreclaimed_temporary_bytes: 64,
+            repository_overhead_bytes: Some(0),
+            quarantine_bytes: Some(0),
+            pinning_supported: false,
+            inflight_catalog_reservation_bytes: Some(0),
+            inflight_repository_reservation_bytes: Some(0),
             disk_margin_bytes: Some(1024),
             admission_margin_bytes: Some(960),
+            repository_headroom_bytes: Some(960),
+            catalog_headroom_bytes: Some(960),
+            filesystem_headroom_bytes: Some(1024),
+            storage_accounting_state: FirstSliceStorageAccountingState::Reconciled,
+            maximum_repository_storage_bytes: 1024,
+            maximum_catalog_storage_bytes: 1024,
+            minimum_free_disk_bytes: 0,
             effective_retention_generations: 2,
+            source_reservation_factor: 2,
+            oracle_reservation_factor: 2,
         });
 
         assert_eq!(mapped.repositories.len(), 1);
@@ -10890,7 +10954,15 @@ mod tests {
         assert_eq!(mapped.disk_margin_bytes, Some(1024));
         assert_eq!(mapped.active_generation_bytes, Some(0));
         assert_eq!(mapped.predecessor_generation_bytes, Some(0));
-        assert_eq!(mapped.total_storage_bytes, None);
+        assert_eq!(mapped.total_storage_bytes, Some(64));
+        assert_eq!(mapped.source_pool_bytes, Some(0));
+        assert_eq!(mapped.repository_overhead_bytes, Some(0));
+        assert_eq!(
+            mapped.storage_accounting_state,
+            Some(SupportStorageAccountingState::Reconciled)
+        );
+        assert_eq!(mapped.repositories[0].storage_bytes, Some(64));
+        assert_eq!(mapped.repositories[0].repository_headroom_bytes, Some(960));
         assert_eq!(mapped.effective_retention_generations, Some(2));
     }
 
@@ -10921,6 +10993,10 @@ mod tests {
         assert_eq!(startup.total_storage_bytes, None);
         assert_eq!(startup.disk_margin_bytes, None);
         assert_eq!(startup.admission_margin_bytes, None);
+        assert_eq!(
+            startup.storage_accounting_state,
+            Some(SupportStorageAccountingState::Unavailable)
+        );
         assert!(matches!(
             verified_index_support_inventory(&service),
             Err(FirstSliceError::CatalogCorrupt)
@@ -10943,6 +11019,10 @@ mod tests {
         let verified = verified_index_support_inventory(&service)
             .expect("recovery support inventory verifies durable storage");
         assert_eq!(verified.total_storage_bytes, Some(0));
+        assert_eq!(
+            verified.storage_accounting_state,
+            Some(SupportStorageAccountingState::VerifiedScan)
+        );
         assert!(verified.disk_margin_bytes.is_some());
         assert!(verified.admission_margin_bytes.is_some());
 
@@ -10952,6 +11032,10 @@ mod tests {
         assert_eq!(
             reconciled_accounted.total_storage_bytes,
             verified.total_storage_bytes
+        );
+        assert_eq!(
+            reconciled_accounted.storage_accounting_state,
+            Some(SupportStorageAccountingState::Reconciled)
         );
         assert_eq!(reconciled_accounted.shared_bytes, verified.shared_bytes);
         assert_eq!(

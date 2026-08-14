@@ -297,20 +297,33 @@ pub(super) struct DurableStorageInventory {
     pub(super) generation_unique_bytes: u64,
     pub(super) active_generation_bytes: u64,
     pub(super) predecessor_generation_bytes: u64,
+    pub(super) other_retained_generation_bytes: u64,
+    pub(super) source_pool_bytes: u64,
     pub(super) shared_source_bytes: u64,
     pub(super) temporary_bytes: u64,
     pub(super) reclaimable_bytes: u64,
-    pub(super) pinned_bytes: Option<u64>,
+    pub(super) pinned_bytes: u64,
     pub(super) repository_overhead_bytes: u64,
     pub(super) quarantine_bytes: u64,
     pub(super) total_physical_bytes: u64,
     pub(super) available_bytes: u64,
+    pub(super) inflight_catalog_reservation_bytes: u64,
+    pub(super) inflight_repository_reservation_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableRepositoryStorage {
     pub(super) repository: RepositoryId,
     pub(super) physical_bytes: u64,
+    pub(super) active_generation_bytes: u64,
+    pub(super) predecessor_generation_bytes: u64,
+    pub(super) other_retained_generation_bytes: u64,
+    pub(super) source_pool_bytes: u64,
+    pub(super) shared_source_bytes: u64,
+    pub(super) temporary_bytes: u64,
+    pub(super) reclaimable_bytes: u64,
+    pub(super) repository_overhead_bytes: u64,
+    pub(super) inflight_reservation_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +349,14 @@ pub(super) struct DurableStorageAdmission {
     pub(super) limit_bytes: u64,
     pub(super) minimum_free_bytes: u64,
     pub(super) admission_margin_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableStorageHeadroom {
+    pub(super) repository_bytes: u64,
+    pub(super) catalog_bytes: u64,
+    pub(super) filesystem_bytes: u64,
+    pub(super) admission_bytes: u64,
 }
 
 #[derive(Default)]
@@ -949,12 +970,10 @@ impl DurableCatalog {
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
         let inventory = self.inventory_for_admission(&mut accounting, available_bytes)?;
-        let admission =
-            match check_storage_admission(&inventory, &accounting.reservations, repository, policy)
-            {
-                Ok(admission) => admission,
-                Err(failure) => return Ok(Err(failure)),
-            };
+        let admission = match check_storage_admission(&inventory, repository, policy) {
+            Ok(admission) => admission,
+            Err(failure) => return Ok(Err(failure)),
+        };
         accounting.reservations.next_id = accounting
             .reservations
             .next_id
@@ -1015,12 +1034,7 @@ impl DurableCatalog {
                 return Err(error);
             }
         };
-        let result = check_storage_admission(
-            &inventory,
-            &accounting.reservations,
-            current.repository,
-            policy,
-        );
+        let result = check_storage_admission(&inventory, current.repository, policy);
         accounting.reservations.entries.insert(
             reservation.id,
             DurableStorageReservationEntry {
@@ -1172,12 +1186,8 @@ impl DurableCatalog {
             maximum_storage_bytes: policy.maximum_storage_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         };
-        if let Err(failure) = check_storage_admission(
-            &inventory,
-            &accounting.reservations,
-            sealed.repository,
-            catalog_policy,
-        ) {
+        if let Err(failure) = check_storage_admission(&inventory, sealed.repository, catalog_policy)
+        {
             restore_repository_accounting(&mut accounting, sealed.repository, previous);
             accounting
                 .reservations
@@ -1252,13 +1262,14 @@ impl DurableCatalog {
             quarantine_bytes,
             available_bytes,
         );
-        let inventory = match built {
+        let mut inventory = match built {
             Ok(inventory) => inventory,
             Err(error) => {
                 accounting.dirty = true;
                 return Err(error);
             }
         };
+        apply_storage_reservations(&mut inventory, &accounting.reservations)?;
         if accounting.reservations.entries.is_empty() {
             accounting.repositories = Some(repositories);
             accounting.quarantine_bytes = quarantine_bytes;
@@ -1276,10 +1287,7 @@ impl DurableCatalog {
             .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        if accounting.dirty
-            || accounting.repositories.is_none()
-            || !accounting.reservations.entries.is_empty()
-        {
+        if accounting.dirty || accounting.repositories.is_none() {
             return Ok(None);
         }
         inventory_from_accounting(&accounting, available_bytes).map(Some)
@@ -1306,11 +1314,12 @@ impl DurableCatalog {
                 &mut accounting.verified_source_blobs,
                 SourceBlobScan::AccountPhysicalBytes,
             )?;
-            let inventory = build_storage_inventory(
+            let mut inventory = build_storage_inventory(
                 repositories.values().cloned().collect(),
                 quarantine_bytes,
                 available_bytes,
             )?;
+            apply_storage_reservations(&mut inventory, &accounting.reservations)?;
             accounting.repositories = Some(repositories);
             accounting.quarantine_bytes = quarantine_bytes;
             accounting.dirty = false;
@@ -2898,11 +2907,57 @@ fn inventory_from_accounting(
         .repositories
         .as_ref()
         .ok_or(FirstSliceError::Retention)?;
-    build_storage_inventory(
+    let mut inventory = build_storage_inventory(
         repositories.values().cloned().collect(),
         accounting.quarantine_bytes,
         available_bytes,
-    )
+    )?;
+    apply_storage_reservations(&mut inventory, &accounting.reservations)?;
+    Ok(inventory)
+}
+
+fn apply_storage_reservations(
+    inventory: &mut DurableStorageInventory,
+    reservations: &DurableStorageReservations,
+) -> Result<(), FirstSliceError> {
+    for reservation in reservations.entries.values() {
+        checked_add_assign(
+            &mut inventory.inflight_catalog_reservation_bytes,
+            reservation.catalog_bytes,
+        )?;
+        checked_add_assign(
+            &mut inventory.inflight_repository_reservation_bytes,
+            reservation.repository_bytes,
+        )?;
+        if let Some(repository) = inventory
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.repository == reservation.repository)
+        {
+            checked_add_assign(
+                &mut repository.inflight_reservation_bytes,
+                reservation.repository_bytes,
+            )?;
+        } else {
+            inventory.repositories.push(DurableRepositoryStorage {
+                repository: reservation.repository,
+                physical_bytes: 0,
+                active_generation_bytes: 0,
+                predecessor_generation_bytes: 0,
+                other_retained_generation_bytes: 0,
+                source_pool_bytes: 0,
+                shared_source_bytes: 0,
+                temporary_bytes: 0,
+                reclaimable_bytes: 0,
+                repository_overhead_bytes: 0,
+                inflight_reservation_bytes: reservation.repository_bytes,
+            });
+        }
+    }
+    inventory
+        .repositories
+        .sort_unstable_by_key(|repository| repository.repository);
+    Ok(())
 }
 
 fn restore_repository_accounting(
@@ -3281,7 +3336,8 @@ fn build_storage_inventory(
     let mut generation_unique_bytes = 0_u64;
     let mut active_generation_bytes = 0_u64;
     let mut predecessor_generation_bytes = 0_u64;
-    let mut physical_source_blob_bytes = 0_u64;
+    let mut other_retained_generation_bytes = 0_u64;
+    let mut source_pool_bytes = 0_u64;
     let mut shared_source_bytes = 0_u64;
     let mut temporary_bytes = 0_u64;
     let mut reclaimable_bytes = 0_u64;
@@ -3292,10 +3348,14 @@ fn build_storage_inventory(
         .map_err(|_| FirstSliceError::Retention)?;
     for repository in scanned_repositories {
         let repository_id = repository.repository;
-        let repository_total_before = generation_unique_bytes
-            .saturating_add(physical_source_blob_bytes)
-            .saturating_add(temporary_bytes)
-            .saturating_add(repository_overhead_bytes);
+        let mut repository_active_bytes = 0_u64;
+        let mut repository_predecessor_bytes = 0_u64;
+        let mut repository_other_retained_bytes = 0_u64;
+        let mut repository_source_pool_bytes = 0_u64;
+        let mut repository_shared_source_bytes = 0_u64;
+        let repository_temporary_bytes = repository.temporary_bytes;
+        let mut repository_reclaimable_bytes = 0_u64;
+        let mut repository_live_overhead_bytes = 0_u64;
         let latest_by_generation = latest_activation_sequences(&repository.markers);
         let active = latest_by_generation
             .iter()
@@ -3306,19 +3366,7 @@ fn build_storage_inventory(
             .and_then(|generation| generation.parent)
             .filter(|generation| repository.generations.contains_key(generation));
         let retained: BTreeSet<_> = latest_by_generation.keys().copied().collect();
-        let referenced_source_blobs = repository
-            .generations
-            .values()
-            .filter(|generation| retained.contains(&generation.generation))
-            .flat_map(|generation| generation.source_blobs.keys().copied())
-            .collect::<BTreeSet<_>>();
-        for digest in &referenced_source_blobs {
-            let blob = repository
-                .source_blobs
-                .get(digest)
-                .ok_or(FirstSliceError::CatalogCorrupt)?;
-            checked_add_assign(&mut shared_source_bytes, blob.bytes)?;
-        }
+        let mut source_reference_counts = BTreeMap::<ContentHash, u64>::new();
         for generation in repository
             .generations
             .values()
@@ -3332,32 +3380,40 @@ fn build_storage_inventory(
                 if blob.payload_bytes != *declared_bytes {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
+                let count = source_reference_counts.entry(*digest).or_default();
+                *count = count.checked_add(1).ok_or(FirstSliceError::Limits)?;
             }
         }
         for (digest, blob) in &repository.source_blobs {
-            checked_add_assign(&mut physical_source_blob_bytes, blob.bytes)?;
-            if !referenced_source_blobs.contains(digest) {
-                checked_add_assign(&mut reclaimable_bytes, blob.bytes)?;
+            match source_reference_counts.get(digest).copied().unwrap_or(0) {
+                0 => checked_add_assign(&mut repository_reclaimable_bytes, blob.bytes)?,
+                references => {
+                    checked_add_assign(&mut repository_source_pool_bytes, blob.bytes)?;
+                    if references > 1 {
+                        checked_add_assign(&mut repository_shared_source_bytes, blob.bytes)?;
+                    }
+                }
             }
         }
-        checked_add_assign(&mut temporary_bytes, repository.temporary_bytes)?;
         let retained_marker_names =
             retained_activation_marker_names(&repository.markers, &retained);
         for (sequence, bytes) in &repository.marker_bytes {
-            checked_add_assign(&mut repository_overhead_bytes, *bytes)?;
             let marker = repository
                 .markers
                 .get(sequence)
                 .ok_or(FirstSliceError::CatalogCorrupt)?;
-            if !retained_marker_names.contains(&marker.name) {
-                checked_add_assign(&mut reclaimable_bytes, *bytes)?;
+            if retained_marker_names.contains(&marker.name) {
+                checked_add_assign(&mut repository_live_overhead_bytes, *bytes)?;
+            } else {
+                checked_add_assign(&mut repository_reclaimable_bytes, *bytes)?;
             }
         }
         let latest_metadata_sequence = repository.metadata_bytes.keys().next_back().copied();
         for (sequence, bytes) in &repository.metadata_bytes {
-            checked_add_assign(&mut repository_overhead_bytes, *bytes)?;
-            if Some(*sequence) != latest_metadata_sequence {
-                checked_add_assign(&mut reclaimable_bytes, *bytes)?;
+            if Some(*sequence) == latest_metadata_sequence {
+                checked_add_assign(&mut repository_live_overhead_bytes, *bytes)?;
+            } else {
+                checked_add_assign(&mut repository_reclaimable_bytes, *bytes)?;
             }
         }
         for generation in repository.generations.into_values() {
@@ -3367,13 +3423,13 @@ fn build_storage_inventory(
             let reclaimable = !is_retained;
             checked_add_assign(&mut generation_unique_bytes, generation.tree_bytes)?;
             if active_generation {
-                checked_add_assign(&mut active_generation_bytes, generation.tree_bytes)?;
-            }
-            if predecessor_generation {
-                checked_add_assign(&mut predecessor_generation_bytes, generation.tree_bytes)?;
-            }
-            if reclaimable {
-                checked_add_assign(&mut reclaimable_bytes, generation.tree_bytes)?;
+                checked_add_assign(&mut repository_active_bytes, generation.tree_bytes)?;
+            } else if predecessor_generation {
+                checked_add_assign(&mut repository_predecessor_bytes, generation.tree_bytes)?;
+            } else if is_retained {
+                checked_add_assign(&mut repository_other_retained_bytes, generation.tree_bytes)?;
+            } else {
+                checked_add_assign(&mut repository_reclaimable_bytes, generation.tree_bytes)?;
             }
             generations.push(DurableGenerationStorage {
                 repository: generation.repository,
@@ -3386,21 +3442,54 @@ fn build_storage_inventory(
             });
         }
         if let Some(repository) = repository_id {
-            let repository_total_after = generation_unique_bytes
-                .saturating_add(physical_source_blob_bytes)
-                .saturating_add(temporary_bytes)
-                .saturating_add(repository_overhead_bytes);
+            let physical_bytes = repository_active_bytes
+                .checked_add(repository_predecessor_bytes)
+                .and_then(|bytes| bytes.checked_add(repository_other_retained_bytes))
+                .and_then(|bytes| bytes.checked_add(repository_source_pool_bytes))
+                .and_then(|bytes| bytes.checked_add(repository_temporary_bytes))
+                .and_then(|bytes| bytes.checked_add(repository_reclaimable_bytes))
+                .and_then(|bytes| bytes.checked_add(repository_live_overhead_bytes))
+                .ok_or(FirstSliceError::Limits)?;
             repository_totals.push(DurableRepositoryStorage {
                 repository,
-                physical_bytes: repository_total_after.saturating_sub(repository_total_before),
+                physical_bytes,
+                active_generation_bytes: repository_active_bytes,
+                predecessor_generation_bytes: repository_predecessor_bytes,
+                other_retained_generation_bytes: repository_other_retained_bytes,
+                source_pool_bytes: repository_source_pool_bytes,
+                shared_source_bytes: repository_shared_source_bytes,
+                temporary_bytes: repository_temporary_bytes,
+                reclaimable_bytes: repository_reclaimable_bytes,
+                repository_overhead_bytes: repository_live_overhead_bytes,
+                inflight_reservation_bytes: 0,
             });
         }
+        checked_add_assign(&mut active_generation_bytes, repository_active_bytes)?;
+        checked_add_assign(
+            &mut predecessor_generation_bytes,
+            repository_predecessor_bytes,
+        )?;
+        checked_add_assign(
+            &mut other_retained_generation_bytes,
+            repository_other_retained_bytes,
+        )?;
+        checked_add_assign(&mut source_pool_bytes, repository_source_pool_bytes)?;
+        checked_add_assign(&mut shared_source_bytes, repository_shared_source_bytes)?;
+        checked_add_assign(&mut temporary_bytes, repository_temporary_bytes)?;
+        checked_add_assign(&mut reclaimable_bytes, repository_reclaimable_bytes)?;
+        checked_add_assign(
+            &mut repository_overhead_bytes,
+            repository_live_overhead_bytes,
+        )?;
     }
     generations.sort_unstable_by_key(|generation| (generation.repository, generation.generation));
     repository_totals.sort_unstable_by_key(|repository| repository.repository);
-    let total_physical_bytes = generation_unique_bytes
-        .checked_add(physical_source_blob_bytes)
+    let total_physical_bytes = active_generation_bytes
+        .checked_add(predecessor_generation_bytes)
+        .and_then(|bytes| bytes.checked_add(other_retained_generation_bytes))
+        .and_then(|bytes| bytes.checked_add(source_pool_bytes))
         .and_then(|bytes| bytes.checked_add(temporary_bytes))
+        .and_then(|bytes| bytes.checked_add(reclaimable_bytes))
         .and_then(|bytes| bytes.checked_add(repository_overhead_bytes))
         .and_then(|bytes| bytes.checked_add(quarantine_bytes))
         .ok_or(FirstSliceError::Limits)?;
@@ -3410,14 +3499,18 @@ fn build_storage_inventory(
         generation_unique_bytes,
         active_generation_bytes,
         predecessor_generation_bytes,
+        other_retained_generation_bytes,
+        source_pool_bytes,
         shared_source_bytes,
         temporary_bytes,
         reclaimable_bytes,
-        pinned_bytes: None,
+        pinned_bytes: 0,
         repository_overhead_bytes,
         quarantine_bytes,
         total_physical_bytes,
         available_bytes,
+        inflight_catalog_reservation_bytes: 0,
+        inflight_repository_reservation_bytes: 0,
     })
 }
 
@@ -3468,80 +3561,109 @@ fn checked_add_assign(total: &mut u64, bytes: u64) -> Result<(), FirstSliceError
 
 fn check_storage_admission(
     inventory: &DurableStorageInventory,
-    reservations: &DurableStorageReservations,
     repository: RepositoryId,
     policy: DurableStorageAdmissionPolicy,
 ) -> Result<DurableStorageAdmission, DurableStorageAdmissionFailure> {
-    let observed_bytes = inventory.total_physical_bytes;
-    let observed_repository_bytes = inventory
-        .repositories
-        .iter()
-        .filter(|generation| generation.repository == repository)
-        .fold(0_u64, |total, repository| {
-            total.saturating_add(repository.physical_bytes)
-        });
-    let reserved_catalog_bytes = reservations.entries.values().fold(0_u64, |total, entry| {
-        total.saturating_add(entry.catalog_bytes)
-    });
-    let reserved_repository_bytes = reservations
-        .entries
-        .values()
-        .filter(|entry| entry.repository == repository)
-        .fold(0_u64, |total, entry| {
-            total.saturating_add(entry.repository_bytes)
-        });
-    let admitted_repository_bytes =
-        observed_repository_bytes.saturating_add(reserved_repository_bytes);
-    let projected_repository_bytes =
-        admitted_repository_bytes.saturating_add(policy.required_repository_bytes);
-    if projected_repository_bytes > policy.maximum_repository_bytes {
+    let projection = storage_admission_projection(inventory, repository, policy);
+    if projection.projected_repository_bytes > policy.maximum_repository_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::RepositoryBudget,
             required_bytes: policy.required_repository_bytes,
-            observed_bytes: admitted_repository_bytes,
+            observed_bytes: projection.admitted_repository_bytes,
             limit_bytes: policy.maximum_repository_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
-    let admitted_catalog_bytes = observed_bytes.saturating_add(reserved_catalog_bytes);
-    let projected_bytes = admitted_catalog_bytes.saturating_add(policy.required_catalog_bytes);
-    if projected_bytes > policy.maximum_storage_bytes {
+    if projection.projected_catalog_bytes > policy.maximum_storage_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::CatalogBudget,
             required_bytes: policy.required_catalog_bytes,
-            observed_bytes: admitted_catalog_bytes,
+            observed_bytes: projection.admitted_catalog_bytes,
             limit_bytes: policy.maximum_storage_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
-    let usable_free_bytes = inventory
-        .available_bytes
-        .saturating_sub(policy.minimum_free_bytes)
-        .saturating_sub(reserved_catalog_bytes);
-    if policy.required_catalog_bytes > usable_free_bytes {
+    if policy.required_catalog_bytes > projection.usable_free_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::FilesystemFreeSpace,
             required_bytes: policy.required_catalog_bytes,
             observed_bytes: inventory.available_bytes,
-            limit_bytes: usable_free_bytes,
+            limit_bytes: projection.usable_free_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
-    let filesystem_margin_bytes = usable_free_bytes.saturating_sub(policy.required_catalog_bytes);
-    let admission_margin_bytes = filesystem_margin_bytes
-        .min(policy.maximum_storage_bytes.saturating_sub(projected_bytes))
-        .min(
-            policy
-                .maximum_repository_bytes
-                .saturating_sub(projected_repository_bytes),
-        );
     Ok(DurableStorageAdmission {
         required_bytes: policy.required_catalog_bytes,
-        observed_bytes: admitted_catalog_bytes,
+        observed_bytes: projection.admitted_catalog_bytes,
         limit_bytes: policy.maximum_storage_bytes,
         minimum_free_bytes: policy.minimum_free_bytes,
-        admission_margin_bytes,
+        admission_margin_bytes: projection.headroom.admission_bytes,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableStorageAdmissionProjection {
+    admitted_repository_bytes: u64,
+    projected_repository_bytes: u64,
+    admitted_catalog_bytes: u64,
+    projected_catalog_bytes: u64,
+    usable_free_bytes: u64,
+    headroom: DurableStorageHeadroom,
+}
+
+fn storage_admission_projection(
+    inventory: &DurableStorageInventory,
+    repository: RepositoryId,
+    policy: DurableStorageAdmissionPolicy,
+) -> DurableStorageAdmissionProjection {
+    let repository_storage = inventory
+        .repositories
+        .iter()
+        .find(|storage| storage.repository == repository);
+    let admitted_repository_bytes = repository_storage.map_or(0, |storage| {
+        storage
+            .physical_bytes
+            .saturating_add(storage.inflight_reservation_bytes)
+    });
+    let projected_repository_bytes =
+        admitted_repository_bytes.saturating_add(policy.required_repository_bytes);
+    let admitted_catalog_bytes = inventory
+        .total_physical_bytes
+        .saturating_add(inventory.inflight_catalog_reservation_bytes);
+    let projected_catalog_bytes =
+        admitted_catalog_bytes.saturating_add(policy.required_catalog_bytes);
+    let usable_free_bytes = inventory
+        .available_bytes
+        .saturating_sub(policy.minimum_free_bytes)
+        .saturating_sub(inventory.inflight_catalog_reservation_bytes);
+    let repository_bytes = policy
+        .maximum_repository_bytes
+        .saturating_sub(projected_repository_bytes);
+    let catalog_bytes = policy
+        .maximum_storage_bytes
+        .saturating_sub(projected_catalog_bytes);
+    let filesystem_bytes = usable_free_bytes.saturating_sub(policy.required_catalog_bytes);
+    DurableStorageAdmissionProjection {
+        admitted_repository_bytes,
+        projected_repository_bytes,
+        admitted_catalog_bytes,
+        projected_catalog_bytes,
+        usable_free_bytes,
+        headroom: DurableStorageHeadroom {
+            repository_bytes,
+            catalog_bytes,
+            filesystem_bytes,
+            admission_bytes: repository_bytes.min(catalog_bytes).min(filesystem_bytes),
+        },
+    }
+}
+
+pub(super) fn storage_headroom(
+    inventory: &DurableStorageInventory,
+    repository: RepositoryId,
+    policy: DurableStorageAdmissionPolicy,
+) -> DurableStorageHeadroom {
+    storage_admission_projection(inventory, repository, policy).headroom
 }
 
 fn read_activation_marker(
@@ -4639,26 +4761,37 @@ mod tests {
             repositories: vec![DurableRepositoryStorage {
                 repository: RepositoryId::from_bytes([1; 16]),
                 physical_bytes: 100,
+                active_generation_bytes: 50,
+                predecessor_generation_bytes: 30,
+                other_retained_generation_bytes: 0,
+                source_pool_bytes: 20,
+                shared_source_bytes: 20,
+                temporary_bytes: 0,
+                reclaimable_bytes: 0,
+                repository_overhead_bytes: 0,
+                inflight_reservation_bytes: 0,
             }],
             generations: Vec::new(),
             generation_unique_bytes: 80,
             active_generation_bytes: 50,
             predecessor_generation_bytes: 30,
+            other_retained_generation_bytes: 0,
+            source_pool_bytes: 20,
             shared_source_bytes: 20,
             temporary_bytes: 0,
             reclaimable_bytes: 0,
-            pinned_bytes: None,
+            pinned_bytes: 0,
             repository_overhead_bytes: 0,
             quarantine_bytes: 0,
             total_physical_bytes: 100,
             available_bytes: 50,
+            inflight_catalog_reservation_bytes: 0,
+            inflight_repository_reservation_bytes: 0,
         };
 
-        let reservations = DurableStorageReservations::default();
         let repository = RepositoryId::from_bytes([1; 16]);
         let repository_failure = check_storage_admission(
             &inventory,
-            &reservations,
             repository,
             DurableStorageAdmissionPolicy {
                 required_catalog_bytes: 1,
@@ -4682,7 +4815,6 @@ mod tests {
 
         let budget_failure = check_storage_admission(
             &inventory,
-            &reservations,
             repository,
             DurableStorageAdmissionPolicy {
                 required_catalog_bytes: 30,
@@ -4706,7 +4838,6 @@ mod tests {
 
         let free_space_failure = check_storage_admission(
             &inventory,
-            &reservations,
             repository,
             DurableStorageAdmissionPolicy {
                 required_catalog_bytes: 31,
@@ -4731,7 +4862,6 @@ mod tests {
         assert_eq!(
             check_storage_admission(
                 &inventory,
-                &reservations,
                 repository,
                 DurableStorageAdmissionPolicy {
                     required_catalog_bytes: 10,
@@ -4927,12 +5057,18 @@ mod tests {
                 .count(),
             1
         );
+        let reserved = durable
+            .storage_inventory_cached()
+            .expect("accounted inventory reads")
+            .expect("in-flight reservations remain observable");
+        assert_eq!(reserved.inflight_catalog_reservation_bytes, required_bytes);
         assert_eq!(
-            durable
-                .storage_inventory_cached()
-                .expect("accounted inventory reads"),
-            None,
-            "in-flight reservations hide physical accounting"
+            reserved.inflight_repository_reservation_bytes,
+            policy.required_repository_bytes
+        );
+        assert_eq!(
+            reserved.repositories[0].inflight_reservation_bytes,
+            policy.required_repository_bytes
         );
         let accounting = durable
             .storage_accounting
@@ -5402,8 +5538,7 @@ mod tests {
             assert_eq!(before_compaction.generations.len(), 2);
             assert_eq!(
                 before_compaction.shared_source_bytes,
-                u64::try_from(stable.len() + first_changed.len() + second_changed.len())
-                    .expect("fixture byte count is representable")
+                u64::try_from(stable.len()).expect("fixture byte count is representable")
             );
 
             fs::write(&changed_path, third_changed).expect("third source writes");
@@ -5484,20 +5619,29 @@ mod tests {
         );
         assert_eq!(
             inventory.shared_source_bytes,
-            u64::try_from(stable.len() + second_changed.len() + third_changed.len())
-                .expect("fixture byte count is representable")
+            u64::try_from(stable.len()).expect("fixture byte count is representable")
         );
         assert_eq!(inventory.temporary_bytes, 0);
         assert_eq!(inventory.reclaimable_bytes, 0);
-        assert_eq!(inventory.pinned_bytes, None);
+        assert_eq!(inventory.pinned_bytes, 0);
         assert_eq!(inventory.quarantine_bytes, 0);
         assert_eq!(
             inventory.total_physical_bytes,
             inventory
-                .generation_unique_bytes
-                .checked_add(inventory.shared_source_bytes)
+                .active_generation_bytes
+                .checked_add(inventory.predecessor_generation_bytes)
+                .and_then(|bytes| bytes.checked_add(inventory.other_retained_generation_bytes))
+                .and_then(|bytes| bytes.checked_add(inventory.source_pool_bytes))
+                .and_then(|bytes| bytes.checked_add(inventory.temporary_bytes))
+                .and_then(|bytes| bytes.checked_add(inventory.reclaimable_bytes))
                 .and_then(|bytes| bytes.checked_add(inventory.repository_overhead_bytes))
+                .and_then(|bytes| bytes.checked_add(inventory.quarantine_bytes))
                 .expect("fixture byte total is representable")
+        );
+        assert!(inventory.shared_source_bytes < inventory.source_pool_bytes);
+        assert_eq!(
+            inventory.repositories[0].physical_bytes,
+            inventory.total_physical_bytes
         );
     }
 

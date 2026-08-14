@@ -37,9 +37,9 @@ use rootlight_observability::{
     SupportConfigurationInventory, SupportDependencyInventory, SupportDetailValue,
     SupportGenerationInventory, SupportInventory, SupportNextAction, SupportOperationKind,
     SupportOperationProgress, SupportOperationStage, SupportOperationState,
-    SupportRepositoryInventory, SupportRuntimeInventory, SupportStorageInventory,
-    SupportTerminalError, SupportTerminalOperation, Telemetry, TelemetryOutcome, TelemetryOutput,
-    build_support_bundle_for_schema,
+    SupportRepositoryInventory, SupportRuntimeInventory, SupportStorageAccountingState,
+    SupportStorageInventory, SupportTerminalError, SupportTerminalOperation, Telemetry,
+    TelemetryOutcome, TelemetryOutput, build_support_bundle_for_schema,
 };
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationDisposition, CancellationOutcome,
@@ -92,6 +92,7 @@ const CAPABILITIES: &[&str] = &[
     "support.bundle.v4",
     "support.bundle.v5",
     "support.bundle.v6",
+    "support.bundle.v7",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -906,6 +907,10 @@ pub struct IndexSupportInventory {
     pub active_generation_bytes: Option<u64>,
     /// Immutable bytes owned by direct active predecessors when measured.
     pub predecessor_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by other retained generations.
+    pub other_retained_generation_bytes: Option<u64>,
+    /// Source-pool bytes referenced by retained generations.
+    pub source_pool_bytes: Option<u64>,
     /// Physically shared immutable bytes when they can be attributed.
     pub shared_bytes: Option<u64>,
     /// Bytes protected from reclamation by a durable pin.
@@ -918,6 +923,34 @@ pub struct IndexSupportInventory {
     pub admission_margin_bytes: Option<u64>,
     /// Effective maximum retained generations per repository.
     pub effective_retention_generations: Option<u32>,
+    /// Live marker and repository-metadata bytes.
+    pub repository_overhead_bytes: Option<u64>,
+    /// Isolated corrupt or untrusted durable bytes.
+    pub quarantine_bytes: Option<u64>,
+    /// Whether explicit durable pins are implemented.
+    pub pinning_supported: Option<bool>,
+    /// Catalog-budget bytes reserved by in-flight publications.
+    pub inflight_catalog_reservation_bytes: Option<u64>,
+    /// Repository-budget bytes reserved by in-flight publications.
+    pub inflight_repository_reservation_bytes: Option<u64>,
+    /// Minimum current repository-budget headroom.
+    pub repository_headroom_bytes: Option<u64>,
+    /// Current durable-catalog headroom.
+    pub catalog_headroom_bytes: Option<u64>,
+    /// Current filesystem headroom after configured reserves.
+    pub filesystem_headroom_bytes: Option<u64>,
+    /// Provenance of the physical accounting.
+    pub storage_accounting_state: Option<SupportStorageAccountingState>,
+    /// Effective maximum physical bytes per repository.
+    pub maximum_repository_storage_bytes: Option<u64>,
+    /// Effective maximum physical bytes in the durable catalog.
+    pub maximum_durable_catalog_bytes: Option<u64>,
+    /// Effective minimum free bytes preserved on the durable volume.
+    pub minimum_free_disk_bytes: Option<u64>,
+    /// Effective source reservation multiplier.
+    pub source_reservation_factor: Option<u64>,
+    /// Effective semantic-oracle reservation multiplier.
+    pub oracle_reservation_factor: Option<u64>,
 }
 
 fn generation_health_status(inventory: &IndexSupportInventory) -> HealthStatus {
@@ -5764,6 +5797,40 @@ fn clear_extended_storage_accounting(storage: &mut SupportStorageInventory) {
     storage.effective_retention_generations = None;
 }
 
+fn clear_authoritative_storage_accounting(inventory: &mut SupportInventory) {
+    let storage = &mut inventory.storage;
+    storage.other_retained_generation_bytes = None;
+    storage.source_pool_bytes = None;
+    storage.repository_overhead_bytes = None;
+    storage.quarantine_bytes = None;
+    storage.pinning_supported = None;
+    storage.inflight_catalog_reservation_bytes = None;
+    storage.inflight_repository_reservation_bytes = None;
+    storage.catalog_accounted_bytes = None;
+    storage.repository_headroom_bytes = None;
+    storage.catalog_headroom_bytes = None;
+    storage.filesystem_headroom_bytes = None;
+    storage.accounting_state = None;
+    storage.maximum_repository_storage_bytes = None;
+    storage.maximum_durable_catalog_bytes = None;
+    storage.minimum_free_disk_bytes = None;
+    storage.source_reservation_factor = None;
+    storage.oracle_reservation_factor = None;
+    for repository in &mut inventory.repositories {
+        repository.storage_bytes = None;
+        repository.active_generation_bytes = None;
+        repository.predecessor_generation_bytes = None;
+        repository.other_retained_generation_bytes = None;
+        repository.source_pool_bytes = None;
+        repository.shared_source_bytes = None;
+        repository.temporary_bytes = None;
+        repository.reclaimable_bytes = None;
+        repository.repository_overhead_bytes = None;
+        repository.inflight_reservation_bytes = None;
+        repository.repository_headroom_bytes = None;
+    }
+}
+
 fn support_inventory(
     health: &Health,
     limits: DaemonLimits,
@@ -5824,12 +5891,29 @@ fn support_inventory(
             disk_margin_bytes: index.disk_margin_bytes,
             active_generation_bytes: index.active_generation_bytes,
             predecessor_generation_bytes: index.predecessor_generation_bytes,
+            other_retained_generation_bytes: index.other_retained_generation_bytes,
+            source_pool_bytes: index.source_pool_bytes,
             shared_bytes: index.shared_bytes,
             pinned_bytes: index.pinned_bytes,
             reclaimable_bytes: index.reclaimable_bytes,
             total_storage_bytes: index.total_storage_bytes,
+            catalog_accounted_bytes: index.total_storage_bytes,
             admission_margin_bytes: index.admission_margin_bytes,
             effective_retention_generations: index.effective_retention_generations,
+            repository_overhead_bytes: index.repository_overhead_bytes,
+            quarantine_bytes: index.quarantine_bytes,
+            pinning_supported: index.pinning_supported,
+            inflight_catalog_reservation_bytes: index.inflight_catalog_reservation_bytes,
+            inflight_repository_reservation_bytes: index.inflight_repository_reservation_bytes,
+            repository_headroom_bytes: index.repository_headroom_bytes,
+            catalog_headroom_bytes: index.catalog_headroom_bytes,
+            filesystem_headroom_bytes: index.filesystem_headroom_bytes,
+            accounting_state: index.storage_accounting_state,
+            maximum_repository_storage_bytes: index.maximum_repository_storage_bytes,
+            maximum_durable_catalog_bytes: index.maximum_durable_catalog_bytes,
+            minimum_free_disk_bytes: index.minimum_free_disk_bytes,
+            source_reservation_factor: index.source_reservation_factor,
+            oracle_reservation_factor: index.oracle_reservation_factor,
         },
     })
 }
@@ -6225,6 +6309,7 @@ impl ControlService {
                         "support.bundle.v4" => selected_minor >= 8,
                         "support.bundle.v5" => selected_minor >= 12,
                         "support.bundle.v6" => selected_minor >= 13,
+                        "support.bundle.v7" => selected_minor >= 14,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -6453,13 +6538,17 @@ impl ControlService {
             SupportBundleSchema::V3 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
             SupportBundleSchema::V4 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
             SupportBundleSchema::V5 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V5,
-            SupportBundleSchema::V6 => {
+            SupportBundleSchema::V6 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
+            SupportBundleSchema::V7 => {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
         let (mut terminal_operations, mut inventory) = if matches!(
             schema,
-            SupportBundleSchema::V4 | SupportBundleSchema::V5 | SupportBundleSchema::V6
+            SupportBundleSchema::V4
+                | SupportBundleSchema::V5
+                | SupportBundleSchema::V6
+                | SupportBundleSchema::V7
         ) {
             let terminal_records =
                 match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
@@ -6496,6 +6585,12 @@ impl ControlService {
             {
                 return ControlResponse::Error(repository_not_found(repository));
             }
+            let selected_repository = inventory
+                .repositories
+                .iter()
+                .find(|entry| entry.repository_id == repository_id)
+                .cloned()
+                .expect("repository presence was checked");
             inventory
                 .repositories
                 .retain(|entry| entry.repository_id == repository_id);
@@ -6522,15 +6617,45 @@ impl ControlService {
                 })
                 .flatten();
             inventory.storage.generation_disk_bytes = generation_disk_bytes;
-            inventory.storage.active_generation_bytes = active_generation_bytes;
-            inventory.storage.predecessor_generation_bytes = None;
-            inventory.storage.shared_bytes = None;
-            inventory.storage.pinned_bytes = None;
-            inventory.storage.reclaimable_bytes = None;
-            // Generation receipts exclude repository-scoped shared, temporary,
-            // and quarantine trees, so the physical total is unknown here.
-            inventory.storage.total_storage_bytes = None;
-            inventory.storage.admission_margin_bytes = None;
+            if schema == SupportBundleSchema::V7
+                && inventory.storage.accounting_state
+                    != Some(SupportStorageAccountingState::Unavailable)
+            {
+                inventory.storage.active_generation_bytes =
+                    selected_repository.active_generation_bytes;
+                inventory.storage.predecessor_generation_bytes =
+                    selected_repository.predecessor_generation_bytes;
+                inventory.storage.other_retained_generation_bytes =
+                    selected_repository.other_retained_generation_bytes;
+                inventory.storage.source_pool_bytes = selected_repository.source_pool_bytes;
+                inventory.storage.shared_bytes = selected_repository.shared_source_bytes;
+                inventory.storage.unreclaimed_temporary_bytes =
+                    selected_repository.temporary_bytes.unwrap_or(0);
+                inventory.storage.reclaimable_bytes = selected_repository.reclaimable_bytes;
+                inventory.storage.repository_overhead_bytes =
+                    selected_repository.repository_overhead_bytes;
+                inventory.storage.quarantine_bytes = Some(0);
+                inventory.storage.total_storage_bytes = selected_repository.storage_bytes;
+                inventory.storage.repository_headroom_bytes =
+                    selected_repository.repository_headroom_bytes;
+                inventory.storage.admission_margin_bytes = selected_repository
+                    .repository_headroom_bytes
+                    .map(|repository| {
+                        repository
+                            .min(inventory.storage.catalog_headroom_bytes.unwrap_or(0))
+                            .min(inventory.storage.filesystem_headroom_bytes.unwrap_or(0))
+                    });
+            } else {
+                inventory.storage.active_generation_bytes = active_generation_bytes;
+                inventory.storage.predecessor_generation_bytes = None;
+                inventory.storage.shared_bytes = None;
+                inventory.storage.pinned_bytes = None;
+                inventory.storage.reclaimable_bytes = None;
+                // Generation receipts exclude repository-scoped shared, temporary,
+                // and quarantine trees, so the physical total is unknown here.
+                inventory.storage.total_storage_bytes = None;
+                inventory.storage.admission_margin_bytes = None;
+            }
             terminal_operations.retain(|operation| {
                 operation.repository_id.as_deref() == Some(repository_id.as_str())
             });
@@ -6539,7 +6664,10 @@ impl ControlService {
             if schema == SupportBundleSchema::V4 {
                 clear_extended_storage_accounting(&mut inventory.storage);
             }
-            if schema != SupportBundleSchema::V6 {
+            if schema != SupportBundleSchema::V7 {
+                clear_authoritative_storage_accounting(inventory);
+            }
+            if !matches!(schema, SupportBundleSchema::V6 | SupportBundleSchema::V7) {
                 inventory.languages.clear();
             }
         }
@@ -6554,6 +6682,7 @@ impl ControlService {
                 SupportBundleSchema::V4 => ObservabilityProtocolVersion::V1_8,
                 SupportBundleSchema::V5 => ObservabilityProtocolVersion::V1_12,
                 SupportBundleSchema::V6 => ObservabilityProtocolVersion::V1_13,
+                SupportBundleSchema::V7 => ObservabilityProtocolVersion::V1_14,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
@@ -10532,7 +10661,9 @@ fn request_from_wire(
             }
             let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 13 {
+                if selected_protocol_minor >= 14 {
+                    SupportBundleSchema::V7
+                } else if selected_protocol_minor >= 13 {
                     SupportBundleSchema::V6
                 } else if selected_protocol_minor >= 12 {
                     SupportBundleSchema::V5
@@ -12403,79 +12534,25 @@ mod tests {
                     .expect("supported minor negotiates"),
                 common::ContractVersion { major: 1, minor }
             );
-            let expected = if minor >= 13 {
-                CAPABILITIES.to_vec()
-            } else if minor >= 12 {
-                CAPABILITIES
-                    .iter()
-                    .copied()
-                    .filter(|capability| *capability != "support.bundle.v6")
-                    .collect()
-            } else if minor >= 10 {
-                CAPABILITIES
-                    .iter()
-                    .copied()
-                    .filter(|capability| {
-                        !matches!(*capability, "support.bundle.v5" | "support.bundle.v6")
-                    })
-                    .collect()
-            } else if minor >= 8 {
-                CAPABILITIES
-                    .iter()
-                    .copied()
-                    .filter(|capability| {
-                        !matches!(
-                            *capability,
-                            "rootlight.ui.graph_projection.v1"
-                                | "support.bundle.v5"
-                                | "support.bundle.v6"
-                        )
-                    })
-                    .collect()
-            } else if minor >= 5 {
-                CAPABILITIES
-                    .iter()
-                    .copied()
-                    .filter(|capability| {
-                        !matches!(
-                            *capability,
-                            "rootlight.ui.graph_projection.v1"
-                                | "support.bundle.v4"
-                                | "support.bundle.v5"
-                                | "support.bundle.v6"
-                        )
-                    })
-                    .collect()
-            } else if minor >= 4 {
-                vec![
-                    "diagnostics.quick",
-                    "health",
-                    "operation.cancel",
-                    "operation.lifecycle.v1",
-                    "operation.status",
-                    "operation.submit",
-                    "support.bundle.v1",
-                    "support.bundle.v2",
-                ]
-            } else if minor >= 3 {
-                vec![
-                    "diagnostics.quick",
-                    "health",
-                    "operation.cancel",
-                    "operation.lifecycle.v1",
-                    "operation.status",
-                    "operation.submit",
-                    "support.bundle.v1",
-                ]
-            } else {
-                vec![
-                    "health",
-                    "operation.cancel",
-                    "operation.lifecycle.v1",
-                    "operation.status",
-                    "operation.submit",
-                ]
-            };
+            let expected = CAPABILITIES
+                .iter()
+                .copied()
+                .filter(|capability| match *capability {
+                    "diagnostics.quick" | "support.bundle.v1" => minor >= 3,
+                    "support.bundle.v2" => minor >= 4,
+                    "support.bundle.v3" => minor >= 5,
+                    "support.bundle.v4" => minor >= 8,
+                    "support.bundle.v5" => minor >= 12,
+                    "support.bundle.v6" => minor >= 13,
+                    "support.bundle.v7" => minor >= 14,
+                    "code.locate.v1"
+                    | "repository.index.v1"
+                    | "source.read.v1"
+                    | "symbol.explain.v1" => minor >= 5,
+                    "rootlight.ui.graph_projection.v1" => minor >= 10,
+                    _ => true,
+                })
+                .collect::<Vec<_>>();
             assert_eq!(negotiated.capabilities, expected);
             assert!(
                 !negotiated
@@ -12489,6 +12566,13 @@ mod tests {
                     .iter()
                     .any(|capability| capability == "rootlight.ui.graph_projection.v1"),
                 minor >= 10
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "support.bundle.v7"),
+                minor >= 14
             );
         }
     }
@@ -12706,6 +12790,17 @@ mod tests {
                         symbol_count: 40,
                         relationship_count: 75,
                         generation_count: 1,
+                        storage_bytes: Some(4_096),
+                        active_generation_bytes: Some(4_096),
+                        predecessor_generation_bytes: Some(0),
+                        other_retained_generation_bytes: Some(0),
+                        source_pool_bytes: Some(0),
+                        shared_source_bytes: Some(0),
+                        temporary_bytes: Some(0),
+                        reclaimable_bytes: Some(0),
+                        repository_overhead_bytes: Some(0),
+                        inflight_reservation_bytes: Some(0),
+                        repository_headroom_bytes: Some(5_904),
                     },
                     SupportRepositoryInventory {
                         repository_id: support_id(other_repository.as_bytes()),
@@ -12717,6 +12812,17 @@ mod tests {
                         symbol_count: 8,
                         relationship_count: 6,
                         generation_count: 1,
+                        storage_bytes: Some(2_048),
+                        active_generation_bytes: Some(2_048),
+                        predecessor_generation_bytes: Some(0),
+                        other_retained_generation_bytes: Some(0),
+                        source_pool_bytes: Some(0),
+                        shared_source_bytes: Some(0),
+                        temporary_bytes: Some(0),
+                        reclaimable_bytes: Some(0),
+                        repository_overhead_bytes: Some(0),
+                        inflight_reservation_bytes: Some(0),
+                        repository_headroom_bytes: Some(7_952),
                     },
                 ],
                 generations: vec![
@@ -12742,13 +12848,29 @@ mod tests {
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: Some(1024 * 1024),
                 active_generation_bytes: Some(6144),
-                predecessor_generation_bytes: Some(1024),
-                shared_bytes: None,
-                pinned_bytes: None,
-                reclaimable_bytes: None,
-                total_storage_bytes: Some(7168),
-                admission_margin_bytes: None,
+                predecessor_generation_bytes: Some(0),
+                other_retained_generation_bytes: Some(0),
+                source_pool_bytes: Some(0),
+                shared_bytes: Some(0),
+                pinned_bytes: Some(0),
+                reclaimable_bytes: Some(0),
+                total_storage_bytes: Some(6_144),
+                admission_margin_bytes: Some(5_904),
                 effective_retention_generations: Some(8),
+                repository_overhead_bytes: Some(0),
+                quarantine_bytes: Some(0),
+                pinning_supported: Some(false),
+                inflight_catalog_reservation_bytes: Some(0),
+                inflight_repository_reservation_bytes: Some(0),
+                repository_headroom_bytes: Some(5_904),
+                catalog_headroom_bytes: Some(13_856),
+                filesystem_headroom_bytes: Some(1_048_576),
+                storage_accounting_state: Some(SupportStorageAccountingState::Reconciled),
+                maximum_repository_storage_bytes: Some(10_000),
+                maximum_durable_catalog_bytes: Some(20_000),
+                minimum_free_disk_bytes: Some(0),
+                source_reservation_factor: Some(2),
+                oracle_reservation_factor: Some(3),
             })
             .expect("index support inventory publishes");
 
@@ -12813,10 +12935,10 @@ mod tests {
         assert_eq!(inventory.generations.len(), 2);
         assert_eq!(inventory.storage.generation_disk_bytes, 6144);
         assert_eq!(inventory.storage.active_generation_bytes, Some(6144));
-        assert_eq!(inventory.storage.predecessor_generation_bytes, Some(1024));
-        assert_eq!(inventory.storage.total_storage_bytes, Some(7168));
+        assert_eq!(inventory.storage.predecessor_generation_bytes, Some(0));
+        assert_eq!(inventory.storage.total_storage_bytes, Some(6144));
         assert_eq!(inventory.storage.effective_retention_generations, Some(8));
-        assert_eq!(inventory.storage.shared_bytes, None);
+        assert_eq!(inventory.storage.shared_bytes, Some(0));
         assert!(inventory.languages.is_empty());
         assert_eq!(inventory.runtime.protocol_minor, PROTOCOL_MINOR);
 
@@ -12896,6 +13018,85 @@ mod tests {
             serde_json::from_slice(&current_inventory_bytes).expect("current inventory decodes");
         assert_eq!(current_inventory.languages.len(), 1);
         assert_eq!(current_inventory.languages[0].language, "rust");
+        assert_eq!(current_inventory.storage.accounting_state, None);
+        assert_eq!(current_inventory.repositories[0].storage_bytes, None);
+
+        let authoritative =
+            service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V7, None));
+        let ControlResponse::SupportBundle(authoritative) = authoritative else {
+            panic!("authoritative support bundle response expected");
+        };
+        assert_eq!(
+            authoritative.schema_version,
+            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        );
+        let mut authoritative_archive =
+            zip::ZipArchive::new(std::io::Cursor::new(authoritative.archive))
+                .expect("authoritative support ZIP opens");
+        let mut authoritative_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut authoritative_archive
+                .by_name("inventory.json")
+                .expect("authoritative inventory entry opens"),
+            &mut authoritative_inventory_bytes,
+        )
+        .expect("authoritative inventory entry reads");
+        let authoritative_inventory: SupportInventory =
+            serde_json::from_slice(&authoritative_inventory_bytes)
+                .expect("authoritative inventory decodes");
+        assert_eq!(
+            authoritative_inventory.storage.accounting_state,
+            Some(SupportStorageAccountingState::Reconciled)
+        );
+        assert_eq!(
+            authoritative_inventory.storage.total_storage_bytes,
+            Some(6_144)
+        );
+        assert_eq!(
+            authoritative_inventory.storage.catalog_accounted_bytes,
+            Some(6_144)
+        );
+        assert_eq!(
+            authoritative_inventory.storage.admission_margin_bytes,
+            Some(5_904)
+        );
+        let scoped_authoritative = service.execute(ControlRequest::SupportBundle(
+            SupportBundleSchema::V7,
+            Some(repository),
+        ));
+        let ControlResponse::SupportBundle(scoped_authoritative) = scoped_authoritative else {
+            panic!("repository-scoped authoritative support bundle response expected");
+        };
+        let mut scoped_authoritative_archive =
+            zip::ZipArchive::new(std::io::Cursor::new(scoped_authoritative.archive))
+                .expect("repository-scoped authoritative support ZIP opens");
+        let mut scoped_authoritative_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut scoped_authoritative_archive
+                .by_name("inventory.json")
+                .expect("repository-scoped authoritative inventory entry opens"),
+            &mut scoped_authoritative_inventory_bytes,
+        )
+        .expect("repository-scoped authoritative inventory entry reads");
+        let scoped_authoritative_inventory: SupportInventory =
+            serde_json::from_slice(&scoped_authoritative_inventory_bytes)
+                .expect("repository-scoped authoritative inventory decodes");
+        assert_eq!(
+            scoped_authoritative_inventory.storage.total_storage_bytes,
+            Some(4_096)
+        );
+        assert_eq!(
+            scoped_authoritative_inventory
+                .storage
+                .catalog_accounted_bytes,
+            Some(6_144)
+        );
+        assert_eq!(
+            scoped_authoritative_inventory
+                .storage
+                .catalog_headroom_bytes,
+            Some(13_856)
+        );
         let mut scoped_operation_bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut scoped_archive
@@ -13513,6 +13714,17 @@ mod tests {
                 symbol_count: 1,
                 relationship_count: 0,
                 generation_count: 1,
+                storage_bytes: None,
+                active_generation_bytes: None,
+                predecessor_generation_bytes: None,
+                other_retained_generation_bytes: None,
+                source_pool_bytes: None,
+                shared_source_bytes: None,
+                temporary_bytes: None,
+                reclaimable_bytes: None,
+                repository_overhead_bytes: None,
+                inflight_reservation_bytes: None,
+                repository_headroom_bytes: None,
             }],
             generations: vec![SupportGenerationInventory {
                 repository_id: support_id(repository.as_bytes()),
@@ -13534,6 +13746,7 @@ mod tests {
             total_storage_bytes: None,
             admission_margin_bytes: None,
             effective_retention_generations: None,
+            ..IndexSupportInventory::default()
         };
 
         service
@@ -15392,6 +15605,26 @@ mod tests {
             panic!("journal actor renewal must remain unsupported");
         };
         assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    }
+
+    #[test]
+    fn support_request_selects_v7_only_for_protocol_minor_fourteen() {
+        let owner = ClientInstanceId::new([40; 16]).expect("owner is valid");
+        for (minor, expected) in [(13, SupportBundleSchema::V6), (14, SupportBundleSchema::V7)] {
+            let decoded = request_from_wire(
+                Some(daemon::request_envelope::Request::SupportBundle(
+                    daemon::SupportBundleRequest::default(),
+                )),
+                owner,
+                minor,
+            )
+            .expect("support request decodes");
+            assert!(matches!(
+                decoded,
+                DecodedRequest::Control(ControlRequest::SupportBundle(schema, None))
+                    if schema == expected
+            ));
+        }
     }
 
     #[test]

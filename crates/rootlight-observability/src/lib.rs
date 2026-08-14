@@ -29,8 +29,10 @@ pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V3: u32 = 3;
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V4: u32 = 4;
 /// Frozen support-bundle schema with storage-accounting inventory.
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V5: u32 = 5;
-/// Current support-bundle schema with installed language capabilities.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 6;
+/// Frozen support-bundle schema with installed language capabilities.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V6: u32 = 6;
+/// Current support-bundle schema with reconciliable durable storage accounting.
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 7;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -179,6 +181,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.13.
     #[serde(rename = "1.13")]
     V1_13,
+    /// Rootlight daemon protocol 1.14.
+    #[serde(rename = "1.14")]
+    V1_14,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -646,6 +651,39 @@ pub struct SupportRepositoryInventory {
     pub relationship_count: u64,
     /// Number of retained immutable generations.
     pub generation_count: u32,
+    /// Physical bytes attributed to this repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_bytes: Option<u64>,
+    /// Active immutable generation bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_generation_bytes: Option<u64>,
+    /// Direct active-predecessor bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_generation_bytes: Option<u64>,
+    /// Other retained immutable generation bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_retained_generation_bytes: Option<u64>,
+    /// Source-pool bytes referenced by retained generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pool_bytes: Option<u64>,
+    /// Source-pool bytes referenced by multiple retained generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_source_bytes: Option<u64>,
+    /// Unpublished temporary bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_bytes: Option<u64>,
+    /// Reclaimable physical bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaimable_bytes: Option<u64>,
+    /// Live marker and metadata bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_overhead_bytes: Option<u64>,
+    /// In-flight repository-budget reservation bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_reservation_bytes: Option<u64>,
+    /// Current repository-budget headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_headroom_bytes: Option<u64>,
 }
 
 /// Closed checksum state for one immutable generation summary.
@@ -742,6 +780,12 @@ pub struct SupportStorageInventory {
     /// Immutable bytes owned by direct active predecessors when measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predecessor_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by other retained generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_retained_generation_bytes: Option<u64>,
+    /// Physical source-pool bytes referenced by retained generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pool_bytes: Option<u64>,
     /// Physically shared immutable bytes when the storage engine can attribute them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_bytes: Option<u64>,
@@ -754,12 +798,72 @@ pub struct SupportStorageInventory {
     /// Total physical bytes owned by the selected storage scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_storage_bytes: Option<u64>,
+    /// Global physical bytes charged against the durable catalog budget.
+    ///
+    /// This remains catalog-wide when a support bundle projects one repository,
+    /// because catalog admission and its reported headroom are global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_accounted_bytes: Option<u64>,
     /// Bytes remaining after every admission reserve and safety margin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_margin_bytes: Option<u64>,
     /// Effective maximum retained generations per repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_retention_generations: Option<u32>,
+    /// Live marker and repository-metadata bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_overhead_bytes: Option<u64>,
+    /// Isolated corrupt or untrusted durable bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_bytes: Option<u64>,
+    /// Whether explicit durable pins are implemented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinning_supported: Option<bool>,
+    /// Catalog-budget bytes reserved by in-flight publications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_catalog_reservation_bytes: Option<u64>,
+    /// Repository-budget bytes reserved by in-flight publications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_repository_reservation_bytes: Option<u64>,
+    /// Minimum current repository-budget headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_headroom_bytes: Option<u64>,
+    /// Current durable-catalog headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_headroom_bytes: Option<u64>,
+    /// Current filesystem headroom after configured reserves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_headroom_bytes: Option<u64>,
+    /// Provenance of the physical storage accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_state: Option<SupportStorageAccountingState>,
+    /// Effective maximum physical bytes per repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_repository_storage_bytes: Option<u64>,
+    /// Effective maximum physical bytes in the durable catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_durable_catalog_bytes: Option<u64>,
+    /// Effective minimum free bytes preserved on the durable volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_free_disk_bytes: Option<u64>,
+    /// Effective source reservation multiplier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_reservation_factor: Option<u64>,
+    /// Effective semantic-oracle reservation multiplier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_reservation_factor: Option<u64>,
+}
+
+/// Provenance of a support inventory's physical storage accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportStorageAccountingState {
+    /// Physical storage was deliberately not read.
+    Unavailable,
+    /// Physical storage was reconciled from Rootlight-owned mutations.
+    Reconciled,
+    /// Physical storage was rebuilt by a content-verifying scan.
+    VerifiedScan,
 }
 
 /// Complete allow-listed production inventory accepted by the privacy boundary.
@@ -1216,6 +1320,8 @@ pub enum SupportBundleSchema {
     V5,
     /// Production schema with authoritative installed language capabilities.
     V6,
+    /// Production schema with reconciliable durable storage accounting.
+    V7,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -1803,6 +1909,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V4 => ProtocolVersion::V1_8,
         SupportBundleSchema::V5 => ProtocolVersion::V1_12,
         SupportBundleSchema::V6 => ProtocolVersion::V1_13,
+        SupportBundleSchema::V7 => ProtocolVersion::V1_14,
     };
     if input.protocol_version != expected_protocol {
         return Err(SupportBundleError::ProtocolVersionMismatch);
@@ -1814,6 +1921,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V4 => build_support_bundle_v4(input),
         SupportBundleSchema::V5 => build_support_bundle_v5(input),
         SupportBundleSchema::V6 => build_support_bundle_v6(input),
+        SupportBundleSchema::V7 => build_support_bundle_v7(input),
     }
 }
 
@@ -1927,6 +2035,23 @@ fn build_support_bundle_v5(
 fn build_support_bundle_v6(
     input: &SupportBundleInput,
 ) -> Result<SupportBundle, SupportBundleError> {
+    if input
+        .inventory
+        .as_ref()
+        .is_some_and(SupportInventory::has_authoritative_storage_accounting)
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    build_production_support_bundle(
+        input,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
+        &OMITTED_DATA_CLASSES_V6,
+    )
+}
+
+fn build_support_bundle_v7(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
     build_production_support_bundle(
         input,
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
@@ -1989,7 +2114,8 @@ fn validate_production_input(
     schema_version: u32,
 ) -> Result<(), SupportBundleError> {
     let minimum_protocol_minor = match schema_version {
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => 13,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => 14,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V6 => 13,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => 12,
         _ => 8,
     };
@@ -2077,9 +2203,8 @@ fn validate_production_input(
             return Err(SupportBundleError::InvalidInventory);
         }
     }
-    if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION && inventory.languages.is_empty()
-        || schema_version != CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
-            && !inventory.languages.is_empty()
+    if schema_version >= SUPPORT_BUNDLE_SCHEMA_VERSION_V6 && inventory.languages.is_empty()
+        || schema_version < SUPPORT_BUNDLE_SCHEMA_VERSION_V6 && !inventory.languages.is_empty()
     {
         return Err(SupportBundleError::InvalidInventory);
     }
@@ -2111,6 +2236,9 @@ fn validate_production_input(
     for operation in &input.terminal_operations {
         validate_terminal_operation(operation)?;
     }
+    if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        validate_authoritative_storage_accounting(inventory)?;
+    }
     Ok(())
 }
 
@@ -2122,9 +2250,242 @@ impl SupportStorageInventory {
             || self.pinned_bytes.is_some()
             || self.reclaimable_bytes.is_some()
             || self.total_storage_bytes.is_some()
+            || self.catalog_accounted_bytes.is_some()
             || self.admission_margin_bytes.is_some()
             || self.effective_retention_generations.is_some()
     }
+}
+
+impl SupportInventory {
+    fn has_authoritative_storage_accounting(&self) -> bool {
+        self.storage.has_authoritative_accounting()
+            || self
+                .repositories
+                .iter()
+                .any(SupportRepositoryInventory::has_storage_accounting)
+    }
+}
+
+impl SupportStorageInventory {
+    fn has_authoritative_accounting(&self) -> bool {
+        self.catalog_accounted_bytes.is_some()
+            || self.other_retained_generation_bytes.is_some()
+            || self.source_pool_bytes.is_some()
+            || self.repository_overhead_bytes.is_some()
+            || self.quarantine_bytes.is_some()
+            || self.pinning_supported.is_some()
+            || self.inflight_catalog_reservation_bytes.is_some()
+            || self.inflight_repository_reservation_bytes.is_some()
+            || self.repository_headroom_bytes.is_some()
+            || self.catalog_headroom_bytes.is_some()
+            || self.filesystem_headroom_bytes.is_some()
+            || self.accounting_state.is_some()
+            || self.maximum_repository_storage_bytes.is_some()
+            || self.maximum_durable_catalog_bytes.is_some()
+            || self.minimum_free_disk_bytes.is_some()
+            || self.source_reservation_factor.is_some()
+            || self.oracle_reservation_factor.is_some()
+    }
+}
+
+impl SupportRepositoryInventory {
+    fn has_storage_accounting(&self) -> bool {
+        self.storage_bytes.is_some()
+            || self.active_generation_bytes.is_some()
+            || self.predecessor_generation_bytes.is_some()
+            || self.other_retained_generation_bytes.is_some()
+            || self.source_pool_bytes.is_some()
+            || self.shared_source_bytes.is_some()
+            || self.temporary_bytes.is_some()
+            || self.reclaimable_bytes.is_some()
+            || self.repository_overhead_bytes.is_some()
+            || self.inflight_reservation_bytes.is_some()
+            || self.repository_headroom_bytes.is_some()
+    }
+}
+
+fn validate_authoritative_storage_accounting(
+    inventory: &SupportInventory,
+) -> Result<(), SupportBundleError> {
+    let storage = &inventory.storage;
+    let Some(accounting_state) = storage.accounting_state else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    let (
+        Some(maximum_repository_bytes),
+        Some(maximum_catalog_bytes),
+        Some(minimum_free_bytes),
+        Some(retention),
+        Some(source_factor),
+        Some(oracle_factor),
+        Some(pinning_supported),
+        Some(pinned_bytes),
+    ) = (
+        storage.maximum_repository_storage_bytes,
+        storage.maximum_durable_catalog_bytes,
+        storage.minimum_free_disk_bytes,
+        storage.effective_retention_generations,
+        storage.source_reservation_factor,
+        storage.oracle_reservation_factor,
+        storage.pinning_supported,
+        storage.pinned_bytes,
+    )
+    else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    if maximum_repository_bytes == 0
+        || maximum_catalog_bytes == 0
+        || retention == 0
+        || source_factor == 0
+        || oracle_factor == 0
+        || !pinning_supported && pinned_bytes != 0
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+
+    if accounting_state == SupportStorageAccountingState::Unavailable {
+        if storage.total_storage_bytes.is_some()
+            || storage.active_generation_bytes.is_some()
+            || storage.predecessor_generation_bytes.is_some()
+            || storage.other_retained_generation_bytes.is_some()
+            || storage.source_pool_bytes.is_some()
+            || storage.shared_bytes.is_some()
+            || storage.reclaimable_bytes.is_some()
+            || storage.catalog_accounted_bytes.is_some()
+            || storage.repository_overhead_bytes.is_some()
+            || storage.quarantine_bytes.is_some()
+            || storage.inflight_catalog_reservation_bytes.is_some()
+            || storage.inflight_repository_reservation_bytes.is_some()
+            || storage.repository_headroom_bytes.is_some()
+            || storage.catalog_headroom_bytes.is_some()
+            || storage.filesystem_headroom_bytes.is_some()
+            || storage.admission_margin_bytes.is_some()
+            || inventory
+                .repositories
+                .iter()
+                .any(SupportRepositoryInventory::has_storage_accounting)
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+        return Ok(());
+    }
+
+    let (
+        Some(total),
+        Some(catalog_accounted),
+        Some(active),
+        Some(predecessor),
+        Some(other_retained),
+        Some(source_pool),
+        Some(shared),
+        Some(reclaimable),
+        Some(overhead),
+        Some(quarantine),
+        Some(inflight_catalog),
+        Some(_inflight_repository),
+        Some(repository_headroom),
+        Some(catalog_headroom),
+        Some(filesystem_headroom),
+        Some(admission_headroom),
+        Some(available_bytes),
+    ) = (
+        storage.total_storage_bytes,
+        storage.catalog_accounted_bytes,
+        storage.active_generation_bytes,
+        storage.predecessor_generation_bytes,
+        storage.other_retained_generation_bytes,
+        storage.source_pool_bytes,
+        storage.shared_bytes,
+        storage.reclaimable_bytes,
+        storage.repository_overhead_bytes,
+        storage.quarantine_bytes,
+        storage.inflight_catalog_reservation_bytes,
+        storage.inflight_repository_reservation_bytes,
+        storage.repository_headroom_bytes,
+        storage.catalog_headroom_bytes,
+        storage.filesystem_headroom_bytes,
+        storage.admission_margin_bytes,
+        storage.disk_margin_bytes,
+    )
+    else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    let reconciled_total = u128::from(active)
+        + u128::from(predecessor)
+        + u128::from(other_retained)
+        + u128::from(source_pool)
+        + u128::from(storage.unreclaimed_temporary_bytes)
+        + u128::from(reclaimable)
+        + u128::from(overhead)
+        + u128::from(quarantine);
+    if reconciled_total != u128::from(total)
+        || catalog_accounted < total
+        || shared > source_pool
+        || catalog_headroom
+            != maximum_catalog_bytes
+                .saturating_sub(catalog_accounted.saturating_add(inflight_catalog))
+        || filesystem_headroom
+            != available_bytes
+                .saturating_sub(minimum_free_bytes)
+                .saturating_sub(inflight_catalog)
+        || admission_headroom
+            != repository_headroom
+                .min(catalog_headroom)
+                .min(filesystem_headroom)
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    let mut minimum_repository_headroom = maximum_repository_bytes;
+    for repository in &inventory.repositories {
+        let (
+            Some(repository_total),
+            Some(active),
+            Some(predecessor),
+            Some(other_retained),
+            Some(source_pool),
+            Some(shared),
+            Some(temporary),
+            Some(reclaimable),
+            Some(overhead),
+            Some(inflight),
+            Some(headroom),
+        ) = (
+            repository.storage_bytes,
+            repository.active_generation_bytes,
+            repository.predecessor_generation_bytes,
+            repository.other_retained_generation_bytes,
+            repository.source_pool_bytes,
+            repository.shared_source_bytes,
+            repository.temporary_bytes,
+            repository.reclaimable_bytes,
+            repository.repository_overhead_bytes,
+            repository.inflight_reservation_bytes,
+            repository.repository_headroom_bytes,
+        )
+        else {
+            return Err(SupportBundleError::InvalidInventory);
+        };
+        if u128::from(repository_total)
+            != u128::from(active)
+                + u128::from(predecessor)
+                + u128::from(other_retained)
+                + u128::from(source_pool)
+                + u128::from(temporary)
+                + u128::from(reclaimable)
+                + u128::from(overhead)
+            || shared > source_pool
+            || headroom
+                != maximum_repository_bytes
+                    .saturating_sub(repository_total.saturating_add(inflight))
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+        minimum_repository_headroom = minimum_repository_headroom.min(headroom);
+    }
+    if repository_headroom > minimum_repository_headroom {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    Ok(())
 }
 
 fn validate_terminal_operation(
@@ -2542,6 +2903,17 @@ mod tests {
                 symbol_count: 40,
                 relationship_count: 75,
                 generation_count: 1,
+                storage_bytes: None,
+                active_generation_bytes: None,
+                predecessor_generation_bytes: None,
+                other_retained_generation_bytes: None,
+                source_pool_bytes: None,
+                shared_source_bytes: None,
+                temporary_bytes: None,
+                reclaimable_bytes: None,
+                repository_overhead_bytes: None,
+                inflight_reservation_bytes: None,
+                repository_headroom_bytes: None,
             }],
             generations: vec![SupportGenerationInventory {
                 repository_id: "22".repeat(16),
@@ -2580,12 +2952,29 @@ mod tests {
                 disk_margin_bytes: Some(1024 * 1024),
                 active_generation_bytes: Some(4096),
                 predecessor_generation_bytes: None,
+                other_retained_generation_bytes: None,
+                source_pool_bytes: None,
                 shared_bytes: None,
                 pinned_bytes: None,
                 reclaimable_bytes: None,
                 total_storage_bytes: None,
+                catalog_accounted_bytes: None,
                 admission_margin_bytes: None,
                 effective_retention_generations: None,
+                repository_overhead_bytes: None,
+                quarantine_bytes: None,
+                pinning_supported: None,
+                inflight_catalog_reservation_bytes: None,
+                inflight_repository_reservation_bytes: None,
+                repository_headroom_bytes: None,
+                catalog_headroom_bytes: None,
+                filesystem_headroom_bytes: None,
+                accounting_state: None,
+                maximum_repository_storage_bytes: None,
+                maximum_durable_catalog_bytes: None,
+                minimum_free_disk_bytes: None,
+                source_reservation_factor: None,
+                oracle_reservation_factor: None,
             },
         });
         input
@@ -2623,6 +3012,55 @@ mod tests {
             maximum_tier: "tier_d".to_owned(),
             analyzers: vec!["treesitter".to_owned()],
         }];
+    }
+
+    fn make_schema_v7_input(input: &mut SupportBundleInput) {
+        make_schema_v6_input(input);
+        input.protocol_version = ProtocolVersion::V1_14;
+        let inventory = input
+            .inventory
+            .as_mut()
+            .expect("production inventory exists");
+        inventory.runtime.protocol_minor = 14;
+        let repository = &mut inventory.repositories[0];
+        repository.storage_bytes = Some(5_248);
+        repository.active_generation_bytes = Some(4_096);
+        repository.predecessor_generation_bytes = Some(0);
+        repository.other_retained_generation_bytes = Some(0);
+        repository.source_pool_bytes = Some(1_024);
+        repository.shared_source_bytes = Some(0);
+        repository.temporary_bytes = Some(0);
+        repository.reclaimable_bytes = Some(0);
+        repository.repository_overhead_bytes = Some(128);
+        repository.inflight_reservation_bytes = Some(128);
+        repository.repository_headroom_bytes = Some(1_043_200);
+        let storage = &mut inventory.storage;
+        storage.active_generation_bytes = Some(4_096);
+        storage.predecessor_generation_bytes = Some(0);
+        storage.other_retained_generation_bytes = Some(0);
+        storage.source_pool_bytes = Some(1_024);
+        storage.shared_bytes = Some(0);
+        storage.pinned_bytes = Some(0);
+        storage.reclaimable_bytes = Some(0);
+        storage.total_storage_bytes = Some(5_248);
+        storage.catalog_accounted_bytes = Some(5_248);
+        storage.admission_margin_bytes = Some(1_043_200);
+        storage.effective_retention_generations = Some(2);
+        storage.repository_overhead_bytes = Some(128);
+        storage.quarantine_bytes = Some(0);
+        storage.pinning_supported = Some(false);
+        storage.inflight_catalog_reservation_bytes = Some(256);
+        storage.inflight_repository_reservation_bytes = Some(128);
+        storage.repository_headroom_bytes = Some(1_043_200);
+        storage.catalog_headroom_bytes = Some(2_091_648);
+        storage.filesystem_headroom_bytes = Some(2_096_896);
+        storage.accounting_state = Some(SupportStorageAccountingState::Reconciled);
+        storage.maximum_repository_storage_bytes = Some(1_048_576);
+        storage.maximum_durable_catalog_bytes = Some(2_097_152);
+        storage.minimum_free_disk_bytes = Some(1_048_576);
+        storage.source_reservation_factor = Some(2);
+        storage.oracle_reservation_factor = Some(3);
+        storage.disk_margin_bytes = Some(3_145_728);
     }
 
     #[test]
@@ -3142,6 +3580,117 @@ mod tests {
             .clear();
         assert!(matches!(
             build_support_bundle_for_schema(&missing_languages, SupportBundleSchema::V6),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    #[test]
+    fn schema_v7_reconciles_storage_and_preserves_v6_compatibility() {
+        let mut input = production_input();
+        make_schema_v7_input(&mut input);
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V7)
+            .expect("reconciled schema v7 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory entry opens")
+            .read_to_end(&mut bytes)
+            .expect("inventory entry reads");
+        let inventory: SupportInventory =
+            serde_json::from_slice(&bytes).expect("inventory entry decodes");
+        assert_eq!(inventory.storage.total_storage_bytes, Some(5_248));
+        assert_eq!(inventory.storage.catalog_accounted_bytes, Some(5_248));
+        assert_eq!(inventory.storage.source_pool_bytes, Some(1_024));
+        assert_eq!(inventory.storage.shared_bytes, Some(0));
+        assert_eq!(
+            inventory.storage.accounting_state,
+            Some(SupportStorageAccountingState::Reconciled)
+        );
+        assert_eq!(
+            inventory.storage.admission_margin_bytes,
+            inventory.storage.repository_headroom_bytes
+        );
+
+        let mut leaked_v7 = input.clone();
+        leaked_v7.protocol_version = ProtocolVersion::V1_13;
+        leaked_v7
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .runtime
+            .protocol_minor = 13;
+        assert!(matches!(
+            build_support_bundle_for_schema(&leaked_v7, SupportBundleSchema::V6),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+        let mut corrupted = input.clone();
+        corrupted
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .storage
+            .total_storage_bytes = Some(5_249);
+        assert!(matches!(
+            build_support_bundle_for_schema(&corrupted, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut missing_catalog_total = input.clone();
+        missing_catalog_total
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .storage
+            .catalog_accounted_bytes = None;
+        assert!(matches!(
+            build_support_bundle_for_schema(&missing_catalog_total, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut impossible_catalog_total = input;
+        impossible_catalog_total
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .storage
+            .catalog_accounted_bytes = Some(5_247);
+        assert!(matches!(
+            build_support_bundle_for_schema(&impossible_catalog_total, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    #[test]
+    fn schema_v6_inventory_decodes_without_v7_fields() {
+        let mut input = production_input();
+        make_schema_v6_input(&mut input);
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V6)
+            .expect("schema v6 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory entry opens")
+            .read_to_end(&mut bytes)
+            .expect("inventory entry reads");
+        let inventory: SupportInventory =
+            serde_json::from_slice(&bytes).expect("v6 inventory decodes through current types");
+        assert_eq!(inventory.storage.accounting_state, None);
+        assert_eq!(inventory.storage.catalog_accounted_bytes, None);
+        assert_eq!(inventory.storage.source_pool_bytes, None);
+        assert_eq!(inventory.repositories[0].storage_bytes, None);
+
+        input
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .storage
+            .catalog_accounted_bytes = Some(0);
+        assert!(matches!(
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V6),
             Err(SupportBundleError::InvalidInventory)
         ));
     }
