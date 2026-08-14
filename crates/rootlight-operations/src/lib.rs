@@ -15,7 +15,7 @@ pub use repair::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, TryLockError},
     io,
     mem::size_of,
@@ -26,7 +26,7 @@ use std::{
 
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_error::PublicError;
-use rootlight_ids::{GenerationId, OperationId, RepositoryId};
+use rootlight_ids::{FactId, FileId, GenerationId, OperationId, RepositoryId};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction,
     config::DbConfig,
@@ -86,7 +86,8 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
 // safely ignore this namespaced retry intent without a rollback-breaking DDL change.
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const REPOSITORY_OPERATION_META_PREFIX: &str = "operation_repository_context/";
-const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 5;
+const VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 5;
+const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 6;
 const LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES: usize = 71;
 const VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 32;
@@ -96,6 +97,12 @@ const VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES + 2 + (11 * size_of::<u64>());
 const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES + size_of::<u64>();
+const MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES: usize = 16 * 1024;
+const MAX_REPOSITORY_FACT_WORK_GROUPS: usize = 32;
+const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES: usize = 16;
+const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES: usize = 128;
+const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
+const REPOSITORY_OPERATION_FACT_WORK_VERSION: u8 = 1;
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 // Older journals used this marker before `error_json` stored typed public errors.
@@ -327,8 +334,271 @@ impl RepositoryFallbackReason {
     }
 }
 
+/// Whether one incremental fact scope was rebuilt or reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryFactWorkDisposition {
+    /// The scope was selected for rebuilding.
+    Rebuild,
+    /// Existing work was retained after a complete dependency match.
+    Reuse,
+}
+
+impl RepositoryFactWorkDisposition {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Rebuild => 1,
+            Self::Reuse => 2,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1 => Ok(Self::Rebuild),
+            2 => Ok(Self::Reuse),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Source-free cause attributed to planned or normalized fact work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryFactWorkCause {
+    /// No committed parent generation existed.
+    InitialGeneration,
+    /// A declared dependency closure selected the scope.
+    DependencyClosure,
+    /// The complete dependency match retained the scope.
+    CompleteDependencyMatch,
+    /// Missing dependency evidence selected a repository-wide rebuild.
+    ConservativeFallback,
+    /// Generation ownership required fresh normalized facts.
+    GenerationBoundLowering,
+    /// Repository-wide resolution produced or retained normalized facts.
+    Resolution,
+}
+
+impl RepositoryFactWorkCause {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::InitialGeneration => 1,
+            Self::DependencyClosure => 2,
+            Self::CompleteDependencyMatch => 3,
+            Self::ConservativeFallback => 4,
+            Self::GenerationBoundLowering => 5,
+            Self::Resolution => 6,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1 => Ok(Self::InitialGeneration),
+            2 => Ok(Self::DependencyClosure),
+            3 => Ok(Self::CompleteDependencyMatch),
+            4 => Ok(Self::ConservativeFallback),
+            5 => Ok(Self::GenerationBoundLowering),
+            6 => Ok(Self::Resolution),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Logical domain selected by incremental planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryPlannedFactDomain {
+    /// Parsed syntax facts.
+    Syntax,
+    /// Public symbol surface facts.
+    PublicSurface,
+    /// Function or method body facts.
+    Body,
+    /// Name and type resolution facts.
+    Resolution,
+    /// Search projection facts.
+    Search,
+    /// Derived graph facts.
+    DerivedGraph,
+    /// Test facts.
+    Tests,
+    /// Service and route facts.
+    Services,
+    /// History-derived facts.
+    History,
+}
+
+impl RepositoryPlannedFactDomain {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Syntax => 1,
+            Self::PublicSurface => 2,
+            Self::Body => 3,
+            Self::Resolution => 4,
+            Self::Search => 5,
+            Self::DerivedGraph => 6,
+            Self::Tests => 7,
+            Self::Services => 8,
+            Self::History => 9,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1 => Ok(Self::Syntax),
+            2 => Ok(Self::PublicSurface),
+            3 => Ok(Self::Body),
+            4 => Ok(Self::Resolution),
+            5 => Ok(Self::Search),
+            6 => Ok(Self::DerivedGraph),
+            7 => Ok(Self::Tests),
+            8 => Ok(Self::Services),
+            9 => Ok(Self::History),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Normalized IR record domain completed by incremental construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryNormalizedFactDomain {
+    /// File records.
+    Files,
+    /// Entity records.
+    Entities,
+    /// Occurrence records.
+    Occurrences,
+    /// Relationship records.
+    Relations,
+    /// Provenance records.
+    Provenance,
+    /// Source-mapping records.
+    SourceMappings,
+    /// Diagnostic records.
+    Diagnostics,
+    /// Extension records.
+    Extensions,
+}
+
+impl RepositoryNormalizedFactDomain {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Files => 1,
+            Self::Entities => 2,
+            Self::Occurrences => 3,
+            Self::Relations => 4,
+            Self::Provenance => 5,
+            Self::SourceMappings => 6,
+            Self::Diagnostics => 7,
+            Self::Extensions => 8,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1 => Ok(Self::Files),
+            2 => Ok(Self::Entities),
+            3 => Ok(Self::Occurrences),
+            4 => Ok(Self::Relations),
+            5 => Ok(Self::Provenance),
+            6 => Ok(Self::SourceMappings),
+            7 => Ok(Self::Diagnostics),
+            8 => Ok(Self::Extensions),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Bounded canonical file identities affected by one fact-work group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryAffectedFileIds {
+    /// Exact number of distinct affected files.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    pub samples: Vec<FileId>,
+    /// Whether the sample contains every affected file identity.
+    pub complete: bool,
+}
+
+/// Bounded canonical analysis-unit identities affected by one fact-work group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryAffectedAnalysisUnitIds {
+    /// Exact number of distinct affected analysis units.
+    pub total: u64,
+    /// Canonical ascending identity sample backed by domain-separated fact IDs.
+    pub samples: Vec<FactId>,
+    /// Whether the sample contains every affected analysis-unit identity.
+    pub complete: bool,
+}
+
+/// One canonical logical work scope selected before fact construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPlannedFactWorkGroup {
+    /// Whether the planner selected rebuild or reuse.
+    pub disposition: RepositoryFactWorkDisposition,
+    /// Logical incremental fact domain.
+    pub domain: RepositoryPlannedFactDomain,
+    /// Source-free provider pass.
+    pub provider_pass: String,
+    /// Dependency or construction cause.
+    pub cause: RepositoryFactWorkCause,
+    /// Exact fact count when the phase can authoritatively provide it.
+    pub fact_count: Option<u64>,
+    /// Exact count and bounded identities for affected files.
+    pub affected_files: RepositoryAffectedFileIds,
+    /// Exact count and bounded identities for affected analysis units.
+    pub affected_analysis_units: RepositoryAffectedAnalysisUnitIds,
+}
+
+/// One canonical normalized record group completed by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryNormalizedFactWorkGroup {
+    /// Whether normalized records were rebuilt or reused.
+    pub disposition: RepositoryFactWorkDisposition,
+    /// Normalized IR record domain.
+    pub domain: RepositoryNormalizedFactDomain,
+    /// Source-free provider pass.
+    pub provider_pass: String,
+    /// Construction or verified-reuse cause.
+    pub cause: RepositoryFactWorkCause,
+    /// Exact normalized fact count.
+    pub fact_count: Option<u64>,
+    /// Exact count and bounded identities for affected files.
+    pub affected_files: RepositoryAffectedFileIds,
+    /// Exact count and bounded identities for affected analysis units.
+    pub affected_analysis_units: RepositoryAffectedAnalysisUnitIds,
+}
+
+/// Bounded planned fact-work groups and collection completeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPlannedFactWorkCollection {
+    /// Canonically ordered retained groups.
+    pub groups: Vec<RepositoryPlannedFactWorkGroup>,
+    /// Exact total number of groups before response bounding.
+    pub total_groups: u64,
+    /// Whether all groups are retained.
+    pub complete: bool,
+}
+
+/// Bounded normalized fact-work groups and collection completeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryNormalizedFactWorkCollection {
+    /// Canonically ordered retained groups.
+    pub groups: Vec<RepositoryNormalizedFactWorkGroup>,
+    /// Exact total number of groups before response bounding.
+    pub total_groups: u64,
+    /// Whether all groups are retained.
+    pub complete: bool,
+}
+
+/// Durable grouped evidence for planned and normalized incremental fact work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryIncrementalFactWorkEvidence {
+    /// Planned logical work groups.
+    pub planned: RepositoryPlannedFactWorkCollection,
+    /// Completed normalized record groups.
+    pub normalized: RepositoryNormalizedFactWorkCollection,
+}
+
 /// Durable source-free reuse, rebuild, I/O, and memory evidence for one index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryOperationEvidence {
     /// Construction strategy used by this operation.
     pub build_strategy: RepositoryBuildStrategy,
@@ -358,6 +628,8 @@ pub struct RepositoryOperationEvidence {
     pub owned_memory_bytes: u64,
     /// Durable bytes retained for the resulting immutable generation.
     pub retained_durable_bytes: u64,
+    /// Optional grouped incremental fact-work evidence.
+    pub fact_work: Option<RepositoryIncrementalFactWorkEvidence>,
 }
 
 /// Immutable repository context submitted atomically with repository-scoped work.
@@ -412,7 +684,7 @@ impl RepositoryOperationSubmission {
 }
 
 /// Durable repository context and live monotonic observations for one operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryOperationContext {
     /// Stable operation handle.
     pub operation: OperationId,
@@ -439,7 +711,7 @@ pub struct RepositoryOperationContext {
 }
 
 impl RepositoryOperationContext {
-    const fn submission(self) -> RepositoryOperationSubmission {
+    fn submission(self) -> RepositoryOperationSubmission {
         RepositoryOperationSubmission {
             repository: self.repository,
             parent_generation: self.parent_generation,
@@ -988,7 +1260,7 @@ impl OperationJournal {
         if let Some(context) = submission.repository_context {
             store_repository_operation_context(
                 &transaction,
-                RepositoryOperationContext {
+                &RepositoryOperationContext {
                     operation: submission.operation,
                     repository: context.repository,
                     parent_generation: context.parent_generation,
@@ -1097,7 +1369,7 @@ impl OperationJournal {
                 .ok_or(OperationError::InvalidSubmission)?;
             store_repository_operation_context(
                 &transaction,
-                RepositoryOperationContext {
+                &RepositoryOperationContext {
                     operation: submission.operation,
                     repository: context.repository,
                     parent_generation: context.parent_generation,
@@ -2551,7 +2823,7 @@ impl OperationJournal {
         }
         context.files_examined = next_files;
         context.bytes_examined = next_bytes;
-        store_repository_operation_context(&transaction, context)?;
+        store_repository_operation_context(&transaction, &context)?;
         let updated = transaction
             .execute(
                 "UPDATE operations SET revision = ?1
@@ -2610,7 +2882,7 @@ impl OperationJournal {
             None => {}
         }
         context.published_generation = Some(generation);
-        store_repository_operation_context(&transaction, context)?;
+        store_repository_operation_context(&transaction, &context)?;
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(context)
     }
@@ -2644,8 +2916,8 @@ impl OperationJournal {
         }
         let mut context = load_repository_operation_context(&transaction, operation)?
             .ok_or(OperationError::NotFound)?;
-        match context.evidence {
-            Some(existing) if existing != evidence => {
+        match &context.evidence {
+            Some(existing) if existing != &evidence => {
                 return Err(OperationError::SubmissionConflict);
             }
             Some(_) => {
@@ -2655,7 +2927,7 @@ impl OperationJournal {
             None => {}
         }
         context.evidence = Some(evidence);
-        store_repository_operation_context(&transaction, context)?;
+        store_repository_operation_context(&transaction, &context)?;
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(context)
     }
@@ -4274,7 +4546,685 @@ fn table_columns_named(
         .map_err(map_sqlite_error)
 }
 
-fn encode_repository_operation_context(context: RepositoryOperationContext) -> Vec<u8> {
+fn valid_repository_fact_work_provider_pass(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+}
+
+fn validate_repository_affected_ids<Id: Ord>(
+    total: u64,
+    samples: &[Id],
+    complete: bool,
+) -> Result<(), OperationError> {
+    if samples.len() > MAX_REPOSITORY_FACT_WORK_ID_SAMPLES
+        || !samples.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(OperationError::CorruptState);
+    }
+    let sample_count = u64::try_from(samples.len()).map_err(|_| OperationError::CorruptState)?;
+    if sample_count > total || complete != (sample_count == total) {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(())
+}
+
+fn validate_repository_fact_work_cause(
+    disposition: RepositoryFactWorkDisposition,
+    cause: RepositoryFactWorkCause,
+    normalized: bool,
+) -> Result<(), OperationError> {
+    match (disposition, cause, normalized) {
+        (
+            RepositoryFactWorkDisposition::Reuse,
+            RepositoryFactWorkCause::CompleteDependencyMatch,
+            _,
+        )
+        | (
+            RepositoryFactWorkDisposition::Rebuild,
+            RepositoryFactWorkCause::InitialGeneration
+            | RepositoryFactWorkCause::DependencyClosure
+            | RepositoryFactWorkCause::ConservativeFallback,
+            false,
+        )
+        | (
+            RepositoryFactWorkDisposition::Rebuild,
+            RepositoryFactWorkCause::GenerationBoundLowering | RepositoryFactWorkCause::Resolution,
+            true,
+        ) => Ok(()),
+        _ => Err(OperationError::CorruptState),
+    }
+}
+
+fn validate_repository_fact_work_collection(
+    retained_groups: usize,
+    total_groups: u64,
+    complete: bool,
+) -> Result<(), OperationError> {
+    if retained_groups > MAX_REPOSITORY_FACT_WORK_GROUPS {
+        return Err(OperationError::CorruptState);
+    }
+    let retained_groups =
+        u64::try_from(retained_groups).map_err(|_| OperationError::CorruptState)?;
+    if retained_groups > total_groups || complete != (retained_groups == total_groups) {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(())
+}
+
+fn validate_repository_operation_fact_work(
+    evidence: &RepositoryOperationEvidence,
+    fact_work: &RepositoryIncrementalFactWorkEvidence,
+) -> Result<(), OperationError> {
+    validate_repository_fact_work_collection(
+        fact_work.planned.groups.len(),
+        fact_work.planned.total_groups,
+        fact_work.planned.complete,
+    )?;
+    validate_repository_fact_work_collection(
+        fact_work.normalized.groups.len(),
+        fact_work.normalized.total_groups,
+        fact_work.normalized.complete,
+    )?;
+
+    let mut provider_passes = BTreeSet::new();
+    for group in &fact_work.planned.groups {
+        if !valid_repository_fact_work_provider_pass(&group.provider_pass)
+            || group.fact_count.is_some()
+        {
+            return Err(OperationError::CorruptState);
+        }
+        validate_repository_fact_work_cause(group.disposition, group.cause, false)?;
+        validate_repository_affected_ids(
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+        )?;
+        validate_repository_affected_ids(
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+        )?;
+        provider_passes.insert(group.provider_pass.as_str());
+    }
+    if !fact_work.planned.groups.windows(2).all(|pair| {
+        (
+            pair[0].disposition,
+            pair[0].domain,
+            pair[0].provider_pass.as_str(),
+            pair[0].cause,
+        ) < (
+            pair[1].disposition,
+            pair[1].domain,
+            pair[1].provider_pass.as_str(),
+            pair[1].cause,
+        )
+    }) {
+        return Err(OperationError::CorruptState);
+    }
+
+    let mut reused_facts = 0_u64;
+    let mut rebuilt_facts = 0_u64;
+    for group in &fact_work.normalized.groups {
+        if !valid_repository_fact_work_provider_pass(&group.provider_pass)
+            || !matches!(group.fact_count, Some(facts) if facts > 0)
+        {
+            return Err(OperationError::CorruptState);
+        }
+        validate_repository_fact_work_cause(group.disposition, group.cause, true)?;
+        validate_repository_affected_ids(
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+        )?;
+        validate_repository_affected_ids(
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+        )?;
+        provider_passes.insert(group.provider_pass.as_str());
+        let target = match group.disposition {
+            RepositoryFactWorkDisposition::Rebuild => &mut rebuilt_facts,
+            RepositoryFactWorkDisposition::Reuse => &mut reused_facts,
+        };
+        *target = target
+            .checked_add(group.fact_count.ok_or(OperationError::CorruptState)?)
+            .ok_or(OperationError::CorruptState)?;
+    }
+    if !fact_work.normalized.groups.windows(2).all(|pair| {
+        (
+            pair[0].disposition,
+            pair[0].domain,
+            pair[0].provider_pass.as_str(),
+            pair[0].cause,
+        ) < (
+            pair[1].disposition,
+            pair[1].domain,
+            pair[1].provider_pass.as_str(),
+            pair[1].cause,
+        )
+    }) || provider_passes.len() > MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES
+    {
+        return Err(OperationError::CorruptState);
+    }
+
+    if fact_work.normalized.complete {
+        if reused_facts != evidence.reused_facts || rebuilt_facts != evidence.rebuilt_facts {
+            return Err(OperationError::CorruptState);
+        }
+    } else if reused_facts > evidence.reused_facts || rebuilt_facts > evidence.rebuilt_facts {
+        return Err(OperationError::CorruptState);
+    }
+
+    let planned_groups = &fact_work.planned.groups;
+    let normalized_groups = &fact_work.normalized.groups;
+    match evidence.build_strategy {
+        RepositoryBuildStrategy::Initial => {
+            if evidence.fallback_reason.is_some()
+                || evidence.reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::InitialGeneration
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(OperationError::CorruptState);
+            }
+        }
+        RepositoryBuildStrategy::DependencyDirected => {
+            if evidence.fallback_reason.is_some()
+                || planned_groups.iter().any(|group| {
+                    group.disposition == RepositoryFactWorkDisposition::Rebuild
+                        && group.cause != RepositoryFactWorkCause::DependencyClosure
+                })
+            {
+                return Err(OperationError::CorruptState);
+            }
+        }
+        RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+            if evidence.fallback_reason.is_none()
+                || evidence.reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::ConservativeFallback
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(OperationError::CorruptState);
+            }
+        }
+        RepositoryBuildStrategy::RetainedGeneration => {
+            return Err(OperationError::CorruptState);
+        }
+    }
+    Ok(())
+}
+
+fn append_repository_fact_work_collection_header(
+    encoded: &mut Vec<u8>,
+    retained_groups: usize,
+    total_groups: u64,
+    complete: bool,
+) -> Result<(), OperationError> {
+    encoded.extend_from_slice(&total_groups.to_be_bytes());
+    encoded.push(u8::try_from(retained_groups).map_err(|_| OperationError::CorruptState)?);
+    encoded.push(u8::from(complete));
+    Ok(())
+}
+
+fn append_repository_fact_work_ids<Id>(
+    encoded: &mut Vec<u8>,
+    total: u64,
+    samples: &[Id],
+    complete: bool,
+    bytes: impl Fn(&Id) -> &[u8; 20],
+) -> Result<(), OperationError> {
+    encoded.extend_from_slice(&total.to_be_bytes());
+    encoded.push(u8::try_from(samples.len()).map_err(|_| OperationError::CorruptState)?);
+    encoded.push(u8::from(complete));
+    for sample in samples {
+        encoded.extend_from_slice(bytes(sample));
+    }
+    Ok(())
+}
+
+fn repository_fact_work_flags(
+    fact_count: Option<u64>,
+    affected_files_complete: bool,
+    affected_analysis_units_complete: bool,
+) -> u8 {
+    u8::from(fact_count.is_some())
+        | (u8::from(affected_files_complete) << 1)
+        | (u8::from(affected_analysis_units_complete) << 2)
+}
+
+fn encode_repository_operation_fact_work(
+    evidence: &RepositoryOperationEvidence,
+    fact_work: &RepositoryIncrementalFactWorkEvidence,
+) -> Result<Vec<u8>, OperationError> {
+    validate_repository_operation_fact_work(evidence, fact_work)?;
+    let provider_passes = fact_work
+        .planned
+        .groups
+        .iter()
+        .map(|group| group.provider_pass.as_str())
+        .chain(
+            fact_work
+                .normalized
+                .groups
+                .iter()
+                .map(|group| group.provider_pass.as_str()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let mut suffix = Vec::new();
+    suffix.push(REPOSITORY_OPERATION_FACT_WORK_VERSION);
+    suffix.extend_from_slice(&[0; size_of::<u16>()]);
+    suffix.push(u8::try_from(provider_passes.len()).map_err(|_| OperationError::CorruptState)?);
+    for provider_pass in &provider_passes {
+        suffix.push(u8::try_from(provider_pass.len()).map_err(|_| OperationError::CorruptState)?);
+        suffix.extend_from_slice(provider_pass.as_bytes());
+    }
+
+    append_repository_fact_work_collection_header(
+        &mut suffix,
+        fact_work.planned.groups.len(),
+        fact_work.planned.total_groups,
+        fact_work.planned.complete,
+    )?;
+    for group in &fact_work.planned.groups {
+        suffix.push(group.disposition.tag());
+        suffix.push(group.domain.tag());
+        suffix.push(
+            u8::try_from(
+                provider_passes
+                    .binary_search(&group.provider_pass.as_str())
+                    .map_err(|_| OperationError::CorruptState)?,
+            )
+            .map_err(|_| OperationError::CorruptState)?,
+        );
+        suffix.push(group.cause.tag());
+        suffix.push(repository_fact_work_flags(
+            group.fact_count,
+            group.affected_files.complete,
+            group.affected_analysis_units.complete,
+        ));
+        suffix.extend_from_slice(&group.fact_count.unwrap_or(0).to_be_bytes());
+        append_repository_fact_work_ids(
+            &mut suffix,
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+            |id| id.as_bytes(),
+        )?;
+        append_repository_fact_work_ids(
+            &mut suffix,
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+            |id| id.as_bytes(),
+        )?;
+    }
+
+    append_repository_fact_work_collection_header(
+        &mut suffix,
+        fact_work.normalized.groups.len(),
+        fact_work.normalized.total_groups,
+        fact_work.normalized.complete,
+    )?;
+    for group in &fact_work.normalized.groups {
+        suffix.push(group.disposition.tag());
+        suffix.push(group.domain.tag());
+        suffix.push(
+            u8::try_from(
+                provider_passes
+                    .binary_search(&group.provider_pass.as_str())
+                    .map_err(|_| OperationError::CorruptState)?,
+            )
+            .map_err(|_| OperationError::CorruptState)?,
+        );
+        suffix.push(group.cause.tag());
+        suffix.push(repository_fact_work_flags(
+            group.fact_count,
+            group.affected_files.complete,
+            group.affected_analysis_units.complete,
+        ));
+        suffix.extend_from_slice(&group.fact_count.unwrap_or(0).to_be_bytes());
+        append_repository_fact_work_ids(
+            &mut suffix,
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+            |id| id.as_bytes(),
+        )?;
+        append_repository_fact_work_ids(
+            &mut suffix,
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+            |id| id.as_bytes(),
+        )?;
+    }
+
+    if suffix.len() > MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES {
+        return Err(OperationError::CorruptState);
+    }
+    let payload_bytes = u16::try_from(suffix.len() - 3)
+        .map_err(|_| OperationError::CorruptState)?
+        .to_be_bytes();
+    suffix[1..3].copy_from_slice(&payload_bytes);
+    Ok(suffix)
+}
+
+struct RepositoryFactWorkDecoder<'a> {
+    encoded: &'a [u8],
+    position: usize,
+}
+
+impl<'a> RepositoryFactWorkDecoder<'a> {
+    const fn new(encoded: &'a [u8]) -> Self {
+        Self {
+            encoded,
+            position: 0,
+        }
+    }
+
+    fn read_bytes(&mut self, count: usize) -> Result<&'a [u8], OperationError> {
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or(OperationError::CorruptState)?;
+        let bytes = self
+            .encoded
+            .get(self.position..end)
+            .ok_or(OperationError::CorruptState)?;
+        self.position = end;
+        Ok(bytes)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, OperationError> {
+        self.read_bytes(1)
+            .and_then(|bytes| bytes.first().copied().ok_or(OperationError::CorruptState))
+    }
+
+    fn read_u16(&mut self) -> Result<u16, OperationError> {
+        Ok(u16::from_be_bytes(
+            self.read_bytes(size_of::<u16>())?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        ))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, OperationError> {
+        Ok(u64::from_be_bytes(
+            self.read_bytes(size_of::<u64>())?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        ))
+    }
+
+    fn is_finished(&self) -> bool {
+        self.position == self.encoded.len()
+    }
+}
+
+fn decode_repository_fact_work_files(
+    decoder: &mut RepositoryFactWorkDecoder<'_>,
+    expected_complete: bool,
+) -> Result<RepositoryAffectedFileIds, OperationError> {
+    let total = decoder.read_u64()?;
+    let sample_count = usize::from(decoder.read_u8()?);
+    let complete = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(OperationError::CorruptState),
+    };
+    if complete != expected_complete || sample_count > MAX_REPOSITORY_FACT_WORK_ID_SAMPLES {
+        return Err(OperationError::CorruptState);
+    }
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(sample_count)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..sample_count {
+        samples.push(FileId::from_bytes(
+            decoder
+                .read_bytes(20)?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        ));
+    }
+    Ok(RepositoryAffectedFileIds {
+        total,
+        samples,
+        complete,
+    })
+}
+
+fn decode_repository_fact_work_analysis_units(
+    decoder: &mut RepositoryFactWorkDecoder<'_>,
+    expected_complete: bool,
+) -> Result<RepositoryAffectedAnalysisUnitIds, OperationError> {
+    let total = decoder.read_u64()?;
+    let sample_count = usize::from(decoder.read_u8()?);
+    let complete = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(OperationError::CorruptState),
+    };
+    if complete != expected_complete || sample_count > MAX_REPOSITORY_FACT_WORK_ID_SAMPLES {
+        return Err(OperationError::CorruptState);
+    }
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(sample_count)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..sample_count {
+        samples.push(FactId::from_bytes(
+            decoder
+                .read_bytes(20)?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        ));
+    }
+    Ok(RepositoryAffectedAnalysisUnitIds {
+        total,
+        samples,
+        complete,
+    })
+}
+
+fn decode_repository_operation_fact_work(
+    encoded: &[u8],
+    evidence: &RepositoryOperationEvidence,
+) -> Result<RepositoryIncrementalFactWorkEvidence, OperationError> {
+    if encoded.len() > MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES {
+        return Err(OperationError::CorruptState);
+    }
+    let mut decoder = RepositoryFactWorkDecoder::new(encoded);
+    if decoder.read_u8()? != REPOSITORY_OPERATION_FACT_WORK_VERSION {
+        return Err(OperationError::CorruptState);
+    }
+    let payload_bytes = usize::from(decoder.read_u16()?);
+    if payload_bytes
+        != encoded
+            .len()
+            .checked_sub(3)
+            .ok_or(OperationError::CorruptState)?
+    {
+        return Err(OperationError::CorruptState);
+    }
+
+    let provider_pass_count = usize::from(decoder.read_u8()?);
+    if provider_pass_count > MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES {
+        return Err(OperationError::CorruptState);
+    }
+    let mut provider_passes = Vec::new();
+    provider_passes
+        .try_reserve_exact(provider_pass_count)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..provider_pass_count {
+        let byte_count = usize::from(decoder.read_u8()?);
+        let provider_pass = std::str::from_utf8(decoder.read_bytes(byte_count)?)
+            .map_err(|_| OperationError::CorruptState)?;
+        if !valid_repository_fact_work_provider_pass(provider_pass)
+            || provider_passes
+                .last()
+                .is_some_and(|previous: &String| previous.as_str() >= provider_pass)
+        {
+            return Err(OperationError::CorruptState);
+        }
+        provider_passes.push(provider_pass.to_owned());
+    }
+
+    let planned_total_groups = decoder.read_u64()?;
+    let planned_group_count = usize::from(decoder.read_u8()?);
+    let planned_complete = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(OperationError::CorruptState),
+    };
+    if planned_group_count > MAX_REPOSITORY_FACT_WORK_GROUPS {
+        return Err(OperationError::CorruptState);
+    }
+    let mut planned_groups = Vec::new();
+    planned_groups
+        .try_reserve_exact(planned_group_count)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..planned_group_count {
+        let disposition = RepositoryFactWorkDisposition::from_tag(decoder.read_u8()?)?;
+        let domain = RepositoryPlannedFactDomain::from_tag(decoder.read_u8()?)?;
+        let provider_pass = provider_passes
+            .get(usize::from(decoder.read_u8()?))
+            .cloned()
+            .ok_or(OperationError::CorruptState)?;
+        let cause = RepositoryFactWorkCause::from_tag(decoder.read_u8()?)?;
+        let flags = decoder.read_u8()?;
+        if flags & !0b111 != 0 {
+            return Err(OperationError::CorruptState);
+        }
+        let encoded_fact_count = decoder.read_u64()?;
+        let fact_count = if flags & 1 == 0 {
+            if encoded_fact_count != 0 {
+                return Err(OperationError::CorruptState);
+            }
+            None
+        } else {
+            Some(encoded_fact_count)
+        };
+        let affected_files = decode_repository_fact_work_files(&mut decoder, flags & 0b010 != 0)?;
+        let affected_analysis_units =
+            decode_repository_fact_work_analysis_units(&mut decoder, flags & 0b100 != 0)?;
+        planned_groups.push(RepositoryPlannedFactWorkGroup {
+            disposition,
+            domain,
+            provider_pass,
+            cause,
+            fact_count,
+            affected_files,
+            affected_analysis_units,
+        });
+    }
+
+    let normalized_total_groups = decoder.read_u64()?;
+    let normalized_group_count = usize::from(decoder.read_u8()?);
+    let normalized_complete = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(OperationError::CorruptState),
+    };
+    if normalized_group_count > MAX_REPOSITORY_FACT_WORK_GROUPS {
+        return Err(OperationError::CorruptState);
+    }
+    let mut normalized_groups = Vec::new();
+    normalized_groups
+        .try_reserve_exact(normalized_group_count)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..normalized_group_count {
+        let disposition = RepositoryFactWorkDisposition::from_tag(decoder.read_u8()?)?;
+        let domain = RepositoryNormalizedFactDomain::from_tag(decoder.read_u8()?)?;
+        let provider_pass = provider_passes
+            .get(usize::from(decoder.read_u8()?))
+            .cloned()
+            .ok_or(OperationError::CorruptState)?;
+        let cause = RepositoryFactWorkCause::from_tag(decoder.read_u8()?)?;
+        let flags = decoder.read_u8()?;
+        if flags & !0b111 != 0 {
+            return Err(OperationError::CorruptState);
+        }
+        let encoded_fact_count = decoder.read_u64()?;
+        let fact_count = if flags & 1 == 0 {
+            if encoded_fact_count != 0 {
+                return Err(OperationError::CorruptState);
+            }
+            None
+        } else {
+            Some(encoded_fact_count)
+        };
+        let affected_files = decode_repository_fact_work_files(&mut decoder, flags & 0b010 != 0)?;
+        let affected_analysis_units =
+            decode_repository_fact_work_analysis_units(&mut decoder, flags & 0b100 != 0)?;
+        normalized_groups.push(RepositoryNormalizedFactWorkGroup {
+            disposition,
+            domain,
+            provider_pass,
+            cause,
+            fact_count,
+            affected_files,
+            affected_analysis_units,
+        });
+    }
+    if !decoder.is_finished() {
+        return Err(OperationError::CorruptState);
+    }
+    let fact_work = RepositoryIncrementalFactWorkEvidence {
+        planned: RepositoryPlannedFactWorkCollection {
+            groups: planned_groups,
+            total_groups: planned_total_groups,
+            complete: planned_complete,
+        },
+        normalized: RepositoryNormalizedFactWorkCollection {
+            groups: normalized_groups,
+            total_groups: normalized_total_groups,
+            complete: normalized_complete,
+        },
+    };
+    let retained_provider_passes = fact_work
+        .planned
+        .groups
+        .iter()
+        .map(|group| group.provider_pass.as_str())
+        .chain(
+            fact_work
+                .normalized
+                .groups
+                .iter()
+                .map(|group| group.provider_pass.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    if retained_provider_passes.len() != provider_passes.len()
+        || !retained_provider_passes
+            .iter()
+            .zip(&provider_passes)
+            .all(|(retained, encoded)| *retained == encoded)
+    {
+        return Err(OperationError::CorruptState);
+    }
+    validate_repository_operation_fact_work(evidence, &fact_work)?;
+    Ok(fact_work)
+}
+
+fn encode_repository_operation_context(
+    context: &RepositoryOperationContext,
+) -> Result<Vec<u8>, OperationError> {
     let encoded_bytes = if context.evidence.is_some() {
         REPOSITORY_OPERATION_CONTEXT_BYTES
     } else if context.published_generation.is_some() {
@@ -4286,7 +5236,7 @@ fn encode_repository_operation_context(context: RepositoryOperationContext) -> V
     };
     let mut encoded = vec![0_u8; encoded_bytes];
     encoded[0] = if context.evidence.is_some() {
-        REPOSITORY_OPERATION_CONTEXT_VERSION
+        VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION
     } else if context.published_generation.is_some() {
         3
     } else if context.root_identity.is_some() {
@@ -4316,7 +5266,7 @@ fn encode_repository_operation_context(context: RepositoryOperationContext) -> V
     } else if let Some(root_identity) = context.root_identity {
         encoded[71..103].copy_from_slice(&root_identity);
     }
-    if let Some(evidence) = context.evidence {
+    if let Some(evidence) = &context.evidence {
         encoded[125] = evidence.build_strategy.tag();
         encoded[126] = evidence
             .fallback_reason
@@ -4341,25 +5291,35 @@ fn encode_repository_operation_context(context: RepositoryOperationContext) -> V
             let start = 127 + (index * size_of::<u64>());
             encoded[start..start + size_of::<u64>()].copy_from_slice(&value.to_be_bytes());
         }
+        if let Some(fact_work) = &evidence.fact_work {
+            // Version six changes only the discriminator and appends to the exact v5 prefix.
+            encoded[0] = REPOSITORY_OPERATION_CONTEXT_VERSION;
+            encoded.extend_from_slice(&encode_repository_operation_fact_work(evidence, fact_work)?);
+        }
     }
-    encoded
+    Ok(encoded)
 }
 
 fn decode_repository_operation_context(
     operation: OperationId,
     encoded: &[u8],
 ) -> Result<RepositoryOperationContext, OperationError> {
-    if !matches!(
+    let fixed_version = matches!(
         (encoded.first(), encoded.len()),
         (Some(&1), LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (Some(&2), VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (Some(&3), VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (Some(&4), VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (
-                Some(&REPOSITORY_OPERATION_CONTEXT_VERSION),
+                Some(&VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION),
                 REPOSITORY_OPERATION_CONTEXT_BYTES
             )
-    ) {
+    );
+    let version_six = encoded.first() == Some(&REPOSITORY_OPERATION_CONTEXT_VERSION)
+        && encoded.len() > REPOSITORY_OPERATION_CONTEXT_BYTES
+        && encoded.len()
+            <= REPOSITORY_OPERATION_CONTEXT_BYTES + MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES;
+    if !fixed_version && !version_six {
         return Err(OperationError::CorruptState);
     }
     let repository = RepositoryId::from_bytes(
@@ -4442,11 +5402,7 @@ fn decode_repository_operation_context(
             0 => None,
             tag => Some(RepositoryFallbackReason::from_tag(tag)?),
         };
-        let value_count = if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES {
-            12
-        } else {
-            11
-        };
+        let value_count = if encoded.first() != Some(&4) { 12 } else { 11 };
         let mut values = [0_u64; 12];
         for (index, value) in values.iter_mut().take(value_count).enumerate() {
             let start = 127 + (index * size_of::<u64>());
@@ -4456,7 +5412,7 @@ fn decode_repository_operation_context(
                     .map_err(|_| OperationError::CorruptState)?,
             );
         }
-        Some(RepositoryOperationEvidence {
+        let mut evidence = RepositoryOperationEvidence {
             build_strategy: RepositoryBuildStrategy::from_tag(encoded[125])?,
             fallback_reason,
             invalidated_units: values[0],
@@ -4471,7 +5427,15 @@ fn decode_repository_operation_context(
             reserved_memory_bytes: values[9],
             owned_memory_bytes: values[10],
             retained_durable_bytes: values[11],
-        })
+            fact_work: None,
+        };
+        if version_six {
+            evidence.fact_work = Some(decode_repository_operation_fact_work(
+                &encoded[REPOSITORY_OPERATION_CONTEXT_BYTES..],
+                &evidence,
+            )?);
+        }
+        Some(evidence)
     } else {
         None
     };
@@ -4492,9 +5456,9 @@ fn decode_repository_operation_context(
 
 fn store_repository_operation_context(
     connection: &Connection,
-    context: RepositoryOperationContext,
+    context: &RepositoryOperationContext,
 ) -> Result<(), OperationError> {
-    let encoded = encode_repository_operation_context(context);
+    let encoded = encode_repository_operation_context(context)?;
     connection
         .execute(
             "INSERT INTO application_meta(key, value)
@@ -5713,6 +6677,115 @@ mod tests {
         .expect("recovery context attaches")
     }
 
+    fn affected_file_ids(seed: u8) -> RepositoryAffectedFileIds {
+        RepositoryAffectedFileIds {
+            total: 1,
+            samples: vec![FileId::from_bytes([seed; 20])],
+            complete: true,
+        }
+    }
+
+    fn affected_analysis_unit_ids(seed: u8) -> RepositoryAffectedAnalysisUnitIds {
+        RepositoryAffectedAnalysisUnitIds {
+            total: 1,
+            samples: vec![FactId::from_bytes([seed; 20])],
+            complete: true,
+        }
+    }
+
+    fn sample_fact_work() -> RepositoryIncrementalFactWorkEvidence {
+        RepositoryIncrementalFactWorkEvidence {
+            planned: RepositoryPlannedFactWorkCollection {
+                groups: vec![
+                    RepositoryPlannedFactWorkGroup {
+                        disposition: RepositoryFactWorkDisposition::Rebuild,
+                        domain: RepositoryPlannedFactDomain::Body,
+                        provider_pass: "lower".to_owned(),
+                        cause: RepositoryFactWorkCause::DependencyClosure,
+                        fact_count: None,
+                        affected_files: affected_file_ids(1),
+                        affected_analysis_units: affected_analysis_unit_ids(11),
+                    },
+                    RepositoryPlannedFactWorkGroup {
+                        disposition: RepositoryFactWorkDisposition::Reuse,
+                        domain: RepositoryPlannedFactDomain::Syntax,
+                        provider_pass: "parse".to_owned(),
+                        cause: RepositoryFactWorkCause::CompleteDependencyMatch,
+                        fact_count: None,
+                        affected_files: affected_file_ids(2),
+                        affected_analysis_units: affected_analysis_unit_ids(12),
+                    },
+                ],
+                total_groups: 2,
+                complete: true,
+            },
+            normalized: RepositoryNormalizedFactWorkCollection {
+                groups: vec![
+                    RepositoryNormalizedFactWorkGroup {
+                        disposition: RepositoryFactWorkDisposition::Rebuild,
+                        domain: RepositoryNormalizedFactDomain::Entities,
+                        provider_pass: "lower".to_owned(),
+                        cause: RepositoryFactWorkCause::GenerationBoundLowering,
+                        fact_count: Some(11),
+                        affected_files: affected_file_ids(1),
+                        affected_analysis_units: affected_analysis_unit_ids(11),
+                    },
+                    RepositoryNormalizedFactWorkGroup {
+                        disposition: RepositoryFactWorkDisposition::Reuse,
+                        domain: RepositoryNormalizedFactDomain::Files,
+                        provider_pass: "parse".to_owned(),
+                        cause: RepositoryFactWorkCause::CompleteDependencyMatch,
+                        fact_count: Some(7),
+                        affected_files: affected_file_ids(2),
+                        affected_analysis_units: affected_analysis_unit_ids(12),
+                    },
+                ],
+                total_groups: 2,
+                complete: true,
+            },
+        }
+    }
+
+    fn sample_repository_evidence(
+        fact_work: Option<RepositoryIncrementalFactWorkEvidence>,
+    ) -> RepositoryOperationEvidence {
+        RepositoryOperationEvidence {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 1,
+            changed_inputs: 1,
+            changed_files: 1,
+            reused_files: 1,
+            rebuilt_files: 1,
+            reused_facts: 7,
+            rebuilt_facts: 11,
+            referenced_bytes: 1_024,
+            newly_written_bytes: 2_048,
+            reserved_memory_bytes: 4_096,
+            owned_memory_bytes: 3_072,
+            retained_durable_bytes: 1_536,
+            fact_work,
+        }
+    }
+
+    fn sample_repository_context(
+        evidence: Option<RepositoryOperationEvidence>,
+    ) -> RepositoryOperationContext {
+        RepositoryOperationContext {
+            operation: operation(90),
+            repository: RepositoryId::from_bytes([1; 16]),
+            parent_generation: Some(GenerationId::from_bytes([2; 20])),
+            started_unix_ms: 0x0102_0304_0506_0708,
+            estimated_disk_bytes: 0x1112_1314_1516_1718,
+            mode: RepositoryOperationMode::Auto,
+            root_identity: Some([4; 32]),
+            files_examined: 0x2122_2324_2526_2728,
+            bytes_examined: 0x3132_3334_3536_3738,
+            published_generation: Some(GenerationId::from_bytes([5; 20])),
+            evidence,
+        }
+    }
+
     fn insert_generated_operations(connection: &Connection, rows: usize, state: OperationState) {
         let rows = i64::try_from(rows).expect("test row count fits SQLite");
         connection
@@ -6067,6 +7140,454 @@ mod tests {
     }
 
     #[test]
+    fn repository_context_versions_one_through_five_keep_golden_bytes() {
+        use sha2::Digest as _;
+
+        let mut version_one = sample_repository_context(None);
+        version_one.root_identity = None;
+        version_one.published_generation = None;
+        let mut version_two = version_one.clone();
+        version_two.root_identity = Some([4; 32]);
+        let mut version_three = version_two.clone();
+        version_three.published_generation = Some(GenerationId::from_bytes([5; 20]));
+        let version_five = sample_repository_context(Some(RepositoryOperationEvidence {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 1,
+            changed_inputs: 2,
+            changed_files: 3,
+            reused_files: 4,
+            rebuilt_files: 5,
+            reused_facts: 6,
+            rebuilt_facts: 7,
+            referenced_bytes: 8,
+            newly_written_bytes: 9,
+            reserved_memory_bytes: 10,
+            owned_memory_bytes: 11,
+            retained_durable_bytes: 12,
+            fact_work: None,
+        }));
+
+        let version_one = encode_repository_operation_context(&version_one).expect("v1 encodes");
+        let version_two = encode_repository_operation_context(&version_two).expect("v2 encodes");
+        let version_three =
+            encode_repository_operation_context(&version_three).expect("v3 encodes");
+        let version_five = encode_repository_operation_context(&version_five).expect("v5 encodes");
+        let mut version_four =
+            version_five[..VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES].to_vec();
+        version_four[0] = 4;
+
+        for (encoded, expected_bytes, expected_digest) in [
+            (
+                &version_one,
+                LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES,
+                "36438364555f3339d9c7151aaeb55bcd3c3eea7a2026e4789ee26147909b8b4b",
+            ),
+            (
+                &version_two,
+                VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES,
+                "5965f6dbbbd7139275b919497e029158e988ef3cbd353c0bcd99163440dab1ee",
+            ),
+            (
+                &version_three,
+                VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES,
+                "f82bb4fdbdb18e1396abd170ac5e9739ca0e12278500e0e3927210f3d9f9f9c9",
+            ),
+            (
+                &version_four,
+                VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES,
+                "cc00e573c2ffbc3bc6f8fc0d9cbe7d478df5807e3a2923db2fdd62b86fe87c1f",
+            ),
+            (
+                &version_five,
+                REPOSITORY_OPERATION_CONTEXT_BYTES,
+                "fa60b8b7472e006f6ad459c53cce69b40d85ec7e030391295a833b14db995d98",
+            ),
+        ] {
+            assert_eq!(encoded.len(), expected_bytes);
+            let digest = Sha256::digest(encoded);
+            let observed_digest = digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(observed_digest, expected_digest);
+            let decoded = decode_repository_operation_context(operation(90), encoded)
+                .expect("golden repository context decodes");
+            assert!(
+                decoded
+                    .evidence
+                    .as_ref()
+                    .is_none_or(|evidence| evidence.fact_work.is_none())
+            );
+        }
+
+        let decoded_version_five =
+            decode_repository_operation_context(operation(90), &version_five)
+                .expect("v5 context decodes");
+        assert_eq!(
+            encode_repository_operation_context(&decoded_version_five)
+                .expect("decoded v5 context re-encodes"),
+            version_five
+        );
+    }
+
+    #[test]
+    fn repository_fact_work_tags_are_frozen() {
+        assert_eq!(
+            [
+                RepositoryFactWorkDisposition::Rebuild.tag(),
+                RepositoryFactWorkDisposition::Reuse.tag(),
+            ],
+            [1, 2]
+        );
+        assert_eq!(
+            [
+                RepositoryFactWorkCause::InitialGeneration.tag(),
+                RepositoryFactWorkCause::DependencyClosure.tag(),
+                RepositoryFactWorkCause::CompleteDependencyMatch.tag(),
+                RepositoryFactWorkCause::ConservativeFallback.tag(),
+                RepositoryFactWorkCause::GenerationBoundLowering.tag(),
+                RepositoryFactWorkCause::Resolution.tag(),
+            ],
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            [
+                RepositoryPlannedFactDomain::Syntax.tag(),
+                RepositoryPlannedFactDomain::PublicSurface.tag(),
+                RepositoryPlannedFactDomain::Body.tag(),
+                RepositoryPlannedFactDomain::Resolution.tag(),
+                RepositoryPlannedFactDomain::Search.tag(),
+                RepositoryPlannedFactDomain::DerivedGraph.tag(),
+                RepositoryPlannedFactDomain::Tests.tag(),
+                RepositoryPlannedFactDomain::Services.tag(),
+                RepositoryPlannedFactDomain::History.tag(),
+            ],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+        assert_eq!(
+            [
+                RepositoryNormalizedFactDomain::Files.tag(),
+                RepositoryNormalizedFactDomain::Entities.tag(),
+                RepositoryNormalizedFactDomain::Occurrences.tag(),
+                RepositoryNormalizedFactDomain::Relations.tag(),
+                RepositoryNormalizedFactDomain::Provenance.tag(),
+                RepositoryNormalizedFactDomain::SourceMappings.tag(),
+                RepositoryNormalizedFactDomain::Diagnostics.tag(),
+                RepositoryNormalizedFactDomain::Extensions.tag(),
+            ],
+            [1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn grouped_repository_evidence_roundtrips_and_survives_restart() {
+        let fact_work = sample_fact_work();
+        let evidence = sample_repository_evidence(Some(fact_work));
+        let context = sample_repository_context(Some(evidence.clone()));
+        let encoded = encode_repository_operation_context(&context).expect("v6 context encodes");
+        let v5_context = sample_repository_context(Some(sample_repository_evidence(None)));
+        let v5_encoded =
+            encode_repository_operation_context(&v5_context).expect("v5 context encodes");
+        assert_eq!(encoded[0], REPOSITORY_OPERATION_CONTEXT_VERSION);
+        assert_eq!(
+            &encoded[1..REPOSITORY_OPERATION_CONTEXT_BYTES],
+            &v5_encoded[1..REPOSITORY_OPERATION_CONTEXT_BYTES]
+        );
+        assert_eq!(
+            decode_repository_operation_context(context.operation, &encoded)
+                .expect("v6 context decodes"),
+            context
+        );
+
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(91);
+        let repository = RepositoryId::from_bytes([6; 16]);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(repository_submission(operation, repository, 4_000))
+                .expect("repository operation submits");
+            journal
+                .start_execution(operation)
+                .expect("repository operation starts");
+            journal
+                .transition(operation, OperationState::Succeeded, None)
+                .expect("repository operation succeeds");
+            let recorded = journal
+                .record_repository_evidence(operation, evidence.clone())
+                .expect("grouped evidence persists");
+            assert_eq!(recorded.evidence, Some(evidence.clone()));
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let restored = reopened
+            .repository_operation_context(operation)
+            .expect("grouped evidence survives restart");
+        assert_eq!(restored.evidence, Some(evidence));
+        reopened
+            .quick_check()
+            .expect("v6 repository metadata validates");
+    }
+
+    #[test]
+    fn grouped_repository_evidence_rejects_noncanonical_wire_values() {
+        let context =
+            sample_repository_context(Some(sample_repository_evidence(Some(sample_fact_work()))));
+        let encoded = encode_repository_operation_context(&context).expect("v6 context encodes");
+        let suffix = &encoded[REPOSITORY_OPERATION_CONTEXT_BYTES..];
+        assert_eq!(suffix[3], 2);
+        assert_eq!(&suffix[5..10], b"lower");
+        assert_eq!(&suffix[11..16], b"parse");
+        assert_eq!(suffix[24], 2);
+        assert_eq!(suffix[26], RepositoryFactWorkDisposition::Rebuild.tag());
+
+        let mut corruptions = Vec::new();
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES] = 2;
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 1..REPOSITORY_OPERATION_CONTEXT_BYTES + 3]
+            .copy_from_slice(&0_u16.to_be_bytes());
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted.truncate(corrupted.len() - 1);
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted.push(0);
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted.resize(
+            REPOSITORY_OPERATION_CONTEXT_BYTES + MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES + 1,
+            0,
+        );
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 11..REPOSITORY_OPERATION_CONTEXT_BYTES + 16]
+            .copy_from_slice(b"lower");
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 28] = 1;
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 184] = 1;
+        corruptions.push(corrupted);
+
+        for strategy in [1, 3, 4] {
+            let mut corrupted = encoded.clone();
+            corrupted[125] = strategy;
+            corruptions.push(corrupted);
+        }
+        let mut corrupted = encoded.clone();
+        corrupted[126] = RepositoryFallbackReason::MissingDependencyDeclaration.tag();
+        corruptions.push(corrupted);
+
+        for (offset, value) in [(26, 9), (27, 10), (28, 16), (29, 9), (30, 0x80)] {
+            let mut corrupted = encoded.clone();
+            corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + offset] = value;
+            corruptions.push(corrupted);
+        }
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 31..REPOSITORY_OPERATION_CONTEXT_BYTES + 39]
+            .copy_from_slice(&1_u64.to_be_bytes());
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 48] = 0;
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded.clone();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 16..REPOSITORY_OPERATION_CONTEXT_BYTES + 24]
+            .copy_from_slice(&3_u64.to_be_bytes());
+        corruptions.push(corrupted);
+
+        let mut corrupted = encoded;
+        let first_group = corrupted
+            [REPOSITORY_OPERATION_CONTEXT_BYTES + 26..REPOSITORY_OPERATION_CONTEXT_BYTES + 99]
+            .to_vec();
+        let second_group = corrupted
+            [REPOSITORY_OPERATION_CONTEXT_BYTES + 99..REPOSITORY_OPERATION_CONTEXT_BYTES + 172]
+            .to_vec();
+        corrupted[REPOSITORY_OPERATION_CONTEXT_BYTES + 26..REPOSITORY_OPERATION_CONTEXT_BYTES + 99]
+            .copy_from_slice(&second_group);
+        corrupted
+            [REPOSITORY_OPERATION_CONTEXT_BYTES + 99..REPOSITORY_OPERATION_CONTEXT_BYTES + 172]
+            .copy_from_slice(&first_group);
+        corruptions.push(corrupted);
+
+        for corrupted in corruptions {
+            assert!(matches!(
+                decode_repository_operation_context(context.operation, &corrupted),
+                Err(OperationError::CorruptState)
+            ));
+        }
+    }
+
+    #[test]
+    fn grouped_repository_evidence_rejects_invalid_models() {
+        let evidence = sample_repository_evidence(Some(sample_fact_work()));
+        let fact_work = evidence
+            .fact_work
+            .as_ref()
+            .expect("sample grouped evidence exists");
+        validate_repository_operation_fact_work(&evidence, fact_work)
+            .expect("sample grouped evidence is valid");
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].provider_pass = "path/shaped".to_owned();
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].provider_pass =
+            "x".repeat(MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES + 1);
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups.swap(0, 1);
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].affected_analysis_units.samples =
+            (1..=5).map(|seed| FactId::from_bytes([seed; 20])).collect();
+        invalid.planned.groups[0].affected_analysis_units.total = 5;
+        invalid.planned.groups[0].affected_analysis_units.complete = true;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].fact_count = Some(1);
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.normalized.groups[0].fact_count = None;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.normalized.groups[0].fact_count = Some(12);
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].cause = RepositoryFactWorkCause::Resolution;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups[0].affected_files.samples =
+            vec![FileId::from_bytes([1; 20]), FileId::from_bytes([1; 20])];
+        invalid.planned.groups[0].affected_files.total = 2;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.complete = false;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups = vec![invalid.planned.groups[0].clone(); 33];
+        invalid.planned.total_groups = 33;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut invalid = fact_work.clone();
+        invalid.planned.groups = (0..17)
+            .map(|index| {
+                let mut group = fact_work.planned.groups[0].clone();
+                group.provider_pass = format!("pass{index:02}");
+                group
+            })
+            .collect();
+        invalid.planned.total_groups = 17;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &invalid),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut incomplete = fact_work.clone();
+        incomplete.normalized.total_groups = 3;
+        incomplete.normalized.complete = false;
+        validate_repository_operation_fact_work(&evidence, &incomplete)
+            .expect("bounded normalized sums may be below aggregates");
+
+        let mut overflow = fact_work.clone();
+        overflow.normalized.groups[0].fact_count = Some(u64::MAX);
+        let mut additional_group = overflow.normalized.groups[0].clone();
+        additional_group.provider_pass = "lower2".to_owned();
+        additional_group.fact_count = Some(1);
+        overflow.normalized.groups.insert(1, additional_group);
+        overflow.normalized.total_groups = 3;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&evidence, &overflow),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut initial_evidence = evidence.clone();
+        initial_evidence.build_strategy = RepositoryBuildStrategy::Initial;
+        initial_evidence.reused_facts = 0;
+        let mut initial = fact_work.clone();
+        initial.planned.groups.truncate(1);
+        initial.planned.groups[0].cause = RepositoryFactWorkCause::InitialGeneration;
+        initial.planned.total_groups = 1;
+        initial.normalized.groups.truncate(1);
+        initial.normalized.total_groups = 1;
+        validate_repository_operation_fact_work(&initial_evidence, &initial)
+            .expect("initial grouped evidence is valid");
+
+        let mut conservative_evidence = initial_evidence.clone();
+        conservative_evidence.build_strategy =
+            RepositoryBuildStrategy::ConservativeRepositoryRebuild;
+        conservative_evidence.fallback_reason =
+            Some(RepositoryFallbackReason::MissingDependencyDeclaration);
+        let mut conservative = initial;
+        conservative.planned.groups[0].cause = RepositoryFactWorkCause::ConservativeFallback;
+        validate_repository_operation_fact_work(&conservative_evidence, &conservative)
+            .expect("conservative grouped evidence is valid");
+
+        let mut retained_evidence = conservative_evidence;
+        retained_evidence.build_strategy = RepositoryBuildStrategy::RetainedGeneration;
+        retained_evidence.fallback_reason = None;
+        assert!(matches!(
+            validate_repository_operation_fact_work(&retained_evidence, &conservative),
+            Err(OperationError::CorruptState)
+        ));
+    }
+
+    #[test]
     fn published_generation_projection_survives_restart_independently() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -6087,6 +7608,7 @@ mod tests {
             reserved_memory_bytes: 16_384,
             owned_memory_bytes: 12_288,
             retained_durable_bytes: 6_144,
+            fact_work: None,
         };
         {
             let journal = OperationJournal::open(&path).expect("journal opens");
@@ -6123,12 +7645,12 @@ mod tests {
                 Err(OperationError::SubmissionConflict)
             ));
             let recorded = journal
-                .record_repository_evidence(operation, evidence)
+                .record_repository_evidence(operation, evidence.clone())
                 .expect("repository evidence persists");
-            assert_eq!(recorded.evidence, Some(evidence));
+            assert_eq!(recorded.evidence, Some(evidence.clone()));
             assert_eq!(
                 journal
-                    .record_repository_evidence(operation, evidence)
+                    .record_repository_evidence(operation, evidence.clone())
                     .expect("matching evidence is idempotent"),
                 recorded
             );
@@ -6137,7 +7659,7 @@ mod tests {
                     operation,
                     RepositoryOperationEvidence {
                         rebuilt_facts: 74,
-                        ..evidence
+                        ..evidence.clone()
                     }
                 ),
                 Err(OperationError::SubmissionConflict)
