@@ -98,10 +98,12 @@ const VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
 const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES + size_of::<u64>();
 const MAX_REPOSITORY_OPERATION_FACT_WORK_BYTES: usize = 16 * 1024;
-const MAX_REPOSITORY_FACT_WORK_GROUPS: usize = 32;
+/// Maximum fact-work groups retained in each durable collection.
+pub const MAX_REPOSITORY_FACT_WORK_GROUPS: usize = 32;
 const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES: usize = 16;
 const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES: usize = 128;
-const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
+/// Maximum canonical identities sampled by one durable fact-work group.
+pub const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
 const REPOSITORY_OPERATION_FACT_WORK_VERSION: u8 = 1;
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];

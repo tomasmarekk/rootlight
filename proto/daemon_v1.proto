@@ -491,6 +491,106 @@ message RepositoryOperationStatusRequest {
   optional uint64 after_revision = 5;
 }
 
+// Work disposition selected before or retained after normalized fact construction.
+enum RepositoryFactWorkDisposition {
+  REPOSITORY_FACT_WORK_DISPOSITION_UNSPECIFIED = 0;
+  REPOSITORY_FACT_WORK_REBUILD = 1;
+  REPOSITORY_FACT_WORK_REUSE = 2;
+}
+
+// Source-free cause attributed to planned or completed incremental work.
+enum RepositoryFactWorkCause {
+  REPOSITORY_FACT_WORK_CAUSE_UNSPECIFIED = 0;
+  REPOSITORY_FACT_WORK_INITIAL_GENERATION = 1;
+  REPOSITORY_FACT_WORK_DEPENDENCY_CLOSURE = 2;
+  REPOSITORY_FACT_WORK_COMPLETE_DEPENDENCY_MATCH = 3;
+  REPOSITORY_FACT_WORK_CONSERVATIVE_FALLBACK = 4;
+  REPOSITORY_FACT_WORK_GENERATION_BOUND_LOWERING = 5;
+  REPOSITORY_FACT_WORK_RESOLUTION = 6;
+}
+
+// Logical dependency-closure domain selected before fact construction.
+enum RepositoryPlannedFactDomain {
+  REPOSITORY_PLANNED_FACT_DOMAIN_UNSPECIFIED = 0;
+  REPOSITORY_PLANNED_FACT_SYNTAX = 1;
+  REPOSITORY_PLANNED_FACT_PUBLIC_SURFACE = 2;
+  REPOSITORY_PLANNED_FACT_BODY = 3;
+  REPOSITORY_PLANNED_FACT_RESOLUTION = 4;
+  REPOSITORY_PLANNED_FACT_SEARCH = 5;
+  REPOSITORY_PLANNED_FACT_DERIVED_GRAPH = 6;
+  REPOSITORY_PLANNED_FACT_TESTS = 7;
+  REPOSITORY_PLANNED_FACT_SERVICES = 8;
+  REPOSITORY_PLANNED_FACT_HISTORY = 9;
+}
+
+// Normalized IR record domain retained or rebuilt by one operation.
+enum RepositoryNormalizedFactDomain {
+  REPOSITORY_NORMALIZED_FACT_DOMAIN_UNSPECIFIED = 0;
+  REPOSITORY_NORMALIZED_FACT_FILES = 1;
+  REPOSITORY_NORMALIZED_FACT_ENTITIES = 2;
+  REPOSITORY_NORMALIZED_FACT_OCCURRENCES = 3;
+  REPOSITORY_NORMALIZED_FACT_RELATIONS = 4;
+  REPOSITORY_NORMALIZED_FACT_PROVENANCE = 5;
+  REPOSITORY_NORMALIZED_FACT_SOURCE_MAPPINGS = 6;
+  REPOSITORY_NORMALIZED_FACT_DIAGNOSTICS = 7;
+  REPOSITORY_NORMALIZED_FACT_EXTENSIONS = 8;
+}
+
+// Canonical bounded file identities affected by one fact-work group.
+message RepositoryAffectedFileIds {
+  uint64 total = 1;
+  bool complete = 2;
+  repeated rootlight.common.v1.FileId samples = 3;
+}
+
+// Canonical bounded analysis-unit identities affected by one fact-work group.
+message RepositoryAffectedAnalysisUnitIds {
+  uint64 total = 1;
+  bool complete = 2;
+  repeated rootlight.common.v1.AnalysisUnitId samples = 3;
+}
+
+// One source-free logical scope selected by incremental planning.
+message RepositoryPlannedFactWorkGroup {
+  RepositoryFactWorkDisposition disposition = 1;
+  RepositoryPlannedFactDomain domain = 2;
+  string provider_pass = 3;
+  RepositoryFactWorkCause cause = 4;
+  RepositoryAffectedFileIds affected_files = 5;
+  RepositoryAffectedAnalysisUnitIds affected_analysis_units = 6;
+}
+
+// One normalized IR partition retained or rebuilt by the operation.
+message RepositoryNormalizedFactWorkGroup {
+  RepositoryFactWorkDisposition disposition = 1;
+  RepositoryNormalizedFactDomain domain = 2;
+  string provider_pass = 3;
+  RepositoryFactWorkCause cause = 4;
+  uint64 fact_count = 5;
+  RepositoryAffectedFileIds affected_files = 6;
+  RepositoryAffectedAnalysisUnitIds affected_analysis_units = 7;
+}
+
+// Bounded canonical prefix of every planned fact-work group.
+message RepositoryPlannedFactWorkCollection {
+  repeated RepositoryPlannedFactWorkGroup groups = 1;
+  uint64 total_groups = 2;
+  bool complete = 3;
+}
+
+// Bounded canonical prefix of every completed normalized fact-work group.
+message RepositoryNormalizedFactWorkCollection {
+  repeated RepositoryNormalizedFactWorkGroup groups = 1;
+  uint64 total_groups = 2;
+  bool complete = 3;
+}
+
+// Source-free grouped incremental evidence retained by the operation journal.
+message RepositoryIncrementalFactWorkEvidence {
+  RepositoryPlannedFactWorkCollection planned = 1;
+  RepositoryNormalizedFactWorkCollection normalized = 2;
+}
+
 // Returns journal state plus durable first-slice publication metadata.
 message RepositoryOperationStatusResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -523,6 +623,8 @@ message RepositoryOperationStatusResponse {
   optional bytes invalidation_trace_json = 25;
   // Durable state retained for the resulting immutable generation.
   uint64 retained_durable_bytes = 26;
+  // Bounded source-free grouped incremental evidence.
+  optional RepositoryIncrementalFactWorkEvidence fact_work = 27;
 }
 
 // Operation-local construction strategy retained with the durable receipt.

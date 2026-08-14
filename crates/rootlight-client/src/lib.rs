@@ -15,7 +15,9 @@ pub use graph_projection::{
     GraphProjectionId, GraphProjectionPage, GraphProjectionRequest, GraphProjectionView,
     GraphRelationKind,
 };
-pub use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+pub use rootlight_ids::{
+    ContentHash, FactId, FileId, GenerationId, OperationId, RepositoryId, SymbolId,
+};
 pub use update::{
     ACTIVE_VERSION_FILE, ArtifactMetadata, CandidateHealthCheck, CandidateHealthError,
     DetachedArtifactSignature, DetachedUpdateSignature, FilesystemUpdateError,
@@ -56,12 +58,14 @@ use rootlight_observability::{
     OperationsSummary as SupportOperations, PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
     SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
-    SUPPORT_BUNDLE_SCHEMA_VERSION_V5, SUPPORT_BUNDLE_SCHEMA_VERSION_V6, SUPPORT_ENTRY_NAMES,
-    SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5,
-    SUPPORT_ENTRY_NAMES_V6, SupportBundleInput, SupportBundleSchema, SupportChecksumStatus,
-    SupportInventory, SupportManifest, SupportOperationKind, SupportOperationState,
-    SupportOperationsV4, SupportStorageAccountingState, SupportTerminalOperation,
-    TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot, build_support_bundle_for_schema,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V5, SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V7, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
+    SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5, SUPPORT_ENTRY_NAMES_V6,
+    SUPPORT_ENTRY_NAMES_V7, SUPPORT_ENTRY_NAMES_V8, SupportBundleInput, SupportBundleSchema,
+    SupportChecksumStatus, SupportInventory, SupportManifest, SupportOperationKind,
+    SupportOperationState, SupportOperationsV4, SupportStorageAccountingState,
+    SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
+    build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -103,7 +107,11 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "support.bundle.v5",
     "support.bundle.v6",
     "support.bundle.v7",
+    "support.bundle.v8",
 ];
+// Negotiation failures are emitted before a protocol minor exists, so their
+// remediation set must remain decodable by the last pre-action contract.
+const PRE_NEGOTIATION_PUBLIC_ERROR_MINOR: u32 = 14;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
@@ -129,6 +137,11 @@ const MAX_REPOSITORY_CATALOG_LANGUAGES: usize = 64;
 const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
 const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
 const MAX_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 1_042;
+const GROUPED_FACT_WORK_PROTOCOL_MINOR: u32 = 15;
+const MAX_REPOSITORY_FACT_WORK_GROUPS: usize = 32;
+const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
+const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES: usize = 16;
+const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES: usize = 128;
 
 /// Current total-order encoding used by repository catalog pages.
 pub const REPOSITORY_CATALOG_SORT_VERSION: u32 = 1;
@@ -877,6 +890,169 @@ pub enum RepositoryFallbackReason {
     ClosureWorkExceeded,
 }
 
+/// Whether one incremental fact scope was rebuilt or reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryFactWorkDisposition {
+    /// The operation constructed fresh normalized records for this scope.
+    Rebuild,
+    /// Verified generation-neutral records were rebound without lowering again.
+    Reuse,
+}
+
+/// Source-free reason attributed to one incremental fact-work group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryFactWorkCause {
+    /// No committed parent generation existed.
+    InitialGeneration,
+    /// The dependency closure selected this rebuild scope.
+    DependencyClosure,
+    /// The dependency graph proved this scope reusable.
+    CompleteDependencyMatch,
+    /// Missing dependency evidence required conservative rebuilding.
+    ConservativeFallback,
+    /// Generation ownership required fresh lowering.
+    GenerationBoundLowering,
+    /// Repository-wide resolution completed the records.
+    Resolution,
+}
+
+/// Logical domain selected by incremental planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryPlannedFactDomain {
+    /// Parsed syntax facts.
+    Syntax,
+    /// Public symbol surface facts.
+    PublicSurface,
+    /// Function or method body facts.
+    Body,
+    /// Name and type resolution facts.
+    Resolution,
+    /// Search projection facts.
+    Search,
+    /// Derived graph facts.
+    DerivedGraph,
+    /// Test facts.
+    Tests,
+    /// Service and route facts.
+    Services,
+    /// History-derived facts.
+    History,
+}
+
+/// Normalized IR record domain completed by incremental construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryNormalizedFactDomain {
+    /// File records.
+    Files,
+    /// Entity records.
+    Entities,
+    /// Occurrence records.
+    Occurrences,
+    /// Relationship records.
+    Relations,
+    /// Provenance records.
+    Provenance,
+    /// Source-mapping records.
+    SourceMappings,
+    /// Diagnostic records.
+    Diagnostics,
+    /// Extension records.
+    Extensions,
+}
+
+/// Exact count and bounded canonical sample of affected file identities.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryAffectedFileIds {
+    /// Exact number of distinct affected files.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    pub samples: Vec<FileId>,
+    /// Whether the sample includes every affected file.
+    pub complete: bool,
+}
+
+/// Exact count and bounded canonical sample of affected analysis units.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryAffectedAnalysisUnitIds {
+    /// Exact number of distinct affected analysis units.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    pub samples: Vec<FactId>,
+    /// Whether the sample includes every affected analysis unit.
+    pub complete: bool,
+}
+
+/// One source-free logical work scope selected before fact construction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryPlannedFactWorkGroup {
+    /// Whether the planner selected rebuild or reuse.
+    pub disposition: RepositoryFactWorkDisposition,
+    /// Logical incremental fact domain.
+    pub domain: RepositoryPlannedFactDomain,
+    /// Source-free provider pass.
+    pub provider_pass: String,
+    /// Dependency or construction cause.
+    pub cause: RepositoryFactWorkCause,
+    /// Exact count and bounded identities for affected files.
+    pub affected_files: RepositoryAffectedFileIds,
+    /// Exact count and bounded identities for affected analysis units.
+    pub affected_analysis_units: RepositoryAffectedAnalysisUnitIds,
+}
+
+/// One normalized IR partition retained or rebuilt by the operation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryNormalizedFactWorkGroup {
+    /// Whether normalized records were rebuilt or reused.
+    pub disposition: RepositoryFactWorkDisposition,
+    /// Normalized IR record domain.
+    pub domain: RepositoryNormalizedFactDomain,
+    /// Source-free provider pass.
+    pub provider_pass: String,
+    /// Construction or verified-reuse cause.
+    pub cause: RepositoryFactWorkCause,
+    /// Exact normalized record count.
+    pub fact_count: u64,
+    /// Exact count and bounded identities for affected files.
+    pub affected_files: RepositoryAffectedFileIds,
+    /// Exact count and bounded identities for affected analysis units.
+    pub affected_analysis_units: RepositoryAffectedAnalysisUnitIds,
+}
+
+/// Bounded planned fact-work groups and collection completeness.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryPlannedFactWorkCollection {
+    /// Canonically ordered retained groups.
+    pub groups: Vec<RepositoryPlannedFactWorkGroup>,
+    /// Exact total number of groups before response bounding.
+    pub total_groups: u64,
+    /// Whether every group is retained.
+    pub complete: bool,
+}
+
+/// Bounded normalized fact-work groups and collection completeness.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryNormalizedFactWorkCollection {
+    /// Canonically ordered retained groups.
+    pub groups: Vec<RepositoryNormalizedFactWorkGroup>,
+    /// Exact total number of groups before response bounding.
+    pub total_groups: u64,
+    /// Whether every group is retained.
+    pub complete: bool,
+}
+
+/// Durable grouped evidence for planned and normalized incremental fact work.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryIncrementalFactWorkEvidence {
+    /// Planned logical work groups.
+    pub planned: RepositoryPlannedFactWorkCollection,
+    /// Completed normalized record groups.
+    pub normalized: RepositoryNormalizedFactWorkCollection,
+}
+
 /// Durable source-free incremental and generation-resource evidence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryOperationEvidence {
@@ -910,6 +1086,8 @@ pub struct RepositoryOperationEvidence {
     pub retained_durable_bytes: u64,
     /// Bounded canonical JSON for the source-free invalidation trace.
     pub invalidation_trace_json: Option<Vec<u8>>,
+    /// Bounded grouped planned and completed normalized fact work.
+    pub fact_work: Option<RepositoryIncrementalFactWorkEvidence>,
 }
 
 /// Durable repository-index operation state and bounded evidence.
@@ -3172,11 +3350,12 @@ impl Client {
     ///
     /// Returns [`ClientError`] for unavailable protocol support or malformed results.
     pub fn diagnostics_quick(&self) -> Result<DiagnosticsQuick, ClientError> {
-        match self.request(daemon::request_envelope::Request::DiagnosticsQuick(
-            daemon::DiagnosticsQuickRequest {},
-        ))? {
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            daemon::request_envelope::Request::DiagnosticsQuick(daemon::DiagnosticsQuickRequest {}),
+        )?;
+        match response {
             daemon::response_envelope::Response::DiagnosticsQuick(response) => {
-                parse_diagnostics_quick(response)
+                parse_diagnostics_quick_for_minor(response, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3198,17 +3377,17 @@ impl Client {
         &self,
         timeout: RequestTimeout,
     ) -> Result<DiagnosticsQuick, ClientError> {
-        match self
-            .request_async(
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(
                 daemon::request_envelope::Request::DiagnosticsQuick(
                     daemon::DiagnosticsQuickRequest {},
                 ),
                 timeout,
             )
-            .await?
-        {
+            .await?;
+        match response {
             daemon::response_envelope::Response::DiagnosticsQuick(response) => {
-                parse_diagnostics_quick(response)
+                parse_diagnostics_quick_for_minor(response, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3459,9 +3638,15 @@ impl Client {
         request: daemon::OperationSubmitRequest,
     ) -> Result<OperationStatus, ClientError> {
         let operation = parse_operation(request.operation.clone())?;
-        match self.request(daemon::request_envelope::Request::OperationSubmit(request))? {
+        let (response, selected_protocol_minor) = self
+            .request_with_protocol(daemon::request_envelope::Request::OperationSubmit(request))?;
+        match response {
             daemon::response_envelope::Response::OperationSubmit(response) => {
-                parse_expected_operation_status(response.operation, operation)
+                parse_expected_operation_status_for_minor(
+                    response.operation,
+                    operation,
+                    selected_protocol_minor,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3473,13 +3658,18 @@ impl Client {
     ///
     /// Returns [`ClientError`] for invalid or error responses.
     pub fn operation_status(&self, operation: OperationId) -> Result<OperationStatus, ClientError> {
-        match self.request(daemon::request_envelope::Request::OperationStatus(
-            daemon::OperationStatusRequest {
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            daemon::request_envelope::Request::OperationStatus(daemon::OperationStatusRequest {
                 operation: Some(operation_to_wire(operation)),
-            },
-        ))? {
+            }),
+        )?;
+        match response {
             daemon::response_envelope::Response::OperationStatus(response) => {
-                parse_expected_operation_status(response.operation, operation)
+                parse_expected_operation_status_for_minor(
+                    response.operation,
+                    operation,
+                    selected_protocol_minor,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3494,14 +3684,19 @@ impl Client {
         &self,
         operation: OperationId,
     ) -> Result<(bool, OperationStatus), ClientError> {
-        match self.request(daemon::request_envelope::Request::OperationCancel(
-            daemon::OperationCancelRequest {
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            daemon::request_envelope::Request::OperationCancel(daemon::OperationCancelRequest {
                 operation: Some(operation_to_wire(operation)),
-            },
-        ))? {
+            }),
+        )?;
+        match response {
             daemon::response_envelope::Response::OperationCancel(response) => Ok((
                 response.accepted,
-                parse_expected_operation_status(response.operation, operation)?,
+                parse_expected_operation_status_for_minor(
+                    response.operation,
+                    operation,
+                    selected_protocol_minor,
+                )?,
             )),
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3620,9 +3815,17 @@ impl Client {
     ) -> Result<RepositoryOperationStatus, ClientError> {
         let request =
             build_repository_operation_status_request(operation, action, wait_ms, after_revision)?;
-        match self.request_with_options(request, operation_status_request_options(wait_ms)?)? {
+        let (response, selected_protocol_minor) = self.request_with_protocol_and_options(
+            request,
+            operation_status_request_options(wait_ms)?,
+        )?;
+        match response {
             daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
-                parse_repository_operation_status(response, operation)
+                parse_repository_operation_status_for_minor(
+                    response,
+                    operation,
+                    selected_protocol_minor,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3650,8 +3853,8 @@ impl Client {
         after_revision: Option<u64>,
         timeout: RequestTimeout,
     ) -> Result<RepositoryOperationStatus, ClientError> {
-        match self
-            .request_async(
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(
                 build_repository_operation_status_request(
                     operation,
                     action,
@@ -3660,10 +3863,14 @@ impl Client {
                 )?,
                 timeout,
             )
-            .await?
-        {
+            .await?;
+        match response {
             daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
-                parse_repository_operation_status(response, operation)
+                parse_repository_operation_status_for_minor(
+                    response,
+                    operation,
+                    selected_protocol_minor,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -6670,7 +6877,10 @@ impl Client {
         let response = read_response(codec, &mut stream)?;
         match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
-                Err(ClientError::Public(Box::new(parse_public_error(error)?)))
+                Err(ClientError::Public(Box::new(parse_public_error_for_minor(
+                    error,
+                    selected_protocol_minor,
+                )?)))
             }
             response => Ok((response, selected_protocol_minor)),
         }
@@ -6776,7 +6986,10 @@ impl Client {
         wait_for_peer_close_async(&mut stream).await?;
         match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
-                Err(ClientError::Public(Box::new(parse_public_error(error)?)))
+                Err(ClientError::Public(Box::new(parse_public_error_for_minor(
+                    error,
+                    selected_protocol_minor,
+                )?)))
             }
             response => Ok((response, selected_protocol_minor)),
         }
@@ -7479,7 +7692,10 @@ fn validate_server_hello(
         return Err(ClientError::NonceMismatch);
     }
     if let Some(error) = hello.error.clone() {
-        return Err(ClientError::Public(Box::new(parse_public_error(error)?)));
+        return Err(ClientError::Public(Box::new(parse_public_error_for_minor(
+            error,
+            PRE_NEGOTIATION_PUBLIC_ERROR_MINOR,
+        )?)));
     }
     let selected = hello
         .selected_protocol
@@ -7653,8 +7869,9 @@ fn parse_resource_pressure(
     }
 }
 
-fn parse_diagnostics_quick(
+fn parse_diagnostics_quick_for_minor(
     response: daemon::DiagnosticsQuickResponse,
+    selected_protocol_minor: u32,
 ) -> Result<DiagnosticsQuick, ClientError> {
     if response.schema_version != 1 || response.results.len() != 1 {
         return Err(ClientError::InvalidDiagnostics);
@@ -7685,7 +7902,10 @@ fn parse_diagnostics_quick(
         catalog: DiagnosticResult {
             outcome,
             duration_ms: result.duration_ms,
-            error: result.error.map(parse_public_error).transpose()?,
+            error: result
+                .error
+                .map(|error| parse_public_error_for_minor(error, selected_protocol_minor))
+                .transpose()?,
         },
     })
 }
@@ -7694,8 +7914,10 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 14 {
+    let expected_schema = if selected_protocol_minor >= 15 {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 14 {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V7
     } else if selected_protocol_minor >= 13 {
         SUPPORT_BUNDLE_SCHEMA_VERSION_V6
     } else if selected_protocol_minor >= 12 {
@@ -7754,9 +7976,9 @@ fn validate_support_archive(
         SUPPORT_BUNDLE_SCHEMA_VERSION_V3 => &SUPPORT_ENTRY_NAMES_V3,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4 => &SUPPORT_ENTRY_NAMES_V4,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => &SUPPORT_ENTRY_NAMES_V5,
-        SUPPORT_BUNDLE_SCHEMA_VERSION_V6 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => {
-            &SUPPORT_ENTRY_NAMES_V6
-        }
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V6 => &SUPPORT_ENTRY_NAMES_V6,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V7 => &SUPPORT_ENTRY_NAMES_V7,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V8,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -7796,6 +8018,7 @@ fn validate_support_archive(
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
             | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         let operations: SupportOperationsV4 =
@@ -7814,6 +8037,7 @@ fn validate_support_archive(
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
             | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         Some(decode_support_entry(&entries, "inventory.json")?)
@@ -7861,8 +8085,10 @@ fn validate_support_archive(
             SupportBundleSchema::V5
         } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V6 {
             SupportBundleSchema::V6
-        } else {
+        } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V7 {
             SupportBundleSchema::V7
+        } else {
+            SupportBundleSchema::V8
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -7921,7 +8147,9 @@ fn validate_support_semantics(
         rootlight_observability::OMITTED_DATA_CLASSES_V5.as_slice()
     } else if matches!(
         schema_version,
-        SUPPORT_BUNDLE_SCHEMA_VERSION_V6 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V6
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+            | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         rootlight_observability::OMITTED_DATA_CLASSES_V6.as_slice()
     } else {
@@ -7950,6 +8178,7 @@ fn validate_support_semantics(
             SUPPORT_BUNDLE_SCHEMA_VERSION_V4
                 | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
                 | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
+                | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
                 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         ) != inventory.is_some()
     {
@@ -7968,6 +8197,7 @@ fn validate_support_semantics(
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4
         | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
         | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
+        | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
         | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
             "diagnostics/quick.json",
             "health.json",
@@ -8108,8 +8338,9 @@ fn parse_daemon_lifecycle(value: i32) -> Result<DaemonLifecycle, ClientError> {
     }
 }
 
-fn parse_operation_status(
+fn parse_operation_status_for_minor(
     status: Option<daemon::OperationStatus>,
+    selected_protocol_minor: u32,
 ) -> Result<OperationStatus, ClientError> {
     let status = status.ok_or(ClientError::MissingOperation)?;
     let operation = parse_operation(status.operation)?;
@@ -8150,7 +8381,10 @@ fn parse_operation_status(
         daemon::RecoveryClass::LeaseExpired => RecoveryClass::LeaseExpired,
         daemon::RecoveryClass::Unspecified => return Err(ClientError::InvalidRecoveryClass),
     };
-    let error = status.error.map(parse_public_error).transpose()?;
+    let error = status
+        .error
+        .map(|error| parse_public_error_for_minor(error, selected_protocol_minor))
+        .transpose()?;
     if (state == OperationState::Failed) != error.is_some()
         || error
             .as_ref()
@@ -8202,11 +8436,20 @@ fn operation_to_wire(operation: OperationId) -> common::OperationId {
     }
 }
 
+#[cfg(test)]
 fn parse_expected_operation_status(
     status: Option<daemon::OperationStatus>,
     expected: OperationId,
 ) -> Result<OperationStatus, ClientError> {
-    let status = parse_operation_status(status)?;
+    parse_expected_operation_status_for_minor(status, expected, CURRENT_PROTOCOL_MINOR)
+}
+
+fn parse_expected_operation_status_for_minor(
+    status: Option<daemon::OperationStatus>,
+    expected: OperationId,
+    selected_protocol_minor: u32,
+) -> Result<OperationStatus, ClientError> {
+    let status = parse_operation_status_for_minor(status, selected_protocol_minor)?;
     if status.operation != expected {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -8841,13 +9084,30 @@ fn valid_index_diagnostic_message(value: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 fn parse_repository_operation_status(
     response: daemon::RepositoryOperationStatusResponse,
     expected_operation: OperationId,
 ) -> Result<RepositoryOperationStatus, ClientError> {
+    parse_repository_operation_status_for_minor(
+        response,
+        expected_operation,
+        CURRENT_PROTOCOL_MINOR,
+    )
+}
+
+fn parse_repository_operation_status_for_minor(
+    response: daemon::RepositoryOperationStatusResponse,
+    expected_operation: OperationId,
+    selected_protocol_minor: u32,
+) -> Result<RepositoryOperationStatus, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let evidence_wire = RepositoryOperationEvidenceWire::from(&response);
-    let operation = parse_expected_operation_status(response.operation, expected_operation)?;
+    let operation = parse_expected_operation_status_for_minor(
+        response.operation,
+        expected_operation,
+        selected_protocol_minor,
+    )?;
     if !matches!(
         operation.kind,
         OperationKind::RepositoryIndex | OperationKind::Recovery
@@ -8862,8 +9122,12 @@ fn parse_repository_operation_status(
         .semantic_operation
         .map(|operation| parse_operation(Some(operation)))
         .transpose()?;
-    let evidence =
-        parse_repository_operation_evidence(operation.kind, operation.state, evidence_wire)?;
+    let evidence = parse_repository_operation_evidence(
+        operation.kind,
+        operation.state,
+        evidence_wire,
+        selected_protocol_minor,
+    )?;
     let index_stage =
         parse_repository_index_stage(response.index_stage, operation.state, operation.stage)?;
     let coherent = match (operation.kind, operation.state) {
@@ -8953,6 +9217,7 @@ struct RepositoryOperationEvidenceWire {
     owned_memory_bytes: u64,
     retained_durable_bytes: u64,
     invalidation_trace_json: Option<Vec<u8>>,
+    fact_work: Option<daemon::RepositoryIncrementalFactWorkEvidence>,
 }
 
 impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvidenceWire {
@@ -8973,6 +9238,7 @@ impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvi
             owned_memory_bytes: response.owned_memory_bytes,
             retained_durable_bytes: response.retained_durable_bytes,
             invalidation_trace_json: response.invalidation_trace_json.clone(),
+            fact_work: response.fact_work.clone(),
         }
     }
 }
@@ -8981,7 +9247,11 @@ fn parse_repository_operation_evidence(
     kind: OperationKind,
     state: OperationState,
     response: RepositoryOperationEvidenceWire,
+    selected_protocol_minor: u32,
 ) -> Result<Option<RepositoryOperationEvidence>, ClientError> {
+    if selected_protocol_minor < GROUPED_FACT_WORK_PROTOCOL_MINOR && response.fact_work.is_some() {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     let counters = [
         response.invalidated_units,
         response.changed_inputs,
@@ -8999,6 +9269,7 @@ fn parse_repository_operation_evidence(
     if response.build_strategy == daemon::RepositoryBuildStrategy::Unspecified as i32 {
         return if response.fallback_reason.is_none()
             && response.invalidation_trace_json.is_none()
+            && response.fact_work.is_none()
             && counters.iter().all(|counter| *counter == 0)
         {
             Ok(None)
@@ -9053,6 +9324,18 @@ fn parse_repository_operation_evidence(
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let fact_work = response
+        .fact_work
+        .map(|fact_work| {
+            parse_repository_incremental_fact_work(
+                fact_work,
+                response.reused_facts,
+                response.rebuilt_facts,
+                build_strategy,
+                fallback_reason,
+            )
+        })
+        .transpose()?;
     Ok(Some(RepositoryOperationEvidence {
         build_strategy,
         fallback_reason,
@@ -9069,7 +9352,431 @@ fn parse_repository_operation_evidence(
         owned_memory_bytes: response.owned_memory_bytes,
         retained_durable_bytes: response.retained_durable_bytes,
         invalidation_trace_json: response.invalidation_trace_json,
+        fact_work,
     }))
+}
+
+fn parse_repository_incremental_fact_work(
+    response: daemon::RepositoryIncrementalFactWorkEvidence,
+    reused_facts: u64,
+    rebuilt_facts: u64,
+    build_strategy: RepositoryBuildStrategy,
+    fallback_reason: Option<RepositoryFallbackReason>,
+) -> Result<RepositoryIncrementalFactWorkEvidence, ClientError> {
+    let planned = response
+        .planned
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    let normalized = response
+        .normalized
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    validate_fact_work_collection(planned.groups.len(), planned.total_groups, planned.complete)?;
+    validate_fact_work_collection(
+        normalized.groups.len(),
+        normalized.total_groups,
+        normalized.complete,
+    )?;
+
+    let planned_groups = planned
+        .groups
+        .into_iter()
+        .map(parse_planned_fact_work_group)
+        .collect::<Result<Vec<_>, _>>()?;
+    let normalized_groups = normalized
+        .groups
+        .into_iter()
+        .map(parse_normalized_fact_work_group)
+        .collect::<Result<Vec<_>, _>>()?;
+    if !planned_groups.windows(2).all(|pair| {
+        (
+            pair[0].disposition,
+            pair[0].domain,
+            pair[0].provider_pass.as_str(),
+            pair[0].cause,
+        ) < (
+            pair[1].disposition,
+            pair[1].domain,
+            pair[1].provider_pass.as_str(),
+            pair[1].cause,
+        )
+    }) || !normalized_groups.windows(2).all(|pair| {
+        (
+            pair[0].disposition,
+            pair[0].domain,
+            pair[0].provider_pass.as_str(),
+            pair[0].cause,
+        ) < (
+            pair[1].disposition,
+            pair[1].domain,
+            pair[1].provider_pass.as_str(),
+            pair[1].cause,
+        )
+    }) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+
+    let provider_passes = planned_groups
+        .iter()
+        .map(|group| group.provider_pass.as_str())
+        .chain(
+            normalized_groups
+                .iter()
+                .map(|group| group.provider_pass.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    if provider_passes.len() > MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+
+    let retained_reused_facts =
+        sum_normalized_fact_work(&normalized_groups, RepositoryFactWorkDisposition::Reuse)?;
+    let retained_rebuilt_facts =
+        sum_normalized_fact_work(&normalized_groups, RepositoryFactWorkDisposition::Rebuild)?;
+    if normalized.complete {
+        if retained_reused_facts != reused_facts || retained_rebuilt_facts != rebuilt_facts {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+    } else if retained_reused_facts > reused_facts || retained_rebuilt_facts > rebuilt_facts {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+
+    match build_strategy {
+        RepositoryBuildStrategy::Initial => {
+            if fallback_reason.is_some()
+                || reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::InitialGeneration
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        }
+        RepositoryBuildStrategy::DependencyDirected => {
+            if fallback_reason.is_some()
+                || planned_groups.iter().any(|group| {
+                    group.disposition == RepositoryFactWorkDisposition::Rebuild
+                        && group.cause != RepositoryFactWorkCause::DependencyClosure
+                })
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        }
+        RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+            if fallback_reason.is_none()
+                || reused_facts != 0
+                || planned_groups.iter().any(|group| {
+                    group.disposition != RepositoryFactWorkDisposition::Rebuild
+                        || group.cause != RepositoryFactWorkCause::ConservativeFallback
+                })
+                || normalized_groups
+                    .iter()
+                    .any(|group| group.disposition != RepositoryFactWorkDisposition::Rebuild)
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        }
+        RepositoryBuildStrategy::RetainedGeneration => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+    }
+
+    Ok(RepositoryIncrementalFactWorkEvidence {
+        planned: RepositoryPlannedFactWorkCollection {
+            groups: planned_groups,
+            total_groups: planned.total_groups,
+            complete: planned.complete,
+        },
+        normalized: RepositoryNormalizedFactWorkCollection {
+            groups: normalized_groups,
+            total_groups: normalized.total_groups,
+            complete: normalized.complete,
+        },
+    })
+}
+
+fn validate_fact_work_collection(
+    retained_groups: usize,
+    total_groups: u64,
+    complete: bool,
+) -> Result<(), ClientError> {
+    let retained_groups =
+        u64::try_from(retained_groups).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    if retained_groups > MAX_REPOSITORY_FACT_WORK_GROUPS as u64
+        || retained_groups > total_groups
+        || complete != (retained_groups == total_groups)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(())
+}
+
+fn parse_planned_fact_work_group(
+    group: daemon::RepositoryPlannedFactWorkGroup,
+) -> Result<RepositoryPlannedFactWorkGroup, ClientError> {
+    let disposition = parse_fact_work_disposition(group.disposition)?;
+    let cause = parse_fact_work_cause(group.cause)?;
+    validate_fact_work_cause(disposition, cause, false)?;
+    if !valid_fact_work_provider_pass(&group.provider_pass) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(RepositoryPlannedFactWorkGroup {
+        disposition,
+        domain: parse_planned_fact_domain(group.domain)?,
+        provider_pass: group.provider_pass,
+        cause,
+        affected_files: parse_affected_files(group.affected_files)?,
+        affected_analysis_units: parse_affected_analysis_units(group.affected_analysis_units)?,
+    })
+}
+
+fn parse_normalized_fact_work_group(
+    group: daemon::RepositoryNormalizedFactWorkGroup,
+) -> Result<RepositoryNormalizedFactWorkGroup, ClientError> {
+    let disposition = parse_fact_work_disposition(group.disposition)?;
+    let cause = parse_fact_work_cause(group.cause)?;
+    validate_fact_work_cause(disposition, cause, true)?;
+    if group.fact_count == 0 || !valid_fact_work_provider_pass(&group.provider_pass) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(RepositoryNormalizedFactWorkGroup {
+        disposition,
+        domain: parse_normalized_fact_domain(group.domain)?,
+        provider_pass: group.provider_pass,
+        cause,
+        fact_count: group.fact_count,
+        affected_files: parse_affected_files(group.affected_files)?,
+        affected_analysis_units: parse_affected_analysis_units(group.affected_analysis_units)?,
+    })
+}
+
+fn parse_affected_files(
+    affected: Option<daemon::RepositoryAffectedFileIds>,
+) -> Result<RepositoryAffectedFileIds, ClientError> {
+    let affected = affected.ok_or(ClientError::InvalidResponseCorrelation)?;
+    let samples = affected
+        .samples
+        .into_iter()
+        .map(|sample| parse_file(Some(sample)))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_affected_ids(affected.total, &samples, affected.complete)?;
+    Ok(RepositoryAffectedFileIds {
+        total: affected.total,
+        samples,
+        complete: affected.complete,
+    })
+}
+
+fn parse_affected_analysis_units(
+    affected: Option<daemon::RepositoryAffectedAnalysisUnitIds>,
+) -> Result<RepositoryAffectedAnalysisUnitIds, ClientError> {
+    let affected = affected.ok_or(ClientError::InvalidResponseCorrelation)?;
+    let samples = affected
+        .samples
+        .into_iter()
+        .map(|sample| {
+            let bytes: [u8; 20] = sample
+                .value
+                .try_into()
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+            Ok(FactId::from_bytes(bytes))
+        })
+        .collect::<Result<Vec<_>, ClientError>>()?;
+    validate_affected_ids(affected.total, &samples, affected.complete)?;
+    Ok(RepositoryAffectedAnalysisUnitIds {
+        total: affected.total,
+        samples,
+        complete: affected.complete,
+    })
+}
+
+fn validate_affected_ids<Id: Ord>(
+    total: u64,
+    samples: &[Id],
+    complete: bool,
+) -> Result<(), ClientError> {
+    let sample_count =
+        u64::try_from(samples.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    if samples.len() > MAX_REPOSITORY_FACT_WORK_ID_SAMPLES
+        || !samples.windows(2).all(|pair| pair[0] < pair[1])
+        || sample_count > total
+        || complete != (sample_count == total)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(())
+}
+
+fn valid_fact_work_provider_pass(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+}
+
+fn validate_fact_work_cause(
+    disposition: RepositoryFactWorkDisposition,
+    cause: RepositoryFactWorkCause,
+    normalized: bool,
+) -> Result<(), ClientError> {
+    if matches!(
+        (disposition, cause, normalized),
+        (
+            RepositoryFactWorkDisposition::Reuse,
+            RepositoryFactWorkCause::CompleteDependencyMatch,
+            _
+        ) | (
+            RepositoryFactWorkDisposition::Rebuild,
+            RepositoryFactWorkCause::InitialGeneration
+                | RepositoryFactWorkCause::DependencyClosure
+                | RepositoryFactWorkCause::ConservativeFallback,
+            false
+        ) | (
+            RepositoryFactWorkDisposition::Rebuild,
+            RepositoryFactWorkCause::GenerationBoundLowering | RepositoryFactWorkCause::Resolution,
+            true
+        )
+    ) {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidResponseCorrelation)
+    }
+}
+
+fn sum_normalized_fact_work(
+    groups: &[RepositoryNormalizedFactWorkGroup],
+    disposition: RepositoryFactWorkDisposition,
+) -> Result<u64, ClientError> {
+    groups
+        .iter()
+        .filter(|group| group.disposition == disposition)
+        .try_fold(0_u64, |total, group| {
+            total
+                .checked_add(group.fact_count)
+                .ok_or(ClientError::InvalidResponseCorrelation)
+        })
+}
+
+fn parse_fact_work_disposition(
+    disposition: i32,
+) -> Result<RepositoryFactWorkDisposition, ClientError> {
+    match daemon::RepositoryFactWorkDisposition::try_from(disposition)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryFactWorkDisposition::RepositoryFactWorkRebuild => {
+            Ok(RepositoryFactWorkDisposition::Rebuild)
+        }
+        daemon::RepositoryFactWorkDisposition::RepositoryFactWorkReuse => {
+            Ok(RepositoryFactWorkDisposition::Reuse)
+        }
+        daemon::RepositoryFactWorkDisposition::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
+}
+
+fn parse_fact_work_cause(cause: i32) -> Result<RepositoryFactWorkCause, ClientError> {
+    match daemon::RepositoryFactWorkCause::try_from(cause)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkInitialGeneration => {
+            Ok(RepositoryFactWorkCause::InitialGeneration)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkDependencyClosure => {
+            Ok(RepositoryFactWorkCause::DependencyClosure)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkCompleteDependencyMatch => {
+            Ok(RepositoryFactWorkCause::CompleteDependencyMatch)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkConservativeFallback => {
+            Ok(RepositoryFactWorkCause::ConservativeFallback)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkGenerationBoundLowering => {
+            Ok(RepositoryFactWorkCause::GenerationBoundLowering)
+        }
+        daemon::RepositoryFactWorkCause::RepositoryFactWorkResolution => {
+            Ok(RepositoryFactWorkCause::Resolution)
+        }
+        daemon::RepositoryFactWorkCause::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
+}
+
+fn parse_planned_fact_domain(domain: i32) -> Result<RepositoryPlannedFactDomain, ClientError> {
+    match daemon::RepositoryPlannedFactDomain::try_from(domain)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactSyntax => {
+            Ok(RepositoryPlannedFactDomain::Syntax)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactPublicSurface => {
+            Ok(RepositoryPlannedFactDomain::PublicSurface)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactBody => {
+            Ok(RepositoryPlannedFactDomain::Body)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactResolution => {
+            Ok(RepositoryPlannedFactDomain::Resolution)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactSearch => {
+            Ok(RepositoryPlannedFactDomain::Search)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactDerivedGraph => {
+            Ok(RepositoryPlannedFactDomain::DerivedGraph)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactTests => {
+            Ok(RepositoryPlannedFactDomain::Tests)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactServices => {
+            Ok(RepositoryPlannedFactDomain::Services)
+        }
+        daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactHistory => {
+            Ok(RepositoryPlannedFactDomain::History)
+        }
+        daemon::RepositoryPlannedFactDomain::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
+}
+
+fn parse_normalized_fact_domain(
+    domain: i32,
+) -> Result<RepositoryNormalizedFactDomain, ClientError> {
+    match daemon::RepositoryNormalizedFactDomain::try_from(domain)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactFiles => {
+            Ok(RepositoryNormalizedFactDomain::Files)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactEntities => {
+            Ok(RepositoryNormalizedFactDomain::Entities)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactOccurrences => {
+            Ok(RepositoryNormalizedFactDomain::Occurrences)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactRelations => {
+            Ok(RepositoryNormalizedFactDomain::Relations)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactProvenance => {
+            Ok(RepositoryNormalizedFactDomain::Provenance)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactSourceMappings => {
+            Ok(RepositoryNormalizedFactDomain::SourceMappings)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactDiagnostics => {
+            Ok(RepositoryNormalizedFactDomain::Diagnostics)
+        }
+        daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactExtensions => {
+            Ok(RepositoryNormalizedFactDomain::Extensions)
+        }
+        daemon::RepositoryNormalizedFactDomain::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
 }
 
 fn parse_repository_index_stage(
@@ -12530,7 +13237,10 @@ fn unix_time_ms() -> Result<u64, ClientError> {
     u64::try_from(elapsed.as_millis()).map_err(|_| ClientError::InvalidSystemClock)
 }
 
-fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientError> {
+fn parse_public_error_for_minor(
+    error: common::PublicError,
+    selected_protocol_minor: u32,
+) -> Result<PublicError, ClientError> {
     if error.retry_after_ms.is_some() && !error.retryable {
         return Err(ClientError::InvalidPublicError);
     }
@@ -12562,7 +13272,7 @@ fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientE
         );
     }
     for action in error.next_actions {
-        builder = builder.next_action(parse_next_action(action)?);
+        builder = builder.next_action(parse_next_action(action, selected_protocol_minor)?);
     }
     builder.build().map_err(|_| ClientError::InvalidPublicError)
 }
@@ -12598,42 +13308,86 @@ fn parse_public_value(value: common::PublicValue) -> Result<PublicValue, ClientE
     }
 }
 
-fn parse_next_action(action: common::NextAction) -> Result<NextAction, ClientError> {
+fn parse_next_action(
+    action: common::NextAction,
+    selected_protocol_minor: u32,
+) -> Result<NextAction, ClientError> {
     let kind = common::next_action::Kind::try_from(action.kind)
         .map_err(|_| ClientError::InvalidPublicError)?;
     match kind {
-        common::next_action::Kind::CorrectField => Ok(NextAction::CorrectField {
-            field: DetailKey::parse(
-                action
-                    .field
-                    .as_deref()
-                    .ok_or(ClientError::InvalidPublicError)?,
-            )
-            .map_err(|_| ClientError::InvalidPublicError)?,
-        }),
-        common::next_action::Kind::Retry if action.field.is_none() => Ok(NextAction::Retry),
-        common::next_action::Kind::SelectSupportedVersion if action.field.is_none() => {
+        common::next_action::Kind::CorrectField if action.configuration_key.is_none() => {
+            Ok(NextAction::CorrectField {
+                field: DetailKey::parse(
+                    action
+                        .field
+                        .as_deref()
+                        .ok_or(ClientError::InvalidPublicError)?,
+                )
+                .map_err(|_| ClientError::InvalidPublicError)?,
+            })
+        }
+        common::next_action::Kind::Retry
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
+            Ok(NextAction::Retry)
+        }
+        common::next_action::Kind::SelectSupportedVersion
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
             Ok(NextAction::SelectSupportedVersion)
         }
-        common::next_action::Kind::InspectOperation if action.field.is_none() => {
+        common::next_action::Kind::InspectOperation
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
             Ok(NextAction::InspectOperation)
         }
-        common::next_action::Kind::RebuildRepository if action.field.is_none() => {
+        common::next_action::Kind::RebuildRepository
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
             Ok(NextAction::RebuildRepository)
         }
-        common::next_action::Kind::CollectSupportBundle if action.field.is_none() => {
+        common::next_action::Kind::CollectSupportBundle
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
             Ok(NextAction::CollectSupportBundle)
         }
-        common::next_action::Kind::RestartEnumeration if action.field.is_none() => {
+        common::next_action::Kind::RestartEnumeration
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
             Ok(NextAction::RestartEnumeration)
         }
+        common::next_action::Kind::UpdateConfiguration
+            if selected_protocol_minor >= 15
+                && action.field.is_none()
+                && action.configuration_key.is_some() =>
+        {
+            Ok(NextAction::UpdateConfiguration {
+                key: SafeLabel::parse(
+                    action
+                        .configuration_key
+                        .as_deref()
+                        .ok_or(ClientError::InvalidPublicError)?,
+                )
+                .map_err(|_| ClientError::InvalidPublicError)?,
+            })
+        }
+        common::next_action::Kind::DeleteRepository
+            if selected_protocol_minor >= 15
+                && action.field.is_none()
+                && action.configuration_key.is_none() =>
+        {
+            Ok(NextAction::DeleteRepository)
+        }
         common::next_action::Kind::Unspecified
+        | common::next_action::Kind::CorrectField
         | common::next_action::Kind::Retry
         | common::next_action::Kind::SelectSupportedVersion
         | common::next_action::Kind::InspectOperation
         | common::next_action::Kind::RebuildRepository
         | common::next_action::Kind::CollectSupportBundle
-        | common::next_action::Kind::RestartEnumeration => Err(ClientError::InvalidPublicError),
+        | common::next_action::Kind::RestartEnumeration
+        | common::next_action::Kind::UpdateConfiguration
+        | common::next_action::Kind::DeleteRepository => Err(ClientError::InvalidPublicError),
     }
 }
 
@@ -14444,13 +15198,14 @@ mod tests {
             }],
         };
         let support_wire = support_response_with_schema(
-            valid_support_archive_v7(),
+            valid_support_archive_v8(),
             CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
         );
         let expected_health = parse_health(health_wire.clone(), CURRENT_PROTOCOL_MINOR)
             .expect("health fixture parses");
         let expected_diagnostics =
-            parse_diagnostics_quick(diagnostics_wire.clone()).expect("diagnostics fixture parses");
+            parse_diagnostics_quick_for_minor(diagnostics_wire.clone(), CURRENT_PROTOCOL_MINOR)
+                .expect("diagnostics fixture parses");
         let expected_support = parse_support_bundle(support_wire.clone(), CURRENT_PROTOCOL_MINOR)
             .expect("support fixture parses");
         let server = tokio::spawn(serve_async_responses(
@@ -14499,6 +15254,62 @@ mod tests {
             requests[2].request,
             Some(daemon::request_envelope::Request::SupportBundle(_))
         ));
+    }
+
+    #[test]
+    fn diagnostics_quick_nested_errors_follow_negotiated_minor() {
+        let response = daemon::DiagnosticsQuickResponse {
+            schema_version: 1,
+            overall_status: daemon::HealthStatus::Degraded as i32,
+            results: vec![daemon::DiagnosticResult {
+                check: daemon::DiagnosticCheck::CatalogQuickCheck as i32,
+                outcome: daemon::DiagnosticOutcome::Failed as i32,
+                duration_ms: 1,
+                error: Some(common::PublicError {
+                    code: common::ErrorCode::ResourceExhausted as i32,
+                    message: "repository capacity is exhausted".to_owned(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    repository: None,
+                    operation: None,
+                    generation: None,
+                    details: Default::default(),
+                    next_actions: vec![
+                        common::NextAction {
+                            kind: common::next_action::Kind::UpdateConfiguration as i32,
+                            field: None,
+                            configuration_key: Some("storage.maximum_repositories".to_owned()),
+                        },
+                        common::NextAction {
+                            kind: common::next_action::Kind::DeleteRepository as i32,
+                            field: None,
+                            configuration_key: None,
+                        },
+                    ],
+                }),
+            }],
+        };
+
+        assert!(matches!(
+            parse_diagnostics_quick_for_minor(response.clone(), 14),
+            Err(ClientError::InvalidPublicError)
+        ));
+        let decoded = parse_diagnostics_quick_for_minor(response, 15)
+            .expect("minor fifteen accepts canonical capacity actions");
+        let error = decoded
+            .catalog
+            .error
+            .expect("failed catalog diagnostic retains its public error");
+        assert_eq!(
+            error.next_actions(),
+            &[
+                NextAction::UpdateConfiguration {
+                    key: SafeLabel::parse("storage.maximum_repositories")
+                        .expect("configuration key is valid"),
+                },
+                NextAction::DeleteRepository,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -15371,6 +16182,8 @@ mod tests {
                 "support.bundle.v4",
                 "support.bundle.v5",
                 "support.bundle.v6",
+                "support.bundle.v7",
+                "support.bundle.v8",
             ]
         );
         assert!(
@@ -16138,6 +16951,59 @@ mod tests {
         incremental_status.owned_memory_bytes = 3_072;
         incremental_status.invalidation_trace_json =
             Some(br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec());
+        incremental_status.fact_work = Some(daemon::RepositoryIncrementalFactWorkEvidence {
+            planned: Some(daemon::RepositoryPlannedFactWorkCollection {
+                groups: vec![daemon::RepositoryPlannedFactWorkGroup {
+                    disposition: daemon::RepositoryFactWorkDisposition::RepositoryFactWorkRebuild
+                        as i32,
+                    domain: daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactBody as i32,
+                    provider_pass: "lower".to_owned(),
+                    cause: daemon::RepositoryFactWorkCause::RepositoryFactWorkDependencyClosure
+                        as i32,
+                    affected_files: Some(daemon::RepositoryAffectedFileIds {
+                        total: 1,
+                        complete: true,
+                        samples: vec![file_to_wire(FileId::from_bytes([3; 20]))],
+                    }),
+                    affected_analysis_units: Some(daemon::RepositoryAffectedAnalysisUnitIds {
+                        total: 1,
+                        complete: true,
+                        samples: vec![common::AnalysisUnitId { value: vec![4; 20] }],
+                    }),
+                }],
+                total_groups: 1,
+                complete: true,
+            }),
+            normalized: Some(daemon::RepositoryNormalizedFactWorkCollection {
+                groups: vec![daemon::RepositoryNormalizedFactWorkGroup {
+                    disposition: daemon::RepositoryFactWorkDisposition::RepositoryFactWorkRebuild
+                        as i32,
+                    domain: daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactEntities
+                        as i32,
+                    provider_pass: "lower".to_owned(),
+                    cause:
+                        daemon::RepositoryFactWorkCause::RepositoryFactWorkGenerationBoundLowering
+                            as i32,
+                    fact_count: 17,
+                    affected_files: Some(daemon::RepositoryAffectedFileIds {
+                        total: 1,
+                        complete: true,
+                        samples: vec![file_to_wire(FileId::from_bytes([3; 20]))],
+                    }),
+                    affected_analysis_units: Some(daemon::RepositoryAffectedAnalysisUnitIds {
+                        total: 1,
+                        complete: true,
+                        samples: vec![common::AnalysisUnitId { value: vec![4; 20] }],
+                    }),
+                }],
+                total_groups: 1,
+                complete: true,
+            }),
+        });
+        assert!(matches!(
+            parse_repository_operation_status_for_minor(incremental_status.clone(), operation, 14,),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let incremental = parse_repository_operation_status(incremental_status, operation)
             .expect("durable incremental evidence decodes");
         let evidence = incremental
@@ -16148,6 +17014,15 @@ mod tests {
             RepositoryBuildStrategy::DependencyDirected
         );
         assert!(evidence.invalidation_trace_json.is_some());
+        assert_eq!(
+            evidence
+                .fact_work
+                .expect("grouped fact work is retained")
+                .normalized
+                .groups[0]
+                .fact_count,
+            17
+        );
         let mut recovery_status = status.clone();
         recovery_status
             .operation
@@ -16679,6 +17554,52 @@ mod tests {
             .to_vec()
     }
 
+    fn valid_support_archive_v8() -> Vec<u8> {
+        let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_15);
+        let mut inventory = test_support_inventory();
+        inventory.runtime.protocol_minor = 15;
+        inventory.languages = vec![
+            rootlight_observability::SupportLanguageCapabilityInventory {
+                language: "rust".to_owned(),
+                suffixes: vec![".rs".to_owned()],
+                aliases: Vec::new(),
+                detectors: vec!["extension".to_owned()],
+                maximum_tier: "tier_d".to_owned(),
+                analyzers: vec!["treesitter".to_owned()],
+            },
+        ];
+        let storage = &mut inventory.storage;
+        storage.active_generation_bytes = None;
+        storage.pinned_bytes = Some(0);
+        storage.effective_retention_generations = Some(8);
+        storage.pinning_supported = Some(false);
+        storage.accounting_state = Some(SupportStorageAccountingState::Unavailable);
+        storage.maximum_repository_storage_bytes = Some(1024 * 1024);
+        storage.maximum_durable_catalog_bytes = Some(2 * 1024 * 1024);
+        storage.minimum_free_disk_bytes = Some(1024);
+        storage.source_reservation_factor = Some(2);
+        storage.oracle_reservation_factor = Some(3);
+        inventory.repository_capacity = Some(
+            rootlight_observability::SupportRepositoryCapacityInventory {
+                registered_repository_count: 2,
+                pending_repository_count: 1,
+                active_repository_count: 1,
+                failed_repository_count: 0,
+                pinned_repository_count: 0,
+                reclaimable_repository_count: 1,
+                pinning_supported: false,
+                configured_maximum_repositories: 8,
+                effective_maximum_repositories: 4,
+                repository_headroom: 2,
+            },
+        );
+        input.inventory = Some(inventory);
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V8)
+            .expect("test repository-capacity support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
     fn clear_extended_storage_accounting(
         storage: &mut rootlight_observability::SupportStorageInventory,
     ) {
@@ -16770,6 +17691,7 @@ mod tests {
             adapters: Vec::new(),
             languages: Vec::new(),
             repositories: Vec::new(),
+            repository_capacity: None,
             generations: Vec::new(),
             configuration: rootlight_observability::SupportConfigurationInventory {
                 schema_version: 1,
@@ -17251,11 +18173,11 @@ mod tests {
 
         let v7 = support_response_with_schema(
             valid_support_archive_v7(),
-            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V7,
         );
         let parsed = parse_support_bundle(v7.clone(), 14)
             .expect("protocol 1.14 accepts schema v7 support evidence");
-        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, SUPPORT_BUNDLE_SCHEMA_VERSION_V7);
         assert_eq!(
             parsed
                 .inventory
@@ -17272,6 +18194,26 @@ mod tests {
         );
         assert!(matches!(
             parse_support_bundle(v7, 13),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let v8 = support_response_with_schema(
+            valid_support_archive_v8(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v8.clone(), 15)
+            .expect("protocol 1.15 accepts schema v8 support evidence");
+        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(
+            parsed
+                .inventory
+                .as_ref()
+                .and_then(|inventory| inventory.repository_capacity.as_ref())
+                .map(|capacity| capacity.registered_repository_count),
+            Some(2)
+        );
+        assert!(matches!(
+            parse_support_bundle(v8, 14),
             Err(ClientError::InvalidSupportBundle)
         ));
         assert!(matches!(
@@ -17320,20 +18262,24 @@ mod tests {
 
     #[test]
     fn public_error_decoder_preserves_message_and_retry_delay() {
-        let parsed = parse_public_error(common::PublicError {
-            code: common::ErrorCode::ProtocolMismatch as i32,
-            message: "client protocol range is missing".to_owned(),
-            retryable: true,
-            retry_after_ms: Some(250),
-            repository: None,
-            operation: None,
-            generation: None,
-            details: Default::default(),
-            next_actions: vec![common::NextAction {
-                kind: common::next_action::Kind::SelectSupportedVersion as i32,
-                field: None,
-            }],
-        })
+        let parsed = parse_public_error_for_minor(
+            common::PublicError {
+                code: common::ErrorCode::ProtocolMismatch as i32,
+                message: "client protocol range is missing".to_owned(),
+                retryable: true,
+                retry_after_ms: Some(250),
+                repository: None,
+                operation: None,
+                generation: None,
+                details: Default::default(),
+                next_actions: vec![common::NextAction {
+                    kind: common::next_action::Kind::SelectSupportedVersion as i32,
+                    field: None,
+                    configuration_key: None,
+                }],
+            },
+            CURRENT_PROTOCOL_MINOR,
+        )
         .expect("valid public error decodes");
 
         assert_eq!(parsed.message(), "client protocol range is missing");
@@ -17436,17 +18382,20 @@ mod tests {
 
     #[test]
     fn public_error_decoder_rejects_source_shaped_message() {
-        let result = parse_public_error(common::PublicError {
-            code: common::ErrorCode::Internal as i32,
-            message: "/home/person/secret.rs".to_owned(),
-            retryable: false,
-            retry_after_ms: None,
-            repository: None,
-            operation: None,
-            generation: None,
-            details: Default::default(),
-            next_actions: Vec::new(),
-        });
+        let result = parse_public_error_for_minor(
+            common::PublicError {
+                code: common::ErrorCode::Internal as i32,
+                message: "/home/person/secret.rs".to_owned(),
+                retryable: false,
+                retry_after_ms: None,
+                repository: None,
+                operation: None,
+                generation: None,
+                details: Default::default(),
+                next_actions: Vec::new(),
+            },
+            CURRENT_PROTOCOL_MINOR,
+        );
 
         assert!(matches!(result, Err(ClientError::InvalidPublicError)));
     }
@@ -17454,23 +18403,26 @@ mod tests {
     #[test]
     fn public_error_decoder_accepts_every_registered_code_and_additive_detail() {
         for definition in rootlight_error::ERROR_REGISTRY {
-            let parsed = parse_public_error(common::PublicError {
-                code: definition.wire_number,
-                message: definition.message.to_owned(),
-                retryable: definition.retryable,
-                retry_after_ms: None,
-                repository: None,
-                operation: None,
-                generation: None,
-                details: [(
-                    "extension_flag".to_owned(),
-                    common::PublicValue {
-                        value: Some(common::public_value::Value::Boolean(true)),
-                    },
-                )]
-                .into(),
-                next_actions: Vec::new(),
-            })
+            let parsed = parse_public_error_for_minor(
+                common::PublicError {
+                    code: definition.wire_number,
+                    message: definition.message.to_owned(),
+                    retryable: definition.retryable,
+                    retry_after_ms: None,
+                    repository: None,
+                    operation: None,
+                    generation: None,
+                    details: [(
+                        "extension_flag".to_owned(),
+                        common::PublicValue {
+                            value: Some(common::public_value::Value::Boolean(true)),
+                        },
+                    )]
+                    .into(),
+                    next_actions: Vec::new(),
+                },
+                CURRENT_PROTOCOL_MINOR,
+            )
             .expect("registered code with additive detail decodes");
 
             assert_eq!(parsed.code(), definition.code);
@@ -17478,17 +18430,20 @@ mod tests {
             assert_eq!(parsed.details().len(), 1);
         }
 
-        let unknown = parse_public_error(common::PublicError {
-            code: 23,
-            message: "unknown error code".to_owned(),
-            retryable: false,
-            retry_after_ms: None,
-            repository: None,
-            operation: None,
-            generation: None,
-            details: Default::default(),
-            next_actions: Vec::new(),
-        });
+        let unknown = parse_public_error_for_minor(
+            common::PublicError {
+                code: 23,
+                message: "unknown error code".to_owned(),
+                retryable: false,
+                retry_after_ms: None,
+                repository: None,
+                operation: None,
+                generation: None,
+                details: Default::default(),
+                next_actions: Vec::new(),
+            },
+            CURRENT_PROTOCOL_MINOR,
+        );
         assert!(matches!(unknown, Err(ClientError::InvalidPublicError)));
     }
 

@@ -4744,6 +4744,8 @@ mod tests {
             cause: crate::FirstSliceFactWorkCause::CompleteDependencyMatch,
             files: 1,
             analysis_units: 1,
+            file_ids: BTreeSet::new(),
+            analysis_unit_ids: BTreeSet::new(),
         }];
         let semantic_state = DurableIncrementalState {
             version: INCREMENTAL_STATE_VERSION,

@@ -37,9 +37,10 @@ use rootlight_observability::{
     SupportConfigurationInventory, SupportDependencyInventory, SupportDetailValue,
     SupportGenerationInventory, SupportInventory, SupportNextAction, SupportOperationKind,
     SupportOperationProgress, SupportOperationStage, SupportOperationState,
-    SupportRepositoryInventory, SupportRuntimeInventory, SupportStorageAccountingState,
-    SupportStorageInventory, SupportTerminalError, SupportTerminalOperation, Telemetry,
-    TelemetryOutcome, TelemetryOutput, build_support_bundle_for_schema,
+    SupportRepositoryCapacityInventory, SupportRepositoryInventory, SupportRuntimeInventory,
+    SupportStorageAccountingState, SupportStorageInventory, SupportTerminalError,
+    SupportTerminalOperation, Telemetry, TelemetryOutcome, TelemetryOutput,
+    build_support_bundle_for_schema,
 };
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationDisposition, CancellationOutcome,
@@ -93,6 +94,7 @@ const CAPABILITIES: &[&str] = &[
     "support.bundle.v5",
     "support.bundle.v6",
     "support.bundle.v7",
+    "support.bundle.v8",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -893,6 +895,8 @@ pub struct IndexSupportInventory {
     pub languages: Vec<rootlight_observability::SupportLanguageCapabilityInventory>,
     /// Known repository summaries.
     pub repositories: Vec<SupportRepositoryInventory>,
+    /// Authoritative catalog-wide repository-capacity accounting.
+    pub repository_capacity: Option<SupportRepositoryCapacityInventory>,
     /// Known generation manifest headers.
     pub generations: Vec<SupportGenerationInventory>,
     /// Current generation format version.
@@ -5859,6 +5863,7 @@ fn support_inventory(
         adapters: index.adapters,
         languages: index.languages,
         repositories: index.repositories,
+        repository_capacity: index.repository_capacity,
         generations: index.generations,
         configuration: SupportConfigurationInventory {
             schema_version: 1,
@@ -5921,21 +5926,23 @@ fn support_inventory(
 fn support_terminal_operations(
     records: &[OperationRecord],
     contexts: &BTreeMap<OperationId, RepositoryIndexSupportContext>,
+    schema: SupportBundleSchema,
 ) -> Result<Vec<SupportTerminalOperation>, ServiceError> {
     records
         .iter()
-        .map(|record| support_terminal_operation(record, contexts.get(&record.operation)))
+        .map(|record| support_terminal_operation(record, contexts.get(&record.operation), schema))
         .collect()
 }
 
 fn support_terminal_operation(
     record: &OperationRecord,
     context: Option<&RepositoryIndexSupportContext>,
+    schema: SupportBundleSchema,
 ) -> Result<SupportTerminalOperation, ServiceError> {
     let error = record
         .error
         .as_ref()
-        .map(|error| support_terminal_error(record.operation, error))
+        .map(|error| support_terminal_error(record.operation, error, schema))
         .transpose()?;
     let repository_id = context
         .map(|context| context.repository)
@@ -5988,6 +5995,7 @@ fn support_terminal_operation(
 fn support_terminal_error(
     operation: OperationId,
     error: &PublicError,
+    schema: SupportBundleSchema,
 ) -> Result<SupportTerminalError, ServiceError> {
     let details = error
         .details()
@@ -5999,6 +6007,13 @@ fn support_terminal_error(
     let mut next_actions = error
         .next_actions()
         .iter()
+        .filter(|action| {
+            schema == SupportBundleSchema::V8
+                || !matches!(
+                    action,
+                    NextAction::UpdateConfiguration { .. } | NextAction::DeleteRepository
+                )
+        })
         .map(support_next_action)
         .collect::<Result<Vec<_>, _>>()?;
     if next_actions.is_empty() {
@@ -6050,6 +6065,10 @@ fn support_next_action(action: &NextAction) -> Result<SupportNextAction, Service
         NextAction::RebuildRepository => Ok(SupportNextAction::RebuildRepository),
         NextAction::CollectSupportBundle => Ok(SupportNextAction::CollectSupportBundle),
         NextAction::RestartEnumeration => Ok(SupportNextAction::RestartEnumeration),
+        NextAction::UpdateConfiguration { key } => Ok(SupportNextAction::UpdateConfiguration {
+            key: key.as_str().to_owned(),
+        }),
+        NextAction::DeleteRepository => Ok(SupportNextAction::DeleteRepository),
         _ => Err(ServiceError::UnsupportedPublicErrorVariant),
     }
 }
@@ -6310,6 +6329,7 @@ impl ControlService {
                         "support.bundle.v5" => selected_minor >= 12,
                         "support.bundle.v6" => selected_minor >= 13,
                         "support.bundle.v7" => selected_minor >= 14,
+                        "support.bundle.v8" => selected_minor >= 15,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -6539,9 +6559,8 @@ impl ControlService {
             SupportBundleSchema::V4 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
             SupportBundleSchema::V5 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V5,
             SupportBundleSchema::V6 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
-            SupportBundleSchema::V7 => {
-                rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
-            }
+            SupportBundleSchema::V7 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V7,
+            SupportBundleSchema::V8 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
         };
         let (mut terminal_operations, mut inventory) = if matches!(
             schema,
@@ -6549,6 +6568,7 @@ impl ControlService {
                 | SupportBundleSchema::V5
                 | SupportBundleSchema::V6
                 | SupportBundleSchema::V7
+                | SupportBundleSchema::V8
         ) {
             let terminal_records =
                 match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
@@ -6559,7 +6579,7 @@ impl ControlService {
                 };
             let contexts = self.state.repository_index_contexts();
             let terminal_operations =
-                match support_terminal_operations(&terminal_records, &contexts) {
+                match support_terminal_operations(&terminal_records, &contexts, schema) {
                     Ok(operations) => operations,
                     Err(_) => return ControlResponse::Error(internal_error()),
                 };
@@ -6617,7 +6637,7 @@ impl ControlService {
                 })
                 .flatten();
             inventory.storage.generation_disk_bytes = generation_disk_bytes;
-            if schema == SupportBundleSchema::V7
+            if matches!(schema, SupportBundleSchema::V7 | SupportBundleSchema::V8)
                 && inventory.storage.accounting_state
                     != Some(SupportStorageAccountingState::Unavailable)
             {
@@ -6664,10 +6684,16 @@ impl ControlService {
             if schema == SupportBundleSchema::V4 {
                 clear_extended_storage_accounting(&mut inventory.storage);
             }
-            if schema != SupportBundleSchema::V7 {
+            if !matches!(schema, SupportBundleSchema::V7 | SupportBundleSchema::V8) {
                 clear_authoritative_storage_accounting(inventory);
             }
-            if !matches!(schema, SupportBundleSchema::V6 | SupportBundleSchema::V7) {
+            if schema != SupportBundleSchema::V8 {
+                inventory.repository_capacity = None;
+            }
+            if !matches!(
+                schema,
+                SupportBundleSchema::V6 | SupportBundleSchema::V7 | SupportBundleSchema::V8
+            ) {
                 inventory.languages.clear();
             }
         }
@@ -6683,6 +6709,7 @@ impl ControlService {
                 SupportBundleSchema::V5 => ObservabilityProtocolVersion::V1_12,
                 SupportBundleSchema::V6 => ObservabilityProtocolVersion::V1_13,
                 SupportBundleSchema::V7 => ObservabilityProtocolVersion::V1_14,
+                SupportBundleSchema::V8 => ObservabilityProtocolVersion::V1_15,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
@@ -6788,20 +6815,25 @@ impl ControlService {
     ) -> daemon::ResponseEnvelope {
         let request_id = envelope.request_id;
         let response = if envelope.timeout_ms == Some(0) {
-            daemon::response_envelope::Response::Error(public_error_to_wire(&invalid_argument(
-                "daemon request timeout is invalid",
-            )))
+            daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                &invalid_argument("daemon request timeout is invalid"),
+                selected_protocol_minor,
+            ))
         } else if !nonce_matches(&envelope.instance_nonce, self.instance_nonce) {
-            daemon::response_envelope::Response::Error(public_error_to_wire(&permission_denied(
-                "daemon instance nonce does not match",
-            )))
+            daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                &permission_denied("daemon instance nonce does not match"),
+                selected_protocol_minor,
+            ))
         } else if envelope.effective_budget.is_some() {
             let error = if selected_protocol_minor < 7 {
                 protocol_mismatch("effective budgets need protocol minor seven")
             } else {
                 invalid_argument("effective budgets require a first-slice request")
             };
-            daemon::response_envelope::Response::Error(public_error_to_wire(&error))
+            daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                &error,
+                selected_protocol_minor,
+            ))
         } else {
             match request_from_wire(
                 envelope.request,
@@ -6818,23 +6850,30 @@ impl ControlService {
                             owner,
                         ),
                         self.limits.operation_queue_limit(),
+                        selected_protocol_minor,
                     )
                 }
                 Ok(DecodedRequest::Control(request @ ControlRequest::OperationCancel { .. })) => {
                     journal_response_to_wire(
                         conceal_client_operation_access(Ok(self.execute(request))),
                         self.limits.operation_queue_limit(),
+                        selected_protocol_minor,
                     )
                 }
-                Ok(DecodedRequest::Control(request)) => response_to_wire(self.execute(request)),
-                Ok(DecodedRequest::Submission(_)) => daemon::response_envelope::Response::Error(
-                    public_error_to_wire(&invalid_argument(
-                        "operation lifecycle mutation requires asynchronous orchestration",
-                    )),
-                ),
-                Err(error) => {
-                    daemon::response_envelope::Response::Error(public_error_to_wire(&error))
+                Ok(DecodedRequest::Control(request)) => {
+                    response_to_wire_for_minor(self.execute(request), selected_protocol_minor)
                 }
+                Ok(DecodedRequest::Submission(_)) => {
+                    daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                        &invalid_argument(
+                            "operation lifecycle mutation requires asynchronous orchestration",
+                        ),
+                        selected_protocol_minor,
+                    ))
+                }
+                Err(error) => daemon::response_envelope::Response::Error(
+                    public_error_to_wire_for_minor(&error, selected_protocol_minor),
+                ),
             }
         };
         daemon::ResponseEnvelope {
@@ -7164,15 +7203,20 @@ async fn dispatch_async(
         .telemetry
         .start_span(SpanKind::IpcRequest { method });
     let response = if envelope.timeout_ms == Some(0) {
-        daemon::response_envelope::Response::Error(public_error_to_wire(&invalid_argument(
-            "daemon request timeout is invalid",
-        )))
+        daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+            &invalid_argument("daemon request timeout is invalid"),
+            context.selected_protocol_minor,
+        ))
     } else if !nonce_matches(&envelope.instance_nonce, service.instance_nonce) {
-        daemon::response_envelope::Response::Error(public_error_to_wire(&permission_denied(
-            "daemon instance nonce does not match",
-        )))
+        daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+            &permission_denied("daemon instance nonce does not match"),
+            context.selected_protocol_minor,
+        ))
     } else if request_deadline.is_none() {
-        daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
+        daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+            &request_timed_out(),
+            context.selected_protocol_minor,
+        ))
     } else {
         let request_deadline =
             request_deadline.unwrap_or_else(|| unreachable!("deadline was checked above"));
@@ -7198,13 +7242,17 @@ async fn dispatch_async(
                         )
                         .await
                     }
-                    Err(error) => daemon::response_envelope::Response::Error(public_error_to_wire(
-                        error.as_ref(),
-                    )),
+                    Err(error) => {
+                        daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                            error.as_ref(),
+                            context.selected_protocol_minor,
+                        ))
+                    }
                 }
             }
-            Ok(None) => daemon::response_envelope::Response::Error(public_error_to_wire(
+            Ok(None) => daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
                 &invalid_argument("daemon request is missing"),
+                context.selected_protocol_minor,
             )),
             Err(_) if envelope.effective_budget.is_some() => {
                 let error = if context.selected_protocol_minor < 7 {
@@ -7212,7 +7260,10 @@ async fn dispatch_async(
                 } else {
                     invalid_argument("effective budgets require a first-slice request")
                 };
-                daemon::response_envelope::Response::Error(public_error_to_wire(&error))
+                daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
+                    &error,
+                    context.selected_protocol_minor,
+                ))
             }
             Err(request) => {
                 match request_from_wire(
@@ -7221,13 +7272,17 @@ async fn dispatch_async(
                     context.selected_protocol_minor,
                 ) {
                     Ok(DecodedRequest::Control(ControlRequest::Health)) => {
-                        response_to_wire(ControlResponse::Health(service.health()))
+                        response_to_wire_for_minor(
+                            ControlResponse::Health(service.health()),
+                            context.selected_protocol_minor,
+                        )
                     }
                     Ok(DecodedRequest::Control(ControlRequest::DiagnosticsQuick)) => {
                         run_diagnostic_request(
                             service.clone(),
                             DiagnosticKind::Quick,
                             envelope.timeout_ms,
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
@@ -7239,15 +7294,17 @@ async fn dispatch_async(
                             service.clone(),
                             DiagnosticKind::SupportBundle(schema, repository),
                             envelope.timeout_ms,
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
                     Ok(DecodedRequest::Submission(prepared))
                         if !service.state.accepting_operations.load(Ordering::Acquire) =>
                     {
-                        response_to_wire(ControlResponse::Error(daemon_not_accepting(
-                            prepared.operation(),
-                        )))
+                        response_to_wire_for_minor(
+                            ControlResponse::Error(daemon_not_accepting(prepared.operation())),
+                            context.selected_protocol_minor,
+                        )
                     }
                     Ok(DecodedRequest::Submission(prepared)) => {
                         let operation = prepared.operation();
@@ -7291,6 +7348,7 @@ async fn dispatch_async(
                             response,
                             request_deadline,
                             service.limits.operation_queue_limit(),
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
@@ -7344,6 +7402,7 @@ async fn dispatch_async(
                         await_claimed_journal_response(
                             response,
                             service.limits.operation_queue_limit(),
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
@@ -7363,6 +7422,7 @@ async fn dispatch_async(
                             response,
                             request_deadline,
                             service.limits.operation_queue_limit(),
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
@@ -7371,12 +7431,13 @@ async fn dispatch_async(
                             journal.control(request),
                             request_deadline,
                             service.limits.operation_queue_limit(),
+                            context.selected_protocol_minor,
                         )
                         .await
                     }
-                    Err(error) => {
-                        daemon::response_envelope::Response::Error(public_error_to_wire(&error))
-                    }
+                    Err(error) => daemon::response_envelope::Response::Error(
+                        public_error_to_wire_for_minor(&error, context.selected_protocol_minor),
+                    ),
                 }
             }
         }
@@ -7591,6 +7652,7 @@ async fn dispatch_first_slice(
     }
     let cancellation = context.cancellation.clone();
     let deadline = context.deadline;
+    let selected_protocol_minor = context.selected_protocol_minor;
     // Retain the already-bounded request so the daemon can reject an internal
     // handler response that is well typed but belongs to another identity.
     let correlation_request = request.clone();
@@ -7601,7 +7663,9 @@ async fn dispatch_first_slice(
     .await
     {
         Ok(Ok(response)) => correlated_first_slice_response(&correlation_request, response),
-        Ok(Err(error)) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
+        Ok(Err(error)) => daemon::response_envelope::Response::Error(
+            public_error_to_wire_for_minor(&error, selected_protocol_minor),
+        ),
         Err(_) => {
             let _ = cancellation.cancel(CancellationReason::DeadlineExceeded);
             daemon::response_envelope::Response::Error(public_error_to_wire(
@@ -9121,13 +9185,27 @@ fn checked_next_action_from_wire(action: &common::NextAction) -> Option<NextActi
         common::next_action::Kind::RestartEnumeration if action.field.is_none() => {
             Some(NextAction::RestartEnumeration)
         }
+        common::next_action::Kind::UpdateConfiguration
+            if action.field.is_none() && action.configuration_key.is_some() =>
+        {
+            Some(NextAction::UpdateConfiguration {
+                key: SafeLabel::parse(action.configuration_key.as_deref()?).ok()?,
+            })
+        }
+        common::next_action::Kind::DeleteRepository
+            if action.field.is_none() && action.configuration_key.is_none() =>
+        {
+            Some(NextAction::DeleteRepository)
+        }
         common::next_action::Kind::Unspecified
         | common::next_action::Kind::Retry
         | common::next_action::Kind::SelectSupportedVersion
         | common::next_action::Kind::InspectOperation
         | common::next_action::Kind::RebuildRepository
         | common::next_action::Kind::CollectSupportBundle
-        | common::next_action::Kind::RestartEnumeration => None,
+        | common::next_action::Kind::RestartEnumeration
+        | common::next_action::Kind::UpdateConfiguration
+        | common::next_action::Kind::DeleteRepository => None,
     }
 }
 
@@ -10233,6 +10311,7 @@ async fn run_diagnostic_request(
     service: ControlService,
     kind: DiagnosticKind,
     requested_timeout_ms: Option<u32>,
+    selected_protocol_minor: u32,
 ) -> daemon::response_envelope::Response {
     let started = Instant::now();
     let (method, span_kind) = match kind {
@@ -10244,37 +10323,63 @@ async fn run_diagnostic_request(
     let span = service.state.telemetry.start_span(span_kind);
     let timeout = bounded_request_timeout(&service, requested_timeout_ms);
     let Some(deadline) = Instant::now().checked_add(timeout) else {
-        return response_to_wire(ControlResponse::Error(request_timed_out()));
+        return response_to_wire_for_minor(
+            ControlResponse::Error(request_timed_out()),
+            selected_protocol_minor,
+        );
     };
     let Some(actor) = service.diagnostic_actor.as_ref() else {
-        return response_to_wire(ControlResponse::Error(internal_error()));
+        return response_to_wire_for_minor(
+            ControlResponse::Error(internal_error()),
+            selected_protocol_minor,
+        );
     };
     let receiver = match actor.request(kind, deadline) {
         Ok(receiver) => receiver,
         Err(ServiceError::QueueFull) if matches!(kind, DiagnosticKind::SupportBundle(_, _)) => {
-            return response_to_wire(ControlResponse::Error(queue_full(1)));
+            return response_to_wire_for_minor(
+                ControlResponse::Error(queue_full(1)),
+                selected_protocol_minor,
+            );
         }
         Err(ServiceError::QueueFull) => {
-            return response_to_wire(ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
-                schema_version: 1,
-                overall_status: HealthStatus::Degraded,
-                catalog: DiagnosticResult {
-                    outcome: DiagnosticOutcome::Unavailable,
-                    duration_ms: 0,
-                    error: Some(queue_full(1)),
-                },
-            }));
+            return response_to_wire_for_minor(
+                ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                    schema_version: 1,
+                    overall_status: HealthStatus::Degraded,
+                    catalog: DiagnosticResult {
+                        outcome: DiagnosticOutcome::Unavailable,
+                        duration_ms: 0,
+                        error: Some(queue_full(1)),
+                    },
+                }),
+                selected_protocol_minor,
+            );
         }
         Err(ServiceError::ChannelClosed) => {
-            return response_to_wire(ControlResponse::Error(request_timed_out()));
+            return response_to_wire_for_minor(
+                ControlResponse::Error(request_timed_out()),
+                selected_protocol_minor,
+            );
         }
-        Err(_) => return response_to_wire(ControlResponse::Error(internal_error())),
+        Err(_) => {
+            return response_to_wire_for_minor(
+                ControlResponse::Error(internal_error()),
+                selected_protocol_minor,
+            );
+        }
     };
     let response =
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
-            Ok(Ok(response)) => response_to_wire(response),
-            Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
-            Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+            Ok(Ok(response)) => response_to_wire_for_minor(response, selected_protocol_minor),
+            Ok(Err(_)) => response_to_wire_for_minor(
+                ControlResponse::Error(internal_error()),
+                selected_protocol_minor,
+            ),
+            Err(_) => response_to_wire_for_minor(
+                ControlResponse::Error(request_timed_out()),
+                selected_protocol_minor,
+            ),
         };
     let (outcome, error_code) = telemetry_outcome_from_wire(&response);
     service
@@ -10289,18 +10394,23 @@ async fn await_journal_response_until(
     response: impl std::future::Future<Output = Result<ControlResponse, ServiceError>>,
     deadline: Instant,
     queue_limit: u32,
+    selected_protocol_minor: u32,
 ) -> daemon::response_envelope::Response {
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response).await {
-        Ok(response) => journal_response_to_wire(response, queue_limit),
-        Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+        Ok(response) => journal_response_to_wire(response, queue_limit, selected_protocol_minor),
+        Err(_) => response_to_wire_for_minor(
+            ControlResponse::Error(request_timed_out()),
+            selected_protocol_minor,
+        ),
     }
 }
 
 async fn await_claimed_journal_response(
     response: impl std::future::Future<Output = Result<ControlResponse, ServiceError>>,
     queue_limit: u32,
+    selected_protocol_minor: u32,
 ) -> daemon::response_envelope::Response {
-    journal_response_to_wire(response.await, queue_limit)
+    journal_response_to_wire(response.await, queue_limit, selected_protocol_minor)
 }
 
 fn authorize_client_operation_status(
@@ -10341,23 +10451,33 @@ fn conceal_client_operation_access(
 fn journal_response_to_wire(
     response: Result<ControlResponse, ServiceError>,
     queue_limit: u32,
+    selected_protocol_minor: u32,
 ) -> daemon::response_envelope::Response {
     match response {
-        Ok(response) => response_to_wire(response),
-        Err(ServiceError::Operations(error)) => response_to_wire(ControlResponse::Error(
-            operation_error_to_public(&error, None),
-        )),
-        Err(ServiceError::Public(error)) => response_to_wire(ControlResponse::Error(*error)),
-        Err(ServiceError::QueueFull) => {
-            response_to_wire(ControlResponse::Error(queue_full(queue_limit)))
+        Ok(response) => response_to_wire_for_minor(response, selected_protocol_minor),
+        Err(ServiceError::Operations(error)) => response_to_wire_for_minor(
+            ControlResponse::Error(operation_error_to_public(&error, None)),
+            selected_protocol_minor,
+        ),
+        Err(ServiceError::Public(error)) => {
+            response_to_wire_for_minor(ControlResponse::Error(*error), selected_protocol_minor)
         }
-        Err(ServiceError::ClientOperationLimit { limit }) => {
-            response_to_wire(ControlResponse::Error(client_operation_limit(limit)))
-        }
-        Err(ServiceError::RequestTimedOut) => {
-            response_to_wire(ControlResponse::Error(request_timed_out()))
-        }
-        Err(_) => response_to_wire(ControlResponse::Error(internal_error())),
+        Err(ServiceError::QueueFull) => response_to_wire_for_minor(
+            ControlResponse::Error(queue_full(queue_limit)),
+            selected_protocol_minor,
+        ),
+        Err(ServiceError::ClientOperationLimit { limit }) => response_to_wire_for_minor(
+            ControlResponse::Error(client_operation_limit(limit)),
+            selected_protocol_minor,
+        ),
+        Err(ServiceError::RequestTimedOut) => response_to_wire_for_minor(
+            ControlResponse::Error(request_timed_out()),
+            selected_protocol_minor,
+        ),
+        Err(_) => response_to_wire_for_minor(
+            ControlResponse::Error(internal_error()),
+            selected_protocol_minor,
+        ),
     }
 }
 
@@ -10661,7 +10781,9 @@ fn request_from_wire(
             }
             let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 14 {
+                if selected_protocol_minor >= 15 {
+                    SupportBundleSchema::V8
+                } else if selected_protocol_minor >= 14 {
                     SupportBundleSchema::V7
                 } else if selected_protocol_minor >= 13 {
                     SupportBundleSchema::V6
@@ -10900,7 +11022,15 @@ fn parse_repository_id(repository: common::RepositoryId) -> Result<RepositoryId,
     Ok(RepositoryId::from_bytes(bytes))
 }
 
+#[cfg(test)]
 fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Response {
+    response_to_wire_for_minor(response, CURRENT_PROTOCOL_MINOR)
+}
+
+fn response_to_wire_for_minor(
+    response: ControlResponse,
+    selected_protocol_minor: u32,
+) -> daemon::response_envelope::Response {
     match response {
         ControlResponse::Health(health) => {
             daemon::response_envelope::Response::Health(daemon::HealthResponse {
@@ -10935,7 +11065,9 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
                         check: daemon::DiagnosticCheck::CatalogQuickCheck as i32,
                         outcome: diagnostic_outcome_to_wire(diagnostics.catalog.outcome) as i32,
                         duration_ms: diagnostics.catalog.duration_ms,
-                        error: diagnostics.catalog.error.as_ref().map(public_error_to_wire),
+                        error: diagnostics.catalog.error.as_ref().map(|error| {
+                            public_error_to_wire_for_minor(error, selected_protocol_minor)
+                        }),
                     }],
                 },
             )
@@ -10951,18 +11083,27 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
         }
         ControlResponse::OperationSubmit(operation) => {
             daemon::response_envelope::Response::OperationSubmit(daemon::OperationSubmitResponse {
-                operation: Some(operation_record_to_wire(&operation)),
+                operation: Some(operation_record_to_wire_for_minor(
+                    &operation,
+                    selected_protocol_minor,
+                )),
             })
         }
         ControlResponse::OperationStatus(operation) => {
             daemon::response_envelope::Response::OperationStatus(daemon::OperationStatusResponse {
-                operation: Some(operation_record_to_wire(&operation)),
+                operation: Some(operation_record_to_wire_for_minor(
+                    &operation,
+                    selected_protocol_minor,
+                )),
             })
         }
         ControlResponse::OperationLeaseRenew(operation) => {
             daemon::response_envelope::Response::OperationLeaseRenew(
                 daemon::OperationLeaseRenewResponse {
-                    operation: Some(operation_record_to_wire(&operation)),
+                    operation: Some(operation_record_to_wire_for_minor(
+                        &operation,
+                        selected_protocol_minor,
+                    )),
                 },
             )
         }
@@ -10971,13 +11112,16 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
             operation,
         } => {
             daemon::response_envelope::Response::OperationCancel(daemon::OperationCancelResponse {
-                operation: Some(operation_record_to_wire(&operation)),
+                operation: Some(operation_record_to_wire_for_minor(
+                    &operation,
+                    selected_protocol_minor,
+                )),
                 accepted,
             })
         }
-        ControlResponse::Error(error) => {
-            daemon::response_envelope::Response::Error(public_error_to_wire(&error))
-        }
+        ControlResponse::Error(error) => daemon::response_envelope::Response::Error(
+            public_error_to_wire_for_minor(&error, selected_protocol_minor),
+        ),
     }
 }
 
@@ -11023,6 +11167,15 @@ const fn daemon_lifecycle_to_wire(lifecycle: DaemonLifecycle) -> daemon::DaemonL
 /// Converts one checked durable record into its stable protobuf representation.
 #[must_use]
 pub fn operation_record_to_wire(record: &OperationRecord) -> daemon::OperationStatus {
+    operation_record_to_wire_for_minor(record, CURRENT_PROTOCOL_MINOR)
+}
+
+/// Converts one checked durable record for the negotiated protocol minor.
+#[must_use]
+pub fn operation_record_to_wire_for_minor(
+    record: &OperationRecord,
+    selected_protocol_minor: u32,
+) -> daemon::OperationStatus {
     daemon::OperationStatus {
         operation: Some(common::OperationId {
             value: record.operation.as_bytes().to_vec(),
@@ -11031,7 +11184,10 @@ pub fn operation_record_to_wire(record: &OperationRecord) -> daemon::OperationSt
         revision: record.revision,
         completed_units: record.progress.completed,
         total_units: record.progress.total,
-        error: record.error.as_ref().map(public_error_to_wire),
+        error: record
+            .error
+            .as_ref()
+            .map(|error| public_error_to_wire_for_minor(error, selected_protocol_minor)),
         kind: operation_kind_to_wire(record.kind) as i32,
         stage: operation_stage_to_wire(record.stage) as i32,
         plan_hash: record.plan_hash.as_bytes().to_vec(),
@@ -11428,20 +11584,37 @@ fn nonce_matches(observed: &[u8], expected: [u8; 16]) -> bool {
 /// Converts one checked public error into its stable protobuf representation.
 #[must_use]
 pub fn public_error_to_wire(error: &PublicError) -> common::PublicError {
-    checked_public_error_to_wire(error).unwrap_or_else(|_| common::PublicError {
-        code: common::ErrorCode::Internal as i32,
-        message: "internal operation failed".to_owned(),
-        retryable: false,
-        retry_after_ms: None,
-        repository: None,
-        operation: None,
-        generation: None,
-        details: Default::default(),
-        next_actions: Vec::new(),
+    public_error_to_wire_for_minor(error, CURRENT_PROTOCOL_MINOR)
+}
+
+fn public_error_to_wire_for_minor(
+    error: &PublicError,
+    selected_protocol_minor: u32,
+) -> common::PublicError {
+    checked_public_error_to_wire_for_minor(error, selected_protocol_minor).unwrap_or_else(|_| {
+        common::PublicError {
+            code: common::ErrorCode::Internal as i32,
+            message: "internal operation failed".to_owned(),
+            retryable: false,
+            retry_after_ms: None,
+            repository: None,
+            operation: None,
+            generation: None,
+            details: Default::default(),
+            next_actions: Vec::new(),
+        }
     })
 }
 
+#[cfg(test)]
 fn checked_public_error_to_wire(error: &PublicError) -> Result<common::PublicError, ServiceError> {
+    checked_public_error_to_wire_for_minor(error, CURRENT_PROTOCOL_MINOR)
+}
+
+fn checked_public_error_to_wire_for_minor(
+    error: &PublicError,
+    selected_protocol_minor: u32,
+) -> Result<common::PublicError, ServiceError> {
     let details = error
         .details()
         .iter()
@@ -11452,6 +11625,7 @@ fn checked_public_error_to_wire(error: &PublicError) -> Result<common::PublicErr
     let next_actions = error
         .next_actions()
         .iter()
+        .filter(|action| next_action_supported_by_protocol(action, selected_protocol_minor))
         .map(next_action_to_wire)
         .collect::<Result<_, _>>()?;
     Ok(common::PublicError {
@@ -11471,6 +11645,17 @@ fn checked_public_error_to_wire(error: &PublicError) -> Result<common::PublicErr
         details,
         next_actions,
     })
+}
+
+const fn next_action_supported_by_protocol(
+    action: &NextAction,
+    selected_protocol_minor: u32,
+) -> bool {
+    selected_protocol_minor >= 15
+        || !matches!(
+            action,
+            NextAction::UpdateConfiguration { .. } | NextAction::DeleteRepository
+        )
 }
 
 fn error_code_to_wire(code: ErrorCode) -> Result<common::ErrorCode, ServiceError> {
@@ -11513,11 +11698,20 @@ fn next_action_to_wire(action: &NextAction) -> Result<common::NextAction, Servic
         NextAction::RebuildRepository => (common::next_action::Kind::RebuildRepository, None),
         NextAction::CollectSupportBundle => (common::next_action::Kind::CollectSupportBundle, None),
         NextAction::RestartEnumeration => (common::next_action::Kind::RestartEnumeration, None),
+        NextAction::UpdateConfiguration { key } => {
+            return Ok(common::NextAction {
+                kind: common::next_action::Kind::UpdateConfiguration as i32,
+                field: None,
+                configuration_key: Some(key.as_str().to_owned()),
+            });
+        }
+        NextAction::DeleteRepository => (common::next_action::Kind::DeleteRepository, None),
         _ => return Err(ServiceError::UnsupportedPublicErrorVariant),
     };
     Ok(common::NextAction {
         kind: kind as i32,
         field,
+        configuration_key: None,
     })
 }
 
@@ -12545,6 +12739,7 @@ mod tests {
                     "support.bundle.v5" => minor >= 12,
                     "support.bundle.v6" => minor >= 13,
                     "support.bundle.v7" => minor >= 14,
+                    "support.bundle.v8" => minor >= 15,
                     "code.locate.v1"
                     | "repository.index.v1"
                     | "source.read.v1"
@@ -12573,6 +12768,13 @@ mod tests {
                     .iter()
                     .any(|capability| capability == "support.bundle.v7"),
                 minor >= 14
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "support.bundle.v8"),
+                minor >= 15
             );
         }
     }
@@ -12709,6 +12911,11 @@ mod tests {
                 PublicValue::Label(SafeLabel::parse("tree-sitter").expect("label is valid")),
             )
             .next_action(NextAction::InspectOperation)
+            .next_action(NextAction::UpdateConfiguration {
+                key: SafeLabel::parse("storage.maximum_repositories")
+                    .expect("configuration key is valid"),
+            })
+            .next_action(NextAction::DeleteRepository)
             .build()
             .expect("public error builds");
         service
@@ -12825,6 +13032,18 @@ mod tests {
                         repository_headroom_bytes: Some(7_952),
                     },
                 ],
+                repository_capacity: Some(SupportRepositoryCapacityInventory {
+                    registered_repository_count: 2,
+                    pending_repository_count: 0,
+                    active_repository_count: 2,
+                    failed_repository_count: 0,
+                    pinned_repository_count: 0,
+                    reclaimable_repository_count: 2,
+                    pinning_supported: false,
+                    configured_maximum_repositories: 4_096,
+                    effective_maximum_repositories: 1_024,
+                    repository_headroom: 1_022,
+                }),
                 generations: vec![
                     SupportGenerationInventory {
                         repository_id: support_id(repository.as_bytes()),
@@ -12904,6 +13123,14 @@ mod tests {
         assert_eq!(
             failed.error.as_ref().map(|error| error.code),
             Some(ObservabilityErrorCode::ResourceExhausted)
+        );
+        assert_eq!(
+            failed
+                .error
+                .as_ref()
+                .expect("failed operation has an error")
+                .next_actions,
+            [SupportNextAction::InspectOperation]
         );
         let succeeded = operations
             .recent_terminal
@@ -13028,7 +13255,7 @@ mod tests {
         };
         assert_eq!(
             authoritative.schema_version,
-            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+            rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V7
         );
         let mut authoritative_archive =
             zip::ZipArchive::new(std::io::Cursor::new(authoritative.archive))
@@ -13059,6 +13286,28 @@ mod tests {
         assert_eq!(
             authoritative_inventory.storage.admission_margin_bytes,
             Some(5_904)
+        );
+        assert_eq!(authoritative_inventory.repository_capacity, None);
+        let mut authoritative_operation_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut authoritative_archive
+                .by_name("operations-summary.json")
+                .expect("authoritative operations entry opens"),
+            &mut authoritative_operation_bytes,
+        )
+        .expect("authoritative operations entry reads");
+        let authoritative_operations: rootlight_observability::SupportOperationsV4 =
+            serde_json::from_slice(&authoritative_operation_bytes)
+                .expect("authoritative operations decode");
+        let authoritative_error = authoritative_operations
+            .recent_terminal
+            .iter()
+            .find(|terminal| terminal.operation_id == support_id(operation.as_bytes()))
+            .and_then(|terminal| terminal.error.as_ref())
+            .expect("authoritative bundle retains the failed error");
+        assert_eq!(
+            authoritative_error.next_actions,
+            [SupportNextAction::InspectOperation]
         );
         let scoped_authoritative = service.execute(ControlRequest::SupportBundle(
             SupportBundleSchema::V7,
@@ -13097,6 +13346,94 @@ mod tests {
                 .catalog_headroom_bytes,
             Some(13_856)
         );
+        assert_eq!(scoped_authoritative_inventory.repository_capacity, None);
+
+        let capacity =
+            service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V8, None));
+        let ControlResponse::SupportBundle(capacity) = capacity else {
+            panic!("capacity support bundle response expected");
+        };
+        assert_eq!(
+            capacity.schema_version,
+            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        );
+        let mut capacity_archive = zip::ZipArchive::new(std::io::Cursor::new(capacity.archive))
+            .expect("capacity support ZIP opens");
+        let mut capacity_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut capacity_archive
+                .by_name("inventory.json")
+                .expect("capacity inventory entry opens"),
+            &mut capacity_inventory_bytes,
+        )
+        .expect("capacity inventory entry reads");
+        let capacity_inventory: SupportInventory =
+            serde_json::from_slice(&capacity_inventory_bytes).expect("capacity inventory decodes");
+        let global_capacity = capacity_inventory
+            .repository_capacity
+            .expect("capacity aggregate is present");
+        assert_eq!(capacity_inventory.repositories.len(), 2);
+        assert_eq!(global_capacity.registered_repository_count, 2);
+        assert_eq!(global_capacity.active_repository_count, 2);
+        assert_eq!(global_capacity.reclaimable_repository_count, 2);
+        assert_eq!(global_capacity.repository_headroom, 1_022);
+
+        let mut capacity_operation_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut capacity_archive
+                .by_name("operations-summary.json")
+                .expect("capacity operations entry opens"),
+            &mut capacity_operation_bytes,
+        )
+        .expect("capacity operations entry reads");
+        let capacity_operations: rootlight_observability::SupportOperationsV4 =
+            serde_json::from_slice(&capacity_operation_bytes).expect("capacity operations decode");
+        let capacity_error = capacity_operations
+            .recent_terminal
+            .iter()
+            .find(|terminal| terminal.operation_id == support_id(operation.as_bytes()))
+            .and_then(|terminal| terminal.error.as_ref())
+            .expect("capacity bundle retains the failed error");
+        assert!(capacity_error.next_actions.iter().any(|action| {
+            matches!(
+                action,
+                SupportNextAction::UpdateConfiguration { key }
+                    if key == "storage.maximum_repositories"
+            )
+        }));
+        assert!(
+            capacity_error
+                .next_actions
+                .contains(&SupportNextAction::DeleteRepository)
+        );
+
+        let scoped_capacity = service.execute(ControlRequest::SupportBundle(
+            SupportBundleSchema::V8,
+            Some(repository),
+        ));
+        let ControlResponse::SupportBundle(scoped_capacity) = scoped_capacity else {
+            panic!("repository-scoped capacity support bundle response expected");
+        };
+        let mut scoped_capacity_archive =
+            zip::ZipArchive::new(std::io::Cursor::new(scoped_capacity.archive))
+                .expect("repository-scoped capacity support ZIP opens");
+        let mut scoped_capacity_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut scoped_capacity_archive
+                .by_name("inventory.json")
+                .expect("repository-scoped capacity inventory entry opens"),
+            &mut scoped_capacity_inventory_bytes,
+        )
+        .expect("repository-scoped capacity inventory entry reads");
+        let scoped_capacity_inventory: SupportInventory =
+            serde_json::from_slice(&scoped_capacity_inventory_bytes)
+                .expect("repository-scoped capacity inventory decodes");
+        assert_eq!(scoped_capacity_inventory.repositories.len(), 1);
+        assert_eq!(
+            scoped_capacity_inventory.repository_capacity,
+            Some(global_capacity)
+        );
+
         let mut scoped_operation_bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut scoped_archive
@@ -13204,8 +13541,13 @@ mod tests {
             .with_diagnostic_actor()
             .expect("diagnostic actor starts");
 
-        let first =
-            run_diagnostic_request(service.clone(), DiagnosticKind::Quick, Some(5_000)).await;
+        let first = run_diagnostic_request(
+            service.clone(),
+            DiagnosticKind::Quick,
+            Some(5_000),
+            CURRENT_PROTOCOL_MINOR,
+        )
+        .await;
         let daemon::response_envelope::Response::DiagnosticsQuick(first) = &first else {
             panic!("first diagnostics response expected, got {first:?}");
         };
@@ -13215,7 +13557,13 @@ mod tests {
             daemon::DiagnosticOutcome::Passed as i32
         );
 
-        let next = run_diagnostic_request(service, DiagnosticKind::Quick, Some(5_000)).await;
+        let next = run_diagnostic_request(
+            service,
+            DiagnosticKind::Quick,
+            Some(5_000),
+            CURRENT_PROTOCOL_MINOR,
+        )
+        .await;
         let daemon::response_envelope::Response::DiagnosticsQuick(next) = &next else {
             panic!("second diagnostics response expected, got {next:?}");
         };
@@ -15608,9 +15956,13 @@ mod tests {
     }
 
     #[test]
-    fn support_request_selects_v7_only_for_protocol_minor_fourteen() {
+    fn support_request_selects_latest_schema_for_protocol_minor() {
         let owner = ClientInstanceId::new([40; 16]).expect("owner is valid");
-        for (minor, expected) in [(13, SupportBundleSchema::V6), (14, SupportBundleSchema::V7)] {
+        for (minor, expected) in [
+            (13, SupportBundleSchema::V6),
+            (14, SupportBundleSchema::V7),
+            (15, SupportBundleSchema::V8),
+        ] {
             let decoded = request_from_wire(
                 Some(daemon::request_envelope::Request::SupportBundle(
                     daemon::SupportBundleRequest::default(),

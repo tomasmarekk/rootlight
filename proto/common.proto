@@ -39,6 +39,11 @@ message FileId {
   bytes value = 1;
 }
 
+// Binary incremental analysis-unit identity using canonical Rootlight fact ID bytes.
+message AnalysisUnitId {
+  bytes value = 1;
+}
+
 // Binary immutable content digest using canonical Rootlight hash bytes.
 message ContentHash {
   bytes value = 1;
@@ -95,10 +100,13 @@ message NextAction {
     REBUILD_REPOSITORY = 5;
     COLLECT_SUPPORT_BUNDLE = 6;
     RESTART_ENUMERATION = 7;
+    UPDATE_CONFIGURATION = 8;
+    DELETE_REPOSITORY = 9;
   }
 
   Kind kind = 1;
   optional string field = 2;
+  optional string configuration_key = 3;
 }
 
 // Source-redacted error envelope shared by local process boundaries.

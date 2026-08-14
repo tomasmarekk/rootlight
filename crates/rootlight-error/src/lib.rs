@@ -584,6 +584,15 @@ pub enum NextAction {
     /// Restart the enumeration or query from the beginning after an invalid
     /// continuation cursor.
     RestartEnumeration,
+    /// Update one named, checked configuration value.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    UpdateConfiguration {
+        /// Canonical source-free configuration key.
+        key: SafeLabel,
+    },
+    /// Delete an unneeded repository through the supported catalog mutation.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    DeleteRepository,
 }
 
 /// A stable source-redacted failure safe to serialize across public boundaries.

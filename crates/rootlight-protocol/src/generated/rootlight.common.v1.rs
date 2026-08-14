@@ -54,6 +54,13 @@ pub struct FileId {
     #[allow(missing_docs)]
     pub value: ::prost::alloc::vec::Vec<u8>,
 }
+/// Binary incremental analysis-unit identity using canonical Rootlight fact ID bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnalysisUnitId {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
 /// Binary immutable content digest using canonical Rootlight hash bytes.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ContentHash {
@@ -105,6 +112,9 @@ pub struct NextAction {
     #[prost(string, optional, tag = "2")]
     #[allow(missing_docs)]
     pub field: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub configuration_key: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Nested message and enum types in `NextAction`.
 pub mod next_action {
@@ -138,6 +148,10 @@ pub mod next_action {
         CollectSupportBundle = 6,
         #[allow(missing_docs)]
         RestartEnumeration = 7,
+        #[allow(missing_docs)]
+        UpdateConfiguration = 8,
+        #[allow(missing_docs)]
+        DeleteRepository = 9,
     }
     impl Kind {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -154,6 +168,8 @@ pub mod next_action {
                 Self::RebuildRepository => "REBUILD_REPOSITORY",
                 Self::CollectSupportBundle => "COLLECT_SUPPORT_BUNDLE",
                 Self::RestartEnumeration => "RESTART_ENUMERATION",
+                Self::UpdateConfiguration => "UPDATE_CONFIGURATION",
+                Self::DeleteRepository => "DELETE_REPOSITORY",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -167,6 +183,8 @@ pub mod next_action {
                 "REBUILD_REPOSITORY" => Some(Self::RebuildRepository),
                 "COLLECT_SUPPORT_BUNDLE" => Some(Self::CollectSupportBundle),
                 "RESTART_ENUMERATION" => Some(Self::RestartEnumeration),
+                "UPDATE_CONFIGURATION" => Some(Self::UpdateConfiguration),
+                "DELETE_REPOSITORY" => Some(Self::DeleteRepository),
                 _ => None,
             }
         }

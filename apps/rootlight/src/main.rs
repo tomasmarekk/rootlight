@@ -1307,7 +1307,7 @@ fn execute_repository_operation_client(
             None,
         )?,
     };
-    Ok(CommandResult::RepositoryOperationStatus(status))
+    Ok(CommandResult::RepositoryOperationStatus(Box::new(status)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2532,7 +2532,7 @@ enum CommandResult {
     RepositoryIndex(RepositoryIndex),
     RepositoryList(RepositoryList),
     RepositoryStatus(RepositoryStatus),
-    RepositoryOperationStatus(RepositoryOperationStatus),
+    RepositoryOperationStatus(Box<RepositoryOperationStatus>),
     RepairPlan(RepairPlan),
     RepositoryRepairPlan {
         repository: RepositoryId,
@@ -3424,6 +3424,7 @@ mod tests {
             owned_memory_bytes: 64,
             retained_durable_bytes: 192,
             invalidation_trace_json: None,
+            fact_work: None,
         });
 
         apply_repository_index_completion(&mut submission, completion)

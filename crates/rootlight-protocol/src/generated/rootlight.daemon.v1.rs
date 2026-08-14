@@ -912,6 +912,119 @@ pub struct RepositoryOperationStatusRequest {
     #[allow(missing_docs)]
     pub after_revision: ::core::option::Option<u64>,
 }
+/// Canonical bounded file identities affected by one fact-work group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryAffectedFileIds {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub total: u64,
+    #[prost(bool, tag = "2")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub samples: ::prost::alloc::vec::Vec<super::super::common::v1::FileId>,
+}
+/// Canonical bounded analysis-unit identities affected by one fact-work group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryAffectedAnalysisUnitIds {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub total: u64,
+    #[prost(bool, tag = "2")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub samples: ::prost::alloc::vec::Vec<super::super::common::v1::AnalysisUnitId>,
+}
+/// One source-free logical scope selected by incremental planning.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryPlannedFactWorkGroup {
+    #[prost(enumeration = "RepositoryFactWorkDisposition", tag = "1")]
+    #[allow(missing_docs)]
+    pub disposition: i32,
+    #[prost(enumeration = "RepositoryPlannedFactDomain", tag = "2")]
+    #[allow(missing_docs)]
+    pub domain: i32,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub provider_pass: ::prost::alloc::string::String,
+    #[prost(enumeration = "RepositoryFactWorkCause", tag = "4")]
+    #[allow(missing_docs)]
+    pub cause: i32,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub affected_files: ::core::option::Option<RepositoryAffectedFileIds>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub affected_analysis_units: ::core::option::Option<
+        RepositoryAffectedAnalysisUnitIds,
+    >,
+}
+/// One normalized IR partition retained or rebuilt by the operation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryNormalizedFactWorkGroup {
+    #[prost(enumeration = "RepositoryFactWorkDisposition", tag = "1")]
+    #[allow(missing_docs)]
+    pub disposition: i32,
+    #[prost(enumeration = "RepositoryNormalizedFactDomain", tag = "2")]
+    #[allow(missing_docs)]
+    pub domain: i32,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub provider_pass: ::prost::alloc::string::String,
+    #[prost(enumeration = "RepositoryFactWorkCause", tag = "4")]
+    #[allow(missing_docs)]
+    pub cause: i32,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub fact_count: u64,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub affected_files: ::core::option::Option<RepositoryAffectedFileIds>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub affected_analysis_units: ::core::option::Option<
+        RepositoryAffectedAnalysisUnitIds,
+    >,
+}
+/// Bounded canonical prefix of every planned fact-work group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryPlannedFactWorkCollection {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub groups: ::prost::alloc::vec::Vec<RepositoryPlannedFactWorkGroup>,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub total_groups: u64,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+}
+/// Bounded canonical prefix of every completed normalized fact-work group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryNormalizedFactWorkCollection {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub groups: ::prost::alloc::vec::Vec<RepositoryNormalizedFactWorkGroup>,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub total_groups: u64,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+}
+/// Source-free grouped incremental evidence retained by the operation journal.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryIncrementalFactWorkEvidence {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub planned: ::core::option::Option<RepositoryPlannedFactWorkCollection>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub normalized: ::core::option::Option<RepositoryNormalizedFactWorkCollection>,
+}
 /// Returns journal state plus durable first-slice publication metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RepositoryOperationStatusResponse {
@@ -1003,6 +1116,10 @@ pub struct RepositoryOperationStatusResponse {
     #[prost(uint64, tag = "26")]
     #[allow(missing_docs)]
     pub retained_durable_bytes: u64,
+    /// Bounded source-free grouped incremental evidence.
+    #[prost(message, optional, tag = "27")]
+    #[allow(missing_docs)]
+    pub fact_work: ::core::option::Option<RepositoryIncrementalFactWorkEvidence>,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3675,6 +3792,272 @@ impl RepositoryOperationAction {
             "REPOSITORY_OPERATION_ACTION_UNSPECIFIED" => Some(Self::Unspecified),
             "REPOSITORY_OPERATION_GET" => Some(Self::RepositoryOperationGet),
             "REPOSITORY_OPERATION_CANCEL" => Some(Self::RepositoryOperationCancel),
+            _ => None,
+        }
+    }
+}
+/// Work disposition selected before or retained after normalized fact construction.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryFactWorkDisposition {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryFactWorkRebuild = 1,
+    #[allow(missing_docs)]
+    RepositoryFactWorkReuse = 2,
+}
+impl RepositoryFactWorkDisposition {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_FACT_WORK_DISPOSITION_UNSPECIFIED",
+            Self::RepositoryFactWorkRebuild => "REPOSITORY_FACT_WORK_REBUILD",
+            Self::RepositoryFactWorkReuse => "REPOSITORY_FACT_WORK_REUSE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_FACT_WORK_DISPOSITION_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_FACT_WORK_REBUILD" => Some(Self::RepositoryFactWorkRebuild),
+            "REPOSITORY_FACT_WORK_REUSE" => Some(Self::RepositoryFactWorkReuse),
+            _ => None,
+        }
+    }
+}
+/// Source-free cause attributed to planned or completed incremental work.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryFactWorkCause {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryFactWorkInitialGeneration = 1,
+    #[allow(missing_docs)]
+    RepositoryFactWorkDependencyClosure = 2,
+    #[allow(missing_docs)]
+    RepositoryFactWorkCompleteDependencyMatch = 3,
+    #[allow(missing_docs)]
+    RepositoryFactWorkConservativeFallback = 4,
+    #[allow(missing_docs)]
+    RepositoryFactWorkGenerationBoundLowering = 5,
+    #[allow(missing_docs)]
+    RepositoryFactWorkResolution = 6,
+}
+impl RepositoryFactWorkCause {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_FACT_WORK_CAUSE_UNSPECIFIED",
+            Self::RepositoryFactWorkInitialGeneration => {
+                "REPOSITORY_FACT_WORK_INITIAL_GENERATION"
+            }
+            Self::RepositoryFactWorkDependencyClosure => {
+                "REPOSITORY_FACT_WORK_DEPENDENCY_CLOSURE"
+            }
+            Self::RepositoryFactWorkCompleteDependencyMatch => {
+                "REPOSITORY_FACT_WORK_COMPLETE_DEPENDENCY_MATCH"
+            }
+            Self::RepositoryFactWorkConservativeFallback => {
+                "REPOSITORY_FACT_WORK_CONSERVATIVE_FALLBACK"
+            }
+            Self::RepositoryFactWorkGenerationBoundLowering => {
+                "REPOSITORY_FACT_WORK_GENERATION_BOUND_LOWERING"
+            }
+            Self::RepositoryFactWorkResolution => "REPOSITORY_FACT_WORK_RESOLUTION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_FACT_WORK_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_FACT_WORK_INITIAL_GENERATION" => {
+                Some(Self::RepositoryFactWorkInitialGeneration)
+            }
+            "REPOSITORY_FACT_WORK_DEPENDENCY_CLOSURE" => {
+                Some(Self::RepositoryFactWorkDependencyClosure)
+            }
+            "REPOSITORY_FACT_WORK_COMPLETE_DEPENDENCY_MATCH" => {
+                Some(Self::RepositoryFactWorkCompleteDependencyMatch)
+            }
+            "REPOSITORY_FACT_WORK_CONSERVATIVE_FALLBACK" => {
+                Some(Self::RepositoryFactWorkConservativeFallback)
+            }
+            "REPOSITORY_FACT_WORK_GENERATION_BOUND_LOWERING" => {
+                Some(Self::RepositoryFactWorkGenerationBoundLowering)
+            }
+            "REPOSITORY_FACT_WORK_RESOLUTION" => Some(Self::RepositoryFactWorkResolution),
+            _ => None,
+        }
+    }
+}
+/// Logical dependency-closure domain selected before fact construction.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryPlannedFactDomain {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactSyntax = 1,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactPublicSurface = 2,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactBody = 3,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactResolution = 4,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactSearch = 5,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactDerivedGraph = 6,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactTests = 7,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactServices = 8,
+    #[allow(missing_docs)]
+    RepositoryPlannedFactHistory = 9,
+}
+impl RepositoryPlannedFactDomain {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_PLANNED_FACT_DOMAIN_UNSPECIFIED",
+            Self::RepositoryPlannedFactSyntax => "REPOSITORY_PLANNED_FACT_SYNTAX",
+            Self::RepositoryPlannedFactPublicSurface => {
+                "REPOSITORY_PLANNED_FACT_PUBLIC_SURFACE"
+            }
+            Self::RepositoryPlannedFactBody => "REPOSITORY_PLANNED_FACT_BODY",
+            Self::RepositoryPlannedFactResolution => "REPOSITORY_PLANNED_FACT_RESOLUTION",
+            Self::RepositoryPlannedFactSearch => "REPOSITORY_PLANNED_FACT_SEARCH",
+            Self::RepositoryPlannedFactDerivedGraph => {
+                "REPOSITORY_PLANNED_FACT_DERIVED_GRAPH"
+            }
+            Self::RepositoryPlannedFactTests => "REPOSITORY_PLANNED_FACT_TESTS",
+            Self::RepositoryPlannedFactServices => "REPOSITORY_PLANNED_FACT_SERVICES",
+            Self::RepositoryPlannedFactHistory => "REPOSITORY_PLANNED_FACT_HISTORY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_PLANNED_FACT_DOMAIN_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_PLANNED_FACT_SYNTAX" => Some(Self::RepositoryPlannedFactSyntax),
+            "REPOSITORY_PLANNED_FACT_PUBLIC_SURFACE" => {
+                Some(Self::RepositoryPlannedFactPublicSurface)
+            }
+            "REPOSITORY_PLANNED_FACT_BODY" => Some(Self::RepositoryPlannedFactBody),
+            "REPOSITORY_PLANNED_FACT_RESOLUTION" => {
+                Some(Self::RepositoryPlannedFactResolution)
+            }
+            "REPOSITORY_PLANNED_FACT_SEARCH" => Some(Self::RepositoryPlannedFactSearch),
+            "REPOSITORY_PLANNED_FACT_DERIVED_GRAPH" => {
+                Some(Self::RepositoryPlannedFactDerivedGraph)
+            }
+            "REPOSITORY_PLANNED_FACT_TESTS" => Some(Self::RepositoryPlannedFactTests),
+            "REPOSITORY_PLANNED_FACT_SERVICES" => {
+                Some(Self::RepositoryPlannedFactServices)
+            }
+            "REPOSITORY_PLANNED_FACT_HISTORY" => Some(Self::RepositoryPlannedFactHistory),
+            _ => None,
+        }
+    }
+}
+/// Normalized IR record domain retained or rebuilt by one operation.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryNormalizedFactDomain {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactFiles = 1,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactEntities = 2,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactOccurrences = 3,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactRelations = 4,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactProvenance = 5,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactSourceMappings = 6,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactDiagnostics = 7,
+    #[allow(missing_docs)]
+    RepositoryNormalizedFactExtensions = 8,
+}
+impl RepositoryNormalizedFactDomain {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_NORMALIZED_FACT_DOMAIN_UNSPECIFIED",
+            Self::RepositoryNormalizedFactFiles => "REPOSITORY_NORMALIZED_FACT_FILES",
+            Self::RepositoryNormalizedFactEntities => {
+                "REPOSITORY_NORMALIZED_FACT_ENTITIES"
+            }
+            Self::RepositoryNormalizedFactOccurrences => {
+                "REPOSITORY_NORMALIZED_FACT_OCCURRENCES"
+            }
+            Self::RepositoryNormalizedFactRelations => {
+                "REPOSITORY_NORMALIZED_FACT_RELATIONS"
+            }
+            Self::RepositoryNormalizedFactProvenance => {
+                "REPOSITORY_NORMALIZED_FACT_PROVENANCE"
+            }
+            Self::RepositoryNormalizedFactSourceMappings => {
+                "REPOSITORY_NORMALIZED_FACT_SOURCE_MAPPINGS"
+            }
+            Self::RepositoryNormalizedFactDiagnostics => {
+                "REPOSITORY_NORMALIZED_FACT_DIAGNOSTICS"
+            }
+            Self::RepositoryNormalizedFactExtensions => {
+                "REPOSITORY_NORMALIZED_FACT_EXTENSIONS"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_NORMALIZED_FACT_DOMAIN_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_NORMALIZED_FACT_FILES" => {
+                Some(Self::RepositoryNormalizedFactFiles)
+            }
+            "REPOSITORY_NORMALIZED_FACT_ENTITIES" => {
+                Some(Self::RepositoryNormalizedFactEntities)
+            }
+            "REPOSITORY_NORMALIZED_FACT_OCCURRENCES" => {
+                Some(Self::RepositoryNormalizedFactOccurrences)
+            }
+            "REPOSITORY_NORMALIZED_FACT_RELATIONS" => {
+                Some(Self::RepositoryNormalizedFactRelations)
+            }
+            "REPOSITORY_NORMALIZED_FACT_PROVENANCE" => {
+                Some(Self::RepositoryNormalizedFactProvenance)
+            }
+            "REPOSITORY_NORMALIZED_FACT_SOURCE_MAPPINGS" => {
+                Some(Self::RepositoryNormalizedFactSourceMappings)
+            }
+            "REPOSITORY_NORMALIZED_FACT_DIAGNOSTICS" => {
+                Some(Self::RepositoryNormalizedFactDiagnostics)
+            }
+            "REPOSITORY_NORMALIZED_FACT_EXTENSIONS" => {
+                Some(Self::RepositoryNormalizedFactExtensions)
+            }
             _ => None,
         }
     }

@@ -31,8 +31,12 @@ pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V4: u32 = 4;
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V5: u32 = 5;
 /// Frozen support-bundle schema with installed language capabilities.
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V6: u32 = 6;
-/// Current support-bundle schema with reconciliable durable storage accounting.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 7;
+/// Frozen support-bundle schema with reconciliable durable storage accounting.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V7: u32 = 7;
+/// Frozen support-bundle schema with authoritative repository-capacity accounting.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V8: u32 = 8;
+/// Current support-bundle schema.
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = SUPPORT_BUNDLE_SCHEMA_VERSION_V8;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -108,6 +112,10 @@ pub const SUPPORT_ENTRY_NAMES_V4: [&str; SUPPORT_ENTRY_COUNT_V4] = [
 pub const SUPPORT_ENTRY_NAMES_V5: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
 /// Ordered allow-list for current production support archives.
 pub const SUPPORT_ENTRY_NAMES_V6: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
+/// Ordered allow-list for support archives with authoritative storage accounting.
+pub const SUPPORT_ENTRY_NAMES_V7: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
+/// Ordered allow-list for current production support archives.
+pub const SUPPORT_ENTRY_NAMES_V8: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
 /// Data classes that the frozen support schema must explicitly omit.
 pub const OMITTED_DATA_CLASSES: [&str; 12] = [
     "absolute_roots",
@@ -159,6 +167,10 @@ pub const OMITTED_DATA_CLASSES_V4: [&str; 12] = [
 pub const OMITTED_DATA_CLASSES_V5: [&str; 12] = OMITTED_DATA_CLASSES_V4;
 /// Data classes omitted by current language-capability support archives.
 pub const OMITTED_DATA_CLASSES_V6: [&str; 12] = OMITTED_DATA_CLASSES_V5;
+/// Data classes omitted by authoritative storage-accounting support archives.
+pub const OMITTED_DATA_CLASSES_V7: [&str; 12] = OMITTED_DATA_CLASSES_V6;
+/// Data classes omitted by current repository-capacity support archives.
+pub const OMITTED_DATA_CLASSES_V8: [&str; 12] = OMITTED_DATA_CLASSES_V7;
 
 /// Closed daemon protocol version emitted by this support schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +196,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.14.
     #[serde(rename = "1.14")]
     V1_14,
+    /// Rootlight daemon protocol 1.15.
+    #[serde(rename = "1.15")]
+    V1_15,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -495,6 +510,13 @@ pub enum SupportNextAction {
     CollectSupportBundle,
     /// Restart enumeration after an invalid continuation.
     RestartEnumeration,
+    /// Update one checked configuration value.
+    UpdateConfiguration {
+        /// Canonical source-free configuration key.
+        key: String,
+    },
+    /// Delete an unneeded repository through the supported catalog mutation.
+    DeleteRepository,
 }
 
 /// Stable source-free terminal error retained in production support evidence.
@@ -866,6 +888,32 @@ pub enum SupportStorageAccountingState {
     VerifiedScan,
 }
 
+/// Authoritative catalog-wide repository-capacity accounting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportRepositoryCapacityInventory {
+    /// All committed and pending repository registrations.
+    pub registered_repository_count: u32,
+    /// Repository registrations with publication still in flight.
+    pub pending_repository_count: u32,
+    /// Committed repositories with an active generation.
+    pub active_repository_count: u32,
+    /// Retained committed repositories in a failed state.
+    pub failed_repository_count: u32,
+    /// Committed repositories protected by a durable pin.
+    pub pinned_repository_count: u32,
+    /// Committed repositories eligible for explicit deletion.
+    pub reclaimable_repository_count: u32,
+    /// Whether durable repository pinning is implemented.
+    pub pinning_supported: bool,
+    /// Configured maximum registered repositories.
+    pub configured_maximum_repositories: u32,
+    /// Effective maximum after durable-generation constraints.
+    pub effective_maximum_repositories: u32,
+    /// Remaining registrations admitted by the effective maximum.
+    pub repository_headroom: u32,
+}
+
 /// Complete allow-listed production inventory accepted by the privacy boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -881,6 +929,9 @@ pub struct SupportInventory {
     pub languages: Vec<SupportLanguageCapabilityInventory>,
     /// Bounded repository inventory.
     pub repositories: Vec<SupportRepositoryInventory>,
+    /// Catalog-wide repository-capacity accounting, independent of detail truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_capacity: Option<SupportRepositoryCapacityInventory>,
     /// Bounded generation manifest headers.
     pub generations: Vec<SupportGenerationInventory>,
     /// Effective non-secret configuration.
@@ -1322,6 +1373,8 @@ pub enum SupportBundleSchema {
     V6,
     /// Production schema with reconciliable durable storage accounting.
     V7,
+    /// Production schema with authoritative repository-capacity accounting.
+    V8,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -1910,6 +1963,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V5 => ProtocolVersion::V1_12,
         SupportBundleSchema::V6 => ProtocolVersion::V1_13,
         SupportBundleSchema::V7 => ProtocolVersion::V1_14,
+        SupportBundleSchema::V8 => ProtocolVersion::V1_15,
     };
     if input.protocol_version != expected_protocol {
         return Err(SupportBundleError::ProtocolVersionMismatch);
@@ -1922,6 +1976,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V5 => build_support_bundle_v5(input),
         SupportBundleSchema::V6 => build_support_bundle_v6(input),
         SupportBundleSchema::V7 => build_support_bundle_v7(input),
+        SupportBundleSchema::V8 => build_support_bundle_v8(input),
     }
 }
 
@@ -2054,8 +2109,18 @@ fn build_support_bundle_v7(
 ) -> Result<SupportBundle, SupportBundleError> {
     build_production_support_bundle(
         input,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
-        &OMITTED_DATA_CLASSES_V6,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V7,
+        &OMITTED_DATA_CLASSES_V7,
+    )
+}
+
+fn build_support_bundle_v8(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
+    build_production_support_bundle(
+        input,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+        &OMITTED_DATA_CLASSES_V8,
     )
 }
 
@@ -2114,7 +2179,8 @@ fn validate_production_input(
     schema_version: u32,
 ) -> Result<(), SupportBundleError> {
     let minimum_protocol_minor = match schema_version {
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => 14,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V8 => 15,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V7 => 14,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V6 => 13,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => 12,
         _ => 8,
@@ -2234,10 +2300,18 @@ fn validate_production_input(
         }
     }
     for operation in &input.terminal_operations {
-        validate_terminal_operation(operation)?;
+        validate_terminal_operation(operation, schema_version)?;
     }
-    if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    if schema_version >= SUPPORT_BUNDLE_SCHEMA_VERSION_V7 {
         validate_authoritative_storage_accounting(inventory)?;
+    }
+    match (
+        schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+        inventory.repository_capacity.as_ref(),
+    ) {
+        (true, Some(capacity)) => validate_repository_capacity(capacity)?,
+        (false, None) => {}
+        _ => return Err(SupportBundleError::InvalidInventory),
     }
     Ok(())
 }
@@ -2490,6 +2564,7 @@ fn validate_authoritative_storage_accounting(
 
 fn validate_terminal_operation(
     operation: &SupportTerminalOperation,
+    schema_version: u32,
 ) -> Result<(), SupportBundleError> {
     if !is_opaque_id(&operation.operation_id)
         || operation
@@ -2530,11 +2605,63 @@ fn validate_terminal_operation(
         }
     }
     for action in &error.next_actions {
-        if let SupportNextAction::CorrectField { field } = action
-            && !is_detail_key(field)
-        {
-            return Err(SupportBundleError::InvalidInventory);
+        match action {
+            SupportNextAction::CorrectField { field } if !is_detail_key(field) => {
+                return Err(SupportBundleError::InvalidInventory);
+            }
+            SupportNextAction::UpdateConfiguration { key }
+                if schema_version < SUPPORT_BUNDLE_SCHEMA_VERSION_V8 || !is_support_label(key) =>
+            {
+                return Err(SupportBundleError::InvalidInventory);
+            }
+            SupportNextAction::DeleteRepository
+                if schema_version < SUPPORT_BUNDLE_SCHEMA_VERSION_V8 =>
+            {
+                return Err(SupportBundleError::InvalidInventory);
+            }
+            _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_repository_capacity(
+    capacity: &SupportRepositoryCapacityInventory,
+) -> Result<(), SupportBundleError> {
+    let Some(committed) = capacity
+        .active_repository_count
+        .checked_add(capacity.failed_repository_count)
+    else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    let Some(registered) = committed.checked_add(capacity.pending_repository_count) else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    let Some(headroom) = capacity
+        .effective_maximum_repositories
+        .checked_sub(capacity.registered_repository_count)
+    else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    let Some(protected_or_reclaimable) = capacity
+        .pinned_repository_count
+        .checked_add(capacity.reclaimable_repository_count)
+    else {
+        return Err(SupportBundleError::InvalidInventory);
+    };
+    if capacity.configured_maximum_repositories == 0
+        || capacity.effective_maximum_repositories == 0
+        || capacity.effective_maximum_repositories > capacity.configured_maximum_repositories
+        || registered != capacity.registered_repository_count
+        || headroom != capacity.repository_headroom
+        || capacity.pinned_repository_count > committed
+        || capacity.reclaimable_repository_count > committed
+        || protected_or_reclaimable > committed
+        || !capacity.pinning_supported
+            && (capacity.pinned_repository_count != 0
+                || capacity.reclaimable_repository_count != committed)
+    {
+        return Err(SupportBundleError::InvalidInventory);
     }
     Ok(())
 }
@@ -2915,6 +3042,7 @@ mod tests {
                 inflight_reservation_bytes: None,
                 repository_headroom_bytes: None,
             }],
+            repository_capacity: None,
             generations: vec![SupportGenerationInventory {
                 repository_id: "22".repeat(16),
                 generation_id: "33".repeat(16),
@@ -3061,6 +3189,28 @@ mod tests {
         storage.source_reservation_factor = Some(2);
         storage.oracle_reservation_factor = Some(3);
         storage.disk_margin_bytes = Some(3_145_728);
+    }
+
+    fn make_schema_v8_input(input: &mut SupportBundleInput) {
+        make_schema_v7_input(input);
+        input.protocol_version = ProtocolVersion::V1_15;
+        let inventory = input
+            .inventory
+            .as_mut()
+            .expect("production inventory exists");
+        inventory.runtime.protocol_minor = 15;
+        inventory.repository_capacity = Some(SupportRepositoryCapacityInventory {
+            registered_repository_count: 2,
+            pending_repository_count: 1,
+            active_repository_count: 1,
+            failed_repository_count: 0,
+            pinned_repository_count: 0,
+            reclaimable_repository_count: 1,
+            pinning_supported: false,
+            configured_maximum_repositories: 4_096,
+            effective_maximum_repositories: 4_096,
+            repository_headroom: 4_094,
+        });
     }
 
     #[test]
@@ -3612,6 +3762,7 @@ mod tests {
             inventory.storage.admission_margin_bytes,
             inventory.storage.repository_headroom_bytes
         );
+        assert_eq!(inventory.repository_capacity, None);
 
         let mut leaked_v7 = input.clone();
         leaked_v7.protocol_version = ProtocolVersion::V1_13;
@@ -3658,6 +3809,125 @@ mod tests {
             .catalog_accounted_bytes = Some(5_247);
         assert!(matches!(
             build_support_bundle_for_schema(&impossible_catalog_total, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    #[test]
+    fn schema_v8_validates_repository_capacity_and_v7_actions() {
+        let mut input = production_input();
+        make_schema_v8_input(&mut input);
+        let actions = &mut input.terminal_operations[0]
+            .error
+            .as_mut()
+            .expect("failed operation has an error")
+            .next_actions;
+        actions.push(SupportNextAction::UpdateConfiguration {
+            key: "storage.maximum_repositories".to_owned(),
+        });
+        actions.push(SupportNextAction::DeleteRepository);
+
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V8)
+            .expect("schema v8 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory entry opens")
+            .read_to_end(&mut bytes)
+            .expect("inventory entry reads");
+        let inventory: SupportInventory =
+            serde_json::from_slice(&bytes).expect("inventory entry decodes");
+        assert_eq!(
+            inventory
+                .repository_capacity
+                .expect("capacity aggregate is present")
+                .repository_headroom,
+            4_094
+        );
+
+        let mut leaked_capacity = input.clone();
+        leaked_capacity.protocol_version = ProtocolVersion::V1_14;
+        let leaked_capacity_inventory = leaked_capacity
+            .inventory
+            .as_mut()
+            .expect("production inventory exists");
+        leaked_capacity_inventory.runtime.protocol_minor = 14;
+        leaked_capacity.terminal_operations[0]
+            .error
+            .as_mut()
+            .expect("failed operation has an error")
+            .next_actions
+            .truncate(2);
+        assert!(matches!(
+            build_support_bundle_for_schema(&leaked_capacity, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut leaked_v8 = input.clone();
+        leaked_v8.protocol_version = ProtocolVersion::V1_14;
+        let leaked_inventory = leaked_v8
+            .inventory
+            .as_mut()
+            .expect("production inventory exists");
+        leaked_inventory.runtime.protocol_minor = 14;
+        leaked_inventory.repository_capacity = None;
+        assert!(matches!(
+            build_support_bundle_for_schema(&leaked_v8, SupportBundleSchema::V7),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut missing_capacity = input.clone();
+        missing_capacity
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repository_capacity = None;
+        assert!(matches!(
+            build_support_bundle_for_schema(&missing_capacity, SupportBundleSchema::V8),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut inconsistent = input.clone();
+        inconsistent
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repository_capacity
+            .as_mut()
+            .expect("capacity aggregate exists")
+            .registered_repository_count = 3;
+        assert!(matches!(
+            build_support_bundle_for_schema(&inconsistent, SupportBundleSchema::V8),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut invalid_headroom = input.clone();
+        invalid_headroom
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repository_capacity
+            .as_mut()
+            .expect("capacity aggregate exists")
+            .repository_headroom = 4_093;
+        assert!(matches!(
+            build_support_bundle_for_schema(&invalid_headroom, SupportBundleSchema::V8),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut unsupported_pin = input;
+        unsupported_pin
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repository_capacity
+            .as_mut()
+            .expect("capacity aggregate exists")
+            .pinned_repository_count = 1;
+        assert!(matches!(
+            build_support_bundle_for_schema(&unsupported_pin, SupportBundleSchema::V8),
             Err(SupportBundleError::InvalidInventory)
         ));
     }

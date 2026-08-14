@@ -331,7 +331,7 @@ pub enum FirstSliceIndexOperationStrategy {
 }
 
 /// Final source-free reuse, rebuild, I/O, and memory evidence for one index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceIndexOperationEvidence {
     /// Construction strategy used by this operation.
     pub strategy: FirstSliceIndexOperationStrategy,
@@ -364,6 +364,10 @@ pub struct FirstSliceIndexOperationEvidence {
     pub owned_memory_bytes: u64,
     /// Durable bytes retained for the resulting immutable generation.
     pub retained_durable_bytes: u64,
+    /// Logical pre-work closure grouped by domain, pass, and cause.
+    pub planned_fact_work: Vec<FirstSlicePlannedFactWork>,
+    /// Actual normalized records retained or rebuilt by domain and pass.
+    pub normalized_fact_work: Vec<FirstSliceNormalizedFactWork>,
 }
 
 /// Opaque durable recovery work split between startup-active and retained-history phases.
@@ -613,6 +617,31 @@ pub struct FirstSliceSupportGeneration {
     pub active: bool,
 }
 
+/// Authoritative repository-registration capacity for production support evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceRepositoryCapacityInventory {
+    /// Registrations currently charged to repository admission.
+    pub registered_repository_count: u32,
+    /// Admitted registrations that are not yet active.
+    pub pending_repository_count: u32,
+    /// Committed registrations with one queryable active generation.
+    pub active_repository_count: u32,
+    /// Failed registrations retained by the service.
+    pub failed_repository_count: u32,
+    /// Registrations protected by an explicit durable pin.
+    pub pinned_repository_count: u32,
+    /// Committed registrations removable through explicit repository deletion.
+    pub reclaimable_repository_count: u32,
+    /// Whether explicit durable repository pinning is implemented.
+    pub pinning_supported: bool,
+    /// User-configured repository registration ceiling.
+    pub configured_maximum_repositories: u32,
+    /// Effective ceiling after generation-retention capacity is applied.
+    pub effective_maximum_repositories: u32,
+    /// Registration slots available through the same arithmetic as admission.
+    pub repository_headroom: u32,
+}
+
 /// Bounded source-free snapshot consumed by the daemon support bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSupportInventory {
@@ -622,6 +651,8 @@ pub struct FirstSliceSupportInventory {
     pub languages: Vec<FirstSliceSupportLanguageCapability>,
     /// Active repository summaries.
     pub repositories: Vec<FirstSliceSupportRepository>,
+    /// Authoritative repository-registration counts and admission headroom.
+    pub repository_capacity: FirstSliceRepositoryCapacityInventory,
     /// Retained immutable generation summaries.
     pub generations: Vec<FirstSliceSupportGeneration>,
     /// Stable normalized generation format.
@@ -1172,6 +1203,10 @@ pub struct FirstSlicePlannedFactWork {
     cause: FirstSliceFactWorkCause,
     files: u64,
     analysis_units: u64,
+    #[serde(skip)]
+    file_ids: BTreeSet<FileId>,
+    #[serde(skip)]
+    analysis_unit_ids: BTreeSet<AnalysisUnitId>,
 }
 
 impl FirstSlicePlannedFactWork {
@@ -1210,6 +1245,19 @@ impl FirstSlicePlannedFactWork {
     pub const fn analysis_units(&self) -> u64 {
         self.analysis_units
     }
+
+    /// Iterates canonical file identities represented by this in-process result.
+    pub fn file_ids(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.file_ids.iter().copied()
+    }
+
+    /// Iterates canonical fact identities for represented analysis units.
+    pub fn analysis_unit_ids(&self) -> impl Iterator<Item = FactId> + '_ {
+        self.analysis_unit_ids
+            .iter()
+            .copied()
+            .map(AnalysisUnitId::as_fact_id)
+    }
 }
 
 /// Normalized records retained by verified rebind or rebuilt during construction.
@@ -1221,6 +1269,8 @@ pub struct FirstSliceNormalizedFactWork {
     cause: FirstSliceFactWorkCause,
     files: u64,
     facts: u64,
+    #[serde(skip)]
+    file_ids: BTreeSet<FileId>,
 }
 
 impl FirstSliceNormalizedFactWork {
@@ -1252,6 +1302,20 @@ impl FirstSliceNormalizedFactWork {
     #[must_use]
     pub const fn facts(&self) -> u64 {
         self.facts
+    }
+
+    /// Iterates canonical file identities evidenced by this in-process result.
+    pub fn file_ids(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.file_ids.iter().copied()
+    }
+
+    /// Iterates canonical fact identities for evidenced file analysis units.
+    pub fn analysis_unit_ids(&self) -> impl Iterator<Item = FactId> + '_ {
+        self.file_ids
+            .iter()
+            .copied()
+            .map(file_analysis_unit)
+            .map(AnalysisUnitId::as_fact_id)
     }
 }
 
@@ -4037,36 +4101,34 @@ impl FirstSliceService {
             .pending_repository_registrations
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let (repository, reservation_inserted) =
-            if let Some(repository) = self.repositories.get(&root_identity).copied() {
-                (repository, false)
-            } else if let Some((repository, display_name, pending_root_path)) =
-                pending.get_mut(&root_identity)
-            {
-                *display_name = sanitized_repository_display_name(&canonical, *repository)?;
-                *pending_root_path = Some(root_path.clone());
-                (*repository, false)
-            } else {
-                let retained_repositories = self
-                    .repository_display_names
-                    .len()
-                    .checked_add(pending.len())
-                    .ok_or(FirstSliceError::Retention)?;
-                if retained_repositories >= self.maximum_repositories {
-                    return Err(repository_capacity_limit(
-                        retained_repositories,
-                        self.maximum_repositories,
-                    ));
-                }
-                let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
-                let display_name = sanitized_repository_display_name(&canonical, repository)?;
-                // Opening the root now proves the reserved identity names a valid
-                // directory before the operation is acknowledged to the caller.
-                let _root = RepositoryRoot::open(repository, path)
-                    .map_err(|_| FirstSliceError::Repository)?;
-                pending.insert(root_identity, (repository, display_name, Some(root_path)));
-                (repository, true)
-            };
+        let (repository, reservation_inserted) = if let Some(repository) =
+            self.repositories.get(&root_identity).copied()
+        {
+            (repository, false)
+        } else if let Some((repository, display_name, pending_root_path)) =
+            pending.get_mut(&root_identity)
+        {
+            *display_name = sanitized_repository_display_name(&canonical, *repository)?;
+            *pending_root_path = Some(root_path.clone());
+            (*repository, false)
+        } else {
+            let retained_repositories = self
+                .repository_display_names
+                .len()
+                .checked_add(pending.len())
+                .ok_or(FirstSliceError::Retention)?;
+            if retained_repositories >= self.maximum_repositories {
+                return Err(self.repository_capacity_limit(retained_repositories, pending.len()));
+            }
+            let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
+            let display_name = sanitized_repository_display_name(&canonical, repository)?;
+            // Opening the root now proves the reserved identity names a valid
+            // directory before the operation is acknowledged to the caller.
+            let _root =
+                RepositoryRoot::open(repository, path).map_err(|_| FirstSliceError::Repository)?;
+            pending.insert(root_identity, (repository, display_name, Some(root_path)));
+            (repository, true)
+        };
         drop(pending);
         let maximum_source_bytes =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
@@ -4112,6 +4174,27 @@ impl FirstSliceService {
             reservation_inserted,
             storage_admission,
         })
+    }
+
+    fn repository_capacity_limit(
+        &self,
+        observed: usize,
+        pending_repositories: usize,
+    ) -> FirstSliceError {
+        let configured =
+            usize::try_from(self.storage_policy.maximum_repositories).unwrap_or(usize::MAX);
+        let configuration = if self.maximum_repositories < configured {
+            FirstSliceRepositoryCapacityConfiguration::RetainedGenerations
+        } else {
+            FirstSliceRepositoryCapacityConfiguration::MaximumRepositories
+        };
+        repository_capacity_limit(
+            observed,
+            self.maximum_repositories,
+            configuration,
+            pending_repositories,
+            self.repository_display_names.len(),
+        )
     }
 
     /// Compatibility wrapper for callers using the original Rust-first API name.
@@ -4190,9 +4273,9 @@ impl FirstSliceService {
             .ok_or(FirstSliceError::Retention)?
             >= self.maximum_repositories
         {
-            return Err(repository_capacity_limit(
+            return Err(self.repository_capacity_limit(
                 self.repository_display_names.len() + pending.len(),
-                self.maximum_repositories,
+                pending.len(),
             ));
         }
         pending.insert(root_identity, (repository, repository.to_string(), None));
@@ -4954,9 +5037,9 @@ impl FirstSliceService {
                 .ok_or(FirstSliceError::Retention)?
                 >= self.maximum_repositories
         {
-            return Err(repository_capacity_limit(
+            return Err(self.repository_capacity_limit(
                 self.repository_display_names.len() + pending.len(),
-                self.maximum_repositories,
+                pending.len(),
             ));
         }
         let repository_result = match existing_repository {
@@ -6670,6 +6753,8 @@ impl FirstSliceService {
                     reserved_memory_bytes: 0,
                     owned_memory_bytes: 0,
                     retained_durable_bytes: receipt.retained_durable_bytes,
+                    planned_fact_work: Vec::new(),
+                    normalized_fact_work: Vec::new(),
                 }
             }
             FirstSlicePublication::Pending {
@@ -6727,6 +6812,8 @@ impl FirstSliceService {
                     reserved_memory_bytes: *reserved_memory_bytes,
                     owned_memory_bytes: *memory_bytes,
                     retained_durable_bytes: receipt.retained_durable_bytes,
+                    planned_fact_work: incremental.evidence.planned_fact_work.clone(),
+                    normalized_fact_work: incremental.evidence.normalized_fact_work.clone(),
                 }
             }
         };
@@ -7442,6 +7529,76 @@ impl FirstSliceService {
         storage: Option<durable::DurableStorageInventory>,
         storage_accounting_state: FirstSliceStorageAccountingState,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        let pending = self
+            .pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let committed_repository_count = self.repository_display_names.len();
+        let active_repository_count = self.active_by_repository.len();
+        if committed_repository_count != active_repository_count
+            || self.repositories.len() != committed_repository_count
+            || !self
+                .repository_display_names
+                .keys()
+                .eq(self.active_by_repository.keys())
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let mut committed_repositories = BTreeSet::new();
+        for repository in self.repositories.values() {
+            if !self.active_by_repository.contains_key(repository)
+                || !committed_repositories.insert(*repository)
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        let mut pending_repositories = BTreeSet::new();
+        for (root_identity, (repository, _, _)) in pending.iter() {
+            if self.repositories.contains_key(root_identity)
+                || self.active_by_repository.contains_key(repository)
+                || !pending_repositories.insert(*repository)
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        let registered_repository_count = committed_repository_count
+            .checked_add(pending.len())
+            .ok_or(FirstSliceError::Limits)?;
+        let configured_maximum_repositories =
+            usize::try_from(self.storage_policy.maximum_repositories)
+                .map_err(|_| FirstSliceError::Limits)?;
+        let effective_maximum_repositories = self
+            .storage_policy
+            .effective_maximum_repositories(self.maximum_generations_per_repository)?;
+        if effective_maximum_repositories != self.maximum_repositories
+            || effective_maximum_repositories > configured_maximum_repositories
+            || registered_repository_count > effective_maximum_repositories
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let repository_headroom = effective_maximum_repositories
+            .checked_sub(registered_repository_count)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let repository_capacity = FirstSliceRepositoryCapacityInventory {
+            registered_repository_count: u32::try_from(registered_repository_count)
+                .map_err(|_| FirstSliceError::Limits)?,
+            pending_repository_count: u32::try_from(pending.len())
+                .map_err(|_| FirstSliceError::Limits)?,
+            active_repository_count: u32::try_from(active_repository_count)
+                .map_err(|_| FirstSliceError::Limits)?,
+            failed_repository_count: 0,
+            pinned_repository_count: 0,
+            reclaimable_repository_count: u32::try_from(committed_repository_count)
+                .map_err(|_| FirstSliceError::Limits)?,
+            pinning_supported: false,
+            configured_maximum_repositories: self.storage_policy.maximum_repositories,
+            effective_maximum_repositories: u32::try_from(effective_maximum_repositories)
+                .map_err(|_| FirstSliceError::Limits)?,
+            repository_headroom: u32::try_from(repository_headroom)
+                .map_err(|_| FirstSliceError::Limits)?,
+        };
+        drop(pending);
+
         let languages: Vec<_> = self.analyzers.keys().cloned().collect();
         let mut adapters = vec![FirstSliceSupportAdapter {
             name: "tree-sitter".to_owned(),
@@ -7657,6 +7814,7 @@ impl FirstSliceService {
                 })
                 .collect(),
             repositories,
+            repository_capacity,
             generations,
             generation_format: format!(
                 "{}.{}",
@@ -9985,6 +10143,27 @@ impl FirstSliceResource {
     }
 }
 
+/// Supported configuration that governs repository-registration capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceRepositoryCapacityConfiguration {
+    /// Explicit repository-registration ceiling.
+    MaximumRepositories,
+    /// Per-repository generation retention determines the effective ceiling.
+    RetainedGenerations,
+}
+
+impl FirstSliceRepositoryCapacityConfiguration {
+    /// Returns the canonical source-free user configuration key.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaximumRepositories => "storage.maximum_repositories",
+            Self::RetainedGenerations => "storage.retained_generations",
+        }
+    }
+}
+
 /// Closed source-redacted component of an identity-verification failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirstSliceIdentityFailure {
@@ -10166,6 +10345,22 @@ pub enum FirstSliceError {
         observed: u64,
         /// Configured count or byte ceiling.
         limit: u64,
+    },
+    /// Repository registration crossed its effective configured capacity.
+    #[error(
+        "repository registration observed {observed} above limit {limit} governed by {configuration:?}"
+    )]
+    RepositoryCapacityLimit {
+        /// Safe attempted registration count.
+        observed: u64,
+        /// Effective repository-registration ceiling.
+        limit: u64,
+        /// Configuration key that currently governs the effective ceiling.
+        configuration: FirstSliceRepositoryCapacityConfiguration,
+        /// Registrations that have reserved capacity but are not yet committed.
+        pending_repositories: u64,
+        /// Committed registrations that the supported delete lifecycle can reclaim.
+        reclaimable_repositories: u64,
     },
     /// One explicit bounded resource crossed a ceiling whose exact observation was discarded.
     #[error("first-slice resource {resource:?} estimated at least {estimated} above limit {limit}")]
@@ -11292,6 +11487,8 @@ fn planned_fact_work(
                     files: u64::try_from(files.len()).map_err(|_| FirstSliceError::Limits)?,
                     analysis_units: u64::try_from(units.len())
                         .map_err(|_| FirstSliceError::Limits)?,
+                    file_ids: files,
+                    analysis_unit_ids: units,
                 })
             },
         )
@@ -13587,6 +13784,7 @@ fn normalized_fact_work(
                 cause,
                 files: u64::try_from(files.len()).map_err(|_| FirstSliceError::Limits)?,
                 facts,
+                file_ids: files,
             })
         })
         .collect()
@@ -13791,13 +13989,21 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
     }
 }
 
-fn repository_capacity_limit(observed: usize, limit: usize) -> FirstSliceError {
-    FirstSliceError::ResourceLimit {
-        resource: FirstSliceResource::Repositories,
+fn repository_capacity_limit(
+    observed: usize,
+    limit: usize,
+    configuration: FirstSliceRepositoryCapacityConfiguration,
+    pending_repositories: usize,
+    reclaimable_repositories: usize,
+) -> FirstSliceError {
+    FirstSliceError::RepositoryCapacityLimit {
         observed: u64::try_from(observed)
             .unwrap_or(u64::MAX)
             .saturating_add(1),
         limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        configuration,
+        pending_repositories: u64::try_from(pending_repositories).unwrap_or(u64::MAX),
+        reclaimable_repositories: u64::try_from(reclaimable_repositories).unwrap_or(u64::MAX),
     }
 }
 
@@ -18219,6 +18425,16 @@ mod tests {
                 .iter()
                 .all(FirstSliceIndexAdmission::created_repository_reservation)
         );
+        let capacity = service
+            .support_inventory_snapshot()
+            .expect("support inventory preserves aggregate capacity")
+            .repository_capacity;
+        assert_eq!(capacity.registered_repository_count, 176);
+        assert_eq!(capacity.pending_repository_count, 176);
+        assert_eq!(capacity.active_repository_count, 0);
+        assert_eq!(capacity.configured_maximum_repositories, 4_096);
+        assert_eq!(capacity.effective_maximum_repositories, 1_024);
+        assert_eq!(capacity.repository_headroom, 1_024 - 176);
     }
 
     #[test]
@@ -18238,10 +18454,12 @@ mod tests {
 
         assert!(matches!(
             service.admit_repository(&rejected, &cancellation),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::Repositories,
+            Err(FirstSliceError::RepositoryCapacityLimit {
                 observed: 3,
                 limit: 2,
+                configuration: FirstSliceRepositoryCapacityConfiguration::RetainedGenerations,
+                pending_repositories: 2,
+                reclaimable_repositories: 0,
             })
         ));
     }
@@ -18277,10 +18495,12 @@ mod tests {
 
         assert!(matches!(
             service.admit_repository(&rejected, &cancellation),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::Repositories,
+            Err(FirstSliceError::RepositoryCapacityLimit {
                 observed: 3,
                 limit: 2,
+                configuration: FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 2,
+                reclaimable_repositories: 0,
             })
         ));
     }
@@ -18328,6 +18548,24 @@ mod tests {
             reopened.active_generation_for(indexed.repository),
             Some(indexed.generation)
         );
+        assert_eq!(
+            reopened
+                .support_inventory_snapshot_without_storage_scan()
+                .expect("reopened support capacity builds")
+                .repository_capacity,
+            FirstSliceRepositoryCapacityInventory {
+                registered_repository_count: 1,
+                pending_repository_count: 0,
+                active_repository_count: 1,
+                failed_repository_count: 0,
+                pinned_repository_count: 0,
+                reclaimable_repository_count: 1,
+                pinning_supported: false,
+                configured_maximum_repositories: 1,
+                effective_maximum_repositories: 1,
+                repository_headroom: 0,
+            }
+        );
         let rejected_root = durable_test_tempdir();
         fs::write(
             rejected_root.path().join("lib.rs"),
@@ -18336,10 +18574,12 @@ mod tests {
         .expect("rejected fixture writes");
         assert!(matches!(
             reopened.admit_repository(rejected_root.path(), &cancellation),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::Repositories,
+            Err(FirstSliceError::RepositoryCapacityLimit {
                 observed: 2,
                 limit: 1,
+                configuration: FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 0,
+                reclaimable_repositories: 1,
             })
         ));
     }
@@ -19314,6 +19554,14 @@ mod tests {
         let (mut restored, deferred) =
             FirstSliceService::open_durable_deferred(2, paths.state_dir())
                 .expect("durable boundary opens without scanning generations");
+        let bootstrap_capacity = restored
+            .support_inventory_snapshot_without_storage_scan()
+            .expect("deferred bootstrap capacity builds")
+            .repository_capacity;
+        assert_eq!(bootstrap_capacity.registered_repository_count, 1);
+        assert_eq!(bootstrap_capacity.pending_repository_count, 1);
+        assert_eq!(bootstrap_capacity.active_repository_count, 0);
+        assert_eq!(bootstrap_capacity.reclaimable_repository_count, 0);
         let active_state = deferred
             .restore_active(&cancellation)
             .expect("active generation verifies");
@@ -19328,6 +19576,14 @@ mod tests {
             restored.active_generation_for(active.repository),
             Some(active.generation)
         );
+        let active_capacity = restored
+            .support_inventory_snapshot_without_storage_scan()
+            .expect("progressively restored capacity builds")
+            .repository_capacity;
+        assert_eq!(active_capacity.registered_repository_count, 1);
+        assert_eq!(active_capacity.pending_repository_count, 0);
+        assert_eq!(active_capacity.active_repository_count, 1);
+        assert_eq!(active_capacity.reclaimable_repository_count, 1);
         assert_eq!(
             restored
                 .incremental_evidence(active.generation)
@@ -19540,8 +19796,27 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            service
+                .support_inventory_snapshot_without_storage_scan()
+                .expect("live failed admission remains accounted")
+                .repository_capacity
+                .pending_repository_count,
+            1
+        );
         service.release_index_admission(admission);
         assert!(service.list_repositories().is_empty());
+        let released = service
+            .support_inventory_snapshot_without_storage_scan()
+            .expect("failed admission cleanup restores capacity")
+            .repository_capacity;
+        assert_eq!(released.registered_repository_count, 0);
+        assert_eq!(released.pending_repository_count, 0);
+        assert_eq!(released.failed_repository_count, 0);
+        assert_eq!(
+            released.repository_headroom,
+            released.effective_maximum_repositories
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -20661,6 +20936,96 @@ mod tests {
     }
 
     #[test]
+    fn support_repository_capacity_tracks_active_pending_release_and_delete() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let active_root = fixture.path().join("active");
+        let pending_root = fixture.path().join("pending");
+        for (root, function) in [
+            (&active_root, "active_capacity"),
+            (&pending_root, "pending_capacity"),
+        ] {
+            fs::create_dir(root).expect("repository root exists");
+            fs::write(
+                root.join("lib.rs"),
+                format!("pub fn {function}() -> bool {{ true }}\n"),
+            )
+            .expect("repository fixture writes");
+        }
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+        let active = service
+            .index_rust_fixture(&active_root, &cancellation)
+            .expect("active repository publishes");
+        let pending = service
+            .admit_repository(&pending_root, &cancellation)
+            .expect("pending repository is admitted");
+
+        assert_eq!(
+            service
+                .support_inventory_snapshot_without_storage_scan()
+                .expect("active and pending capacity builds")
+                .repository_capacity,
+            FirstSliceRepositoryCapacityInventory {
+                registered_repository_count: 2,
+                pending_repository_count: 1,
+                active_repository_count: 1,
+                failed_repository_count: 0,
+                pinned_repository_count: 0,
+                reclaimable_repository_count: 1,
+                pinning_supported: false,
+                configured_maximum_repositories: 4_096,
+                effective_maximum_repositories: 4_096,
+                repository_headroom: 4_094,
+            }
+        );
+
+        service.release_index_admission(pending);
+        assert_eq!(
+            service
+                .support_inventory_snapshot_without_storage_scan()
+                .expect("released capacity builds")
+                .repository_capacity
+                .repository_headroom,
+            4_095
+        );
+        service
+            .delete_repository(active.repository)
+            .expect("committed repository deletes");
+        assert_eq!(
+            service
+                .support_inventory_snapshot_without_storage_scan()
+                .expect("deleted capacity builds")
+                .repository_capacity,
+            FirstSliceRepositoryCapacityInventory {
+                registered_repository_count: 0,
+                pending_repository_count: 0,
+                active_repository_count: 0,
+                failed_repository_count: 0,
+                pinned_repository_count: 0,
+                reclaimable_repository_count: 0,
+                pinning_supported: false,
+                configured_maximum_repositories: 4_096,
+                effective_maximum_repositories: 4_096,
+                repository_headroom: 4_096,
+            }
+        );
+    }
+
+    #[test]
+    fn support_repository_capacity_rejects_lifecycle_drift() {
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+        service.repository_display_names.insert(
+            RepositoryId::from_bytes([91; 16]),
+            "orphaned-registration".to_owned(),
+        );
+
+        assert!(matches!(
+            service.support_inventory_snapshot_without_storage_scan(),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+    }
+
+    #[test]
     fn support_inventory_is_source_free_and_tracks_active_generation() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
@@ -20850,6 +21215,18 @@ mod tests {
         assert_support_storage_inventory_eq(&accounted_after_publish, &verified_after_publish);
         assert_eq!(accounted_after_publish.repositories.len(), 1);
         assert_eq!(accounted_after_publish.generations.len(), 1);
+        assert_eq!(
+            accounted_after_publish
+                .repository_capacity
+                .active_repository_count,
+            1
+        );
+        assert_eq!(
+            accounted_after_publish
+                .repository_capacity
+                .reclaimable_repository_count,
+            1
+        );
 
         service
             .delete_repository(receipt.repository)
@@ -20864,6 +21241,14 @@ mod tests {
         assert_support_storage_inventory_eq(&accounted_after_delete, &verified_after_delete);
         assert!(accounted_after_delete.repositories.is_empty());
         assert!(accounted_after_delete.generations.is_empty());
+        assert_eq!(
+            accounted_after_delete
+                .repository_capacity
+                .repository_headroom,
+            accounted_after_delete
+                .repository_capacity
+                .effective_maximum_repositories
+        );
     }
 
     fn assert_support_storage_inventory_eq(
@@ -20880,6 +21265,7 @@ mod tests {
         );
         assert_eq!(accounted.repositories.len(), verified.repositories.len());
         assert_eq!(accounted.generations.len(), verified.generations.len());
+        assert_eq!(accounted.repository_capacity, verified.repository_capacity);
         assert_eq!(accounted.total_storage_bytes, verified.total_storage_bytes);
         assert_eq!(accounted.shared_bytes, verified.shared_bytes);
         assert_eq!(accounted.reclaimable_bytes, verified.reclaimable_bytes);

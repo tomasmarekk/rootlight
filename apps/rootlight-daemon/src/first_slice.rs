@@ -32,28 +32,36 @@ use rootlight_daemon_core::{
     ControlRequest, ControlResponse, DaemonState, FirstSliceEffectiveBudget, FirstSliceIpcContext,
     FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
     HealthStatus, IndexSupportInventory, JournalActorHandle, PROTOCOL_MINOR,
-    RepositoryIndexProvider, ResourcePressure, ServiceError, operation_record_to_wire,
+    RepositoryIndexProvider, ResourcePressure, ServiceError, operation_record_to_wire_for_minor,
 };
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{
     ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
 };
 use rootlight_ir::{
-    AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, LineRange, NormalizedIrDocument,
-    OccurrenceRole, RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
+    AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, FactDomain as IrFactDomain,
+    LineRange, NormalizedIrDocument, OccurrenceRole, RelationEndpoint, RelationPredicate,
+    SourceRef, SourceSpan,
 };
 use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
-    SupportLanguageCapabilityInventory, SupportRepositoryInventory, SupportStorageAccountingState,
+    SupportLanguageCapabilityInventory, SupportRepositoryCapacityInventory,
+    SupportRepositoryInventory, SupportStorageAccountingState,
 };
 #[cfg(test)]
 use rootlight_operations::RecoveryClass;
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
-    InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash, Progress, RepositoryBuildStrategy,
-    RepositoryFallbackReason, RepositoryOperationContext, RepositoryOperationEvidence,
-    RepositoryOperationMode, RepositoryOperationSubmission,
+    InternalCancellationAuthority, MAX_REPOSITORY_FACT_WORK_GROUPS,
+    MAX_REPOSITORY_FACT_WORK_ID_SAMPLES, OperationError, OperationKind, OperationRecord,
+    OperationStage, OperationState, OperationSubmission, PlanHash, Progress,
+    RepositoryAffectedAnalysisUnitIds, RepositoryAffectedFileIds, RepositoryBuildStrategy,
+    RepositoryFactWorkCause, RepositoryFactWorkDisposition, RepositoryFallbackReason,
+    RepositoryIncrementalFactWorkEvidence, RepositoryNormalizedFactDomain,
+    RepositoryNormalizedFactWorkCollection, RepositoryNormalizedFactWorkGroup,
+    RepositoryOperationContext, RepositoryOperationEvidence, RepositoryOperationMode,
+    RepositoryOperationSubmission, RepositoryPlannedFactDomain,
+    RepositoryPlannedFactWorkCollection, RepositoryPlannedFactWorkGroup,
 };
 use rootlight_protocol::{
     MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
@@ -75,9 +83,10 @@ use rootlight_query::{
 use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT};
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
-    AdvancedAstNode, FallbackReason as ServiceFallbackReason, FirstSliceBudget,
-    FirstSliceCoverageGapReason, FirstSliceDeferredRestore, FirstSliceDurableOperation,
-    FirstSliceError, FirstSliceGenerationContext, FirstSliceGitEvidenceError,
+    AdvancedAstNode, FactDomain as IncrementalFactDomain, FallbackReason as ServiceFallbackReason,
+    FirstSliceBudget, FirstSliceCoverageGapReason, FirstSliceDeferredRestore,
+    FirstSliceDurableOperation, FirstSliceError, FirstSliceFactWorkCause,
+    FirstSliceFactWorkDisposition, FirstSliceGenerationContext, FirstSliceGitEvidenceError,
     FirstSliceIndexAdmission, FirstSliceIndexAdmissionMetadata, FirstSliceIndexMode,
     FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexProgress,
     FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
@@ -4966,7 +4975,7 @@ fn repository_index_with_intent(
                 };
                 let (receipt, written_bytes, operation_evidence) = match commit {
                     Ok(commit) => {
-                        let operation_evidence = *commit.evidence();
+                        let operation_evidence = commit.evidence().clone();
                         let (receipt, written_bytes) = commit.into_parts();
                         if receipt != staged_receipt {
                             lock_metadata(metadata)?.stage(operation, receipt.clone());
@@ -5065,7 +5074,7 @@ fn repository_index_with_intent(
                     runtime,
                     journal.record_repository_evidence_until(
                         operation,
-                        operation_evidence,
+                        operation_evidence.clone(),
                         evidence_deadline,
                     ),
                 );
@@ -5891,6 +5900,7 @@ fn index_response(
 fn repository_operation_evidence(
     evidence: FirstSliceIndexOperationEvidence,
 ) -> RepositoryOperationEvidence {
+    let fact_work = repository_incremental_fact_work(&evidence);
     RepositoryOperationEvidence {
         build_strategy: match evidence.strategy {
             FirstSliceIndexOperationStrategy::Initial => RepositoryBuildStrategy::Initial,
@@ -5924,6 +5934,181 @@ fn repository_operation_evidence(
         reserved_memory_bytes: evidence.reserved_memory_bytes,
         owned_memory_bytes: evidence.owned_memory_bytes,
         retained_durable_bytes: evidence.retained_durable_bytes,
+        fact_work,
+    }
+}
+
+fn repository_incremental_fact_work(
+    evidence: &FirstSliceIndexOperationEvidence,
+) -> Option<RepositoryIncrementalFactWorkEvidence> {
+    if evidence.strategy == FirstSliceIndexOperationStrategy::RetainedGeneration {
+        return None;
+    }
+    let planned_total = u64::try_from(evidence.planned_fact_work.len()).unwrap_or(u64::MAX);
+    let planned = evidence
+        .planned_fact_work
+        .iter()
+        .take(MAX_REPOSITORY_FACT_WORK_GROUPS)
+        .map(|work| RepositoryPlannedFactWorkGroup {
+            disposition: repository_fact_work_disposition(work.disposition()),
+            domain: repository_planned_fact_domain(work.domain()),
+            provider_pass: work.provider_pass().to_owned(),
+            cause: repository_fact_work_cause(work.cause()),
+            fact_count: None,
+            affected_files: repository_affected_files(work.files(), work.file_ids()),
+            affected_analysis_units: repository_affected_analysis_units(
+                work.analysis_units(),
+                work.analysis_unit_ids(),
+            ),
+        })
+        .collect::<Vec<_>>();
+    let normalized_total = u64::try_from(evidence.normalized_fact_work.len()).unwrap_or(u64::MAX);
+    let mut normalized = evidence
+        .normalized_fact_work
+        .iter()
+        .map(|work| {
+            let disposition = if work.cause() == FirstSliceFactWorkCause::CompleteDependencyMatch {
+                RepositoryFactWorkDisposition::Reuse
+            } else {
+                RepositoryFactWorkDisposition::Rebuild
+            };
+            RepositoryNormalizedFactWorkGroup {
+                disposition,
+                domain: repository_normalized_fact_domain(work.domain()),
+                provider_pass: work.provider_pass().to_owned(),
+                cause: repository_fact_work_cause(work.cause()),
+                fact_count: Some(work.facts()),
+                affected_files: repository_affected_files(work.files(), work.file_ids()),
+                affected_analysis_units: repository_affected_analysis_units(
+                    work.files(),
+                    work.analysis_unit_ids(),
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by(|left, right| {
+        (
+            left.disposition,
+            left.domain,
+            left.provider_pass.as_str(),
+            left.cause,
+        )
+            .cmp(&(
+                right.disposition,
+                right.domain,
+                right.provider_pass.as_str(),
+                right.cause,
+            ))
+    });
+    normalized.truncate(MAX_REPOSITORY_FACT_WORK_GROUPS);
+    Some(RepositoryIncrementalFactWorkEvidence {
+        planned: RepositoryPlannedFactWorkCollection {
+            complete: planned_total == planned.len() as u64,
+            total_groups: planned_total,
+            groups: planned,
+        },
+        normalized: RepositoryNormalizedFactWorkCollection {
+            complete: normalized_total == normalized.len() as u64,
+            total_groups: normalized_total,
+            groups: normalized,
+        },
+    })
+}
+
+fn repository_affected_files(
+    total: u64,
+    identities: impl Iterator<Item = rootlight_ids::FileId>,
+) -> RepositoryAffectedFileIds {
+    let samples = canonical_identity_samples(identities);
+    RepositoryAffectedFileIds {
+        complete: total == samples.len() as u64,
+        total,
+        samples,
+    }
+}
+
+fn repository_affected_analysis_units(
+    total: u64,
+    identities: impl Iterator<Item = rootlight_ids::FactId>,
+) -> RepositoryAffectedAnalysisUnitIds {
+    let samples = canonical_identity_samples(identities);
+    RepositoryAffectedAnalysisUnitIds {
+        complete: total == samples.len() as u64,
+        total,
+        samples,
+    }
+}
+
+fn canonical_identity_samples<Identity: Ord>(
+    identities: impl Iterator<Item = Identity>,
+) -> Vec<Identity> {
+    let mut samples = Vec::with_capacity(MAX_REPOSITORY_FACT_WORK_ID_SAMPLES);
+    for identity in identities {
+        let Err(position) = samples.binary_search(&identity) else {
+            continue;
+        };
+        if position < MAX_REPOSITORY_FACT_WORK_ID_SAMPLES {
+            samples.insert(position, identity);
+            if samples.len() > MAX_REPOSITORY_FACT_WORK_ID_SAMPLES {
+                samples.pop();
+            }
+        }
+    }
+    samples
+}
+
+const fn repository_fact_work_disposition(
+    disposition: FirstSliceFactWorkDisposition,
+) -> RepositoryFactWorkDisposition {
+    match disposition {
+        FirstSliceFactWorkDisposition::Rebuild => RepositoryFactWorkDisposition::Rebuild,
+        FirstSliceFactWorkDisposition::Reuse => RepositoryFactWorkDisposition::Reuse,
+    }
+}
+
+const fn repository_fact_work_cause(cause: FirstSliceFactWorkCause) -> RepositoryFactWorkCause {
+    match cause {
+        FirstSliceFactWorkCause::InitialGeneration => RepositoryFactWorkCause::InitialGeneration,
+        FirstSliceFactWorkCause::DependencyClosure => RepositoryFactWorkCause::DependencyClosure,
+        FirstSliceFactWorkCause::CompleteDependencyMatch => {
+            RepositoryFactWorkCause::CompleteDependencyMatch
+        }
+        FirstSliceFactWorkCause::ConservativeFallback => {
+            RepositoryFactWorkCause::ConservativeFallback
+        }
+        FirstSliceFactWorkCause::GenerationBoundLowering => {
+            RepositoryFactWorkCause::GenerationBoundLowering
+        }
+        FirstSliceFactWorkCause::Resolution => RepositoryFactWorkCause::Resolution,
+    }
+}
+
+const fn repository_planned_fact_domain(
+    domain: IncrementalFactDomain,
+) -> RepositoryPlannedFactDomain {
+    match domain {
+        IncrementalFactDomain::Syntax => RepositoryPlannedFactDomain::Syntax,
+        IncrementalFactDomain::PublicSurface => RepositoryPlannedFactDomain::PublicSurface,
+        IncrementalFactDomain::Body => RepositoryPlannedFactDomain::Body,
+        IncrementalFactDomain::Resolution => RepositoryPlannedFactDomain::Resolution,
+        IncrementalFactDomain::Search => RepositoryPlannedFactDomain::Search,
+        IncrementalFactDomain::DerivedGraph => RepositoryPlannedFactDomain::DerivedGraph,
+        IncrementalFactDomain::Tests => RepositoryPlannedFactDomain::Tests,
+        IncrementalFactDomain::Services => RepositoryPlannedFactDomain::Services,
+        IncrementalFactDomain::History => RepositoryPlannedFactDomain::History,
+    }
+}
+
+const fn repository_normalized_fact_domain(domain: IrFactDomain) -> RepositoryNormalizedFactDomain {
+    match domain {
+        IrFactDomain::Files => RepositoryNormalizedFactDomain::Files,
+        IrFactDomain::Entities => RepositoryNormalizedFactDomain::Entities,
+        IrFactDomain::Occurrences => RepositoryNormalizedFactDomain::Occurrences,
+        IrFactDomain::Relations => RepositoryNormalizedFactDomain::Relations,
+        IrFactDomain::Provenance => RepositoryNormalizedFactDomain::Provenance,
+        IrFactDomain::SourceMappings => RepositoryNormalizedFactDomain::SourceMappings,
+        IrFactDomain::Diagnostics => RepositoryNormalizedFactDomain::Diagnostics,
+        IrFactDomain::Extensions => RepositoryNormalizedFactDomain::Extensions,
     }
 }
 
@@ -5981,7 +6166,7 @@ fn repository_operation_status(
     let metadata = match lock_metadata(metadata)?.records.get(&operation).cloned() {
         Some(metadata) => metadata,
         None => OperationMetadata::from_durable_context(
-            repository_context.ok_or_else(not_found)?,
+            repository_context.clone().ok_or_else(not_found)?,
             &record,
         ),
     };
@@ -5998,7 +6183,10 @@ fn repository_operation_status(
         let (peak_rss_bytes, written_bytes) = public_operation_resources(&visible, &metadata);
         return Ok(daemon::RepositoryOperationStatusResponse {
             schema_version: Some(schema_version()),
-            operation: Some(operation_record_to_wire(&visible)),
+            operation: Some(operation_record_to_wire_for_minor(
+                &visible,
+                context.selected_protocol_minor,
+            )),
             published_generation: None,
             started_unix_ms: metadata.started_unix_ms,
             peak_rss_bytes,
@@ -6038,7 +6226,10 @@ fn repository_operation_status(
     let semantic_operation = if record.kind == OperationKind::RepositoryIndex
         && record.state == OperationState::Succeeded
     {
-        if repository_context.is_some_and(|context| context.mode == RepositoryOperationMode::Auto) {
+        if repository_context
+            .as_ref()
+            .is_some_and(|context| context.mode == RepositoryOperationMode::Auto)
+        {
             completed_auto_semantic_operation(journal, runtime, operation, context)?
         } else {
             None
@@ -6048,7 +6239,10 @@ fn repository_operation_status(
     };
     let mut response = daemon::RepositoryOperationStatusResponse {
         schema_version: Some(schema_version()),
-        operation: Some(operation_record_to_wire(&record)),
+        operation: Some(operation_record_to_wire_for_minor(
+            &record,
+            context.selected_protocol_minor,
+        )),
         published_generation: published_generation.map(generation_to_wire),
         started_unix_ms: metadata.started_unix_ms,
         peak_rss_bytes,
@@ -6063,7 +6257,11 @@ fn repository_operation_status(
     if record.kind == OperationKind::RepositoryIndex
         && let Some(evidence) = repository_context.and_then(|context| context.evidence)
     {
-        project_repository_operation_evidence(&mut response, evidence);
+        project_repository_operation_evidence(
+            &mut response,
+            evidence,
+            context.selected_protocol_minor,
+        );
         let generation = published_generation.ok_or_else(internal_error)?;
         let trace = match read_service(service)?
             .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
@@ -6126,7 +6324,11 @@ fn completed_auto_semantic_operation(
 fn project_repository_operation_evidence(
     response: &mut daemon::RepositoryOperationStatusResponse,
     evidence: RepositoryOperationEvidence,
+    selected_protocol_minor: u32,
 ) {
+    if selected_protocol_minor >= 15 {
+        response.fact_work = evidence.fact_work.as_ref().map(fact_work_to_wire);
+    }
     response.build_strategy = match evidence.build_strategy {
         RepositoryBuildStrategy::Initial => daemon::RepositoryBuildStrategy::RepositoryBuildInitial,
         RepositoryBuildStrategy::DependencyDirected => {
@@ -6161,6 +6363,193 @@ fn project_repository_operation_evidence(
     response.reserved_memory_bytes = evidence.reserved_memory_bytes;
     response.owned_memory_bytes = evidence.owned_memory_bytes;
     response.retained_durable_bytes = evidence.retained_durable_bytes;
+}
+
+fn fact_work_to_wire(
+    evidence: &RepositoryIncrementalFactWorkEvidence,
+) -> daemon::RepositoryIncrementalFactWorkEvidence {
+    daemon::RepositoryIncrementalFactWorkEvidence {
+        planned: Some(daemon::RepositoryPlannedFactWorkCollection {
+            groups: evidence
+                .planned
+                .groups
+                .iter()
+                .map(planned_fact_work_group_to_wire)
+                .collect(),
+            total_groups: evidence.planned.total_groups,
+            complete: evidence.planned.complete,
+        }),
+        normalized: Some(daemon::RepositoryNormalizedFactWorkCollection {
+            groups: evidence
+                .normalized
+                .groups
+                .iter()
+                .map(normalized_fact_work_group_to_wire)
+                .collect(),
+            total_groups: evidence.normalized.total_groups,
+            complete: evidence.normalized.complete,
+        }),
+    }
+}
+
+fn planned_fact_work_group_to_wire(
+    group: &RepositoryPlannedFactWorkGroup,
+) -> daemon::RepositoryPlannedFactWorkGroup {
+    daemon::RepositoryPlannedFactWorkGroup {
+        disposition: fact_work_disposition_to_wire(group.disposition) as i32,
+        domain: planned_fact_domain_to_wire(group.domain) as i32,
+        provider_pass: group.provider_pass.clone(),
+        cause: fact_work_cause_to_wire(group.cause) as i32,
+        affected_files: Some(affected_files_to_wire(&group.affected_files)),
+        affected_analysis_units: Some(affected_analysis_units_to_wire(
+            &group.affected_analysis_units,
+        )),
+    }
+}
+
+fn normalized_fact_work_group_to_wire(
+    group: &RepositoryNormalizedFactWorkGroup,
+) -> daemon::RepositoryNormalizedFactWorkGroup {
+    daemon::RepositoryNormalizedFactWorkGroup {
+        disposition: fact_work_disposition_to_wire(group.disposition) as i32,
+        domain: normalized_fact_domain_to_wire(group.domain) as i32,
+        provider_pass: group.provider_pass.clone(),
+        cause: fact_work_cause_to_wire(group.cause) as i32,
+        fact_count: group.fact_count.unwrap_or_default(),
+        affected_files: Some(affected_files_to_wire(&group.affected_files)),
+        affected_analysis_units: Some(affected_analysis_units_to_wire(
+            &group.affected_analysis_units,
+        )),
+    }
+}
+
+fn affected_files_to_wire(
+    affected: &RepositoryAffectedFileIds,
+) -> daemon::RepositoryAffectedFileIds {
+    daemon::RepositoryAffectedFileIds {
+        total: affected.total,
+        complete: affected.complete,
+        samples: affected.samples.iter().copied().map(file_to_wire).collect(),
+    }
+}
+
+fn affected_analysis_units_to_wire(
+    affected: &RepositoryAffectedAnalysisUnitIds,
+) -> daemon::RepositoryAffectedAnalysisUnitIds {
+    daemon::RepositoryAffectedAnalysisUnitIds {
+        total: affected.total,
+        complete: affected.complete,
+        samples: affected
+            .samples
+            .iter()
+            .map(|identity| common::AnalysisUnitId {
+                value: identity.as_bytes().to_vec(),
+            })
+            .collect(),
+    }
+}
+
+const fn fact_work_disposition_to_wire(
+    disposition: RepositoryFactWorkDisposition,
+) -> daemon::RepositoryFactWorkDisposition {
+    match disposition {
+        RepositoryFactWorkDisposition::Rebuild => {
+            daemon::RepositoryFactWorkDisposition::RepositoryFactWorkRebuild
+        }
+        RepositoryFactWorkDisposition::Reuse => {
+            daemon::RepositoryFactWorkDisposition::RepositoryFactWorkReuse
+        }
+    }
+}
+
+const fn fact_work_cause_to_wire(
+    cause: RepositoryFactWorkCause,
+) -> daemon::RepositoryFactWorkCause {
+    match cause {
+        RepositoryFactWorkCause::InitialGeneration => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkInitialGeneration
+        }
+        RepositoryFactWorkCause::DependencyClosure => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkDependencyClosure
+        }
+        RepositoryFactWorkCause::CompleteDependencyMatch => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkCompleteDependencyMatch
+        }
+        RepositoryFactWorkCause::ConservativeFallback => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkConservativeFallback
+        }
+        RepositoryFactWorkCause::GenerationBoundLowering => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkGenerationBoundLowering
+        }
+        RepositoryFactWorkCause::Resolution => {
+            daemon::RepositoryFactWorkCause::RepositoryFactWorkResolution
+        }
+    }
+}
+
+const fn planned_fact_domain_to_wire(
+    domain: RepositoryPlannedFactDomain,
+) -> daemon::RepositoryPlannedFactDomain {
+    match domain {
+        RepositoryPlannedFactDomain::Syntax => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactSyntax
+        }
+        RepositoryPlannedFactDomain::PublicSurface => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactPublicSurface
+        }
+        RepositoryPlannedFactDomain::Body => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactBody
+        }
+        RepositoryPlannedFactDomain::Resolution => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactResolution
+        }
+        RepositoryPlannedFactDomain::Search => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactSearch
+        }
+        RepositoryPlannedFactDomain::DerivedGraph => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactDerivedGraph
+        }
+        RepositoryPlannedFactDomain::Tests => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactTests
+        }
+        RepositoryPlannedFactDomain::Services => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactServices
+        }
+        RepositoryPlannedFactDomain::History => {
+            daemon::RepositoryPlannedFactDomain::RepositoryPlannedFactHistory
+        }
+    }
+}
+
+const fn normalized_fact_domain_to_wire(
+    domain: RepositoryNormalizedFactDomain,
+) -> daemon::RepositoryNormalizedFactDomain {
+    match domain {
+        RepositoryNormalizedFactDomain::Files => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactFiles
+        }
+        RepositoryNormalizedFactDomain::Entities => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactEntities
+        }
+        RepositoryNormalizedFactDomain::Occurrences => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactOccurrences
+        }
+        RepositoryNormalizedFactDomain::Relations => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactRelations
+        }
+        RepositoryNormalizedFactDomain::Provenance => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactProvenance
+        }
+        RepositoryNormalizedFactDomain::SourceMappings => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactSourceMappings
+        }
+        RepositoryNormalizedFactDomain::Diagnostics => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactDiagnostics
+        }
+        RepositoryNormalizedFactDomain::Extensions => {
+            daemon::RepositoryNormalizedFactDomain::RepositoryNormalizedFactExtensions
+        }
+    }
 }
 
 fn repository_operation_stage(record: &OperationRecord) -> &'static str {
@@ -9610,6 +9999,22 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
                 repository_headroom_bytes: repository.repository_headroom_bytes,
             })
             .collect(),
+        repository_capacity: Some(SupportRepositoryCapacityInventory {
+            registered_repository_count: snapshot.repository_capacity.registered_repository_count,
+            pending_repository_count: snapshot.repository_capacity.pending_repository_count,
+            active_repository_count: snapshot.repository_capacity.active_repository_count,
+            failed_repository_count: snapshot.repository_capacity.failed_repository_count,
+            pinned_repository_count: snapshot.repository_capacity.pinned_repository_count,
+            reclaimable_repository_count: snapshot.repository_capacity.reclaimable_repository_count,
+            configured_maximum_repositories: snapshot
+                .repository_capacity
+                .configured_maximum_repositories,
+            effective_maximum_repositories: snapshot
+                .repository_capacity
+                .effective_maximum_repositories,
+            repository_headroom: snapshot.repository_capacity.repository_headroom,
+            pinning_supported: snapshot.repository_capacity.pinning_supported,
+        }),
         generations: snapshot
             .generations
             .into_iter()
@@ -9940,6 +10345,23 @@ fn build_service_error(
                 failure_stage,
             )
         }
+        FirstSliceError::RepositoryCapacityLimit {
+            pending_repositories,
+            ..
+        } if pending_repositories > 0 => (
+            ErrorCode::Busy,
+            "repository registration capacity is reserved by pending operations",
+            true,
+            "capacity_pending",
+            "admission",
+        ),
+        FirstSliceError::RepositoryCapacityLimit { .. } => (
+            ErrorCode::ResourceExhausted,
+            "repository registration capacity was reached",
+            false,
+            "resource_limit",
+            "admission",
+        ),
         FirstSliceError::EstimatedResourceLimit { .. } => (
             ErrorCode::ResourceExhausted,
             "first-slice resource limit was reached",
@@ -10156,6 +10578,52 @@ fn build_service_error(
             )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
             .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::RepositoryCapacityLimit {
+        observed,
+        limit,
+        configuration,
+        pending_repositories,
+        reclaimable_repositories,
+    } = error
+    {
+        let configuration_key = static_safe_label(configuration.as_str());
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("repositories")),
+            )
+            .detail(
+                static_detail_key("observed"),
+                PublicValue::Unsigned(observed),
+            )
+            .detail(
+                static_detail_key("estimated"),
+                PublicValue::Unsigned(observed),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .detail(
+                static_detail_key("pending_repositories"),
+                PublicValue::Unsigned(pending_repositories),
+            )
+            .detail(
+                static_detail_key("reclaimable_repositories"),
+                PublicValue::Unsigned(reclaimable_repositories),
+            )
+            .detail(
+                static_detail_key("configuration_key"),
+                PublicValue::Label(configuration_key.clone()),
+            );
+        if pending_repositories == 0 {
+            builder = builder
+                .next_action(NextAction::CollectSupportBundle)
+                .next_action(NextAction::UpdateConfiguration {
+                    key: configuration_key,
+                });
+            if reclaimable_repositories > 0 {
+                builder = builder.next_action(NextAction::DeleteRepository);
+            }
+        }
     }
     if let FirstSliceError::EstimatedResourceLimit {
         resource,
@@ -10952,6 +11420,18 @@ mod tests {
                 inflight_reservation_bytes: Some(0),
                 repository_headroom_bytes: Some(960),
             }],
+            repository_capacity: rootlight_service::FirstSliceRepositoryCapacityInventory {
+                registered_repository_count: 1,
+                pending_repository_count: 0,
+                active_repository_count: 1,
+                failed_repository_count: 0,
+                pinned_repository_count: 0,
+                reclaimable_repository_count: 1,
+                pinning_supported: false,
+                configured_maximum_repositories: 1024,
+                effective_maximum_repositories: 1024,
+                repository_headroom: 1023,
+            },
             generations: Vec::new(),
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
@@ -11007,6 +11487,211 @@ mod tests {
         assert_eq!(mapped.repositories[0].storage_bytes, Some(64));
         assert_eq!(mapped.repositories[0].repository_headroom_bytes, Some(960));
         assert_eq!(mapped.effective_retention_generations, Some(2));
+        assert_eq!(
+            mapped
+                .repository_capacity
+                .expect("repository capacity is retained")
+                .repository_headroom,
+            1023
+        );
+    }
+
+    #[test]
+    fn grouped_fact_work_is_visible_only_in_protocol_1_15() {
+        let evidence = RepositoryOperationEvidence {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 0,
+            changed_inputs: 0,
+            changed_files: 0,
+            reused_files: 0,
+            rebuilt_files: 0,
+            reused_facts: 0,
+            rebuilt_facts: 0,
+            referenced_bytes: 0,
+            newly_written_bytes: 0,
+            reserved_memory_bytes: 0,
+            owned_memory_bytes: 0,
+            retained_durable_bytes: 0,
+            fact_work: Some(RepositoryIncrementalFactWorkEvidence {
+                planned: RepositoryPlannedFactWorkCollection {
+                    groups: Vec::new(),
+                    total_groups: 0,
+                    complete: true,
+                },
+                normalized: RepositoryNormalizedFactWorkCollection {
+                    groups: Vec::new(),
+                    total_groups: 0,
+                    complete: true,
+                },
+            }),
+        };
+        let mut previous = daemon::RepositoryOperationStatusResponse::default();
+        project_repository_operation_evidence(&mut previous, evidence.clone(), 14);
+        assert!(previous.fact_work.is_none());
+
+        let mut current = daemon::RepositoryOperationStatusResponse::default();
+        project_repository_operation_evidence(&mut current, evidence, 15);
+        let fact_work = current
+            .fact_work
+            .expect("protocol 1.15 carries grouped fact work");
+        assert!(
+            fact_work
+                .planned
+                .expect("planned collection exists")
+                .complete
+        );
+        assert!(
+            fact_work
+                .normalized
+                .expect("normalized collection exists")
+                .complete
+        );
+    }
+
+    #[test]
+    fn body_edit_fact_work_survives_canonical_journal_round_trip() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        let changed = fixture.path().join("src/changed.rs");
+        fs::write(&changed, "pub fn changed() -> u32 { 1 }\n").expect("changed source writes");
+        fs::write(
+            fixture.path().join("src/malformed.rs"),
+            "pub fn malformed( {\n",
+        )
+        .expect("unchanged source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let first = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .and_then(|prepared| service.publish_prepared_with_metrics(prepared, &cancellation))
+            .expect("initial generation publishes");
+
+        fs::write(&changed, "pub fn changed() -> u32 { 2 }\n").expect("body edit writes");
+        let second = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .and_then(|prepared| service.publish_prepared_with_metrics(prepared, &cancellation))
+            .expect("successor generation publishes");
+        assert!(
+            second
+                .evidence()
+                .normalized_fact_work
+                .iter()
+                .any(|work| { work.cause() == FirstSliceFactWorkCause::CompleteDependencyMatch })
+        );
+        assert!(
+            second
+                .evidence()
+                .normalized_fact_work
+                .iter()
+                .any(|work| { work.cause() == FirstSliceFactWorkCause::GenerationBoundLowering })
+        );
+
+        let evidence = repository_operation_evidence(second.evidence().clone());
+        let normalized = &evidence
+            .fact_work
+            .as_ref()
+            .expect("grouped fact work is present")
+            .normalized
+            .groups;
+        assert!(normalized.windows(2).all(|pair| {
+            (
+                pair[0].disposition,
+                pair[0].domain,
+                pair[0].provider_pass.as_str(),
+                pair[0].cause,
+            ) < (
+                pair[1].disposition,
+                pair[1].domain,
+                pair[1].provider_pass.as_str(),
+                pair[1].cause,
+            )
+        }));
+
+        let journal_root = TempDir::new().expect("journal directory exists");
+        let journal_path = journal_root.path().join("operations.sqlite");
+        let operation = OperationId::from_bytes([115; 16]);
+        {
+            let journal = OperationJournal::open(&journal_path).expect("journal opens");
+            let repository_context = RepositoryOperationSubmission::new(
+                second.receipt().repository,
+                Some(first.receipt().generation),
+                1_700_000_000_115,
+                second.receipt().estimated_disk_bytes,
+                RepositoryOperationMode::Structural,
+            )
+            .expect("repository context is valid");
+            journal
+                .submit(
+                    repository_submission(operation, 115)
+                        .with_repository_context(repository_context)
+                        .expect("repository context attaches"),
+                )
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            journal
+                .complete_repository_publication(operation)
+                .expect("operation succeeds");
+            journal
+                .record_repository_publication(operation, second.receipt().generation)
+                .expect("published generation persists");
+            journal
+                .record_repository_evidence(operation, evidence.clone())
+                .expect("canonical grouped evidence persists");
+        }
+
+        let reopened = OperationJournal::open(&journal_path).expect("journal reopens");
+        assert_eq!(
+            reopened
+                .repository_operation_context(operation)
+                .expect("repository context reloads")
+                .evidence,
+            Some(evidence)
+        );
+    }
+
+    #[test]
+    fn affected_identity_samples_retain_the_canonical_smallest_values() {
+        let file_id = |seed| FileId::from_bytes([seed; 20]);
+        let files = repository_affected_files(
+            5,
+            [
+                file_id(4),
+                file_id(2),
+                file_id(5),
+                file_id(1),
+                file_id(2),
+                file_id(3),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            files.samples,
+            [file_id(1), file_id(2), file_id(3), file_id(4)]
+        );
+        assert!(!files.complete);
+
+        let unit_id = |seed| FactId::from_bytes([seed; 20]);
+        let units = repository_affected_analysis_units(
+            5,
+            [
+                unit_id(3),
+                unit_id(5),
+                unit_id(1),
+                unit_id(2),
+                unit_id(3),
+                unit_id(4),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            units.samples,
+            [unit_id(1), unit_id(2), unit_id(3), unit_id(4)]
+        );
+        assert!(!units.complete);
     }
 
     #[test]
@@ -11919,10 +12604,12 @@ mod tests {
         );
 
         let repository_capacity = build_service_error(
-            FirstSliceError::ResourceLimit {
-                resource: rootlight_service::FirstSliceResource::Repositories,
+            FirstSliceError::RepositoryCapacityLimit {
                 observed: 177,
                 limit: 176,
+                configuration: rootlight_service::FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 0,
+                reclaimable_repositories: 176,
             },
             None,
         );
@@ -11931,6 +12618,63 @@ mod tests {
                 .details()
                 .get(&static_detail_key("failure_stage")),
             Some(&PublicValue::Label(static_safe_label("admission")))
+        );
+        assert_eq!(
+            repository_capacity
+                .details()
+                .get(&static_detail_key("configuration_key")),
+            Some(&PublicValue::Label(static_safe_label(
+                "storage.maximum_repositories"
+            )))
+        );
+        assert_eq!(
+            repository_capacity.next_actions(),
+            &[
+                NextAction::CollectSupportBundle,
+                NextAction::UpdateConfiguration {
+                    key: static_safe_label("storage.maximum_repositories"),
+                },
+                NextAction::DeleteRepository,
+            ]
+        );
+
+        let retention_bound = build_service_error(
+            FirstSliceError::RepositoryCapacityLimit {
+                observed: 177,
+                limit: 176,
+                configuration: rootlight_service::FirstSliceRepositoryCapacityConfiguration::RetainedGenerations,
+                pending_repositories: 0,
+                reclaimable_repositories: 176,
+            },
+            None,
+        );
+        assert_eq!(
+            retention_bound
+                .details()
+                .get(&static_detail_key("configuration_key")),
+            Some(&PublicValue::Label(static_safe_label(
+                "storage.retained_generations"
+            )))
+        );
+
+        let pending_capacity = build_service_error(
+            FirstSliceError::RepositoryCapacityLimit {
+                observed: 3,
+                limit: 2,
+                configuration: rootlight_service::FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 2,
+                reclaimable_repositories: 0,
+            },
+            None,
+        );
+        assert_eq!(pending_capacity.code(), ErrorCode::Busy);
+        assert!(pending_capacity.retryable());
+        assert_eq!(pending_capacity.next_actions(), &[NextAction::Retry]);
+        assert_eq!(
+            pending_capacity
+                .details()
+                .get(&static_detail_key("pending_repositories")),
+            Some(&PublicValue::Unsigned(2))
         );
     }
 
@@ -14900,7 +15644,7 @@ mod tests {
         let context = journal
             .record_repository_publication(operation, generation)
             .expect("published generation projects durably");
-        let mut unrelated_parent_context = context;
+        let mut unrelated_parent_context = context.clone();
         unrelated_parent_context.parent_generation = Some(GenerationId::from_bytes([66; 20]));
         let record = journal
             .status(operation)
