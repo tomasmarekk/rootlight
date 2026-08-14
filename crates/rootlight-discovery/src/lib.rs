@@ -160,7 +160,9 @@ impl DiscoveryLimits {
             analysis.max_source_file_bytes
         };
         Self {
-            max_entries: MAX_DISCOVERY_ENTRIES.min(100_000),
+            max_entries: usize::try_from(config.max_discovery_entries())
+                .unwrap_or(usize::MAX)
+                .min(MAX_DISCOVERY_ENTRIES),
             max_depth: MAX_DISCOVERY_DEPTH.min(128),
             max_file_bytes: max_file_bytes.min(rootlight_vfs::MAX_SNAPSHOT_BYTES),
             max_diagnostics: MAX_DISCOVERY_DIAGNOSTICS.min(1_000),
@@ -1663,6 +1665,33 @@ max_source_file_bytes = 2097152
 
         assert_eq!(legacy.resources().max_source_bytes, 1024 * 1024);
         assert_eq!(legacy_limits.max_file_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn configured_discovery_entries_preserve_legacy_default_and_accept_current_override() {
+        let legacy = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.2\"\n",
+        }])
+        .expect("configuration 1.2 resolves");
+        assert_eq!(DiscoveryLimits::from_config(&legacy).max_entries, 100_000);
+
+        let current = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.3\"\n[analysis]\nmax_discovery_entries = 250000\n",
+        }])
+        .expect("configuration 1.3 resolves");
+        assert_eq!(DiscoveryLimits::from_config(&current).max_entries, 250_000);
+
+        let maximum = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::System,
+            contents: "version = \"1.3\"\n[analysis]\nmax_discovery_entries = 1000000\n",
+        }])
+        .expect("maximum discovery capacity resolves");
+        assert_eq!(
+            DiscoveryLimits::from_config(&maximum).max_entries,
+            MAX_DISCOVERY_ENTRIES
+        );
     }
 
     #[test]

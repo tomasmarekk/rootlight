@@ -48,7 +48,9 @@ use rootlight_adapters::{
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
-use rootlight_config::{CONFIG_VERSION, ConfigLayer, ConfigSnapshot, ConfigSource};
+use rootlight_config::{
+    CONFIG_VERSION_1_2, ConfigLayer, ConfigSnapshot, ConfigSource, MAXIMUM_REPOSITORIES,
+};
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
@@ -692,6 +694,7 @@ pub struct FirstSliceStoragePolicy {
     config: ConfigSnapshot,
     maximum_repository_bytes: u64,
     maximum_catalog_bytes: u64,
+    maximum_repositories: u32,
     retained_generations: usize,
     minimum_free_disk_bytes: u64,
     source_reservation_factor: u64,
@@ -702,11 +705,12 @@ impl FirstSliceStoragePolicy {
     /// Builds a durable policy from an already resolved configuration snapshot.
     #[must_use]
     pub fn from_config(config: ConfigSnapshot, legacy_retained_generations: usize) -> Self {
-        if config.version() != CONFIG_VERSION {
+        if config.version() < CONFIG_VERSION_1_2 {
             return Self::legacy_with_config(legacy_retained_generations, config);
         }
         let storage = config.storage();
         Self {
+            maximum_repositories: config.maximum_repositories(),
             config,
             maximum_repository_bytes: storage.maximum_repository_bytes,
             maximum_catalog_bytes: storage.maximum_catalog_bytes,
@@ -749,6 +753,7 @@ impl FirstSliceStoragePolicy {
             config,
             maximum_repository_bytes: u64::MAX,
             maximum_catalog_bytes: u64::MAX,
+            maximum_repositories: MAXIMUM_REPOSITORIES,
             retained_generations,
             minimum_free_disk_bytes: 0,
             source_reservation_factor: u64::from(
@@ -764,6 +769,15 @@ impl FirstSliceStoragePolicy {
     #[must_use]
     pub const fn retained_generations(&self) -> usize {
         self.retained_generations
+    }
+
+    fn effective_maximum_repositories(
+        &self,
+        actual_retained_generations: usize,
+    ) -> Result<usize, FirstSliceError> {
+        let configured =
+            usize::try_from(self.maximum_repositories).map_err(|_| FirstSliceError::Limits)?;
+        maximum_repositories_for_retention(actual_retained_generations, configured)
     }
 
     #[cfg(test)]
@@ -3680,7 +3694,12 @@ impl FirstSliceService {
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
         let maximum_generations = policy.retained_generations();
-        let durable = Arc::new(DurableCatalog::open(state_root, maximum_generations)?);
+        let maximum_repositories = policy.effective_maximum_repositories(maximum_generations)?;
+        let durable = Arc::new(DurableCatalog::open(
+            state_root,
+            maximum_generations,
+            maximum_repositories,
+        )?);
         let active_targets = durable.active_restore_targets()?;
         let mut service = Self::new_with_storage_policy(
             maximum_generations,
@@ -4213,7 +4232,8 @@ impl FirstSliceService {
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
         storage_policy: FirstSliceStoragePolicy,
     ) -> Result<Self, FirstSliceError> {
-        let maximum_repositories = maximum_repositories_for_retention(maximum_generations)?;
+        let maximum_repositories =
+            storage_policy.effective_maximum_repositories(maximum_generations)?;
         let total_generation_capacity = maximum_generations
             .checked_mul(maximum_repositories)
             .and_then(|capacity| capacity.checked_add(1))
@@ -13778,10 +13798,14 @@ fn repository_capacity_limit(observed: usize, limit: usize) -> FirstSliceError {
 
 fn maximum_repositories_for_retention(
     maximum_generations: usize,
+    configured_maximum_repositories: usize,
 ) -> Result<usize, FirstSliceError> {
+    // One slot remains available for transactional publication while every
+    // configured repository retains its complete recovery generations.
     HARD_MAX_FIRST_SLICE_GENERATIONS
         .checked_sub(1)
         .and_then(|capacity| capacity.checked_div(maximum_generations))
+        .map(|capacity| capacity.min(configured_maximum_repositories))
         .filter(|capacity| *capacity > 0)
         .ok_or(FirstSliceError::Retention)
 }
@@ -14713,6 +14737,12 @@ mod tests {
             .expect("absent config resolves current defaults");
         assert_eq!(current.retained_generations(), 2);
         assert_eq!(current.minimum_free_disk_bytes(), 64 * 1024 * 1024);
+        assert_eq!(
+            current
+                .effective_maximum_repositories(current.retained_generations())
+                .expect("current repository capacity resolves"),
+            4_096
+        );
 
         let configured = FirstSliceStoragePolicy::resolve_user_config(
             Some(
@@ -14725,12 +14755,55 @@ mod tests {
         assert_eq!(configured.maximum_repository_bytes(), 1024 * 1024 * 1024);
         assert_eq!(configured.minimum_free_disk_bytes(), 128 * 1024 * 1024);
         assert_eq!(configured.source_reservation_factor(), 32);
+        assert_eq!(
+            configured
+                .effective_maximum_repositories(configured.retained_generations())
+                .expect("configuration 1.2 repository capacity resolves"),
+            2_730
+        );
 
         let legacy = FirstSliceStoragePolicy::resolve_user_config(Some("version = \"1.1\""), 8)
             .expect("legacy config keeps compatibility policy");
         assert_eq!(legacy.retained_generations(), 8);
         assert_eq!(legacy.minimum_free_disk_bytes(), 0);
         assert_eq!(legacy.maximum_repository_bytes(), u64::MAX);
+        assert_eq!(
+            legacy
+                .effective_maximum_repositories(legacy.retained_generations())
+                .expect("legacy repository capacity resolves"),
+            1_024
+        );
+    }
+
+    #[test]
+    fn storage_policy_clamps_configured_repository_capacity_to_generation_capacity() {
+        let configured = FirstSliceStoragePolicy::resolve_user_config(
+            Some(
+                "version = \"1.3\"\n[storage]\nmaximum_repositories = 176\nretained_generations = 2\n",
+            ),
+            8,
+        )
+        .expect("configured repository capacity resolves");
+        assert_eq!(
+            configured
+                .effective_maximum_repositories(configured.retained_generations())
+                .expect("configured repository capacity is representable"),
+            176
+        );
+
+        let generation_bound = FirstSliceStoragePolicy::resolve_user_config(
+            Some(
+                "version = \"1.3\"\n[storage]\nmaximum_repositories = 4096\nretained_generations = 8\n",
+            ),
+            2,
+        )
+        .expect("generation-bound repository capacity resolves");
+        assert_eq!(
+            generation_bound
+                .effective_maximum_repositories(generation_bound.retained_generations())
+                .expect("generation-bound repository capacity is representable"),
+            1_024
+        );
     }
 
     const VERTICAL_SLICE_FIXTURE_ROOT: &str = concat!(
@@ -18162,6 +18235,104 @@ mod tests {
                 resource: FirstSliceResource::Repositories,
                 observed: 3,
                 limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn configured_repository_capacity_rejects_only_new_registrations() {
+        let policy = FirstSliceStoragePolicy::resolve_user_config(
+            Some(
+                "version = \"1.3\"\n[storage]\nmaximum_repositories = 2\nretained_generations = 2\n",
+            ),
+            2,
+        )
+        .expect("configured repository capacity resolves");
+        let service = FirstSliceService::new_with_storage_policy(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            None,
+            policy,
+        )
+        .expect("configured service initializes");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let cancellation = deadline();
+        for ordinal in 0..2 {
+            let root = fixture.path().join(format!("repository-{ordinal}"));
+            fs::create_dir(&root).expect("repository root exists");
+            service
+                .admit_repository(&root, &cancellation)
+                .expect("configured repository is admitted");
+        }
+        let rejected = fixture.path().join("repository-rejected");
+        fs::create_dir(&rejected).expect("rejected repository root exists");
+
+        assert!(matches!(
+            service.admit_repository(&rejected, &cancellation),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Repositories,
+                observed: 3,
+                limit: 2,
+            })
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn configured_repository_capacity_is_shared_by_admission_and_cold_reopen() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let indexed_root = durable_test_tempdir();
+        fs::write(
+            indexed_root.path().join("lib.rs"),
+            "pub fn indexed() -> bool { true }\n",
+        )
+        .expect("indexed fixture writes");
+        let cancellation = deadline();
+        let policy = || {
+            FirstSliceStoragePolicy::resolve_user_config(
+                Some(
+                    "version = \"1.3\"\n[storage]\nmaximum_repositories = 1\nretained_generations = 2\n",
+                ),
+                2,
+            )
+            .expect("configured repository capacity resolves")
+        };
+
+        let indexed = {
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy(),
+                paths.state_dir(),
+                &cancellation,
+            )
+            .expect("configured durable service initializes");
+            service
+                .index_rust_fixture(indexed_root.path(), &cancellation)
+                .expect("first configured repository indexes")
+        };
+
+        let reopened =
+            FirstSliceService::new_durable_with_policy(policy(), paths.state_dir(), &cancellation)
+                .expect("configured durable service reopens");
+        assert_eq!(
+            reopened.active_generation_for(indexed.repository),
+            Some(indexed.generation)
+        );
+        let rejected_root = durable_test_tempdir();
+        fs::write(
+            rejected_root.path().join("lib.rs"),
+            "pub fn rejected() -> bool { true }\n",
+        )
+        .expect("rejected fixture writes");
+        assert!(matches!(
+            reopened.admit_repository(rejected_root.path(), &cancellation),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Repositories,
+                observed: 2,
+                limit: 1,
             })
         ));
     }

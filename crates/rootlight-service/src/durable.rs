@@ -902,9 +902,8 @@ impl DurableCatalog {
     pub(super) fn open(
         state_root: &Path,
         maximum_generations_per_repository: usize,
+        maximum_repositories: usize,
     ) -> Result<Self, FirstSliceError> {
-        let maximum_repositories =
-            super::maximum_repositories_for_retention(maximum_generations_per_repository)?;
         PrivateDirectory::require_supported().map_err(|_| FirstSliceError::Catalog)?;
         let root = Dir::open_ambient_dir(state_root, ambient_authority())
             .map_err(|_| FirstSliceError::Catalog)?;
@@ -4669,6 +4668,18 @@ mod tests {
         }
     }
 
+    fn open_test_catalog(
+        state_root: &Path,
+        maximum_generations_per_repository: usize,
+    ) -> Result<DurableCatalog, FirstSliceError> {
+        DurableCatalog::open(
+            state_root,
+            maximum_generations_per_repository,
+            usize::try_from(rootlight_config::MAXIMUM_REPOSITORIES)
+                .expect("configured repository ceiling is representable"),
+        )
+    }
+
     fn assert_inventory_equal_ignoring_available(
         mut left: DurableStorageInventory,
         mut right: DurableStorageInventory,
@@ -4986,7 +4997,7 @@ mod tests {
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
-        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let durable = open_test_catalog(paths.state_dir(), 2).expect("catalog opens");
         let repository = RepositoryId::from_bytes([37; 16]);
         let generation = GenerationId::from_bytes([41; 20]);
         let admitted_worst_case_bytes = 10 * 1024;
@@ -5108,7 +5119,7 @@ mod tests {
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
-        let durable = Arc::new(DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens"));
+        let durable = Arc::new(open_test_catalog(paths.state_dir(), 2).expect("catalog opens"));
         let observed = durable
             .storage_inventory()
             .expect("cold inventory scans")
@@ -5238,7 +5249,7 @@ mod tests {
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
-        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let durable = open_test_catalog(paths.state_dir(), 2).expect("catalog opens");
         let repository = RepositoryId::from_bytes([31; 16]);
         let policy = DurableStorageAdmissionPolicy {
             required_catalog_bytes: 1024,
@@ -5513,7 +5524,7 @@ mod tests {
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
-        let durable = DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens");
+        let durable = open_test_catalog(paths.state_dir(), 2).expect("catalog opens");
         let repository = RepositoryId::from_bytes([53; 16]);
         let generation = GenerationId::from_bytes([59; 20]);
         let prepared = durable
@@ -5698,7 +5709,7 @@ mod tests {
         };
 
         let catalog =
-            DurableCatalog::open(paths.state_dir(), 2).expect("cold durable catalog reopens");
+            open_test_catalog(paths.state_dir(), 2).expect("cold durable catalog reopens");
         let inventory = catalog
             .storage_inventory()
             .expect("cold inventory reconstructs from durable state");
@@ -5798,7 +5809,7 @@ mod tests {
         corrupted[0] ^= 1;
         fs::write(&payload_path, corrupted).expect("same-length corruption writes");
 
-        let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
+        let catalog = open_test_catalog(paths.state_dir(), 2).expect("durable catalog reopens");
         let reservation = catalog
             .ensure_staging_capacity(
                 RepositoryId::from_bytes([67; 16]),
@@ -5916,7 +5927,7 @@ mod tests {
             .expect("source blob entry reads")
             .path()
             .join(SOURCE_BLOB_PAYLOAD_FILENAME);
-        let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
+        let catalog = open_test_catalog(paths.state_dir(), 2).expect("durable catalog reopens");
         catalog
             .storage_inventory()
             .expect("cold inventory verifies source content");
@@ -5957,7 +5968,7 @@ mod tests {
             Err(FirstSliceError::CatalogCorrupt)
         );
         let reopened =
-            DurableCatalog::open(paths.state_dir(), 2).expect("fresh durable catalog reopens");
+            open_test_catalog(paths.state_dir(), 2).expect("fresh durable catalog reopens");
         assert_eq!(
             reopened.storage_inventory(),
             Err(FirstSliceError::CatalogCorrupt)

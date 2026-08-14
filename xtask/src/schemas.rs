@@ -13,7 +13,10 @@ use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_catalog::{catalog_schema_compatibility, oracle_schema_compatibility};
-use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1, ConfigDocumentSchemaV1_2};
+use rootlight_config::{
+    ConfigDocumentSchema, ConfigDocumentSchemaV1_1, ConfigDocumentSchemaV1_2,
+    ConfigDocumentSchemaV1_3,
+};
 use rootlight_ir::{
     ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
     NormalizedIrDocument, decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
@@ -378,15 +381,16 @@ fn validate_configuration_schema(
         .get("version")
         .and_then(serde_json::Value::as_str)
         .and_then(|version| rootlight_config::ContractVersion::parse(version).ok())
-        .map_or("config-1.2.schema.json", |version| {
+        .map_or("config-1.3.schema.json", |version| {
             if version.major() == 1 {
                 match version.minor() {
                     0 => "config-1.0.schema.json",
                     1 => "config-1.1.schema.json",
-                    _ => "config-1.2.schema.json",
+                    2 => "config-1.2.schema.json",
+                    _ => "config-1.3.schema.json",
                 }
             } else {
-                "config-1.2.schema.json"
+                "config-1.3.schema.json"
             }
         });
     let path = workspace_root
@@ -871,6 +875,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_2>(&schema_root.join("config-1.2.schema.json"))?;
+    write_schema::<ConfigDocumentSchemaV1_3>(&schema_root.join("config-1.3.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
     write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
     write_schema::<LexicalEvidenceV1>(
@@ -1480,9 +1485,42 @@ fn validate_generated_json_schemas(
             }),
         ),
         SchemaSemanticCase::valid(
-            "config-1.2.schema.json",
+            "config-1.3.schema.json",
             "additive configuration minor",
-            serde_json::json!({"version": "1.3"}),
+            serde_json::json!({"version": "1.4"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.2.schema.json",
+            "frozen storage configuration rejects current fields",
+            serde_json::json!({
+                "version": "1.2",
+                "storage": {"maximum_repositories": 4_096}
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "config-1.3.schema.json",
+            "trusted discovery and repository capacity",
+            serde_json::json!({
+                "version": "1.3",
+                "analysis": {"max_discovery_entries": 1_000_000},
+                "storage": {"maximum_repositories": 4_096}
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.3.schema.json",
+            "discovery capacity exceeds its hard ceiling",
+            serde_json::json!({
+                "version": "1.3",
+                "analysis": {"max_discovery_entries": 1_000_001}
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.3.schema.json",
+            "repository capacity exceeds its hard ceiling",
+            serde_json::json!({
+                "version": "1.3",
+                "storage": {"maximum_repositories": 4_097}
+            }),
         ),
         SchemaSemanticCase::invalid(
             "config-1.2.schema.json",
@@ -2174,6 +2212,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/config-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/config-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/config-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/config-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
