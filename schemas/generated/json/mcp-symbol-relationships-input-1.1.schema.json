@@ -60,7 +60,7 @@
       "minimum": 0
     },
     "relations": {
-      "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, and `imports`.",
+      "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, `imports`, `tests`, and `calls_route`. Use inbound\n`tests` from a production symbol and outbound `calls_route` from a\nhandler to follow the normalized producer directions.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RelationKind"

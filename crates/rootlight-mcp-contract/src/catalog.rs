@@ -168,10 +168,10 @@ impl McpTool {
                 "Return requested bounded definition sections, exact relation counts, sampled stable relation references, source previews, and selected producer provenance for explicit stable symbol identifiers; absent identifiers and unavailable section evidence are reported explicitly."
             }
             Self::SymbolRelationships => {
-                "Return bounded static call, caller, reference, type, implementation, and import relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported."
+                "Return bounded static call, caller, reference, type, implementation, import, test, and handler-to-route relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported."
             }
             Self::FlowTrace => {
-                "Trace bounded paths over static call, reference, type, implementation, and import edges; other relation families plus route, service, database, and cross-repository endpoints are unsupported."
+                "Trace bounded paths over static call, reference, type, implementation, import, test, and handler-to-route edges; other relation families plus route, service, and database endpoints are unsupported."
             }
             Self::ChangeImpact => {
                 "Use bounded explicit or read-only Git change evidence, scoped relation policies, and optional history signals to map affected symbols, dependents, services, tests, and coverage-aware risks."

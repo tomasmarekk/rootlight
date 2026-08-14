@@ -98,7 +98,9 @@ pub struct SymbolRelationshipsInput {
     /// Requested relation families.
     ///
     /// The served set is `calls`, `called_by`, `references`, `types`,
-    /// `implements`, and `imports`.
+    /// `implements`, `imports`, `tests`, and `calls_route`. Use inbound
+    /// `tests` from a production symbol and outbound `calls_route` from a
+    /// handler to follow the normalized producer directions.
     #[schemars(length(min = 1, max = 16))]
     pub relations: BTreeSet<RelationKind>,
     /// Traversal direction.
@@ -332,8 +334,9 @@ pub struct FlowTraceInput {
     pub direction: Option<Direction>,
     /// Explicit relation allow-list.
     ///
-    /// Every declared relation family is admitted; missing adapter coverage is
-    /// reported through response coverage rather than fabricated edges.
+    /// The served set is `calls`, `references`, `types`, `implements`,
+    /// `imports`, `tests`, and `calls_route`. Use inbound `tests` and outbound
+    /// `calls_route` to follow the normalized producer directions.
     #[schemars(length(min = 1, max = 16))]
     pub relations: BTreeSet<RelationKind>,
     /// Maximum traversal depth.

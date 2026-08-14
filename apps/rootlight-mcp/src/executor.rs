@@ -68,8 +68,8 @@ use rootlight_mcp_contract::intent::{
     TracePath,
 };
 use rootlight_mcp_contract::{
-    DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpTool, NextAction, PublicError,
-    PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
+    DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpPublicError, McpTool, NextAction,
+    PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
     SchemaVersion, SourceFreeMessage, SourceReadInput, SymbolExplainInput, ToolResponse,
     TrustClassification, VerticalTool,
     batch::{BatchResponseProfilePolicy, batch_descriptor},
@@ -96,14 +96,18 @@ use rootlight_mcp_contract::{
         CodeLocateData, CodeLocateInput, ContinuationCursor, CoverageSummary, DetailHandle,
         Diagnostic, EntityKind, Freshness, GenerationSummary, IndexMode, IndexPlanScope,
         IndexPlanSummary, LanguageCoverage, LocateReason, LocatedItem, OperationAction,
-        OperationBuildStrategy, OperationDetailV1_2 as OperationDetail, OperationFallbackReason,
-        OperationIncrementalEvidenceV1_1 as OperationIncrementalEvidence,
-        OperationInvalidationTraceV1_1 as OperationInvalidationTrace, OperationProgress,
+        OperationAffectedAnalysisUnitIds, OperationAffectedFileIds, OperationBuildStrategy,
+        OperationDetailV1_2 as OperationDetail, OperationFactWorkCause,
+        OperationFactWorkDisposition, OperationFallbackReason, OperationIncrementalEvidence,
+        OperationIncrementalFactWorkEvidence,
+        OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
+        OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
+        OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
+        OperationPlannedFactWorkCollection, OperationPlannedFactWorkGroup, OperationProgress,
         OperationResourcesV1_2 as OperationResources, OperationSchemaVersion, OperationState,
-        OperationStatusDataV1_2 as OperationStatusData, OperationStatusInput,
-        OperationStatusSchemaVersion, OperationStatusSuccessV1_2 as OperationStatusSuccess,
-        ProvenanceLevel, ProvenanceSummary, QueryInterpretation, ReadEnvelope,
-        RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_1 as RepoIndexSuccess,
+        OperationStatusData, OperationStatusInput, OperationStatusSchemaVersion,
+        OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
+        ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_2 as RepoIndexSuccess,
         RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
         ScopeSelector, SearchMode, SourceChunk, SourceElision, SourceEncoding,
         SourceEncodingRequest, SourceReadData, SourceReadSelector, StaleSourceReference,
@@ -4690,6 +4694,8 @@ const fn symbol_relationship_kind_is_supported(kind: RelationKind) -> bool {
             | RelationKind::Types
             | RelationKind::Implements
             | RelationKind::Imports
+            | RelationKind::Tests
+            | RelationKind::CallsRoute
     )
 }
 
@@ -4701,6 +4707,8 @@ const fn directed_graph_kind_is_supported(kind: RelationKind) -> bool {
             | RelationKind::Types
             | RelationKind::Implements
             | RelationKind::Imports
+            | RelationKind::Tests
+            | RelationKind::CallsRoute
     )
 }
 
@@ -7281,7 +7289,7 @@ fn map_repository_index(
             .then_with(|| left.message.as_str().cmp(right.message.as_str()))
     });
     Ok(RepoIndexSuccess {
-        schema_version: OperationSchemaVersion::V1_1,
+        schema_version: OperationSchemaVersion::V1_2,
         data: RepoIndexData {
             repository_id: response.result.repository,
             operation_id: response.result.operation,
@@ -7311,10 +7319,14 @@ fn map_operation_status(
     if operation.operation != expected_operation || !valid_publication {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
-    let error = operation_status_error(&operation)?;
+    let error = operation_status_error(&operation)?
+        .as_ref()
+        .map(McpPublicError::try_from)
+        .transpose()
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: OperationStatusSchemaVersion::V1_2,
+        schema_version: OperationStatusSchemaVersion::V1_3,
         data: OperationStatusData {
             operation: OperationDetail {
                 kind: kind.to_owned(),
@@ -7370,6 +7382,11 @@ fn map_operation_status(
 fn map_operation_incremental_evidence(
     evidence: client::RepositoryOperationEvidence,
 ) -> Result<OperationIncrementalEvidence, ToolExecutionError> {
+    let fact_work = evidence
+        .fact_work
+        .as_ref()
+        .map(|fact_work| map_operation_fact_work(&evidence, fact_work))
+        .transpose()?;
     Ok(OperationIncrementalEvidence {
         build_strategy: match evidence.build_strategy {
             client::RepositoryBuildStrategy::Initial => OperationBuildStrategy::Initial,
@@ -7406,7 +7423,396 @@ fn map_operation_incremental_evidence(
                     .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
             })
             .transpose()?,
+        fact_work,
     })
+}
+
+fn map_operation_fact_work(
+    evidence: &client::RepositoryOperationEvidence,
+    fact_work: &client::RepositoryIncrementalFactWorkEvidence,
+) -> Result<OperationIncrementalFactWorkEvidence, ToolExecutionError> {
+    validate_operation_fact_work_collection(
+        fact_work.planned.groups.len(),
+        fact_work.planned.total_groups,
+        fact_work.planned.complete,
+    )?;
+    validate_operation_fact_work_collection(
+        fact_work.normalized.groups.len(),
+        fact_work.normalized.total_groups,
+        fact_work.normalized.complete,
+    )?;
+    if !fact_work.planned.groups.windows(2).all(|pair| {
+        operation_planned_fact_work_key(&pair[0]) < operation_planned_fact_work_key(&pair[1])
+    }) || !fact_work.normalized.groups.windows(2).all(|pair| {
+        operation_normalized_fact_work_key(&pair[0]) < operation_normalized_fact_work_key(&pair[1])
+    }) {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+
+    let provider_passes = fact_work
+        .planned
+        .groups
+        .iter()
+        .map(|group| group.provider_pass.as_str())
+        .chain(
+            fact_work
+                .normalized
+                .groups
+                .iter()
+                .map(|group| group.provider_pass.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    if provider_passes.len() > 16
+        || provider_passes
+            .iter()
+            .any(|provider| !valid_operation_fact_work_provider(provider))
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+
+    let mut retained_reused_facts = 0_u64;
+    let mut retained_rebuilt_facts = 0_u64;
+    for group in &fact_work.planned.groups {
+        validate_operation_fact_work_cause(group.disposition, group.cause, false)?;
+        validate_operation_affected_ids(
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+        )?;
+        validate_operation_affected_ids(
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+        )?;
+    }
+    for group in &fact_work.normalized.groups {
+        validate_operation_fact_work_cause(group.disposition, group.cause, true)?;
+        validate_operation_affected_ids(
+            group.affected_files.total,
+            &group.affected_files.samples,
+            group.affected_files.complete,
+        )?;
+        validate_operation_affected_ids(
+            group.affected_analysis_units.total,
+            &group.affected_analysis_units.samples,
+            group.affected_analysis_units.complete,
+        )?;
+        if group.fact_count == 0 {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        let total = match group.disposition {
+            client::RepositoryFactWorkDisposition::Rebuild => &mut retained_rebuilt_facts,
+            client::RepositoryFactWorkDisposition::Reuse => &mut retained_reused_facts,
+        };
+        *total = total
+            .checked_add(group.fact_count)
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    }
+    if fact_work.normalized.complete {
+        if retained_reused_facts != evidence.reused_facts
+            || retained_rebuilt_facts != evidence.rebuilt_facts
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+    } else if retained_reused_facts > evidence.reused_facts
+        || retained_rebuilt_facts > evidence.rebuilt_facts
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    validate_operation_fact_work_strategy(evidence, fact_work)?;
+
+    Ok(OperationIncrementalFactWorkEvidence {
+        planned: OperationPlannedFactWorkCollection {
+            groups: fact_work
+                .planned
+                .groups
+                .iter()
+                .map(map_operation_planned_fact_work_group)
+                .collect(),
+            total_groups: fact_work.planned.total_groups,
+            complete: fact_work.planned.complete,
+        },
+        normalized: OperationNormalizedFactWorkCollection {
+            groups: fact_work
+                .normalized
+                .groups
+                .iter()
+                .map(map_operation_normalized_fact_work_group)
+                .collect(),
+            total_groups: fact_work.normalized.total_groups,
+            complete: fact_work.normalized.complete,
+        },
+    })
+}
+
+fn validate_operation_fact_work_collection(
+    retained_groups: usize,
+    total_groups: u64,
+    complete: bool,
+) -> Result<(), ToolExecutionError> {
+    let retained_groups = u64::try_from(retained_groups)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if retained_groups > 32
+        || retained_groups > total_groups
+        || complete != (retained_groups == total_groups)
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    Ok(())
+}
+
+fn validate_operation_affected_ids<Id: Ord>(
+    total: u64,
+    samples: &[Id],
+    complete: bool,
+) -> Result<(), ToolExecutionError> {
+    let sample_count = u64::try_from(samples.len())
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if samples.len() > 4
+        || !samples.windows(2).all(|pair| pair[0] < pair[1])
+        || sample_count > total
+        || complete != (sample_count == total)
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    Ok(())
+}
+
+fn valid_operation_fact_work_provider(provider: &str) -> bool {
+    !provider.is_empty()
+        && provider.len() <= 128
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+}
+
+fn validate_operation_fact_work_cause(
+    disposition: client::RepositoryFactWorkDisposition,
+    cause: client::RepositoryFactWorkCause,
+    normalized: bool,
+) -> Result<(), ToolExecutionError> {
+    if matches!(
+        (disposition, cause, normalized),
+        (
+            client::RepositoryFactWorkDisposition::Reuse,
+            client::RepositoryFactWorkCause::CompleteDependencyMatch,
+            _
+        ) | (
+            client::RepositoryFactWorkDisposition::Rebuild,
+            client::RepositoryFactWorkCause::InitialGeneration
+                | client::RepositoryFactWorkCause::DependencyClosure
+                | client::RepositoryFactWorkCause::ConservativeFallback,
+            false
+        ) | (
+            client::RepositoryFactWorkDisposition::Rebuild,
+            client::RepositoryFactWorkCause::GenerationBoundLowering
+                | client::RepositoryFactWorkCause::Resolution,
+            true
+        )
+    ) {
+        Ok(())
+    } else {
+        Err(internal(ToolExecutionFailure::InvalidResponse))
+    }
+}
+
+fn validate_operation_fact_work_strategy(
+    evidence: &client::RepositoryOperationEvidence,
+    fact_work: &client::RepositoryIncrementalFactWorkEvidence,
+) -> Result<(), ToolExecutionError> {
+    let planned = &fact_work.planned.groups;
+    let normalized = &fact_work.normalized.groups;
+    let valid = match evidence.build_strategy {
+        client::RepositoryBuildStrategy::Initial => {
+            evidence.fallback_reason.is_none()
+                && evidence.reused_facts == 0
+                && planned.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                        && group.cause == client::RepositoryFactWorkCause::InitialGeneration
+                })
+                && normalized.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                })
+        }
+        client::RepositoryBuildStrategy::DependencyDirected => {
+            evidence.fallback_reason.is_none()
+                && planned.iter().all(|group| {
+                    group.disposition != client::RepositoryFactWorkDisposition::Rebuild
+                        || group.cause == client::RepositoryFactWorkCause::DependencyClosure
+                })
+        }
+        client::RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+            evidence.fallback_reason.is_some()
+                && evidence.reused_facts == 0
+                && planned.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                        && group.cause == client::RepositoryFactWorkCause::ConservativeFallback
+                })
+                && normalized.iter().all(|group| {
+                    group.disposition == client::RepositoryFactWorkDisposition::Rebuild
+                })
+        }
+        client::RepositoryBuildStrategy::RetainedGeneration => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(internal(ToolExecutionFailure::InvalidResponse))
+    }
+}
+
+fn operation_planned_fact_work_key(
+    group: &client::RepositoryPlannedFactWorkGroup,
+) -> (
+    client::RepositoryFactWorkDisposition,
+    client::RepositoryPlannedFactDomain,
+    &str,
+    client::RepositoryFactWorkCause,
+) {
+    (
+        group.disposition,
+        group.domain,
+        group.provider_pass.as_str(),
+        group.cause,
+    )
+}
+
+fn operation_normalized_fact_work_key(
+    group: &client::RepositoryNormalizedFactWorkGroup,
+) -> (
+    client::RepositoryFactWorkDisposition,
+    client::RepositoryNormalizedFactDomain,
+    &str,
+    client::RepositoryFactWorkCause,
+) {
+    (
+        group.disposition,
+        group.domain,
+        group.provider_pass.as_str(),
+        group.cause,
+    )
+}
+
+fn map_operation_planned_fact_work_group(
+    group: &client::RepositoryPlannedFactWorkGroup,
+) -> OperationPlannedFactWorkGroup {
+    OperationPlannedFactWorkGroup {
+        disposition: operation_fact_work_disposition(group.disposition),
+        domain: operation_planned_fact_domain(group.domain),
+        provider_pass: group.provider_pass.clone(),
+        cause: operation_fact_work_cause(group.cause),
+        affected_files: OperationAffectedFileIds {
+            total: group.affected_files.total,
+            samples: group.affected_files.samples.clone(),
+            complete: group.affected_files.complete,
+        },
+        affected_analysis_units: OperationAffectedAnalysisUnitIds {
+            total: group.affected_analysis_units.total,
+            samples: group.affected_analysis_units.samples.clone(),
+            complete: group.affected_analysis_units.complete,
+        },
+    }
+}
+
+fn map_operation_normalized_fact_work_group(
+    group: &client::RepositoryNormalizedFactWorkGroup,
+) -> OperationNormalizedFactWorkGroup {
+    OperationNormalizedFactWorkGroup {
+        disposition: operation_fact_work_disposition(group.disposition),
+        domain: operation_normalized_fact_domain(group.domain),
+        provider_pass: group.provider_pass.clone(),
+        cause: operation_fact_work_cause(group.cause),
+        fact_count: group.fact_count,
+        affected_files: OperationAffectedFileIds {
+            total: group.affected_files.total,
+            samples: group.affected_files.samples.clone(),
+            complete: group.affected_files.complete,
+        },
+        affected_analysis_units: OperationAffectedAnalysisUnitIds {
+            total: group.affected_analysis_units.total,
+            samples: group.affected_analysis_units.samples.clone(),
+            complete: group.affected_analysis_units.complete,
+        },
+    }
+}
+
+const fn operation_fact_work_disposition(
+    disposition: client::RepositoryFactWorkDisposition,
+) -> OperationFactWorkDisposition {
+    match disposition {
+        client::RepositoryFactWorkDisposition::Rebuild => OperationFactWorkDisposition::Rebuild,
+        client::RepositoryFactWorkDisposition::Reuse => OperationFactWorkDisposition::Reuse,
+    }
+}
+
+const fn operation_fact_work_cause(
+    cause: client::RepositoryFactWorkCause,
+) -> OperationFactWorkCause {
+    match cause {
+        client::RepositoryFactWorkCause::InitialGeneration => {
+            OperationFactWorkCause::InitialGeneration
+        }
+        client::RepositoryFactWorkCause::DependencyClosure => {
+            OperationFactWorkCause::DependencyClosure
+        }
+        client::RepositoryFactWorkCause::CompleteDependencyMatch => {
+            OperationFactWorkCause::CompleteDependencyMatch
+        }
+        client::RepositoryFactWorkCause::ConservativeFallback => {
+            OperationFactWorkCause::ConservativeFallback
+        }
+        client::RepositoryFactWorkCause::GenerationBoundLowering => {
+            OperationFactWorkCause::GenerationBoundLowering
+        }
+        client::RepositoryFactWorkCause::Resolution => OperationFactWorkCause::Resolution,
+    }
+}
+
+const fn operation_planned_fact_domain(
+    domain: client::RepositoryPlannedFactDomain,
+) -> OperationPlannedFactDomain {
+    match domain {
+        client::RepositoryPlannedFactDomain::Syntax => OperationPlannedFactDomain::Syntax,
+        client::RepositoryPlannedFactDomain::PublicSurface => {
+            OperationPlannedFactDomain::PublicSurface
+        }
+        client::RepositoryPlannedFactDomain::Body => OperationPlannedFactDomain::Body,
+        client::RepositoryPlannedFactDomain::Resolution => OperationPlannedFactDomain::Resolution,
+        client::RepositoryPlannedFactDomain::Search => OperationPlannedFactDomain::Search,
+        client::RepositoryPlannedFactDomain::DerivedGraph => {
+            OperationPlannedFactDomain::DerivedGraph
+        }
+        client::RepositoryPlannedFactDomain::Tests => OperationPlannedFactDomain::Tests,
+        client::RepositoryPlannedFactDomain::Services => OperationPlannedFactDomain::Services,
+        client::RepositoryPlannedFactDomain::History => OperationPlannedFactDomain::History,
+    }
+}
+
+const fn operation_normalized_fact_domain(
+    domain: client::RepositoryNormalizedFactDomain,
+) -> OperationNormalizedFactDomain {
+    match domain {
+        client::RepositoryNormalizedFactDomain::Files => OperationNormalizedFactDomain::Files,
+        client::RepositoryNormalizedFactDomain::Entities => OperationNormalizedFactDomain::Entities,
+        client::RepositoryNormalizedFactDomain::Occurrences => {
+            OperationNormalizedFactDomain::Occurrences
+        }
+        client::RepositoryNormalizedFactDomain::Relations => {
+            OperationNormalizedFactDomain::Relations
+        }
+        client::RepositoryNormalizedFactDomain::Provenance => {
+            OperationNormalizedFactDomain::Provenance
+        }
+        client::RepositoryNormalizedFactDomain::SourceMappings => {
+            OperationNormalizedFactDomain::SourceMappings
+        }
+        client::RepositoryNormalizedFactDomain::Diagnostics => {
+            OperationNormalizedFactDomain::Diagnostics
+        }
+        client::RepositoryNormalizedFactDomain::Extensions => {
+            OperationNormalizedFactDomain::Extensions
+        }
+    }
 }
 
 fn repository_operation_kind(

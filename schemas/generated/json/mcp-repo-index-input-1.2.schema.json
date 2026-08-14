@@ -1,0 +1,79 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RepoIndexInput",
+  "description": "Strict input for `repo.index`.",
+  "type": "object",
+  "properties": {
+    "detached": {
+      "description": "Requests permission to continue after client disconnect.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
+      "type": "boolean"
+    },
+    "mode": {
+      "description": "Requested indexing mode.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IndexMode"
+        }
+      ]
+    },
+    "root": {
+      "description": "Canonicalizable local root for first registration.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "wait_ms": {
+      "description": "Maximum time to wait for publication or a terminal state.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 30000,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "not": {
+        "required": [
+          "repository_id"
+        ]
+      },
+      "required": [
+        "root"
+      ]
+    },
+    {
+      "not": {
+        "required": [
+          "root"
+        ]
+      },
+      "required": [
+        "repository_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "IndexMode": {
+      "description": "Indexing mode requested by `repo.index`.",
+      "oneOf": [
+        {
+          "description": "Select the strongest available safe mode.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Build the structural tier only.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Request available deep tiers.",
+          "type": "string",
+          "const": "deep"
+        }
+      ]
+    }
+  }
+}

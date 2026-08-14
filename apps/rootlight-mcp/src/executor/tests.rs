@@ -45,24 +45,30 @@ use rootlight_client::{
     PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
     PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
     QueryContext, QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
-    RelationshipTarget as ClientRelationshipTarget, RepositoryBuildStrategy as ClientBuildStrategy,
+    RelationshipTarget as ClientRelationshipTarget, RepositoryAffectedAnalysisUnitIds,
+    RepositoryAffectedFileIds, RepositoryBuildStrategy as ClientBuildStrategy,
     RepositoryCatalogEntry, RepositoryCatalogFreshness, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId, RepositoryCatalogSortKey,
-    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryList, RepositoryListEntry,
-    RepositoryOperationEvidence, RepositoryStatus, RepositoryStatusOperation,
-    ResultCompleteness as ClientResultCompleteness,
+    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryFactWorkCause,
+    RepositoryFactWorkDisposition, RepositoryIncrementalFactWorkEvidence, RepositoryList,
+    RepositoryListEntry, RepositoryNormalizedFactDomain, RepositoryNormalizedFactWorkCollection,
+    RepositoryNormalizedFactWorkGroup, RepositoryOperationEvidence, RepositoryPlannedFactDomain,
+    RepositoryPlannedFactWorkCollection, RepositoryPlannedFactWorkGroup, RepositoryStatus,
+    RepositoryStatusOperation, ResultCompleteness as ClientResultCompleteness,
     ResultCompletenessState as ClientResultCompletenessState, SourceChunk as ClientSourceChunk,
     SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
     TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
     TestsSelectGap as ClientTestGap, TestsSelectRankedTest as ClientRankedTest,
 };
-use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{
+    ContentHash, FactId, FileId, GenerationId, OperationId, RepositoryId, SymbolId,
+};
 use rootlight_ir::{
     CoverageStatus as IrCoverage, EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan,
 };
 use rootlight_mcp_contract::{
-    CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
-    ToolResponse,
+    CodeLocateOutput, ErrorCode, McpNextAction, OperationStatusOutput, RepoIndexOutput,
+    SourceReadOutput, ToolResponse,
     capability::{CapabilityStatus, capability_for, discovery_metadata},
     change::{
         ChangeClassification, ChangeImpactOutput, ChangeImpactOutputV1_1, HistoryCompareOutput,
@@ -80,7 +86,7 @@ use rootlight_mcp_contract::{
     vertical::{
         AnalysisReadEnvelope, AnalysisTier, AnalysisToolResponse, CacheStatus, Freshness,
         IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage, OperationState,
-        OperationStatusToolResponseV1_2, RequiredNullable,
+        OperationStatusToolResponse, RequiredNullable,
     },
     vertical::{OperationToolResponse, SymbolExplainOutput},
 };
@@ -1407,6 +1413,10 @@ fn file() -> FileId {
     FileId::from_bytes([7; 20])
 }
 
+fn analysis_unit() -> FactId {
+    FactId::from_bytes([8; 20])
+}
+
 fn content_hash() -> ContentHash {
     ContentHash::from_bytes([8; 32])
 }
@@ -1699,6 +1709,67 @@ fn operation_status(state: ClientOperationState) -> client::OperationStatus {
         deadline_unix_ms: None,
         lease_expires_unix_ms: None,
         recovery_class: RecoveryClass::NotApplicable,
+    }
+}
+
+fn grouped_fact_work() -> RepositoryIncrementalFactWorkEvidence {
+    let affected_files = RepositoryAffectedFileIds {
+        total: 1,
+        samples: vec![file()],
+        complete: true,
+    };
+    let affected_analysis_units = RepositoryAffectedAnalysisUnitIds {
+        total: 1,
+        samples: vec![analysis_unit()],
+        complete: true,
+    };
+    RepositoryIncrementalFactWorkEvidence {
+        planned: RepositoryPlannedFactWorkCollection {
+            groups: vec![
+                RepositoryPlannedFactWorkGroup {
+                    disposition: RepositoryFactWorkDisposition::Rebuild,
+                    domain: RepositoryPlannedFactDomain::Body,
+                    provider_pass: "lower".to_owned(),
+                    cause: RepositoryFactWorkCause::DependencyClosure,
+                    affected_files: affected_files.clone(),
+                    affected_analysis_units: affected_analysis_units.clone(),
+                },
+                RepositoryPlannedFactWorkGroup {
+                    disposition: RepositoryFactWorkDisposition::Reuse,
+                    domain: RepositoryPlannedFactDomain::Syntax,
+                    provider_pass: "parser".to_owned(),
+                    cause: RepositoryFactWorkCause::CompleteDependencyMatch,
+                    affected_files: affected_files.clone(),
+                    affected_analysis_units: affected_analysis_units.clone(),
+                },
+            ],
+            total_groups: 2,
+            complete: true,
+        },
+        normalized: RepositoryNormalizedFactWorkCollection {
+            groups: vec![
+                RepositoryNormalizedFactWorkGroup {
+                    disposition: RepositoryFactWorkDisposition::Rebuild,
+                    domain: RepositoryNormalizedFactDomain::Entities,
+                    provider_pass: "lower".to_owned(),
+                    cause: RepositoryFactWorkCause::GenerationBoundLowering,
+                    fact_count: 12,
+                    affected_files: affected_files.clone(),
+                    affected_analysis_units: affected_analysis_units.clone(),
+                },
+                RepositoryNormalizedFactWorkGroup {
+                    disposition: RepositoryFactWorkDisposition::Reuse,
+                    domain: RepositoryNormalizedFactDomain::Occurrences,
+                    provider_pass: "parser".to_owned(),
+                    cause: RepositoryFactWorkCause::CompleteDependencyMatch,
+                    fact_count: 5,
+                    affected_files,
+                    affected_analysis_units,
+                },
+            ],
+            total_groups: 2,
+            complete: true,
+        },
     }
 }
 
@@ -3336,7 +3407,7 @@ async fn maps_operation_status_action_time_progress_and_resources() {
         .expect("operation status maps"),
     );
 
-    let OperationStatusToolResponseV1_2::Success(output) = output else {
+    let OperationStatusToolResponse::Success(output) = output else {
         panic!("expected operation status success");
     };
     assert_eq!(output.data.operation.kind, "repository_index");
@@ -3377,8 +3448,8 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             changed_files: 1,
             reused_files: 4,
             rebuilt_files: 1,
-            reused_facts: 0,
-            rebuilt_facts: 17,
+            reused_facts: 5,
+            rebuilt_facts: 12,
             referenced_bytes: 1_024,
             newly_written_bytes: 2_048,
             reserved_memory_bytes: 4_096,
@@ -3387,6 +3458,7 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             invalidation_trace_json: Some(
                 br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec(),
             ),
+            fact_work: Some(grouped_fact_work()),
         }),
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
@@ -3400,7 +3472,7 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
         .expect("operation evidence maps"),
     );
 
-    let OperationStatusToolResponseV1_2::Success(output) = output else {
+    let OperationStatusToolResponse::Success(output) = output else {
         panic!("expected operation status success");
     };
     let incremental = output
@@ -3408,7 +3480,37 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
         .incremental
         .expect("incremental evidence is projected");
     assert_eq!(incremental.reused_files, 4);
-    assert_eq!(incremental.rebuilt_facts, 17);
+    assert_eq!(incremental.reused_facts, 5);
+    assert_eq!(incremental.rebuilt_facts, 12);
+    let fact_work = incremental
+        .fact_work
+        .expect("grouped fact work is projected");
+    assert_eq!(fact_work.planned.total_groups, 2);
+    assert_eq!(fact_work.planned.groups[0].provider_pass, "lower");
+    assert_eq!(
+        fact_work.planned.groups[0].domain,
+        OperationPlannedFactDomain::Body
+    );
+    assert_eq!(
+        fact_work.planned.groups[1].disposition,
+        OperationFactWorkDisposition::Reuse
+    );
+    assert_eq!(fact_work.normalized.groups[0].fact_count, 12);
+    assert_eq!(fact_work.normalized.groups[1].fact_count, 5);
+    assert_eq!(
+        fact_work.normalized.groups[1].cause,
+        OperationFactWorkCause::CompleteDependencyMatch
+    );
+    assert_eq!(
+        fact_work.normalized.groups[1].affected_files.samples,
+        [file()]
+    );
+    assert_eq!(
+        fact_work.normalized.groups[1]
+            .affected_analysis_units
+            .samples,
+        [analysis_unit()]
+    );
     assert!(
         incremental
             .invalidation_trace
@@ -3419,6 +3521,42 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
     assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
     assert_eq!(output.data.operation.resources.reserved_memory_bytes, 4_096);
     assert_eq!(output.data.operation.resources.owned_memory_bytes, 3_072);
+}
+
+#[test]
+fn rejects_nonconserving_grouped_fact_work() {
+    let response = RepositoryOperationStatus {
+        operation: operation_status(ClientOperationState::Succeeded),
+        published_generation: Some(generation()),
+        semantic_operation: None,
+        started_unix_ms: 1,
+        peak_rss_bytes: 100,
+        written_bytes: 2_048,
+        files_examined: 5,
+        bytes_examined: 512,
+        index_stage: "complete".to_owned(),
+        retry_after_ms: None,
+        evidence: Some(RepositoryOperationEvidence {
+            build_strategy: ClientBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 2,
+            changed_inputs: 1,
+            changed_files: 1,
+            reused_files: 4,
+            rebuilt_files: 1,
+            reused_facts: 6,
+            rebuilt_facts: 12,
+            referenced_bytes: 1_024,
+            newly_written_bytes: 2_048,
+            reserved_memory_bytes: 4_096,
+            owned_memory_bytes: 3_072,
+            retained_durable_bytes: 1_536,
+            invalidation_trace_json: None,
+            fact_work: Some(grouped_fact_work()),
+        }),
+    };
+
+    assert!(map_operation_status(response, operation()).is_err());
 }
 
 #[tokio::test]
@@ -3449,7 +3587,7 @@ async fn maps_recovery_operation_status_without_index_projection() {
         .expect("recovery status maps"),
     );
 
-    let OperationStatusToolResponseV1_2::Success(output) = output else {
+    let OperationStatusToolResponse::Success(output) = output else {
         panic!("expected recovery operation status success");
     };
     assert_eq!(output.data.operation.kind, "recovery");
@@ -3503,7 +3641,7 @@ async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
             .expect("interrupted operation status maps"),
         );
 
-        let OperationStatusToolResponseV1_2::Success(output) = output else {
+        let OperationStatusToolResponse::Success(output) = output else {
             panic!("expected interrupted operation status success");
         };
         let error = output
@@ -3516,7 +3654,7 @@ async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
         assert_eq!(error.message(), message);
         assert!(error.retryable());
         assert_eq!(error.operation(), Some(operation()));
-        assert_eq!(error.next_actions(), &[NextAction::Retry]);
+        assert_eq!(error.next_actions(), &[McpNextAction::Retry]);
     }
 }
 
@@ -7013,6 +7151,30 @@ async fn symbol_relationships_rejects_unserved_relation_before_the_port() {
 }
 
 #[tokio::test]
+async fn symbol_relationships_forwards_inbound_test_relations() {
+    let harness = Harness::new(FakeOutcome::SymbolRelationships(Err(
+        ClientPortError::Executor,
+    )));
+    execute(
+        &harness.executor,
+        VerticalTool::SymbolRelationships,
+        json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol()],
+            "relations": ["tests"],
+            "direction": "inbound"
+        }),
+    )
+    .await
+    .expect_err("fake port terminates after accepted normalization");
+    let ObservedCall::SymbolRelationships(request) = harness.only_call() else {
+        panic!("expected symbol relationships call");
+    };
+    assert_eq!(request.relations(), &["tests".to_owned()]);
+    assert_eq!(request.direction(), Some("inbound"));
+}
+
+#[tokio::test]
 async fn flow_trace_maps_paths_frontier_and_projection() {
     let response = FlowTracePortResponse::new(
         ClientFlowTrace {
@@ -7108,6 +7270,28 @@ async fn flow_trace_rejects_noncanonical_called_by_relation_before_the_port() {
         .expect("noncanonical relation is a checked public error");
     assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn flow_trace_forwards_outbound_route_relations() {
+    let harness = Harness::new(FakeOutcome::FlowTrace(Err(ClientPortError::Executor)));
+    execute(
+        &harness.executor,
+        VerticalTool::FlowTrace,
+        json!({
+            "repository": {"repository_id": repository()},
+            "from": {"symbol_id": symbol()},
+            "relations": ["calls_route"],
+            "direction": "outbound"
+        }),
+    )
+    .await
+    .expect_err("fake port terminates after accepted normalization");
+    let ObservedCall::FlowTrace(request) = harness.only_call() else {
+        panic!("expected flow trace call");
+    };
+    assert_eq!(request.relations(), &["calls_route".to_owned()]);
+    assert_eq!(request.direction(), Some("outbound"));
 }
 
 #[tokio::test]

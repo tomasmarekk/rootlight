@@ -45,7 +45,7 @@ use rootlight_mcp_contract::{
     },
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        RepoIndexOutputV1_0, SymbolExplainOutputV1_1,
+        RepoIndexOutputV1_0, RepoIndexOutputV1_1, SymbolExplainOutputV1_1,
     },
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
@@ -887,7 +887,14 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_mcp_tool_schema::<RepoIndexInput>(&schema_root, "repo.index", "input")?;
     write_mcp_tool_schema::<RepoIndexOutputV1_0>(&schema_root, "repo.index", "output")?;
     write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.1")?;
-    write_mcp_tool_schema_version::<RepoIndexOutput>(&schema_root, "repo.index", "output", "1.1")?;
+    write_mcp_tool_schema_version::<RepoIndexOutputV1_1>(
+        &schema_root,
+        "repo.index",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.2")?;
+    write_mcp_tool_schema_version::<RepoIndexOutput>(&schema_root, "repo.index", "output", "1.2")?;
     write_mcp_tool_schema::<OperationStatusInput>(&schema_root, "operation.status", "input")?;
     write_mcp_tool_schema::<OperationStatusOutputV1_0>(&schema_root, "operation.status", "output")?;
     write_mcp_tool_schema_version::<OperationStatusInput>(
@@ -929,6 +936,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "operation.status",
         "output",
         "1.2",
+    )?;
+    write_mcp_tool_schema_version::<OperationStatusInput>(
+        &schema_root,
+        "operation.status",
+        "input",
+        "1.3",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::OperationStatusOutput>(
+        &schema_root,
+        "operation.status",
+        "output",
+        "1.3",
     )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
@@ -2223,12 +2242,16 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),

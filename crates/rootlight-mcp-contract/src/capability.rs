@@ -716,7 +716,11 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "serves static implementation edges",
     ),
     implemented_value("relations[]", "imports", "serves static import edges"),
-    unsupported_value("relations[]", "tests", "test relations are not served"),
+    implemented_value(
+        "relations[]",
+        "tests",
+        "serves test-to-production edges; use inbound traversal from production symbols",
+    ),
     unsupported_value(
         "relations[]",
         "ownership",
@@ -727,10 +731,10 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "service_call",
         "service-call relations are not served",
     ),
-    unsupported_value(
+    implemented_value(
         "relations[]",
         "calls_route",
-        "route-call relations are not served",
+        "serves outward handler-to-route relations when indexed",
     ),
     unsupported_value(
         "relations[]",
@@ -810,7 +814,11 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
         "called_by",
         "use calls with inbound direction instead",
     ),
-    unsupported_value("relations[]", "tests", "test relations are not served"),
+    implemented_value(
+        "relations[]",
+        "tests",
+        "traverses test-to-production edges; use inbound traversal from production symbols",
+    ),
     unsupported_value(
         "relations[]",
         "ownership",
@@ -821,10 +829,10 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
         "service_call",
         "service-call relations are not served",
     ),
-    unsupported_value(
+    implemented_value(
         "relations[]",
         "calls_route",
-        "route-call relations are not served",
+        "traverses outward handler-to-route relations when indexed",
     ),
     unsupported_value(
         "relations[]",
@@ -1836,10 +1844,10 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "bounded sectioned explanations with typed evidence, source preview, and provenance"
         }
         McpTool::SymbolRelationships => {
-            "bounded static call, caller, reference, type, implementation, and import relationships"
+            "bounded static call, caller, reference, type, implementation, import, test, and handler-to-route relationships"
         }
         McpTool::FlowTrace => {
-            "bounded paths over static call, reference, type, implementation, and import edges"
+            "bounded paths over static call, reference, type, implementation, import, test, and handler-to-route edges"
         }
         McpTool::ChangeImpact => {
             "bounded explicit or Git-derived change mapping with scoped conservative coverage"
@@ -2366,6 +2374,21 @@ mod tests {
                 "{} retains public fallback limitations",
                 tool.name()
             );
+        }
+    }
+
+    #[test]
+    fn relationship_tools_advertise_reviewed_test_and_route_directions() {
+        for tool in [McpTool::SymbolRelationships, McpTool::FlowTrace] {
+            let capability = capability_for(tool);
+            for relation in ["tests", "calls_route"] {
+                assert_eq!(
+                    capability.disposition("relations[]", Some(relation)).status,
+                    CapabilityStatus::Implemented,
+                    "{} must advertise {relation}",
+                    tool.name()
+                );
+            }
         }
     }
 

@@ -71,7 +71,7 @@
       ]
     },
     "relations": {
-      "description": "Explicit relation allow-list.\n\nEvery declared relation family is admitted; missing adapter coverage is\nreported through response coverage rather than fabricated edges.",
+      "description": "Explicit relation allow-list.\n\nThe served set is `calls`, `references`, `types`, `implements`,\n`imports`, `tests`, and `calls_route`. Use inbound `tests` and outbound\n`calls_route` to follow the normalized producer directions.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RelationKind"

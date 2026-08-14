@@ -30,11 +30,12 @@ use rootlight_client::{
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, ToolResponse, VerticalTool,
+    ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, RepoIndexOutput, ToolResponse,
+    VerticalTool,
     change::{ChangeImpactOutput, TestsSelectOutput},
     vertical::{
-        AnalysisTier, CodeLocateOutput, OperationStatusToolResponseV1_2, OperationToolResponse,
-        RepoIndexOutputV1_1 as RepoIndexOutput, SourceReadOutput, SymbolExplainOutput,
+        AnalysisTier, CodeLocateOutput, OperationStatusToolResponse, OperationToolResponse,
+        SourceReadOutput, SymbolExplainOutput,
     },
 };
 use serde::de::DeserializeOwned;
@@ -1044,10 +1045,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         }),
     )
     .await;
-    assert!(matches!(
-        status,
-        OperationStatusToolResponseV1_2::Success(_)
-    ));
+    assert!(matches!(status, OperationStatusToolResponse::Success(_)));
 
     let locate: CodeLocateOutput = execute(
         &executor,
