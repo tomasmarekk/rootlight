@@ -38,8 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
-    FirstSliceOperationContext, FirstSliceRecoveryTarget, PreparedIncrementalState,
-    RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
+    FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
+    PreparedIncrementalState, RustSourceInput, check_cancellation, logical_snapshot_identity,
+    map_catalog_error, map_generation_neutral_digest_error, map_identity_error,
     map_incremental_error, map_query_error, map_search_error, map_vfs_error,
     project_lexical_documents_with_sources, repository_path_hash,
 };
@@ -56,6 +57,7 @@ const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
 const RECOVERY_SNAPSHOT_GZIP_FILENAME: &str = "recovery.json.gz";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const INCREMENTAL_STATE_FILENAME: &str = "incremental.json";
+const LOGICAL_SNAPSHOT_FILENAME: &str = "logical-snapshot.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
 const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
@@ -75,6 +77,7 @@ const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_RECOVERY_ENCODED_BYTES: u64 = MAX_RECOVERY_SNAPSHOT_BYTES + 1024 * 1024;
 const RECOVERY_DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
@@ -266,6 +269,29 @@ struct DurableGenerationManifest {
     incremental_state: Option<DurableSidecarDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_storage: Option<DurableSourceStorage>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableLogicalSnapshotIdentity {
+    version: u16,
+    repository: RepositoryId,
+    generation: GenerationId,
+    parent: Option<GenerationId>,
+    contract_major: u16,
+    contract_minor: u16,
+    manifest_hash: ContentHash,
+    configuration_hash: ContentHash,
+    provider_set_hash: ContentHash,
+    schema_version: String,
+    hash: ContentHash,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableLogicalSnapshotSidecar {
+    payload: String,
+    digest: ContentHash,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -2417,6 +2443,50 @@ impl DurablePreparedGeneration {
         Ok(writer.bytes)
     }
 
+    pub(super) fn write_logical_snapshot_identity(
+        &self,
+        snapshot: &GenerationSnapshot,
+        identity: &FirstSliceLogicalSnapshotIdentity,
+    ) -> Result<u64, FirstSliceError> {
+        let metadata = snapshot.metadata();
+        if metadata.repository() != self.repository_id || metadata.generation() != self.generation {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let contract = metadata.contract_version();
+        let descriptor = DurableLogicalSnapshotIdentity {
+            version: 1,
+            repository: metadata.repository(),
+            generation: metadata.generation(),
+            parent: metadata.parent(),
+            contract_major: contract.major(),
+            contract_minor: contract.minor(),
+            manifest_hash: metadata.manifest_hash(),
+            configuration_hash: metadata.configuration_hash(),
+            provider_set_hash: metadata.provider_set_hash(),
+            schema_version: identity.schema_version().to_owned(),
+            hash: identity.hash(),
+        };
+        let payload = serde_json::to_string(&descriptor).map_err(|_| FirstSliceError::Catalog)?;
+        let sidecar = DurableLogicalSnapshotSidecar {
+            digest: content_hash_bytes(payload.as_bytes()),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&sidecar).map_err(|_| FirstSliceError::Catalog)?;
+        let bytes_len = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+        if bytes_len == 0 || bytes_len > MAX_LOGICAL_SNAPSHOT_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        let staging = self.staging();
+        let mut file = staging
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        file.write_all(&bytes)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+        self.account_staging_bytes(bytes_len)?;
+        Ok(bytes_len)
+    }
+
     pub(super) fn finish(
         self,
         repository: RepositoryId,
@@ -4084,7 +4154,7 @@ fn restore_generation(
     let manifest_bytes = generation_directory
         .read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let manifest: DurableGenerationManifest =
+    let mut manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     match (manifest.version, manifest.source_storage) {
         (LEGACY_GENERATION_MANIFEST_VERSION, None) => {}
@@ -4147,6 +4217,11 @@ fn restore_generation(
             Err(error) => return Err(error),
         }
     };
+    manifest.receipt.logical_snapshot =
+        restore_logical_snapshot_identity(&generation_directory, verified.snapshot())?;
+    if manifest.receipt.logical_snapshot.is_some() && incremental.is_none() {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
     let uses_source_blobs = manifest.version == GENERATION_MANIFEST_VERSION;
     let mut sources = Vec::new();
     let unsupported_files = verified
@@ -4202,6 +4277,25 @@ fn restore_generation(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    if let Some(expected) = manifest.receipt.logical_snapshot.as_ref() {
+        let incremental = incremental
+            .as_ref()
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let normalized_ir = verified
+            .generation_neutral_digests(&context)
+            .map_err(|error| {
+                recovery_logical_snapshot_error(map_generation_neutral_digest_error(
+                    error,
+                    cancellation,
+                ))
+            })?;
+        let recomputed =
+            logical_snapshot_identity(normalized_ir, &documents, &incremental.inputs, cancellation)
+                .map_err(recovery_logical_snapshot_error)?;
+        if &recomputed != expected {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
     let search =
         LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
             .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
@@ -4246,6 +4340,63 @@ fn restore_incremental_state(
     let durable: DurableIncrementalState =
         serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     durable.into_prepared(cancellation).map(Some)
+}
+
+fn restore_logical_snapshot_identity(
+    generation_directory: &PrivateDirectory<'_>,
+    snapshot: &GenerationSnapshot,
+) -> Result<Option<FirstSliceLogicalSnapshotIdentity>, FirstSliceError> {
+    let metadata = match generation_directory
+        .capability()
+        .symlink_metadata(Path::new(LOGICAL_SNAPSHOT_FILENAME))
+    {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(FirstSliceError::CatalogCorrupt),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_LOGICAL_SNAPSHOT_BYTES
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let bytes = generation_directory
+        .read_file_bounded(
+            OsStr::new(LOGICAL_SNAPSHOT_FILENAME),
+            MAX_LOGICAL_SNAPSHOT_BYTES,
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let sidecar: DurableLogicalSnapshotSidecar =
+        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if content_hash_bytes(sidecar.payload.as_bytes()) != sidecar.digest {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let Ok(descriptor) = serde_json::from_str::<DurableLogicalSnapshotIdentity>(&sidecar.payload)
+    else {
+        // A checksum-valid future observability descriptor cannot strand the
+        // otherwise valid immutable generation.
+        return Ok(None);
+    };
+    if descriptor.version != 1 || descriptor.schema_version != "1.0" {
+        return Ok(None);
+    }
+    let generation = snapshot.metadata();
+    let contract = generation.contract_version();
+    if descriptor.repository != generation.repository()
+        || descriptor.generation != generation.generation()
+        || descriptor.parent != generation.parent()
+        || descriptor.contract_major != contract.major()
+        || descriptor.contract_minor != contract.minor()
+        || descriptor.manifest_hash != generation.manifest_hash()
+        || descriptor.configuration_hash != generation.configuration_hash()
+        || descriptor.provider_set_hash != generation.provider_set_hash()
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(Some(FirstSliceLogicalSnapshotIdentity::new(
+        descriptor.hash,
+    )))
 }
 
 fn restore_recovery_generation(
@@ -4465,6 +4616,17 @@ fn map_private_read_error(error: PlatformError) -> FirstSliceError {
 fn generation_data_error(error: FirstSliceError) -> FirstSliceError {
     match error {
         FirstSliceError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::CatalogCorrupt,
+    }
+}
+
+fn recovery_logical_snapshot_error(error: FirstSliceError) -> FirstSliceError {
+    match error {
+        FirstSliceError::Cancelled(_)
+        | FirstSliceError::ResourceUnavailable { .. }
+        | FirstSliceError::ResourceLimit { .. }
+        | FirstSliceError::EstimatedResourceLimit { .. }
+        | FirstSliceError::GenerationMemoryLimit { .. } => error,
         _ => FirstSliceError::CatalogCorrupt,
     }
 }
@@ -4865,6 +5027,334 @@ mod tests {
             restored.provider,
             super::super::FirstSliceIndexProvider::Unknown
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn logical_snapshot_sidecar_is_manifest_compatible_and_fail_closed() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn logical_sidecar_fixture() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let expected = receipt
+            .logical_snapshot
+            .clone()
+            .expect("published generation has a logical identity");
+        let mut legacy_receipt = receipt.clone();
+        legacy_receipt.logical_snapshot = None;
+        assert_eq!(
+            serde_json::to_vec(&receipt).expect("current receipt serializes"),
+            serde_json::to_vec(&legacy_receipt).expect("legacy receipt serializes"),
+            "the in-memory identity must not change frozen manifest receipt bytes"
+        );
+        let generation_path = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(generation_path.join(MANIFEST_FILENAME)).expect("manifest reads"),
+        )
+        .expect("manifest is valid JSON");
+        assert!(
+            manifest["receipt"].get("logical_snapshot").is_none(),
+            "manifest-v2 receipt bytes must remain readable by the previous binary"
+        );
+
+        let durable = service.durable.as_ref().expect("durable catalog exists");
+        let repository = PrivateDirectory::open(
+            durable.repositories.capability(),
+            OsStr::new(&receipt.repository.to_string()),
+        )
+        .expect("repository directory opens");
+        let generation = PrivateDirectory::open(
+            repository.capability(),
+            OsStr::new(&receipt.generation.to_string()),
+        )
+        .expect("generation directory opens");
+        let snapshot = service
+            .generations
+            .generation(receipt.generation)
+            .expect("published generation resolves");
+        let sidecar_path = generation_path.join(LOGICAL_SNAPSHOT_FILENAME);
+        let original = fs::read(&sidecar_path).expect("logical sidecar reads");
+        assert_eq!(
+            restore_logical_snapshot_identity(&generation, snapshot)
+                .expect("logical sidecar restores"),
+            Some(expected)
+        );
+
+        let missing = generation
+            .create_directory(OsStr::new("missing-logical"))
+            .expect("missing-sidecar fixture directory creates");
+        assert_eq!(
+            restore_logical_snapshot_identity(&missing, snapshot)
+                .expect("missing sidecar is an observability gap"),
+            None
+        );
+
+        let mut corrupt: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&original).expect("sidecar decodes");
+        corrupt.payload.push(' ');
+        let corrupt_directory = generation
+            .create_directory(OsStr::new("corrupt-logical"))
+            .expect("corrupt-sidecar fixture directory creates");
+        let mut corrupt_file = corrupt_directory
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("corrupt-sidecar fixture creates");
+        corrupt_file
+            .write_all(&serde_json::to_vec(&corrupt).expect("corrupt sidecar serializes"))
+            .expect("corrupt sidecar writes");
+        corrupt_file.sync_all().expect("corrupt sidecar syncs");
+        drop(corrupt_file);
+        assert_eq!(
+            restore_logical_snapshot_identity(&corrupt_directory, snapshot),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+
+        let mut mismatch: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&original).expect("sidecar decodes");
+        let mut descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&mismatch.payload).expect("descriptor decodes");
+        descriptor.generation = GenerationId::from_bytes([0x5a; 20]);
+        mismatch.payload = serde_json::to_string(&descriptor).expect("descriptor serializes");
+        mismatch.digest = content_hash_bytes(mismatch.payload.as_bytes());
+        let mismatch_directory = generation
+            .create_directory(OsStr::new("mismatch-logical"))
+            .expect("mismatch-sidecar fixture directory creates");
+        let mut mismatch_file = mismatch_directory
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("mismatch-sidecar fixture creates");
+        mismatch_file
+            .write_all(&serde_json::to_vec(&mismatch).expect("mismatched sidecar serializes"))
+            .expect("mismatched sidecar writes");
+        mismatch_file.sync_all().expect("mismatched sidecar syncs");
+        drop(mismatch_file);
+        assert_eq!(
+            restore_logical_snapshot_identity(&mismatch_directory, snapshot),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+
+        let mut future: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&original).expect("sidecar decodes");
+        let mut descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&future.payload).expect("descriptor decodes");
+        descriptor.version = 2;
+        descriptor.schema_version = "2.0".to_owned();
+        future.payload = serde_json::to_string(&descriptor).expect("descriptor serializes");
+        future.digest = content_hash_bytes(future.payload.as_bytes());
+        let future_directory = generation
+            .create_directory(OsStr::new("future-logical"))
+            .expect("future-sidecar fixture directory creates");
+        let mut future_file = future_directory
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("future-sidecar fixture creates");
+        future_file
+            .write_all(&serde_json::to_vec(&future).expect("future sidecar serializes"))
+            .expect("future sidecar writes");
+        future_file.sync_all().expect("future sidecar syncs");
+        drop(future_file);
+        assert_eq!(
+            restore_logical_snapshot_identity(&future_directory, snapshot)
+                .expect("future observability descriptor does not strand generation"),
+            None
+        );
+        drop(future_directory);
+        drop(mismatch_directory);
+        drop(corrupt_directory);
+        drop(missing);
+        generation
+            .capability()
+            .remove_file(Path::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("current sidecar removes through its retained directory");
+        let mut future_file = generation
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("future sidecar replaces the current descriptor");
+        future_file
+            .write_all(&serde_json::to_vec(&future).expect("future sidecar serializes"))
+            .expect("future sidecar writes");
+        future_file.sync_all().expect("future sidecar syncs");
+        drop(future_file);
+        drop(generation);
+        drop(repository);
+        drop(service);
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("generation with a future logical descriptor restores");
+        assert_eq!(
+            restored.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        assert!(
+            restored
+                .repository_status(receipt.repository, None)
+                .expect("future descriptor status resolves")
+                .logical_snapshot
+                .is_none()
+        );
+        drop(restored);
+
+        fs::remove_file(&sidecar_path).expect("logical sidecar deletes");
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("generation without a logical sidecar restores");
+        assert_eq!(
+            restored.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        assert!(
+            restored
+                .repository_status(receipt.repository, None)
+                .expect("status without a persisted identity resolves")
+                .logical_snapshot
+                .is_none()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn logical_snapshot_sidecar_requires_its_incremental_state_on_restore() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = fixture.path().join("lib.rs");
+        fs::write(
+            &source,
+            "pub fn logical_incremental_fixture() -> u32 { 1 }\n",
+        )
+        .expect("initial fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let (first, second) = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let first = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("predecessor generation publishes");
+            fs::write(
+                &source,
+                "pub fn logical_incremental_fixture() -> u32 { 2 }\n",
+            )
+            .expect("successor fixture source writes");
+            let second = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("active generation publishes");
+            (first, second)
+        };
+        let incremental_path = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(second.repository.to_string())
+            .join(second.generation.to_string())
+            .join(INCREMENTAL_STATE_FILENAME);
+        fs::remove_file(incremental_path).expect("active incremental sidecar deletes");
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("last-good predecessor restores");
+        assert_eq!(
+            restored.active_generation_for(first.repository),
+            Some(first.generation)
+        );
+        assert!(
+            restored
+                .repository_status(first.repository, None)
+                .expect("predecessor status resolves")
+                .logical_snapshot
+                .is_some()
+        );
+        assert!(matches!(
+            restored.repository_status(second.repository, Some(second.generation)),
+            Err(FirstSliceError::GenerationNotFound)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn logical_snapshot_sidecar_hash_must_match_recomputed_projection_on_restore() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = fixture.path().join("lib.rs");
+        fs::write(&source, "pub fn logical_recompute_fixture() -> u32 { 1 }\n")
+            .expect("initial fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let (first, second) = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let first = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("predecessor generation publishes");
+            fs::write(&source, "pub fn logical_recompute_fixture() -> u32 { 2 }\n")
+                .expect("successor fixture source writes");
+            let second = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("active generation publishes");
+            (first, second)
+        };
+        let sidecar_path = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(second.repository.to_string())
+            .join(second.generation.to_string())
+            .join(LOGICAL_SNAPSHOT_FILENAME);
+        let mut sidecar: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&fs::read(&sidecar_path).expect("active logical sidecar reads"))
+                .expect("active sidecar decodes");
+        let mut descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&sidecar.payload).expect("active descriptor decodes");
+        descriptor.hash = ContentHash::from_bytes([0xa5; 32]);
+        sidecar.payload =
+            serde_json::to_string(&descriptor).expect("wrong-hash descriptor serializes");
+        sidecar.digest = content_hash_bytes(sidecar.payload.as_bytes());
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&sidecar).expect("self-consistent wrong-hash sidecar serializes"),
+        )
+        .expect("wrong-hash sidecar overwrites");
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("last-good predecessor restores");
+        assert_eq!(
+            restored.active_generation_for(first.repository),
+            Some(first.generation)
+        );
+        assert_eq!(
+            restored
+                .repository_status(first.repository, None)
+                .expect("predecessor status resolves")
+                .logical_snapshot,
+            first.logical_snapshot
+        );
+        assert!(matches!(
+            restored.repository_status(second.repository, Some(second.generation)),
+            Err(FirstSliceError::GenerationNotFound)
+        ));
     }
 
     #[test]

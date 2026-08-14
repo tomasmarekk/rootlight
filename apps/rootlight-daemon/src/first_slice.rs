@@ -9356,6 +9356,25 @@ fn repository_status(
             indexed_files: entry.indexed_files,
         })
         .collect();
+    let (logical_snapshot_schema_version, logical_snapshot_hash) =
+        if context.selected_protocol_minor >= 16 {
+            match status.logical_snapshot {
+                Some(identity) => {
+                    let (major, minor) =
+                        identity.schema_version_parts().ok_or_else(internal_error)?;
+                    (
+                        Some(common::ContractVersion {
+                            major: u32::from(major),
+                            minor: u32::from(minor),
+                        }),
+                        Some(content_hash_to_wire(identity.hash())),
+                    )
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
     Ok(daemon::RepositoryStatusResponse {
         repository: Some(repository_to_wire(status.repository)),
         active_generation: Some(generation_to_wire(status.active_generation)),
@@ -9374,6 +9393,8 @@ fn repository_status(
         active_structural_freshness: status.active_structural_freshness,
         active_semantic_freshness: status.active_semantic_freshness,
         retained_durable_bytes: status.retained_durable_bytes,
+        logical_snapshot_schema_version,
+        logical_snapshot_hash,
     })
 }
 
@@ -13625,6 +13646,7 @@ mod tests {
             oracle_allocated_bytes: 1,
             estimated_disk_bytes: 1,
             retained_durable_bytes: 0,
+            logical_snapshot: None,
             diagnostics: Vec::new(),
             elapsed_micros: 1,
         };
@@ -14705,6 +14727,14 @@ mod tests {
         service: &FirstSliceService,
         request: daemon::RepositoryStatusRequest,
     ) -> Result<daemon::RepositoryStatusResponse, PublicError> {
+        status_response_for_minor(service, request, rootlight_daemon_core::PROTOCOL_MINOR)
+    }
+
+    fn status_response_for_minor(
+        service: &FirstSliceService,
+        request: daemon::RepositoryStatusRequest,
+        selected_protocol_minor: u32,
+    ) -> Result<daemon::RepositoryStatusResponse, PublicError> {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let actor = JournalActor::start(journal, 4, 4).expect("journal actor starts");
         let handle = actor.handle();
@@ -14716,7 +14746,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let context = FirstSliceIpcContext {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
-            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            selected_protocol_minor,
             cancellation: Cancellation::with_deadline(deadline),
             deadline,
             effective_budget: None,
@@ -14748,6 +14778,28 @@ mod tests {
             parse_generation(exact.active_generation.as_ref()).expect("active generation maps"),
             alpha.active_generation
         );
+        assert_eq!(
+            exact
+                .logical_snapshot_schema_version
+                .as_ref()
+                .map(|version| (version.major, version.minor)),
+            Some((1, 0))
+        );
+        assert_eq!(
+            exact
+                .logical_snapshot_hash
+                .as_ref()
+                .map(|hash| hash.value.len()),
+            Some(32)
+        );
+        let old_minor = status_response_for_minor(
+            &service,
+            status_request(alpha.repository, Some(alpha.active_generation)),
+            15,
+        )
+        .expect("minor 15 status remains compatible");
+        assert!(old_minor.logical_snapshot_schema_version.is_none());
+        assert!(old_minor.logical_snapshot_hash.is_none());
 
         let wrong_repository = status_response(
             &service,
@@ -15716,6 +15768,7 @@ mod tests {
             oracle_allocated_bytes: 4_096,
             estimated_disk_bytes: 64 * 1024 * 1024,
             retained_durable_bytes: 0,
+            logical_snapshot: None,
             diagnostics: Vec::new(),
             elapsed_micros: 10,
         };

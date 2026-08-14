@@ -14,10 +14,11 @@ use rootlight_ids::{
     ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
 };
 use rootlight_ir::{
-    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
-    IdentityClaimError, IrDocument, IrDocumentDecodeError, IrDocumentValidationError, IrLimits,
-    IrVersion, LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
+    CanonicalGenerationNeutralDigests, CanonicalNormalizedIrDocument, ExtensionSupport,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, IdentityClaimError, IrDocument,
+    IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
+    LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
+    NormalizedRebindError, OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
     decode_file_identity_claim_envelope_with_checkpoint, decode_ir_document_with_checkpoint,
     decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
@@ -225,7 +226,7 @@ const fn generation_format_version(version: GenerationContractVersion) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationSnapshot {
     metadata: GenerationMetadata,
-    document: NormalizedIrDocument,
+    document: CanonicalNormalizedIrDocument,
 }
 
 impl GenerationSnapshot {
@@ -241,10 +242,10 @@ impl GenerationSnapshot {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, GenerationValidationError> {
-        let document = canonicalize_ir_document(document, limits, extensions)
+        let document = CanonicalNormalizedIrDocument::new(document, limits, extensions)
             .map_err(GenerationValidationError::InvalidIr)?;
-        if document.repository != metadata.repository()
-            || document.generation != metadata.generation()
+        if document.document().repository != metadata.repository()
+            || document.document().generation != metadata.generation()
         {
             return Err(GenerationValidationError::OwnershipMismatch);
         }
@@ -291,13 +292,41 @@ impl GenerationSnapshot {
     /// Returns the canonical normalized document.
     #[must_use]
     pub const fn document(&self) -> &NormalizedIrDocument {
-        &self.document
+        self.document.document()
     }
 
     /// Consumes the snapshot into its canonical normalized document.
     #[must_use]
     pub fn into_document(self) -> NormalizedIrDocument {
+        self.document.into_document()
+    }
+
+    fn generation_neutral_digests(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<CanonicalGenerationNeutralDigests, GenerationNeutralDigestError> {
+        context
+            .check()
+            .map_err(GenerationNeutralDigestError::Control)?;
+        let mut control_error = None;
         self.document
+            .generation_neutral_digests(|| match context.check() {
+                Ok(()) => true,
+                Err(error) => {
+                    control_error.get_or_insert(error);
+                    false
+                }
+            })
+            .map_err(|error| match error {
+                NormalizedRebindError::Interrupted => control_error.map_or(
+                    GenerationNeutralDigestError::InvalidGeneration,
+                    GenerationNeutralDigestError::Control,
+                ),
+                NormalizedRebindError::ResourceLimit => {
+                    GenerationNeutralDigestError::ResourceUnavailable
+                }
+                _ => GenerationNeutralDigestError::InvalidGeneration,
+            })
     }
 }
 
@@ -857,7 +886,9 @@ impl IdentityVerifiedGeneration {
         {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
-        Self::verify_snapshot(GenerationSnapshot { metadata, document }, context)
+        let snapshot = GenerationSnapshot::new(metadata, document, limits, extensions)
+            .map_err(|_| IdentityVerificationError::InvalidGeneration)?;
+        Self::verify_snapshot(snapshot, context)
     }
 
     /// Returns the verified generation metadata.
@@ -876,6 +907,22 @@ impl IdentityVerifiedGeneration {
     #[must_use]
     pub const fn snapshot(&self) -> &GenerationSnapshot {
         &self.snapshot
+    }
+
+    /// Streams neutral logical digests from this verified canonical generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenerationNeutralDigestError::Control`] when cancellation
+    /// interrupts projection, [`GenerationNeutralDigestError::ResourceUnavailable`]
+    /// when checked workspace reservation fails, or
+    /// [`GenerationNeutralDigestError::InvalidGeneration`] when a verified
+    /// identity recipe cannot be projected.
+    pub fn generation_neutral_digests(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<CanonicalGenerationNeutralDigests, GenerationNeutralDigestError> {
+        self.snapshot.generation_neutral_digests(context)
     }
 
     /// Consumes the verified wrapper into its canonical generation.
@@ -1616,6 +1663,20 @@ pub enum IdentityVerificationError {
     RecipeEncoding,
 }
 
+/// Failure while projecting a verified generation into logical identity digests.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GenerationNeutralDigestError {
+    /// Cooperative cancellation or a resource policy stopped projection.
+    #[error("generation logical projection was interrupted")]
+    Control(#[source] GenerationControlError),
+    /// The verified snapshot could not be projected through current identity recipes.
+    #[error("generation logical projection is invalid")]
+    InvalidGeneration,
+    /// The checked bounded workspace could not be reserved.
+    #[error("generation logical projection workspace is unavailable")]
+    ResourceUnavailable,
+}
+
 /// Closed record family identifying a canonical identity mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMismatchComponent {
@@ -1940,6 +2001,36 @@ mod tests {
                     resource: GenerationResource::Rows,
                     observed: 3,
                     limit: 2,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn verified_generation_owns_the_safe_logical_digest_projection() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify(
+            metadata,
+            NormalizedIrDocument::empty(repository, metadata.generation()),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("empty generation verifies");
+        let digests = verified
+            .generation_neutral_digests(&context)
+            .expect("verified generation projects logical digests");
+        assert_eq!(digests.records(), 0);
+
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            verified.generation_neutral_digests(&context),
+            Err(GenerationNeutralDigestError::Control(
+                GenerationControlError::Cancelled {
+                    reason: CancellationReason::ClientRequest,
                 }
             ))
         );

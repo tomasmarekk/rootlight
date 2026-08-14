@@ -31,7 +31,7 @@ use rootlight_mcp_contract::{
         SymbolRelationshipsOutputV1_0, SymbolRelationshipsOutputV1_1,
     },
     pagination::AuthenticatedCursor,
-    repository::{RepoListInput, RepoStatusOutputV1_0, RepoStatusOutputV1_1},
+    repository::{RepoListInput, RepoStatusOutput, RepoStatusOutputV1_0, RepoStatusOutputV1_1},
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
         RepoIndexOutputV1_0, RepoIndexOutputV1_1, SymbolExplainOutputV1_0,
@@ -1743,7 +1743,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
     // that intentionally cannot be represented by generated JSON Schema.
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
-        VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList
         | VerticalTool::FlowTrace
         | VerticalTool::QueryAdvanced
@@ -1788,7 +1788,7 @@ fn typed_selected_output_is_valid(
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
@@ -1810,6 +1810,7 @@ fn typed_selected_output_is_valid(
         },
         ContractSelection::Legacy => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
@@ -1994,7 +1995,7 @@ fn unsupported_contract_version_error(
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
-        VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList
         | VerticalTool::FlowTrace
         | VerticalTool::QueryAdvanced
@@ -2030,7 +2031,7 @@ fn typed_selected_error_output_is_valid(
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
@@ -2052,6 +2053,7 @@ fn typed_selected_error_output_is_valid(
         },
         ContractSelection::Legacy => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
@@ -2094,9 +2096,16 @@ fn select_output_version(
             }
             ContractSelection::Current | ContractSelection::Initial => return Err(()),
         },
-        VerticalTool::RepoStatus => {
-            data.remove("retained_durable_bytes");
-        }
+        VerticalTool::RepoStatus => match selection {
+            ContractSelection::Previous => {
+                data.remove("logical_snapshot");
+            }
+            ContractSelection::Legacy => {
+                data.remove("logical_snapshot");
+                data.remove("retained_durable_bytes");
+            }
+            ContractSelection::Current | ContractSelection::Initial => return Err(()),
+        },
         VerticalTool::OperationStatus => match selection {
             ContractSelection::Previous => {
                 remove_operation_fact_work(data)?;
@@ -4819,19 +4828,30 @@ mod tests {
     #[tokio::test]
     async fn repo_status_serves_current_and_retained_minor_contracts() {
         let mut output = retained_output("repo.status");
-        output.insert("schema_version".to_owned(), Value::String("1.1".to_owned()));
-        output
+        output.insert("schema_version".to_owned(), Value::String("1.2".to_owned()));
+        let data = output
             .get_mut("data")
             .and_then(Value::as_object_mut)
-            .expect("repo.status fixture contains data")
-            .insert("retained_durable_bytes".to_owned(), json!(768));
+            .expect("repo.status fixture contains data");
+        data.insert("retained_durable_bytes".to_owned(), json!(768));
+        data.insert(
+            "logical_snapshot".to_owned(),
+            json!({
+                "schema_version": "1.0",
+                "hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+            }),
+        );
         let router = ToolRouter::new(
             StaticExecutor { result: Ok(output) },
             ExposureProfile::Developer,
         )
         .expect("registry compiles");
 
-        for (version, retained_durable) in [("1.1", true), ("1.0", false)] {
+        for (version, retained_durable, logical_snapshot) in [
+            ("1.2", true, true),
+            ("1.1", true, false),
+            ("1.0", false, false),
+        ] {
             let response = router
                 .handle(
                     request(
@@ -4860,6 +4880,12 @@ mod tests {
                     .get("retained_durable_bytes")
                     .is_some(),
                 retained_durable
+            );
+            assert_eq!(
+                result["structuredContent"]["data"]
+                    .get("logical_snapshot")
+                    .is_some(),
+                logical_snapshot
             );
         }
     }

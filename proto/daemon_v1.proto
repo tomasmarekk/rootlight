@@ -1060,6 +1060,8 @@ message RepositoryStatusResponse {
   string active_structural_freshness = 15;
   string active_semantic_freshness = 16;
   uint64 retained_durable_bytes = 17;
+  optional rootlight.common.v1.ContractVersion logical_snapshot_schema_version = 18;
+  optional rootlight.common.v1.ContentHash logical_snapshot_hash = 19;
 }
 
 // Requests bounded typed relation neighborhoods for stable symbols.

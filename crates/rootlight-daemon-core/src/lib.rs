@@ -85,6 +85,7 @@ const CAPABILITIES: &[&str] = &[
     "operation.status",
     "operation.submit",
     "repository.index.v1",
+    "repository.status.logical-snapshot.v1",
     "source.read.v1",
     "symbol.explain.v1",
     "support.bundle.v1",
@@ -6330,6 +6331,7 @@ impl ControlService {
                         "support.bundle.v6" => selected_minor >= 13,
                         "support.bundle.v7" => selected_minor >= 14,
                         "support.bundle.v8" => selected_minor >= 15,
+                        "repository.status.logical-snapshot.v1" => selected_minor >= 16,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -12740,6 +12742,7 @@ mod tests {
                     "support.bundle.v6" => minor >= 13,
                     "support.bundle.v7" => minor >= 14,
                     "support.bundle.v8" => minor >= 15,
+                    "repository.status.logical-snapshot.v1" => minor >= 16,
                     "code.locate.v1"
                     | "repository.index.v1"
                     | "source.read.v1"
@@ -12775,6 +12778,13 @@ mod tests {
                     .iter()
                     .any(|capability| capability == "support.bundle.v8"),
                 minor >= 15
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "repository.status.logical-snapshot.v1"),
+                minor >= 16
             );
         }
     }

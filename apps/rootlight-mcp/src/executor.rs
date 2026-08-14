@@ -87,19 +87,19 @@ use rootlight_mcp_contract::{
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
         CatalogEnvelope, CatalogSnapshotId, CoverageDetail, CoverageReport, FreshnessRequirement,
-        GenerationPublicationState, LanguageCoverageReport, OperationSummary, RepoListData,
-        RepoListInput, RepoListSchemaVersion, RepoStatusData, RepoStatusInput, RepositoryEntry,
-        RepositoryState,
+        GenerationPublicationState, LanguageCoverageReport, LogicalSnapshotIdentity,
+        LogicalSnapshotSchemaVersion, OperationSummary, RepoListData, RepoListInput,
+        RepoListSchemaVersion, RepoStatusData, RepoStatusInput, RepoStatusReadEnvelope,
+        RepoStatusSchemaVersion, RepositoryEntry, RepositoryState,
     },
     vertical::{
-        ActiveGeneration, AnalysisReadEnvelope, AnalysisSchemaVersion, AnalysisTier, CacheStatus,
-        CodeLocateData, CodeLocateInput, ContinuationCursor, CoverageSummary, DetailHandle,
-        Diagnostic, EntityKind, Freshness, GenerationSummary, IndexMode, IndexPlanScope,
-        IndexPlanSummary, LanguageCoverage, LocateReason, LocatedItem, OperationAction,
-        OperationAffectedAnalysisUnitIds, OperationAffectedFileIds, OperationBuildStrategy,
-        OperationDetailV1_2 as OperationDetail, OperationFactWorkCause,
-        OperationFactWorkDisposition, OperationFallbackReason, OperationIncrementalEvidence,
-        OperationIncrementalFactWorkEvidence,
+        ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
+        ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
+        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
+        LocateReason, LocatedItem, OperationAction, OperationAffectedAnalysisUnitIds,
+        OperationAffectedFileIds, OperationBuildStrategy, OperationDetailV1_2 as OperationDetail,
+        OperationFactWorkCause, OperationFactWorkDisposition, OperationFallbackReason,
+        OperationIncrementalEvidence, OperationIncrementalFactWorkEvidence,
         OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
         OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
         OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
@@ -3847,6 +3847,22 @@ where
         active_generation: RequiredNullable(Some(active_generation_summary)),
         publication_state,
         retained_durable_bytes: status.retained_durable_bytes,
+        logical_snapshot: RequiredNullable(
+            status
+                .logical_snapshot
+                .as_ref()
+                .map(|identity| {
+                    let schema_version = match identity.schema_version.as_str() {
+                        "1.0" => LogicalSnapshotSchemaVersion::V1_0,
+                        _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
+                    };
+                    Ok(LogicalSnapshotIdentity {
+                        schema_version,
+                        hash: identity.hash,
+                    })
+                })
+                .transpose()?,
+        ),
         alias: RequiredNullable(status.alias.clone()),
         coverage: CoverageReport {
             languages: if matches!(
@@ -3868,8 +3884,8 @@ where
             )
         }),
     };
-    let envelope = AnalysisReadEnvelope {
-        schema_version: AnalysisSchemaVersion::V1_1,
+    let envelope = RepoStatusReadEnvelope {
+        schema_version: RepoStatusSchemaVersion::V1_2,
         repository: ResolvedRepository {
             repository_id: status.repository_id,
             display_name: status.display_name,
@@ -3899,7 +3915,7 @@ where
         warnings,
         trust: TrustClassification::UntrustedRepositoryData,
     };
-    serialize_measured_analysis_read_success(envelope, started_at, BudgetLimits::server_ceiling())
+    serialize_measured_repo_status_success(envelope, started_at, BudgetLimits::server_ceiling())
 }
 
 fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
@@ -8806,8 +8822,8 @@ where
     serialize_measured_success(output, started_at, limits, |output| &mut output.usage)
 }
 
-fn serialize_measured_analysis_read_success<T>(
-    output: AnalysisReadEnvelope<T>,
+fn serialize_measured_repo_status_success<T>(
+    output: RepoStatusReadEnvelope<T>,
     started_at: Instant,
     limits: BudgetLimits,
 ) -> Result<Map<String, Value>, ToolExecutionError>

@@ -98,6 +98,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "operation.status",
     "operation.submit",
     "repository.index.v1",
+    "repository.status.logical-snapshot.v1",
     "source.read.v1",
     "symbol.explain.v1",
     "support.bundle.v1",
@@ -1705,6 +1706,15 @@ pub struct RepositoryCoverageEntry {
     pub indexed_files: u64,
 }
 
+/// Public generation-neutral logical snapshot identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LogicalSnapshotIdentity {
+    /// Version of the canonical generation-neutral projection.
+    pub schema_version: String,
+    /// Complete logical snapshot digest.
+    pub hash: ContentHash,
+}
+
 /// One repository's resolved and active generation status.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryStatus {
@@ -1736,6 +1746,8 @@ pub struct RepositoryStatus {
     pub publication_state: String,
     /// Durable bytes retained for the selected immutable generation.
     pub retained_durable_bytes: u64,
+    /// Generation-neutral identity, absent when no supported persisted sidecar is available.
+    pub logical_snapshot: Option<LogicalSnapshotIdentity>,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntry>,
     /// Bounded current and recent repository-index operations.
@@ -4640,9 +4652,11 @@ impl Client {
         &self,
         request: RepositoryStatusRequest,
     ) -> Result<RepositoryStatus, ClientError> {
-        match self.request(build_repository_status_request(request))? {
+        let (response, selected_protocol_minor) =
+            self.request_with_protocol(build_repository_status_request(request))?;
+        match response {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, request)
+                parse_repository_status(response, request, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4690,12 +4704,12 @@ impl Client {
         request: RepositoryStatusRequest,
         timeout: RequestTimeout,
     ) -> Result<RepositoryStatus, ClientError> {
-        match self
-            .request_async(build_repository_status_request(request), timeout)
-            .await?
-        {
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(build_repository_status_request(request), timeout)
+            .await?;
+        match response {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, request)
+                parse_repository_status(response, request, selected_protocol_minor)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -10173,6 +10187,7 @@ fn repository_catalog_sort_key_parts(bytes: &[u8]) -> Result<(&str, &[u8]), Clie
 fn parse_repository_status(
     response: daemon::RepositoryStatusResponse,
     request: RepositoryStatusRequest,
+    selected_protocol_minor: u32,
 ) -> Result<RepositoryStatus, ClientError> {
     let repository_id =
         parse_repository(response.repository.ok_or(ClientError::InvalidIdentifier)?)?;
@@ -10219,6 +10234,22 @@ fn parse_repository_status(
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let logical_snapshot = match (
+        response.logical_snapshot_schema_version.as_ref(),
+        response.logical_snapshot_hash.clone(),
+    ) {
+        (None, None) => None,
+        (Some(_), Some(_)) if selected_protocol_minor <= 15 => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        (Some(version), Some(hash)) if version.major == 1 && version.minor == 0 => {
+            Some(LogicalSnapshotIdentity {
+                schema_version: "1.0".to_owned(),
+                hash: parse_content_hash(Some(hash))?,
+            })
+        }
+        _ => return Err(ClientError::InvalidResponseCorrelation),
+    };
     let coverage = response
         .coverage
         .into_iter()
@@ -10279,6 +10310,7 @@ fn parse_repository_status(
         state: response.state,
         publication_state: publication_state.to_owned(),
         retained_durable_bytes: response.retained_durable_bytes,
+        logical_snapshot,
         coverage,
         operations,
     })
@@ -14332,6 +14364,8 @@ mod tests {
             active_structural_freshness: "current".to_owned(),
             active_semantic_freshness: "current".to_owned(),
             retained_durable_bytes: 0,
+            logical_snapshot_schema_version: None,
+            logical_snapshot_hash: None,
         }
     }
 
@@ -14343,6 +14377,7 @@ mod tests {
         let active_status = parse_repository_status(
             wire_repository_status_response(Some(active), active),
             RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active),
+            CURRENT_PROTOCOL_MINOR,
         )
         .expect("active status correlates");
         assert_eq!(active_status.resolved_generation, active);
@@ -14365,6 +14400,7 @@ mod tests {
             recovery_response,
             RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active)
                 .with_operations(true),
+            CURRENT_PROTOCOL_MINOR,
         )
         .expect("repository recovery is visible in status");
         assert_eq!(recovery_status.operations[0].kind, OperationKind::Recovery);
@@ -14372,6 +14408,7 @@ mod tests {
         let exact_status = parse_repository_status(
             wire_repository_status_response(Some(exact), active),
             RepositoryStatusRequest::new(test_repository(), GenerationSelector::Generation(exact)),
+            CURRENT_PROTOCOL_MINOR,
         )
         .expect("exact status remains distinct from active");
         assert_eq!(exact_status.resolved_generation, exact);
@@ -14384,6 +14421,7 @@ mod tests {
                     test_repository(),
                     GenerationSelector::Generation(exact),
                 ),
+                CURRENT_PROTOCOL_MINOR,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -14394,6 +14432,7 @@ mod tests {
                     test_repository(),
                     GenerationSelector::Generation(exact),
                 ),
+                CURRENT_PROTOCOL_MINOR,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -14401,10 +14440,61 @@ mod tests {
             parse_repository_status(
                 wire_repository_status_response(None, active),
                 RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active),
+                CURRENT_PROTOCOL_MINOR,
             )
             .is_ok(),
             "an older active-only daemon response remains compatible"
         );
+    }
+
+    #[test]
+    fn repository_status_logical_snapshot_is_minor_gated_and_pair_validated() {
+        let active = test_generation();
+        let request = RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active);
+        let mut response = wire_repository_status_response(Some(active), active);
+        response.logical_snapshot_schema_version =
+            Some(common::ContractVersion { major: 1, minor: 0 });
+        response.logical_snapshot_hash = Some(common::ContentHash { value: vec![7; 32] });
+
+        let current = parse_repository_status(response.clone(), request, 16)
+            .expect("minor 16 accepts the canonical logical snapshot pair");
+        assert_eq!(
+            current.logical_snapshot,
+            Some(LogicalSnapshotIdentity {
+                schema_version: "1.0".to_owned(),
+                hash: ContentHash::from_bytes([7; 32]),
+            })
+        );
+        assert!(matches!(
+            parse_repository_status(response.clone(), request, 15),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let mut missing_hash = response.clone();
+        missing_hash.logical_snapshot_hash = None;
+        assert!(matches!(
+            parse_repository_status(missing_hash, request, 16),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut missing_version = response.clone();
+        missing_version.logical_snapshot_schema_version = None;
+        assert!(matches!(
+            parse_repository_status(missing_version, request, 16),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut future_version = response.clone();
+        future_version.logical_snapshot_schema_version =
+            Some(common::ContractVersion { major: 1, minor: 1 });
+        assert!(matches!(
+            parse_repository_status(future_version, request, 16),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut invalid_hash = response;
+        invalid_hash.logical_snapshot_hash = Some(common::ContentHash { value: vec![7; 31] });
+        assert!(matches!(
+            parse_repository_status(invalid_hash, request, 16),
+            Err(ClientError::InvalidIdentifier)
+        ));
     }
 
     fn test_source(file_byte: u8, start: u64, end: u64) -> SourceReference {
@@ -16174,6 +16264,7 @@ mod tests {
                 "operation.status",
                 "operation.submit",
                 "repository.index.v1",
+                "repository.status.logical-snapshot.v1",
                 "source.read.v1",
                 "symbol.explain.v1",
                 "support.bundle.v1",
@@ -17802,6 +17893,7 @@ mod tests {
             state: "ready".to_owned(),
             publication_state: "published".to_owned(),
             retained_durable_bytes: 4_096,
+            logical_snapshot: None,
             coverage: vec![RepositoryCoverageEntry {
                 language: "rust".to_owned(),
                 tier: "tier_a".to_owned(),

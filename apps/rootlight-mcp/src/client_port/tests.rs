@@ -18,15 +18,16 @@ use rootlight_client::{
     CodeLocate, ContinuationAvailability, CoverageGap, CoverageStatus, CycleProjection, FlowTrace,
     FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
     HistoryCompare, HistoryCompareScope, HistoryMatchedStates, HistoryRevisionSelector, LocateHit,
-    LocateMode, OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContext,
-    PlanChangeContextPack, PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass,
-    RepositoryCatalogEntry, RepositoryCatalogFreshness, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId, RepositoryCatalogState,
-    RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexDiagnostic, RepositoryIndexMode,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
-    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
-    SymbolExplanation, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    LocateMode, LogicalSnapshotIdentity as ClientLogicalSnapshotIdentity, OperationKind,
+    OperationStage, OperationState, PlanChange, PlanChangeContext, PlanChangeContextPack,
+    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry,
+    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
+    RepositoryCatalogSnapshotId, RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex,
+    RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
+    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -49,8 +50,8 @@ use super::{
     source_languages, symbol_languages,
 };
 use crate::{
-    FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
-    ToolExecutor,
+    FirstSliceClientPort, FirstSliceToolExecutor, RepositoryStatusPortRequest, RequestCancellation,
+    ToolExecutionFailure, ToolExecutor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,6 +558,10 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 state: "ready".to_owned(),
                 publication_state: "published".to_owned(),
                 retained_durable_bytes: 0,
+                logical_snapshot: Some(ClientLogicalSnapshotIdentity {
+                    schema_version: "1.0".to_owned(),
+                    hash: content_hash(),
+                }),
                 coverage: vec![RepositoryCoverageEntry {
                     language: "rust".to_owned(),
                     tier: "tier_a".to_owned(),
@@ -1519,6 +1524,23 @@ async fn native_port_forwards_the_typed_catalog_continuation() {
             ..
         }] if observed == &request
     ));
+}
+
+#[tokio::test]
+async fn native_port_preserves_the_logical_snapshot_identity() {
+    let fake = FakeAsyncClient::default();
+    let port = native_port_with_client(fake);
+    let request = RepositoryStatusPortRequest::new(repository(), GenerationSelector::Active);
+
+    let response = FirstSliceClientPort::repository_status(&port, request, cancellation())
+        .await
+        .expect("native port forwards repository status");
+    let logical_snapshot = response
+        .logical_snapshot
+        .expect("fixture exposes a logical snapshot identity");
+
+    assert_eq!(logical_snapshot.schema_version, "1.0");
+    assert_eq!(logical_snapshot.hash, content_hash());
 }
 
 #[tokio::test]

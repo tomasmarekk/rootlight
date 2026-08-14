@@ -4,11 +4,14 @@
 //! durable IR format and accept only extension namespaces with identity recipes
 //! that this module can completely reconstruct.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId};
+use serde::Serialize;
 
 use crate::lexical::rebind_lexical_evidence_subject;
+use crate::validation::validate_canonical_ir_document;
 use crate::{
     CoverageRecord, DiagnosticRecord, ExtensionEnvelope, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FactRef, FileRecord, IrDocumentValidationError,
@@ -35,6 +38,351 @@ pub struct CanonicalNormalizedFileChunk {
     encoded_bytes: usize,
 }
 
+/// A complete canonical IR document with generation-owned identity neutralized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalGenerationNeutralDocument {
+    document: NormalizedIrDocument,
+    fact_id_map: FactIdMap,
+}
+
+/// Owned canonical IR carrying the validation proof required by fast projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNormalizedIrDocument {
+    document: NormalizedIrDocument,
+}
+
+impl CanonicalNormalizedIrDocument {
+    /// Validates and canonicalizes one normalized document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IrDocumentValidationError`] for the same contract, quota,
+    /// ownership, reference, and extension failures as
+    /// [`canonicalize_ir_document`].
+    pub fn new(
+        document: NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+    ) -> Result<Self, IrDocumentValidationError> {
+        canonicalize_ir_document(document, limits, extensions).map(|document| Self { document })
+    }
+
+    /// Returns the canonical validated document.
+    #[must_use]
+    pub const fn document(&self) -> &NormalizedIrDocument {
+        &self.document
+    }
+
+    /// Consumes the proof wrapper into its canonical document.
+    #[must_use]
+    pub fn into_document(self) -> NormalizedIrDocument {
+        self.document
+    }
+
+    /// Streams generation-neutral digests without repeating validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NormalizedRebindError`] for unsupported identity recipes,
+    /// resource exhaustion, or caller interruption.
+    pub fn generation_neutral_digests(
+        &self,
+        checkpoint: impl FnMut() -> bool,
+    ) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
+        canonical_generation_neutral_digests_for_prevalidated_document(&self.document, checkpoint)
+    }
+}
+
+/// Compact digests of a complete generation-neutral canonical IR projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalGenerationNeutralDigests {
+    complete: ContentHash,
+    coverage: ContentHash,
+    provenance: ContentHash,
+    stable_identities: ContentHash,
+    records: u64,
+    coverage_records: u64,
+    provenance_records: u64,
+    stable_identities_records: u64,
+}
+
+impl CanonicalGenerationNeutralDigests {
+    /// Returns the digest binding every normalized record and document header.
+    #[must_use]
+    pub const fn complete(self) -> ContentHash {
+        self.complete
+    }
+
+    /// Returns the digest binding coverage, skipped-region, and diagnostic records.
+    #[must_use]
+    pub const fn coverage(self) -> ContentHash {
+        self.coverage
+    }
+
+    /// Returns the digest binding every provenance record.
+    #[must_use]
+    pub const fn provenance(self) -> ContentHash {
+        self.provenance
+    }
+
+    /// Returns the digest binding stable and reconstructed fact identities.
+    #[must_use]
+    pub const fn stable_identities(self) -> ContentHash {
+        self.stable_identities
+    }
+
+    /// Returns the number of records bound by the complete digest.
+    #[must_use]
+    pub const fn records(self) -> u64 {
+        self.records
+    }
+
+    /// Returns the number of coverage-domain records.
+    #[must_use]
+    pub const fn coverage_records(self) -> u64 {
+        self.coverage_records
+    }
+
+    /// Returns the number of provenance records.
+    #[must_use]
+    pub const fn provenance_records(self) -> u64 {
+        self.provenance_records
+    }
+
+    /// Returns the number of stable identities.
+    #[must_use]
+    pub const fn stable_identities_records(self) -> u64 {
+        self.stable_identities_records
+    }
+}
+
+impl CanonicalGenerationNeutralDocument {
+    /// Canonicalizes and rebinds a complete document to the neutral generation.
+    ///
+    /// Repository-, file-, and symbol-scoped identities remain unchanged.
+    /// Generation-dependent fact identities and every reference to them are
+    /// reconstructed through the same path used by incremental chunk reuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NormalizedRebindError`] when the input violates IR limits,
+    /// contains an unsupported extension, has an incomplete or cyclic fact
+    /// graph, or cannot reconstruct every typed identity.
+    fn new(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+    ) -> Result<Self, NormalizedRebindError> {
+        require_supported_extensions(document)?;
+        let canonical = canonical_preserving_extensions(document.clone(), limits, extensions)?;
+        let (document, fact_id_map) =
+            rebind_document_with_map(canonical, GENERATION_NEUTRAL_ID, limits, extensions)?;
+        Ok(Self {
+            document,
+            fact_id_map,
+        })
+    }
+
+    /// Returns the reconstructed identity for one source-generation fact.
+    #[must_use]
+    #[cfg(test)]
+    fn rebind_fact_id(&self, fact: FactId) -> Option<FactId> {
+        self.fact_id_map.get(fact)
+    }
+}
+
+/// Streams compact generation-neutral digests for one complete canonical document.
+///
+/// The implementation retains bounded compact graph workspace proportional to
+/// the document's facts and dependency edges, plus one rebound record at a
+/// time. `checkpoint` is called throughout graph traversal and record hashing
+/// so callers can preserve their cancellation contract without adding a
+/// transport dependency to this crate.
+///
+/// Identity ordering uses in-place sorts over that pre-admitted workspace.
+/// Each sort is one atomic bounded operation, with cancellation checkpoints
+/// immediately before and after it.
+///
+/// # Errors
+///
+/// Returns [`NormalizedRebindError`] when the document is invalid, contains an
+/// unsupported extension, cannot reconstruct every identity, exceeds checked
+/// record accounting, or the caller checkpoint returns `false`.
+pub fn canonical_generation_neutral_digests(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
+    validate_canonical_ir_document(document, limits, extensions)?;
+    canonical_generation_neutral_digests_for_prevalidated_document(document, &mut checkpoint)
+}
+
+/// Streams neutral digests for a document already proven canonical and valid.
+///
+/// This is the publication entry point for a caller retaining an external
+/// identity-verification proof. It deliberately avoids repeating the
+/// allocation-heavy general IR validator.
+///
+/// # Errors
+///
+/// Returns [`NormalizedRebindError`] when unsupported extensions or identity
+/// reconstruction prevent a complete projection, resource accounting fails,
+/// or the caller checkpoint returns `false`.
+fn canonical_generation_neutral_digests_for_prevalidated_document(
+    document: &NormalizedIrDocument,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
+    require_supported_extensions_with_checkpoint(document, &mut checkpoint)?;
+    let ids = derive_fact_id_map(document, GENERATION_NEUTRAL_ID, &mut checkpoint)?;
+    let mut hashers = LogicalProjectionHashers::new();
+    hashers
+        .complete
+        .record(&(document.version, document.repository, GENERATION_NEUTRAL_ID))?;
+    hashers.stable.record(&document.repository)?;
+
+    hashers.complete.category(1, document.files.len())?;
+    hashers.stable.category(1, document.files.len())?;
+    for record in &document.files {
+        ensure_projection_continues(&mut checkpoint)?;
+        let record = rebind_file(record.clone(), GENERATION_NEUTRAL_ID, &ids, &mut checkpoint)?;
+        hashers.complete.record(&record)?;
+        ensure_projection_continues(&mut checkpoint)?;
+        hashers.stable.record(&record.id)?;
+    }
+    hashers.complete.category(2, document.entities.len())?;
+    hashers.stable.category(2, document.entities.len())?;
+    for record in &document.entities {
+        ensure_projection_continues(&mut checkpoint)?;
+        let record = rebind_entity(record.clone(), GENERATION_NEUTRAL_ID, &ids, &mut checkpoint)?;
+        hashers.complete.record(&record)?;
+        ensure_projection_continues(&mut checkpoint)?;
+        hashers.stable.record(&record.id)?;
+    }
+
+    type FactCategory = (u8, usize, fn(usize) -> FactLocation);
+    let fact_categories: [FactCategory; 8] = [
+        (3, document.occurrences.len(), FactLocation::Occurrence),
+        (4, document.relations.len(), FactLocation::Relation),
+        (5, document.provenance.len(), FactLocation::Provenance),
+        (
+            6,
+            document.source_mappings.len(),
+            FactLocation::SourceMapping,
+        ),
+        (7, document.coverage_records.len(), FactLocation::Coverage),
+        (8, document.skipped_regions.len(), FactLocation::Skipped),
+        (9, document.diagnostics.len(), FactLocation::Diagnostic),
+        (10, document.extensions.len(), FactLocation::Extension),
+    ];
+    for (category, length, constructor) in fact_categories {
+        hashers.complete.category(category, length)?;
+        hashers.stable.category(category, length)?;
+        match constructor(0) {
+            FactLocation::Provenance(_) => hashers.provenance.category(category, length)?,
+            FactLocation::Coverage(_) | FactLocation::Skipped(_) | FactLocation::Diagnostic(_) => {
+                hashers.coverage.category(category, length)?
+            }
+            _ => {}
+        }
+        let mut neutral_order = Vec::new();
+        neutral_order
+            .try_reserve_exact(length)
+            .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+        for index in 0..length {
+            ensure_projection_continues(&mut checkpoint)?;
+            let location = constructor(index);
+            let old_id = location.id(document);
+            let new_id = ids
+                .get(old_id)
+                .ok_or(NormalizedRebindError::IdentityRecipe)?;
+            neutral_order.push((new_id, index));
+        }
+        ensure_projection_continues(&mut checkpoint)?;
+        // Rust's in-place sort is an atomic bounded step. The admitted compact
+        // workspace bounds its input, while checkpoints bracket the operation.
+        neutral_order.sort_unstable();
+        ensure_projection_continues(&mut checkpoint)?;
+        for pair in neutral_order.windows(2) {
+            ensure_projection_continues(&mut checkpoint)?;
+            if pair[0].0 == pair[1].0 {
+                return Err(NormalizedRebindError::IdentityRecipe);
+            }
+        }
+        for (_, index) in neutral_order {
+            ensure_projection_continues(&mut checkpoint)?;
+            hash_rebound_fact(
+                constructor(index),
+                document,
+                &ids,
+                &mut hashers,
+                &mut checkpoint,
+            )?;
+        }
+    }
+
+    let records = checked_record_count(document)?;
+    let coverage_records = document
+        .coverage_records
+        .len()
+        .checked_add(document.skipped_regions.len())
+        .and_then(|count| count.checked_add(document.diagnostics.len()))
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or(NormalizedRebindError::ResourceLimit)?;
+    let provenance_records = u64::try_from(document.provenance.len())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    Ok(CanonicalGenerationNeutralDigests {
+        complete: hashers.complete.finish(),
+        coverage: hashers.coverage.finish(),
+        provenance: hashers.provenance.finish(),
+        stable_identities: hashers.stable.finish(),
+        records,
+        coverage_records,
+        provenance_records,
+        stable_identities_records: records,
+    })
+}
+
+/// Estimates temporary graph workspace for streamed neutral projection.
+///
+/// The estimate covers only compact graph storage. Callers must separately
+/// admit the retained document and conservative bounds for the source-record
+/// clone and rebound-record buffers that can coexist with this workspace.
+///
+/// # Errors
+///
+/// Returns [`NormalizedRebindError::ResourceLimit`] when checked accounting is
+/// not representable, or [`NormalizedRebindError::Interrupted`] when the
+/// caller checkpoint returns `false`.
+pub fn generation_neutral_workspace_bytes(
+    document: &NormalizedIrDocument,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<u64, NormalizedRebindError> {
+    ensure_projection_continues(&mut checkpoint)?;
+    let facts = checked_fact_record_count(document)?;
+    let dependencies = checked_dependency_count(document, &mut checkpoint)?;
+    let per_fact = u64::try_from(
+        std::mem::size_of::<(FactId, FactLocation)>()
+            + std::mem::size_of::<(FactId, Option<FactId>)>()
+            + std::mem::size_of::<usize>()
+            + std::mem::size_of::<usize>()
+            + std::mem::size_of::<(FactId, usize)>(),
+    )
+    .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    let per_dependency = u64::try_from(std::mem::size_of::<(usize, usize)>())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    let bytes = facts
+        .checked_mul(per_fact)
+        .and_then(|bytes| {
+            dependencies
+                .checked_mul(per_dependency)
+                .and_then(|edges| bytes.checked_add(edges))
+        })
+        .ok_or(NormalizedRebindError::ResourceLimit)?;
+    ensure_projection_continues(&mut checkpoint)?;
+    Ok(bytes)
+}
+
 impl CanonicalNormalizedFileChunk {
     /// Creates a canonical chunk from one complete file-scoped normalized document.
     ///
@@ -53,13 +401,12 @@ impl CanonicalNormalizedFileChunk {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, NormalizedRebindError> {
-        require_supported_extensions(document)?;
-        let canonical = canonical_preserving_extensions(document.clone(), limits, extensions)?;
-        let [file] = canonical.files.as_slice() else {
+        let neutral = CanonicalGenerationNeutralDocument::new(document, limits, extensions)?;
+        let [file] = neutral.document.files.as_slice() else {
             return Err(NormalizedRebindError::NotSingleFile);
         };
         let file = file.id;
-        let document = rebind_document(canonical, GENERATION_NEUTRAL_ID, limits, extensions)?;
+        let document = neutral.document;
         let encoded =
             serde_json::to_vec(&document).map_err(|_| NormalizedRebindError::IdentityRecipe)?;
         let encoded_bytes = encoded.len();
@@ -136,11 +483,90 @@ pub enum NormalizedRebindError {
     /// Checked byte or record accounting exceeded the platform representation.
     #[error("normalized reuse chunk exceeded its resource limit")]
     ResourceLimit,
+    /// A caller checkpoint interrupted generation-neutral projection.
+    #[error("normalized generation-neutral projection was interrupted")]
+    Interrupted,
 }
 
 impl From<IrDocumentValidationError> for NormalizedRebindError {
     fn from(_: IrDocumentValidationError) -> Self {
         Self::InvalidDocument
+    }
+}
+
+struct ProjectionHasher {
+    hasher: blake3::Hasher,
+}
+
+struct LogicalProjectionHashers {
+    complete: ProjectionHasher,
+    coverage: ProjectionHasher,
+    provenance: ProjectionHasher,
+    stable: ProjectionHasher,
+}
+
+impl LogicalProjectionHashers {
+    fn new() -> Self {
+        Self {
+            complete: ProjectionHasher::new("rootlight.ir.logical.complete/1"),
+            coverage: ProjectionHasher::new("rootlight.ir.logical.coverage/1"),
+            provenance: ProjectionHasher::new("rootlight.ir.logical.provenance/1"),
+            stable: ProjectionHasher::new("rootlight.ir.logical.stable-identities/1"),
+        }
+    }
+}
+
+impl ProjectionHasher {
+    fn new(context: &'static str) -> Self {
+        Self {
+            hasher: blake3::Hasher::new_derive_key(context),
+        }
+    }
+
+    fn category(&mut self, discriminator: u8, records: usize) -> Result<(), NormalizedRebindError> {
+        let records = u64::try_from(records).map_err(|_| NormalizedRebindError::ResourceLimit)?;
+        self.hasher.update(&[discriminator]);
+        self.hasher.update(&records.to_be_bytes());
+        Ok(())
+    }
+
+    fn record(&mut self, record: &impl Serialize) -> Result<(), NormalizedRebindError> {
+        let mut record_hasher = RecordHasher {
+            hasher: blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1"),
+            bytes: 0,
+        };
+        serde_json::to_writer(&mut record_hasher, record)
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+        self.hasher.update(&record_hasher.bytes.to_be_bytes());
+        self.hasher
+            .update(record_hasher.hasher.finalize().as_bytes());
+        Ok(())
+    }
+
+    fn finish(self) -> ContentHash {
+        ContentHash::from_bytes(*self.hasher.finalize().as_bytes())
+    }
+}
+
+struct RecordHasher {
+    hasher: blake3::Hasher,
+    bytes: u64,
+}
+
+impl std::io::Write for RecordHasher {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| std::io::Error::other("record byte length is not representable"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(length)
+            .ok_or_else(|| std::io::Error::other("record byte accounting overflowed"))?;
+        self.hasher.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -157,54 +583,63 @@ enum FactNode {
 }
 
 impl FactNode {
-    const fn id(&self) -> FactId {
-        match self {
-            Self::Occurrence(record) => record.id,
-            Self::Relation(record) => record.id,
-            Self::Provenance(record) => record.id,
-            Self::SourceMapping(record) => record.id,
-            Self::Coverage(record) => record.id,
-            Self::Skipped(record) => record.id,
-            Self::Diagnostic(record) => record.id,
-            Self::Extension(record) => record.id,
+    fn dependencies(
+        &self,
+        checkpoint: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<FactId>, NormalizedRebindError> {
+        ensure_projection_continues(checkpoint)?;
+        let mut dependencies = Vec::new();
+        let capacity = match self {
+            Self::Occurrence(record) => 1_usize.checked_add(record.evidence.derivation.len()),
+            Self::Relation(record) => 3_usize.checked_add(record.evidence.derivation.len()),
+            Self::Provenance(record) => Some(record.derivation_parents.len()),
+            Self::SourceMapping(record) => 1_usize.checked_add(record.evidence.derivation.len()),
+            Self::Coverage(record) => 1_usize.checked_add(record.evidence.derivation.len()),
+            Self::Skipped(record) => 1_usize.checked_add(record.evidence.derivation.len()),
+            Self::Diagnostic(record) => 1_usize.checked_add(record.evidence.derivation.len()),
+            Self::Extension(record) => 2_usize.checked_add(record.evidence.derivation.len()),
         }
-    }
-
-    fn dependencies(&self) -> Result<BTreeSet<FactId>, NormalizedRebindError> {
-        let mut dependencies = BTreeSet::new();
+        .ok_or(NormalizedRebindError::ResourceLimit)?;
+        dependencies
+            .try_reserve_exact(capacity)
+            .map_err(|_| NormalizedRebindError::ResourceLimit)?;
         match self {
             Self::Occurrence(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Relation(record) => {
-                dependencies.insert(record.provenance);
+                dependencies.push(record.provenance);
                 collect_endpoint_dependency(record.subject, &mut dependencies);
                 collect_endpoint_dependency(record.object, &mut dependencies);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Provenance(record) => {
-                collect_fact_ref_dependencies(&record.derivation_parents, &mut dependencies);
+                collect_fact_ref_dependencies(
+                    &record.derivation_parents,
+                    &mut dependencies,
+                    checkpoint,
+                )?;
             }
             Self::SourceMapping(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Coverage(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Skipped(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Diagnostic(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
             }
             Self::Extension(record) => {
-                dependencies.insert(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies);
+                dependencies.push(record.provenance);
+                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
                 if record.namespace == LEXICAL_EXTENSION_NAMESPACE {
                     let evidence = decode_lexical_evidence_envelope(record)
                         .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -212,6 +647,12 @@ impl FactNode {
                 }
             }
         }
+        ensure_projection_continues(checkpoint)?;
+        // A single fact can carry a bounded derivation fan-in. Sorting is
+        // in-place and therefore allocation-free; checkpoints bracket it.
+        dependencies.sort_unstable();
+        ensure_projection_continues(checkpoint)?;
+        dependencies.dedup();
         Ok(dependencies)
     }
 }
@@ -229,18 +670,235 @@ fn canonical_preserving_extensions(
 fn require_supported_extensions(
     document: &NormalizedIrDocument,
 ) -> Result<(), NormalizedRebindError> {
-    if document.extensions.iter().all(|extension| {
-        matches!(
+    require_supported_extensions_with_checkpoint(document, &mut || true)
+}
+
+fn require_supported_extensions_with_checkpoint(
+    document: &NormalizedIrDocument,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), NormalizedRebindError> {
+    for extension in &document.extensions {
+        ensure_projection_continues(checkpoint)?;
+        if !matches!(
             extension.namespace.as_str(),
             FILE_IDENTITY_CLAIM_NAMESPACE
                 | SYMBOL_IDENTITY_CLAIM_NAMESPACE
                 | LEXICAL_EXTENSION_NAMESPACE
-        )
-    }) {
-        Ok(())
-    } else {
-        Err(NormalizedRebindError::UnsupportedExtension)
+        ) {
+            return Err(NormalizedRebindError::UnsupportedExtension);
+        }
     }
+    ensure_projection_continues(checkpoint)
+}
+
+#[derive(Clone, Copy)]
+enum FactLocation {
+    Occurrence(usize),
+    Relation(usize),
+    Provenance(usize),
+    SourceMapping(usize),
+    Coverage(usize),
+    Skipped(usize),
+    Diagnostic(usize),
+    Extension(usize),
+}
+
+impl FactLocation {
+    fn id(self, document: &NormalizedIrDocument) -> FactId {
+        match self {
+            Self::Occurrence(index) => document.occurrences[index].id,
+            Self::Relation(index) => document.relations[index].id,
+            Self::Provenance(index) => document.provenance[index].id,
+            Self::SourceMapping(index) => document.source_mappings[index].id,
+            Self::Coverage(index) => document.coverage_records[index].id,
+            Self::Skipped(index) => document.skipped_regions[index].id,
+            Self::Diagnostic(index) => document.diagnostics[index].id,
+            Self::Extension(index) => document.extensions[index].id,
+        }
+    }
+
+    fn node(self, document: &NormalizedIrDocument) -> FactNode {
+        match self {
+            Self::Occurrence(index) => FactNode::Occurrence(document.occurrences[index].clone()),
+            Self::Relation(index) => FactNode::Relation(document.relations[index].clone()),
+            Self::Provenance(index) => FactNode::Provenance(document.provenance[index].clone()),
+            Self::SourceMapping(index) => {
+                FactNode::SourceMapping(document.source_mappings[index].clone())
+            }
+            Self::Coverage(index) => FactNode::Coverage(document.coverage_records[index].clone()),
+            Self::Skipped(index) => FactNode::Skipped(document.skipped_regions[index].clone()),
+            Self::Diagnostic(index) => FactNode::Diagnostic(document.diagnostics[index].clone()),
+            Self::Extension(index) => FactNode::Extension(document.extensions[index].clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactIdMap {
+    entries: Vec<(FactId, Option<FactId>)>,
+}
+
+impl FactIdMap {
+    fn new(locations: &[(FactId, FactLocation)]) -> Result<Self, NormalizedRebindError> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(locations.len())
+            .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+        entries.extend(locations.iter().map(|(id, _)| (*id, None)));
+        Ok(Self { entries })
+    }
+
+    fn index(&self, id: FactId) -> Result<usize, NormalizedRebindError> {
+        self.entries
+            .binary_search_by_key(&id, |(candidate, _)| *candidate)
+            .map_err(|_| NormalizedRebindError::ExternalFactReference)
+    }
+
+    fn get(&self, id: FactId) -> Option<FactId> {
+        self.entries
+            .binary_search_by_key(&id, |(candidate, _)| *candidate)
+            .ok()
+            .and_then(|index| self.entries[index].1)
+    }
+
+    fn set(&mut self, index: usize, id: FactId) -> Result<(), NormalizedRebindError> {
+        let slot = self
+            .entries
+            .get_mut(index)
+            .ok_or(NormalizedRebindError::IdentityRecipe)?;
+        if slot.1.replace(id).is_some() {
+            return Err(NormalizedRebindError::IdentityRecipe);
+        }
+        Ok(())
+    }
+}
+
+fn fact_locations(
+    document: &NormalizedIrDocument,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<Vec<(FactId, FactLocation)>, NormalizedRebindError> {
+    let total = usize::try_from(checked_fact_record_count(document)?)
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    let mut locations = Vec::new();
+    locations
+        .try_reserve_exact(total)
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    type FactCategory = (usize, fn(usize) -> FactLocation);
+    let categories: [FactCategory; 8] = [
+        (document.occurrences.len(), FactLocation::Occurrence),
+        (document.relations.len(), FactLocation::Relation),
+        (document.provenance.len(), FactLocation::Provenance),
+        (document.source_mappings.len(), FactLocation::SourceMapping),
+        (document.coverage_records.len(), FactLocation::Coverage),
+        (document.skipped_regions.len(), FactLocation::Skipped),
+        (document.diagnostics.len(), FactLocation::Diagnostic),
+        (document.extensions.len(), FactLocation::Extension),
+    ];
+    for (length, constructor) in categories {
+        for index in 0..length {
+            ensure_projection_continues(checkpoint)?;
+            let location = constructor(index);
+            locations.push((location.id(document), location));
+        }
+    }
+    ensure_projection_continues(checkpoint)?;
+    // Sorting by persisted identity is an in-place bounded step. Checkpoints
+    // immediately before and after keep cancellation latency explicit.
+    locations.sort_unstable_by_key(|(id, _)| *id);
+    ensure_projection_continues(checkpoint)?;
+    for pair in locations.windows(2) {
+        ensure_projection_continues(checkpoint)?;
+        if pair[0].0 == pair[1].0 {
+            return Err(NormalizedRebindError::InvalidDocument);
+        }
+    }
+    Ok(locations)
+}
+
+fn derive_fact_id_map(
+    document: &NormalizedIrDocument,
+    generation: GenerationId,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<FactIdMap, NormalizedRebindError> {
+    let locations = fact_locations(document, &mut checkpoint)?;
+    let mut ids = FactIdMap::new(&locations)?;
+    let mut indegrees = Vec::new();
+    indegrees
+        .try_reserve_exact(locations.len())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    indegrees.resize(locations.len(), 0_usize);
+    let mut edges = Vec::<(usize, usize)>::new();
+    let dependency_capacity = usize::try_from(checked_dependency_count(document, &mut checkpoint)?)
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    edges
+        .try_reserve_exact(dependency_capacity)
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    for (node_index, (_, location)) in locations.iter().enumerate() {
+        ensure_projection_continues(&mut checkpoint)?;
+        let dependencies = location.node(document).dependencies(&mut checkpoint)?;
+        for dependency in dependencies {
+            ensure_projection_continues(&mut checkpoint)?;
+            let dependency_index = ids.index(dependency)?;
+            edges.push((dependency_index, node_index));
+            indegrees[node_index] = indegrees[node_index]
+                .checked_add(1)
+                .ok_or(NormalizedRebindError::ResourceLimit)?;
+        }
+    }
+    ensure_projection_continues(&mut checkpoint)?;
+    // Edge sorting is in-place over the pre-admitted compact graph buffer.
+    edges.sort_unstable();
+    ensure_projection_continues(&mut checkpoint)?;
+
+    let mut ready = Vec::new();
+    ready
+        .try_reserve_exact(locations.len())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    for (index, indegree) in indegrees.iter().enumerate() {
+        ensure_projection_continues(&mut checkpoint)?;
+        if *indegree == 0 {
+            ready.push(index);
+        }
+    }
+    let mut processed = 0_usize;
+    while let Some(node_index) = ready.pop() {
+        ensure_projection_continues(&mut checkpoint)?;
+        let location = locations
+            .get(node_index)
+            .map(|(_, location)| *location)
+            .ok_or(NormalizedRebindError::IdentityRecipe)?;
+        let mut scratch = NormalizedIrDocument::empty(document.repository, generation);
+        let new_id = rebind_node(
+            location.node(document),
+            document.repository,
+            generation,
+            &ids,
+            &mut scratch,
+            &mut checkpoint,
+        )?;
+        ids.set(node_index, new_id)?;
+        processed = processed
+            .checked_add(1)
+            .ok_or(NormalizedRebindError::ResourceLimit)?;
+        let start = edges.partition_point(|(dependency, _)| *dependency < node_index);
+        let end = edges.partition_point(|(dependency, _)| *dependency <= node_index);
+        for (_, dependent) in &edges[start..end] {
+            ensure_projection_continues(&mut checkpoint)?;
+            let indegree = indegrees
+                .get_mut(*dependent)
+                .ok_or(NormalizedRebindError::IdentityRecipe)?;
+            *indegree = indegree
+                .checked_sub(1)
+                .ok_or(NormalizedRebindError::IdentityRecipe)?;
+            if *indegree == 0 {
+                ready.push(*dependent);
+            }
+        }
+    }
+    if processed != locations.len() {
+        return Err(NormalizedRebindError::CyclicFactReferences);
+    }
+    Ok(ids)
 }
 
 fn rebind_document(
@@ -249,134 +907,67 @@ fn rebind_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<NormalizedIrDocument, NormalizedRebindError> {
+    rebind_document_with_map(document, generation, limits, extensions).map(|(document, _)| document)
+}
+
+fn rebind_document_with_map(
+    document: NormalizedIrDocument,
+    generation: GenerationId,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+) -> Result<(NormalizedIrDocument, FactIdMap), NormalizedRebindError> {
     require_supported_extensions(&document)?;
-    let mut nodes = BTreeMap::new();
-    for node in document
-        .occurrences
-        .iter()
-        .cloned()
-        .map(FactNode::Occurrence)
-        .chain(document.relations.iter().cloned().map(FactNode::Relation))
-        .chain(
-            document
-                .provenance
-                .iter()
-                .cloned()
-                .map(FactNode::Provenance),
-        )
-        .chain(
-            document
-                .source_mappings
-                .iter()
-                .cloned()
-                .map(FactNode::SourceMapping),
-        )
-        .chain(
-            document
-                .coverage_records
-                .iter()
-                .cloned()
-                .map(FactNode::Coverage),
-        )
-        .chain(
-            document
-                .skipped_regions
-                .iter()
-                .cloned()
-                .map(FactNode::Skipped),
-        )
-        .chain(
-            document
-                .diagnostics
-                .iter()
-                .cloned()
-                .map(FactNode::Diagnostic),
-        )
-        .chain(document.extensions.iter().cloned().map(FactNode::Extension))
-    {
-        if nodes.insert(node.id(), node).is_some() {
-            return Err(NormalizedRebindError::InvalidDocument);
-        }
-    }
-
-    let known_ids = nodes.keys().copied().collect::<BTreeSet<_>>();
-    let mut dependents = BTreeMap::<FactId, Vec<FactId>>::new();
-    let mut indegrees = BTreeMap::new();
-    for (id, node) in &nodes {
-        let dependencies = node.dependencies()?;
-        if dependencies
-            .iter()
-            .any(|dependency| !known_ids.contains(dependency))
-        {
-            return Err(NormalizedRebindError::ExternalFactReference);
-        }
-        indegrees.insert(*id, dependencies.len());
-        for dependency in dependencies {
-            dependents.entry(dependency).or_default().push(*id);
-        }
-    }
-
     let mut rebound = NormalizedIrDocument::empty(document.repository, generation);
-    let mut ids = BTreeMap::new();
-    let mut ready = indegrees
-        .iter()
-        .filter_map(|(id, indegree)| (*indegree == 0).then_some(*id))
-        .collect::<BTreeSet<_>>();
-    while let Some(old_id) = ready.pop_first() {
-        let node = nodes
-            .remove(&old_id)
-            .ok_or(NormalizedRebindError::IdentityRecipe)?;
-        let new_id = rebind_node(node, document.repository, generation, &ids, &mut rebound)?;
-        if ids.insert(old_id, new_id).is_some() {
-            return Err(NormalizedRebindError::IdentityRecipe);
-        }
-        for dependent in dependents.remove(&old_id).unwrap_or_default() {
-            let indegree = indegrees
-                .get_mut(&dependent)
-                .ok_or(NormalizedRebindError::IdentityRecipe)?;
-            *indegree = indegree
-                .checked_sub(1)
-                .ok_or(NormalizedRebindError::IdentityRecipe)?;
-            if *indegree == 0 {
-                ready.insert(dependent);
-            }
-        }
-    }
-    if !nodes.is_empty() {
-        return Err(NormalizedRebindError::CyclicFactReferences);
+    let mut checkpoint = || true;
+    let ids = derive_fact_id_map(&document, generation, &mut checkpoint)?;
+    for (_, location) in fact_locations(&document, &mut checkpoint)? {
+        rebind_node(
+            location.node(&document),
+            document.repository,
+            generation,
+            &ids,
+            &mut rebound,
+            &mut checkpoint,
+        )?;
     }
 
-    rebound.files = document
+    rebound
         .files
-        .into_iter()
-        .map(|record| rebind_file(record, generation, &ids))
-        .collect::<Result<_, _>>()?;
-    rebound.entities = document
+        .try_reserve_exact(document.files.len())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    for record in document.files {
+        rebound
+            .files
+            .push(rebind_file(record, generation, &ids, &mut checkpoint)?);
+    }
+    rebound
         .entities
-        .into_iter()
-        .map(|mut record| {
-            record.generation = generation;
-            record.provenance = remap_id(record.provenance, &ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, &ids)?;
-            Ok(record)
-        })
-        .collect::<Result<_, NormalizedRebindError>>()?;
-    canonical_preserving_extensions(rebound, limits, extensions)
+        .try_reserve_exact(document.entities.len())
+        .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    for record in document.entities {
+        rebound
+            .entities
+            .push(rebind_entity(record, generation, &ids, &mut checkpoint)?);
+    }
+    let rebound = canonical_preserving_extensions(rebound, limits, extensions)?;
+    Ok((rebound, ids))
 }
 
 fn rebind_node(
     node: FactNode,
     repository: rootlight_ids::RepositoryId,
     generation: GenerationId,
-    ids: &BTreeMap<FactId, FactId>,
+    ids: &FactIdMap,
     target: &mut NormalizedIrDocument,
+    checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<FactId, NormalizedRebindError> {
+    ensure_projection_continues(checkpoint)?;
     match node {
         FactNode::Occurrence(mut record) => {
             record.generation = generation;
             record.source = rebind_source(record.source, generation);
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_occurrence_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -388,7 +979,7 @@ fn rebind_node(
             record.subject = rebind_endpoint(record.subject, ids)?;
             record.object = rebind_endpoint(record.object, ids)?;
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_relation_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -397,21 +988,22 @@ fn rebind_node(
         }
         FactNode::Provenance(mut record) => {
             record.generation = generation;
-            record.input_sources = record
-                .input_sources
-                .into_iter()
-                .map(|source| rebind_source(source, generation))
-                .collect();
-            record.evidence_sources = record
-                .evidence_sources
-                .into_iter()
-                .map(|source| rebind_source(source, generation))
-                .collect();
-            record.derivation_parents = record
-                .derivation_parents
-                .into_iter()
-                .map(|reference| rebind_fact_ref(reference, ids))
-                .collect::<Result<_, _>>()?;
+            for source in &mut record.input_sources {
+                ensure_projection_continues(checkpoint)?;
+                *source = rebind_source(source.clone(), generation);
+            }
+            for source in &mut record.evidence_sources {
+                ensure_projection_continues(checkpoint)?;
+                *source = rebind_source(source.clone(), generation);
+            }
+            for reference in &mut record.derivation_parents {
+                ensure_projection_continues(checkpoint)?;
+                *reference = rebind_fact_ref(*reference, ids)?;
+            }
+            ensure_projection_continues(checkpoint)?;
+            record.derivation_parents.sort_unstable();
+            ensure_projection_continues(checkpoint)?;
+            record.derivation_parents.dedup();
             record.id = derive_provenance_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -423,7 +1015,7 @@ fn rebind_node(
             record.from = rebind_source(record.from, generation);
             record.to = rebind_source(record.to, generation);
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_source_mapping_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -433,7 +1025,7 @@ fn rebind_node(
         FactNode::Coverage(mut record) => {
             record.generation = generation;
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_coverage_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -444,7 +1036,7 @@ fn rebind_node(
             record.generation = generation;
             record.source = rebind_source(record.source, generation);
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_skipped_region_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -457,7 +1049,7 @@ fn rebind_node(
                 .source
                 .map(|source| rebind_source(source, generation));
             record.provenance = remap_id(record.provenance, ids)?;
-            record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+            record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
             record.id = derive_diagnostic_record_id(&record)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let id = record.id;
@@ -465,7 +1057,9 @@ fn rebind_node(
             Ok(id)
         }
         FactNode::Extension(record) => {
+            ensure_projection_continues(checkpoint)?;
             let extension = rebind_extension(record, repository, generation, ids)?;
+            ensure_projection_continues(checkpoint)?;
             let id = extension.id;
             target.extensions.push(extension);
             Ok(id)
@@ -473,11 +1067,151 @@ fn rebind_node(
     }
 }
 
+fn hash_rebound_fact(
+    location: FactLocation,
+    document: &NormalizedIrDocument,
+    ids: &FactIdMap,
+    hashers: &mut LogicalProjectionHashers,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), NormalizedRebindError> {
+    ensure_projection_continues(checkpoint)?;
+    let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
+    let id = rebind_node(
+        location.node(document),
+        document.repository,
+        GENERATION_NEUTRAL_ID,
+        ids,
+        &mut scratch,
+        checkpoint,
+    )?;
+    ensure_projection_continues(checkpoint)?;
+    match location {
+        FactLocation::Occurrence(_) => hashers.complete.record(&scratch.occurrences[0])?,
+        FactLocation::Relation(_) => hashers.complete.record(&scratch.relations[0])?,
+        FactLocation::Provenance(_) => {
+            hashers.complete.record(&scratch.provenance[0])?;
+            ensure_projection_continues(checkpoint)?;
+            hashers.provenance.record(&scratch.provenance[0])?;
+        }
+        FactLocation::SourceMapping(_) => hashers.complete.record(&scratch.source_mappings[0])?,
+        FactLocation::Coverage(_) => {
+            hashers.complete.record(&scratch.coverage_records[0])?;
+            ensure_projection_continues(checkpoint)?;
+            hashers.coverage.record(&scratch.coverage_records[0])?;
+        }
+        FactLocation::Skipped(_) => {
+            hashers.complete.record(&scratch.skipped_regions[0])?;
+            ensure_projection_continues(checkpoint)?;
+            hashers.coverage.record(&scratch.skipped_regions[0])?;
+        }
+        FactLocation::Diagnostic(_) => {
+            hashers.complete.record(&scratch.diagnostics[0])?;
+            ensure_projection_continues(checkpoint)?;
+            hashers.coverage.record(&scratch.diagnostics[0])?;
+        }
+        FactLocation::Extension(_) => hashers.complete.record(&scratch.extensions[0])?,
+    }
+    ensure_projection_continues(checkpoint)?;
+    hashers.stable.record(&id)
+}
+
+fn checked_record_count(document: &NormalizedIrDocument) -> Result<u64, NormalizedRebindError> {
+    [
+        document.files.len(),
+        document.entities.len(),
+        document.occurrences.len(),
+        document.relations.len(),
+        document.provenance.len(),
+        document.source_mappings.len(),
+        document.coverage_records.len(),
+        document.skipped_regions.len(),
+        document.diagnostics.len(),
+        document.extensions.len(),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, length| {
+        total
+            .checked_add(length)
+            .ok_or(NormalizedRebindError::ResourceLimit)
+    })
+    .and_then(|records| u64::try_from(records).map_err(|_| NormalizedRebindError::ResourceLimit))
+}
+
+fn checked_fact_record_count(
+    document: &NormalizedIrDocument,
+) -> Result<u64, NormalizedRebindError> {
+    [
+        document.occurrences.len(),
+        document.relations.len(),
+        document.provenance.len(),
+        document.source_mappings.len(),
+        document.coverage_records.len(),
+        document.skipped_regions.len(),
+        document.diagnostics.len(),
+        document.extensions.len(),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, length| {
+        total
+            .checked_add(length)
+            .ok_or(NormalizedRebindError::ResourceLimit)
+    })
+    .and_then(|records| u64::try_from(records).map_err(|_| NormalizedRebindError::ResourceLimit))
+}
+
+fn checked_dependency_count(
+    document: &NormalizedIrDocument,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<u64, NormalizedRebindError> {
+    let mut dependencies = 0_usize;
+    let mut add = |fixed: usize, derivations: usize| -> Result<(), NormalizedRebindError> {
+        dependencies = dependencies
+            .checked_add(fixed)
+            .and_then(|total| total.checked_add(derivations))
+            .ok_or(NormalizedRebindError::ResourceLimit)?;
+        Ok(())
+    };
+    for record in &document.occurrences {
+        ensure_projection_continues(checkpoint)?;
+        add(1, record.evidence.derivation.len())?;
+    }
+    for record in &document.relations {
+        ensure_projection_continues(checkpoint)?;
+        add(3, record.evidence.derivation.len())?;
+    }
+    for record in &document.provenance {
+        ensure_projection_continues(checkpoint)?;
+        add(0, record.derivation_parents.len())?;
+    }
+    for record in &document.source_mappings {
+        ensure_projection_continues(checkpoint)?;
+        add(1, record.evidence.derivation.len())?;
+    }
+    for record in &document.coverage_records {
+        ensure_projection_continues(checkpoint)?;
+        add(1, record.evidence.derivation.len())?;
+    }
+    for record in &document.skipped_regions {
+        ensure_projection_continues(checkpoint)?;
+        add(1, record.evidence.derivation.len())?;
+    }
+    for record in &document.diagnostics {
+        ensure_projection_continues(checkpoint)?;
+        add(1, record.evidence.derivation.len())?;
+    }
+    for record in &document.extensions {
+        ensure_projection_continues(checkpoint)?;
+        add(2, record.evidence.derivation.len())?;
+    }
+    ensure_projection_continues(checkpoint)?;
+    u64::try_from(dependencies).map_err(|_| NormalizedRebindError::ResourceLimit)
+}
+
 fn rebind_extension(
     extension: ExtensionEnvelope,
     repository: rootlight_ids::RepositoryId,
     generation: GenerationId,
-    ids: &BTreeMap<FactId, FactId>,
+    ids: &FactIdMap,
 ) -> Result<ExtensionEnvelope, NormalizedRebindError> {
     let provenance = remap_id(extension.provenance, ids)?;
     let source = extension
@@ -515,11 +1249,24 @@ fn rebind_extension(
 fn rebind_file(
     mut record: FileRecord,
     generation: GenerationId,
-    ids: &BTreeMap<FactId, FactId>,
+    ids: &FactIdMap,
+    checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<FileRecord, NormalizedRebindError> {
     record.generation = generation;
     record.provenance = remap_id(record.provenance, ids)?;
-    record.evidence = rebind_evidence(record.evidence, generation, ids)?;
+    record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
+    Ok(record)
+}
+
+fn rebind_entity(
+    mut record: crate::EntityRecord,
+    generation: GenerationId,
+    ids: &FactIdMap,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<crate::EntityRecord, NormalizedRebindError> {
+    record.generation = generation;
+    record.provenance = remap_id(record.provenance, ids)?;
+    record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
     Ok(record)
 }
 
@@ -534,26 +1281,26 @@ fn rebind_source(source: SourceRef, generation: GenerationId) -> SourceRef {
 }
 
 fn rebind_evidence(
-    evidence: FactEvidence,
+    mut evidence: FactEvidence,
     generation: GenerationId,
-    ids: &BTreeMap<FactId, FactId>,
+    ids: &FactIdMap,
+    checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<FactEvidence, NormalizedRebindError> {
-    Ok(FactEvidence {
-        source: evidence
-            .source
-            .map(|source| rebind_source(source, generation)),
-        derivation: evidence
-            .derivation
-            .into_iter()
-            .map(|reference| rebind_fact_ref(reference, ids))
-            .collect::<Result<_, _>>()?,
-    })
+    evidence.source = evidence
+        .source
+        .map(|source| rebind_source(source, generation));
+    for reference in &mut evidence.derivation {
+        ensure_projection_continues(checkpoint)?;
+        *reference = rebind_fact_ref(*reference, ids)?;
+    }
+    ensure_projection_continues(checkpoint)?;
+    evidence.derivation.sort_unstable();
+    ensure_projection_continues(checkpoint)?;
+    evidence.derivation.dedup();
+    Ok(evidence)
 }
 
-fn rebind_fact_ref(
-    reference: FactRef,
-    ids: &BTreeMap<FactId, FactId>,
-) -> Result<FactRef, NormalizedRebindError> {
+fn rebind_fact_ref(reference: FactRef, ids: &FactIdMap) -> Result<FactRef, NormalizedRebindError> {
     match reference {
         FactRef::File(file) => Ok(FactRef::File(file)),
         FactRef::Entity(entity) => Ok(FactRef::Entity(entity)),
@@ -563,7 +1310,7 @@ fn rebind_fact_ref(
 
 fn rebind_endpoint(
     endpoint: RelationEndpoint,
-    ids: &BTreeMap<FactId, FactId>,
+    ids: &FactIdMap,
 ) -> Result<RelationEndpoint, NormalizedRebindError> {
     match endpoint {
         RelationEndpoint::Occurrence(id) => remap_id(id, ids).map(RelationEndpoint::Occurrence),
@@ -571,31 +1318,50 @@ fn rebind_endpoint(
     }
 }
 
-fn remap_id(id: FactId, ids: &BTreeMap<FactId, FactId>) -> Result<FactId, NormalizedRebindError> {
-    ids.get(&id)
-        .copied()
+fn remap_id(id: FactId, ids: &FactIdMap) -> Result<FactId, NormalizedRebindError> {
+    ids.get(id)
         .ok_or(NormalizedRebindError::ExternalFactReference)
 }
 
-fn collect_evidence_dependencies(evidence: &FactEvidence, target: &mut BTreeSet<FactId>) {
-    collect_fact_ref_dependencies(&evidence.derivation, target);
+fn collect_evidence_dependencies(
+    evidence: &FactEvidence,
+    target: &mut Vec<FactId>,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), NormalizedRebindError> {
+    collect_fact_ref_dependencies(&evidence.derivation, target, checkpoint)
 }
 
-fn collect_fact_ref_dependencies(references: &[FactRef], target: &mut BTreeSet<FactId>) {
+fn collect_fact_ref_dependencies(
+    references: &[FactRef],
+    target: &mut Vec<FactId>,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), NormalizedRebindError> {
     for reference in references {
+        ensure_projection_continues(checkpoint)?;
         collect_fact_ref_dependency(*reference, target);
     }
+    Ok(())
 }
 
-fn collect_fact_ref_dependency(reference: FactRef, target: &mut BTreeSet<FactId>) {
+fn collect_fact_ref_dependency(reference: FactRef, target: &mut Vec<FactId>) {
     if let FactRef::Fact(id) = reference {
-        target.insert(id);
+        target.push(id);
     }
 }
 
-fn collect_endpoint_dependency(endpoint: RelationEndpoint, target: &mut BTreeSet<FactId>) {
+fn collect_endpoint_dependency(endpoint: RelationEndpoint, target: &mut Vec<FactId>) {
     if let RelationEndpoint::Occurrence(id) = endpoint {
-        target.insert(id);
+        target.push(id);
+    }
+}
+
+fn ensure_projection_continues(
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), NormalizedRebindError> {
+    if checkpoint() {
+        Ok(())
+    } else {
+        Err(NormalizedRebindError::Interrupted)
     }
 }
 
@@ -810,6 +1576,187 @@ mod tests {
         assert_eq!(first_chunk.file(), second_chunk.file());
         assert_eq!(first_chunk.digest(), second_chunk.digest());
         assert_eq!(first_chunk.encoded_bytes(), second_chunk.encoded_bytes());
+    }
+
+    #[test]
+    fn streamed_logical_digests_are_generation_independent_across_fact_order_flip() {
+        let (original, _, _) = fixture_with_identity_extensions();
+        let original_digests = canonical_generation_neutral_digests(
+            &original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("original logical digests build");
+        let chunk = CanonicalNormalizedFileChunk::new(
+            &original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("fixture chunk builds");
+        let mut flipped = None;
+        for discriminator in 1..=u8::MAX {
+            let candidate = chunk
+                .rebind(
+                    GenerationId::from_bytes([discriminator; 20]),
+                    &IrLimits::default(),
+                    &ExtensionSupport::default(),
+                )
+                .expect("candidate generation rebinds");
+            let neutral = CanonicalGenerationNeutralDocument::new(
+                &candidate,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .expect("candidate neutralizes");
+            let neutral_ids = candidate
+                .extensions
+                .iter()
+                .map(|record| {
+                    neutral
+                        .rebind_fact_id(record.id)
+                        .expect("extension identity is mapped")
+                })
+                .collect::<Vec<_>>();
+            if !neutral_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+                flipped = Some(candidate);
+                break;
+            }
+        }
+        let flipped = flipped.expect("a generation-bound fact order flip is found");
+        let flipped_digests = canonical_generation_neutral_digests(
+            &flipped,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("flipped logical digests build");
+
+        assert_eq!(flipped_digests, original_digests);
+        assert_eq!(
+            original_digests.records(),
+            u64::try_from(
+                fact_ids(&original).len() + original.files.len() + original.entities.len()
+            )
+            .expect("record count fits")
+        );
+    }
+
+    #[test]
+    fn streamed_logical_digests_bind_semantics_and_fail_closed() {
+        let (original, _, _) = fixture_with_identity_extensions();
+        let original_digests = canonical_generation_neutral_digests(
+            &original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("original logical digests build");
+
+        let mut semantic_edit = original.clone();
+        semantic_edit.files[0].language = "go".to_owned();
+        let semantic_digests = canonical_generation_neutral_digests(
+            &semantic_edit,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("semantic edit remains valid");
+        assert_ne!(semantic_digests.complete(), original_digests.complete());
+        assert_eq!(
+            semantic_digests.stable_identities(),
+            original_digests.stable_identities()
+        );
+
+        let mut noncanonical = original.clone();
+        noncanonical.entities[0].flags =
+            vec![crate::EntityFlag::Test, crate::EntityFlag::Generated];
+        assert!(matches!(
+            canonical_generation_neutral_digests(
+                &noncanonical,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || true
+            ),
+            Err(NormalizedRebindError::InvalidDocument)
+        ));
+
+        let mut opaque = original.clone();
+        opaque.extensions[0].namespace = "dev.rootlight.opaque".to_owned();
+        let preservation = ExtensionSupport {
+            unknown_noncritical: UnknownNoncriticalExtensionPolicy::Preserve,
+            ..ExtensionSupport::default()
+        };
+        assert!(matches!(
+            canonical_generation_neutral_digests(
+                &opaque,
+                &IrLimits::default(),
+                &preservation,
+                || true
+            ),
+            Err(NormalizedRebindError::UnsupportedExtension)
+        ));
+        assert!(matches!(
+            canonical_generation_neutral_digests(
+                &original,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || false
+            ),
+            Err(NormalizedRebindError::Interrupted)
+        ));
+        let mut workspace_checkpoints = 0_u8;
+        assert!(matches!(
+            generation_neutral_workspace_bytes(&original, || {
+                workspace_checkpoints = workspace_checkpoints.saturating_add(1);
+                workspace_checkpoints < 2
+            }),
+            Err(NormalizedRebindError::Interrupted)
+        ));
+        assert_eq!(workspace_checkpoints, 2);
+    }
+
+    #[test]
+    fn streamed_logical_digests_match_the_canonical_materialized_projection() {
+        let (original, _, _) = fixture_with_identity_extensions();
+        let streamed = canonical_generation_neutral_digests(
+            &original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("streamed logical digests build");
+        let materialized = CanonicalGenerationNeutralDocument::new(
+            &original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("canonical neutral document builds");
+        let materialized_digests = canonical_generation_neutral_digests(
+            &materialized.document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("materialized logical digests build");
+        assert_eq!(streamed, materialized_digests);
+
+        let proof = CanonicalNormalizedIrDocument::new(
+            original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("canonical proof builds");
+        assert_eq!(
+            proof
+                .generation_neutral_digests(|| true)
+                .expect("proof-bound logical digests build"),
+            streamed
+        );
+        assert!(matches!(
+            proof.generation_neutral_digests(|| false),
+            Err(NormalizedRebindError::Interrupted)
+        ));
     }
 
     #[test]

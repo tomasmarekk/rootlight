@@ -51,7 +51,7 @@ pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.3";
 pub const MCP_ANALYSIS_SCHEMA_VERSION: &str = "1.1";
 
 /// The additive repository-status tool schema version.
-pub const MCP_REPOSITORY_STATUS_SCHEMA_VERSION: &str = "1.1";
+pub const MCP_REPOSITORY_STATUS_SCHEMA_VERSION: &str = "1.2";
 
 /// The repository catalog response schema version.
 pub const REPO_LIST_SCHEMA_VERSION: &str = "2.0";

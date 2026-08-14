@@ -17,7 +17,8 @@ pub use dependency::{
     PassObservation,
 };
 pub use equivalence::{
-    EquivalenceMismatch, EquivalenceReport, EquivalenceSnapshot, LogicalComponent, LogicalDomain,
+    EquivalenceMismatch, EquivalenceReport, EquivalenceSnapshot, LOGICAL_SNAPSHOT_SCHEMA_VERSION,
+    LogicalComponent, LogicalDomain,
 };
 pub use error::{IncrementalError, ResourceKind};
 pub use model::{

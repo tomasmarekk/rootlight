@@ -1892,6 +1892,16 @@ pub struct RepositoryStatusResponse {
     #[prost(uint64, tag = "17")]
     #[allow(missing_docs)]
     pub retained_durable_bytes: u64,
+    #[prost(message, optional, tag = "18")]
+    #[allow(missing_docs)]
+    pub logical_snapshot_schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "19")]
+    #[allow(missing_docs)]
+    pub logical_snapshot_hash: ::core::option::Option<
+        super::super::common::v1::ContentHash,
+    >,
 }
 /// Requests bounded typed relation neighborhoods for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]

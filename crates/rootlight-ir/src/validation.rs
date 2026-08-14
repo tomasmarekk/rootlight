@@ -233,6 +233,18 @@ pub fn validate_ir_document(
     prepare_bounded_document(document.clone(), extensions).map(|_| ())
 }
 
+pub(crate) fn validate_canonical_ir_document(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+) -> Result<(), IrDocumentValidationError> {
+    validate_version(document)?;
+    validate_limits(document, limits)?;
+    validate_canonical_collections(document, extensions)?;
+    validate_extension_envelopes(document, extensions)?;
+    validate_invariants(document, extensions)
+}
+
 /// Validates and deterministically canonicalizes a normalized document.
 ///
 /// The returned document is independent of producer order, preserves equal
@@ -601,6 +613,84 @@ fn canonicalize_nested_collections(document: &mut NormalizedIrDocument) {
 fn canonicalize_evidence(evidence: &mut FactEvidence) {
     evidence.derivation.sort_unstable();
     evidence.derivation.dedup();
+}
+
+fn validate_canonical_collections(
+    document: &NormalizedIrDocument,
+    extensions: &ExtensionSupport,
+) -> Result<(), IrDocumentValidationError> {
+    let top_level_is_canonical = strictly_increasing_by(&document.files, |record| record.id)
+        && strictly_increasing_by(&document.entities, |record| record.id)
+        && strictly_increasing_by(&document.occurrences, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.relations, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.provenance, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.source_mappings, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.coverage_records, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.skipped_regions, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.diagnostics, IdentifiedFact::fact_id)
+        && strictly_increasing_by(&document.extensions, IdentifiedFact::fact_id);
+    let nested_is_canonical = document
+        .files
+        .iter()
+        .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document.entities.iter().all(|record| {
+            strictly_increasing(&record.flags) && strictly_increasing(&record.evidence.derivation)
+        })
+        && document.occurrences.iter().all(|record| {
+            let candidates_are_canonical = match &record.target {
+                OccurrenceTarget::Candidates { symbols, .. } => strictly_increasing(symbols),
+                _ => true,
+            };
+            candidates_are_canonical && strictly_increasing(&record.evidence.derivation)
+        })
+        && document
+            .relations
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document.provenance.iter().all(|record| {
+            strictly_increasing(&record.input_sources)
+                && strictly_increasing(&record.evidence_sources)
+                && strictly_increasing(&record.derivation_parents)
+        })
+        && document
+            .source_mappings
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document
+            .coverage_records
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document
+            .skipped_regions
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document
+            .diagnostics
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation))
+        && document
+            .extensions
+            .iter()
+            .all(|record| strictly_increasing(&record.evidence.derivation));
+    let extension_policy_is_applied = extensions.unknown_noncritical
+        != UnknownNoncriticalExtensionPolicy::Skip
+        || document.extensions.iter().all(|extension| {
+            extension.criticality == ExtensionCriticality::Critical
+                || extension_is_supported(extension, extensions)
+        });
+    if top_level_is_canonical && nested_is_canonical && extension_policy_is_applied {
+        Ok(())
+    } else {
+        Err(IrDocumentValidationError::NonCanonicalDocument)
+    }
+}
+
+fn strictly_increasing<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn strictly_increasing_by<T, K: Ord + Copy>(values: &[T], key: fn(&T) -> K) -> bool {
+    values.windows(2).all(|pair| key(&pair[0]) < key(&pair[1]))
 }
 
 fn apply_noncritical_extension_policy(
@@ -1321,6 +1411,9 @@ pub enum IrDocumentValidationError {
         /// Unsupported minor component.
         minor: u16,
     },
+    /// A caller requiring canonical input observed unsorted or duplicate records.
+    #[error("normalized IR document is not canonical")]
+    NonCanonicalDocument,
     /// One top-level or nested collection exceeds its limit.
     #[error("{collection} contains {observed} items, limit is {limit}")]
     CollectionLimit {

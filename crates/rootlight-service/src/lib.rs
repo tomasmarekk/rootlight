@@ -69,23 +69,25 @@ use rootlight_ids::{
 };
 use rootlight_incremental::{
     AnalysisUnitId, ArtifactDecisionKind, ArtifactId, ArtifactSummary, DependencyEdge,
-    DependencyGraph, DependencyRegistry, DependencySource, FactDomainSet, FactNode,
-    GenerationSummary, GraphLimits, INCREMENTAL_SCHEMA_VERSION, IncrementalError, InputFingerprint,
-    InputKey, InputKind, InputSnapshot, InvalidationPlan, PassDeclaration, PassId, PassObservation,
-    PlanningLimits, ReconcileMode, TraceEntry, plan_invalidation,
+    DependencyGraph, DependencyRegistry, DependencySource, EquivalenceSnapshot, FactDomainSet,
+    FactNode, GenerationSummary, GraphLimits, INCREMENTAL_SCHEMA_VERSION, IncrementalError,
+    InputFingerprint, InputKey, InputKind, InputSnapshot, InvalidationPlan,
+    LOGICAL_SNAPSHOT_SCHEMA_VERSION, LogicalComponent, LogicalDomain, PassDeclaration, PassId,
+    PassObservation, PlanningLimits, ReconcileMode, TraceEntry, plan_invalidation,
 };
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CanonicalNormalizedFileChunk, CoverageRecord,
-    CoverageScope, CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityKind, EntityRecord,
-    ExtensionEnvelope, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain,
-    FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
+    AnalysisTier, BuildContextIdentity, CanonicalGenerationNeutralDigests,
+    CanonicalNormalizedFileChunk, CoverageRecord, CoverageScope, CoverageStatus, DiagnosticRecord,
+    DiagnosticSeverity, EntityKind, EntityRecord, ExtensionEnvelope, ExtensionSupport,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain, FactEvidence, FactRef,
+    FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
     LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
     ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
     RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason,
     SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, derive_coverage_record_id,
     derive_diagnostic_record_id, derive_provenance_record_id, derive_skipped_region_id,
-    new_file_identity_claim_envelope,
+    generation_neutral_workspace_bytes, new_file_identity_claim_envelope,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -113,21 +115,21 @@ use rootlight_resolve::{
     RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolutionLimits,
     ResolverFactContext,
 };
-use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
+use rootlight_search::{BuildBudget, LexicalDocument, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceService};
 pub use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationControlError,
-    GenerationManifestRecipe, GenerationMetadata, GenerationResource, IdentityMismatchComponent,
-    IdentityVerificationError, IdentityVerifiedGeneration, SharedGenerationError,
-    export_shared_generation as encode_shared_generation,
+    GenerationManifestRecipe, GenerationMetadata, GenerationNeutralDigestError, GenerationResource,
+    IdentityMismatchComponent, IdentityVerificationError, IdentityVerifiedGeneration,
+    SharedGenerationError, export_shared_generation as encode_shared_generation,
     import_shared_generation as decode_shared_generation, shared_generation_source_set_hash,
 };
 pub use rootlight_storage::{
     SharedGenerationExpectation, SharedGenerationImport, SharedGenerationLimits,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeSeq};
 
 const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 const DISCOVERY_PROGRESS_INTERVAL_FILES: u64 = 64;
@@ -164,12 +166,13 @@ const MAX_STREAM_DIAGNOSTICS_PER_FILE: usize = 16_384;
 const MAX_STREAM_DIAGNOSTIC_BYTES_PER_FILE: usize = 16 * 1024 * 1024;
 const MAX_STREAM_STRING_BYTES_PER_FILE: usize = 128 * 1024 * 1024;
 const MAX_REPORTED_MEMORY_BYTES_PER_FILE: usize = 512 * 1024 * 1024;
+const MAX_LOGICAL_SNAPSHOT_COMPONENT_BYTES: usize = 16 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/3";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/4";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -232,6 +235,69 @@ pub struct FirstSliceIndexDiagnostic {
     pub message: String,
 }
 
+/// Immutable generation-neutral identity of one complete logical snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstSliceLogicalSnapshotIdentity {
+    schema_version: String,
+    hash: ContentHash,
+}
+
+impl FirstSliceLogicalSnapshotIdentity {
+    fn new(hash: ContentHash) -> Self {
+        Self {
+            schema_version: LOGICAL_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+            hash,
+        }
+    }
+
+    /// Returns the version of the canonical logical projection.
+    #[must_use]
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    /// Returns the checked numeric version accepted by the current service.
+    #[must_use]
+    pub fn schema_version_parts(&self) -> Option<(u16, u16)> {
+        match self.schema_version.as_str() {
+            LOGICAL_SNAPSHOT_SCHEMA_VERSION => Some((1, 0)),
+            _ => None,
+        }
+    }
+
+    /// Returns the generation-neutral logical snapshot digest.
+    #[must_use]
+    pub const fn hash(&self) -> ContentHash {
+        self.hash
+    }
+}
+
+impl<'de> Deserialize<'de> for FirstSliceLogicalSnapshotIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireIdentity {
+            schema_version: String,
+            hash: ContentHash,
+        }
+
+        let wire = WireIdentity::deserialize(deserializer)?;
+        if wire.schema_version != LOGICAL_SNAPSHOT_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(
+                "unsupported logical snapshot schema version",
+            ));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            hash: wire.hash,
+        })
+    }
+}
+
 /// Bounded receipt for one first-slice generation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -279,6 +345,9 @@ pub struct FirstSliceIndexReceipt {
     /// Distinct source-free diagnostics retained in deterministic order.
     #[serde(default)]
     pub diagnostics: Vec<FirstSliceIndexDiagnostic>,
+    /// Complete generation-neutral identity, absent when no supported sidecar is available.
+    #[serde(default, skip_serializing)]
+    pub logical_snapshot: Option<FirstSliceLogicalSnapshotIdentity>,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
 }
@@ -1680,6 +1749,8 @@ pub struct RepositoryStatusDto {
     pub publication_state: String,
     /// Durable bytes retained for the selected immutable generation.
     pub retained_durable_bytes: u64,
+    /// Complete logical identity for the selected generation, if persisted.
+    pub logical_snapshot: Option<FirstSliceLogicalSnapshotIdentity>,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntryDto>,
 }
@@ -5696,9 +5767,20 @@ impl FirstSliceService {
         let mut incremental = incremental_plan.state;
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
         let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
-        // The measured document charge can exceed the source-based reservation.
-        // Re-run aggregate admission before any durable generation output exists.
-        self.preflight_generation_memory_capacity(memory_bytes, PendingGenerationMemory::Staged)?;
+        let logical_workspace_bytes =
+            generation_neutral_workspace_bytes(&document, || cancellation.check().is_ok())
+                .map_err(|_| {
+                    current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits)
+                })?;
+        let logical_staged_memory_bytes =
+            logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?;
+        // Projection can retain the canonical document while one complete
+        // source record and its rebound buffers coexist with compact graph
+        // workspace. Admit that conservative peak before either allocation.
+        self.preflight_generation_memory_capacity(
+            logical_staged_memory_bytes,
+            PendingGenerationMemory::Staged,
+        )?;
         let metadata = GenerationMetadata::new(
             repository,
             generation,
@@ -5717,6 +5799,9 @@ impl FirstSliceService {
             &context,
         )
         .map_err(|error| map_identity_error(error, cancellation))?;
+        let normalized_ir_logical = verified
+            .generation_neutral_digests(&context)
+            .map_err(|error| map_generation_neutral_digest_error(error, cancellation))?;
         if self.durable.is_some() {
             estimated_disk_bytes = self
                 .durable_output_reservation(
@@ -5817,6 +5902,19 @@ impl FirstSliceService {
         .map_err(|error| map_query_error(error, cancellation))?;
         let lexical_documents =
             u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
+        let logical_snapshot = logical_snapshot_identity(
+            normalized_ir_logical,
+            &documents,
+            &incremental.inputs,
+            cancellation,
+        )?;
+        if let Some(durable) = durable.as_ref() {
+            let logical_snapshot_bytes =
+                durable.write_logical_snapshot_identity(verified.snapshot(), &logical_snapshot)?;
+            written_bytes = written_bytes
+                .checked_add(logical_snapshot_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+        }
         let search = LexicalIndex::build_ephemeral(
             generation,
             documents,
@@ -5870,6 +5968,7 @@ impl FirstSliceService {
             estimated_disk_bytes,
             retained_durable_bytes: 0,
             diagnostics: index_diagnostic_summaries(verified.document())?,
+            logical_snapshot: Some(logical_snapshot),
             elapsed_micros: elapsed_micros(started),
         };
         let durable = if let Some(durable) = durable {
@@ -9929,11 +10028,10 @@ impl FirstSliceService {
             .language_coverage_by_generation
             .get(&context.generation)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let retained_durable_bytes = self
+        let receipt = self
             .receipts
             .get(&context.generation)
-            .ok_or(FirstSliceError::CatalogCorrupt)?
-            .retained_durable_bytes;
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
         let display_name = self
             .repository_display_names
             .get(&repository)
@@ -9959,7 +10057,8 @@ impl FirstSliceService {
             } else {
                 "retained".to_owned()
             },
-            retained_durable_bytes,
+            retained_durable_bytes: receipt.retained_durable_bytes,
+            logical_snapshot: receipt.logical_snapshot.clone(),
             coverage: coverage_from_summaries(coverage),
         })
     }
@@ -12066,6 +12165,16 @@ fn ensure_generation_memory_admission(
     Ok(observed)
 }
 
+fn logical_projection_staged_memory_bytes(
+    serialized_document_bytes: u64,
+    compact_graph_workspace_bytes: u64,
+) -> Result<u64, FirstSliceError> {
+    serialized_document_bytes
+        .checked_mul(3)
+        .and_then(|documents| documents.checked_add(compact_graph_workspace_bytes))
+        .ok_or(FirstSliceError::Limits)
+}
+
 fn project_context_manifest(
     language: &str,
     configuration: ContentHash,
@@ -13645,6 +13754,165 @@ fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, Fir
     })
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct LogicalLexicalDocument<'document> {
+    symbol_id: Option<SymbolId>,
+    file_id: FileId,
+    identifier: &'document str,
+    qualified_name: &'document str,
+    path: &'document str,
+    kind: &'document str,
+    language: &'document str,
+    tier: &'document str,
+    package: &'document Option<String>,
+    build_target: &'document Option<String>,
+    signature: &'document Option<String>,
+    type_names: &'document [String],
+    documentation: &'document Option<String>,
+    source_identifiers: &'document [String],
+    source_text: &'document Option<String>,
+    generated: bool,
+    test: bool,
+    declaration_only: bool,
+}
+
+impl<'document> From<&'document LexicalDocument> for LogicalLexicalDocument<'document> {
+    fn from(document: &'document LexicalDocument) -> Self {
+        Self {
+            symbol_id: document.symbol_id,
+            file_id: document.file_id,
+            identifier: &document.identifier,
+            qualified_name: &document.qualified_name,
+            path: &document.path,
+            kind: &document.kind,
+            language: &document.language,
+            tier: &document.tier,
+            package: &document.package,
+            build_target: &document.build_target,
+            signature: &document.signature,
+            type_names: &document.type_names,
+            documentation: &document.documentation,
+            source_identifiers: &document.source_identifiers,
+            source_text: &document.source_text,
+            generated: document.generated,
+            test: document.test,
+            declaration_only: document.declaration_only,
+        }
+    }
+}
+
+struct LogicalLexicalProjection<'document>(&'document [LexicalDocument]);
+
+impl Serialize for LogicalLexicalProjection<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for document in self.0 {
+            sequence.serialize_element(&LogicalLexicalDocument::from(document))?;
+        }
+        sequence.end()
+    }
+}
+
+struct LogicalDiscoveryProjection<'inputs>(&'inputs InputSnapshot);
+
+impl Serialize for LogicalDiscoveryProjection<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for input in self.0.iter() {
+            sequence.serialize_element(&input)?;
+        }
+        sequence.end()
+    }
+}
+
+fn logical_component(
+    domain: LogicalDomain,
+    value: &impl Serialize,
+    records: u64,
+    cancellation: &Cancellation,
+) -> Result<LogicalComponent, FirstSliceError> {
+    LogicalComponent::from_canonical_value(
+        domain,
+        value,
+        records,
+        MAX_LOGICAL_SNAPSHOT_COMPONENT_BYTES,
+        cancellation,
+    )
+    .map_err(|error| map_incremental_error(error, cancellation))
+}
+
+fn logical_snapshot_identity(
+    normalized_ir: CanonicalGenerationNeutralDigests,
+    lexical_documents: &[LexicalDocument],
+    inputs: &InputSnapshot,
+    cancellation: &Cancellation,
+) -> Result<FirstSliceLogicalSnapshotIdentity, FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let query_projection = LogicalLexicalProjection(lexical_documents);
+    let discovery_inputs = LogicalDiscoveryProjection(inputs);
+    let normalized_ir_component = logical_component(
+        LogicalDomain::NormalizedIr,
+        &normalized_ir.complete(),
+        normalized_ir.records(),
+        cancellation,
+    )?;
+    // LogicalStore is the backend-neutral intended store projection. Catalog
+    // and recovery round-trip correctness is tested separately, so ordinary
+    // publication does not traverse the same generation twice.
+    let logical_store_component = logical_component(
+        LogicalDomain::LogicalStore,
+        &normalized_ir.complete(),
+        normalized_ir.records(),
+        cancellation,
+    )?;
+    let components = [
+        logical_component(
+            LogicalDomain::Discovery,
+            &discovery_inputs,
+            u64::try_from(inputs.len()).map_err(|_| FirstSliceError::Limits)?,
+            cancellation,
+        )?,
+        normalized_ir_component,
+        logical_store_component,
+        logical_component(
+            LogicalDomain::QueryOutputs,
+            &query_projection,
+            u64::try_from(lexical_documents.len()).map_err(|_| FirstSliceError::Limits)?,
+            cancellation,
+        )?,
+        logical_component(
+            LogicalDomain::Coverage,
+            &normalized_ir.coverage(),
+            normalized_ir.coverage_records(),
+            cancellation,
+        )?,
+        logical_component(
+            LogicalDomain::Provenance,
+            &normalized_ir.provenance(),
+            normalized_ir.provenance_records(),
+            cancellation,
+        )?,
+        logical_component(
+            LogicalDomain::StableIds,
+            &normalized_ir.stable_identities(),
+            normalized_ir.stable_identities_records(),
+            cancellation,
+        )?,
+    ];
+    let snapshot = EquivalenceSnapshot::new(components, cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    Ok(FirstSliceLogicalSnapshotIdentity::new(
+        snapshot.logical_snapshot_hash(),
+    ))
+}
+
 fn normalized_fact_work(
     document: &NormalizedIrDocument,
     reused_records: &ReusedNormalizedRecords,
@@ -14405,6 +14673,37 @@ fn map_identity_error(
         IdentityVerificationError::RecipeEncoding => {
             FirstSliceError::IdentityVerification(FirstSliceIdentityFailure::RecipeEncoding)
         }
+    }
+}
+
+fn map_generation_neutral_digest_error(
+    error: GenerationNeutralDigestError,
+    cancellation: &Cancellation,
+) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        GenerationNeutralDigestError::Control(GenerationControlError::Cancelled { reason }) => {
+            FirstSliceError::Cancelled(reason)
+        }
+        GenerationNeutralDigestError::Control(GenerationControlError::BudgetExceeded {
+            resource,
+            observed,
+            limit,
+        }) => generation_resource(resource).map_or(FirstSliceError::Identity, |resource| {
+            FirstSliceError::ResourceLimit {
+                resource,
+                observed,
+                limit,
+            }
+        }),
+        GenerationNeutralDigestError::InvalidGeneration => {
+            FirstSliceError::IdentityVerification(FirstSliceIdentityFailure::InvalidGeneration)
+        }
+        GenerationNeutralDigestError::ResourceUnavailable => FirstSliceError::ResourceUnavailable {
+            resource: FirstSliceResource::MemoryBytes,
+        },
     }
 }
 
@@ -19885,6 +20184,51 @@ mod tests {
     }
 
     #[test]
+    fn logical_projection_preflight_counts_three_document_charges_and_graph_workspace() {
+        assert_eq!(
+            logical_projection_staged_memory_bytes(1_024, 512)
+                .expect("logical projection peak is representable"),
+            3_584
+        );
+        assert_eq!(
+            logical_projection_staged_memory_bytes(u64::MAX / 3 + 1, 0),
+            Err(FirstSliceError::Limits)
+        );
+        assert_eq!(
+            logical_projection_staged_memory_bytes(u64::MAX / 3, 2),
+            Err(FirstSliceError::Limits)
+        );
+
+        let serialized_bytes = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 3 + 1;
+        assert!(
+            serialized_bytes * 2 < MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            "the former two-charge model would have admitted this projection"
+        );
+        let required = logical_projection_staged_memory_bytes(serialized_bytes, 0)
+            .expect("three-charge observation is representable");
+        let service = FirstSliceService::new(2).expect("service initializes");
+        assert!(matches!(
+            service.preflight_generation_memory_capacity(
+                required,
+                PendingGenerationMemory::Staged,
+            ),
+            Err(FirstSliceError::GenerationMemoryLimit {
+                breakdown: GenerationMemoryBreakdown {
+                    retained_bytes: 0,
+                    reserved_bytes: 0,
+                    owned_bytes: 0,
+                    referenced_bytes: 0,
+                    mapped_bytes: 0,
+                    staged_bytes,
+                    shared_bytes: 0,
+                },
+                observed,
+                limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            }) if staged_bytes == required && observed == required
+        ));
+    }
+
+    #[test]
     fn generation_memory_breakdown_distinguishes_reservation_from_retained_ownership() {
         let retained = 9 * 1024_u64.pow(3);
         let reserved = 8 * 1024_u64.pow(3);
@@ -20402,6 +20746,8 @@ mod tests {
             let third = service
                 .index_rust_fixture(fixture.path(), &cancellation)
                 .expect("third generation publishes");
+            assert!(second.logical_snapshot.is_some());
+            assert!(third.logical_snapshot.is_some());
             assert!(matches!(
                 service.resolve_generation(first.repository, Some(first.generation)),
                 Err(FirstSliceError::GenerationNotFound)
@@ -20456,6 +20802,20 @@ mod tests {
         restored
             .resolve_generation(second.repository, Some(second.generation))
             .expect("previous generation survives restart");
+        assert_eq!(
+            restored
+                .repository_status(second.repository, Some(second.generation))
+                .expect("retained logical identity survives restart")
+                .logical_snapshot,
+            second.logical_snapshot
+        );
+        assert_eq!(
+            restored
+                .repository_status(third.repository, None)
+                .expect("active logical identity survives restart")
+                .logical_snapshot,
+            third.logical_snapshot
+        );
         let page = restored
             .repository_catalog_page(
                 CatalogPageRequest::new(
@@ -21754,6 +22114,10 @@ mod tests {
         let body = incremental
             .index_rust_fixture(fixture.path(), &cancellation)
             .expect("body successor publishes");
+        assert_ne!(
+            initial.logical_snapshot, body.logical_snapshot,
+            "a source-body edit must change the public logical identity"
+        );
         assert_fresh_equivalent(
             &incremental,
             fixture.path(),
@@ -23267,6 +23631,10 @@ mod tests {
         assert_eq!(rebuilt.repository, successor.repository);
         assert_eq!(rebuilt.parent, successor.parent);
         assert_eq!(rebuilt.generation, successor.generation);
+        assert_eq!(
+            rebuilt.logical_snapshot, successor.logical_snapshot,
+            "generation-neutral public identity must match the fresh logical projection"
+        );
 
         let incremental_snapshot =
             equivalence_snapshot(incremental, successor.generation, cancellation);

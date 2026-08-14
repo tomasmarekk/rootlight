@@ -5,16 +5,18 @@
 //! these bounded types; transport routing consumes only those generated
 //! artifacts.
 
-use rootlight_ids::{GenerationId, OperationId, RepositoryId};
+use rootlight_ids::{ContentHash, GenerationId, OperationId, RepositoryId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::TrustClassification;
+use crate::completeness::ResultCompleteness;
 use crate::vertical::{
-    AnalysisReadEnvelope, AnalysisToolResponse, ContinuationCursor, Freshness, GenerationSelector,
-    GenerationSummary, OperationState, ReadEnvelope, RepositorySelector, RequiredNullable,
-    ResponseBudget, ResponseProfile, ResponseWarning, ToolResponse, UsageSummary,
+    AnalysisReadEnvelope, AnalysisToolResponse, ContinuationCursor, CoverageSummary, Freshness,
+    GenerationSelector, GenerationSummary, OperationState, ReadEnvelope, RepositorySelector,
+    RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
+    ToolResponse, UsageSummary,
 };
+use crate::{PublicError, TrustClassification};
 use rootlight_ir::CoverageStatus;
 
 const MAX_CATALOG_SNAPSHOT_ID_BYTES: usize = 128;
@@ -172,7 +174,57 @@ pub struct CoverageReport {
     pub skipped_files: u64,
 }
 
+/// Source-free generation-neutral identity for one logical snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalSnapshotIdentity {
+    /// Version of the canonical generation-neutral projection.
+    pub schema_version: LogicalSnapshotSchemaVersion,
+    /// Complete generation-neutral logical snapshot digest.
+    pub hash: ContentHash,
+}
+
+/// Version of the logical snapshot identity projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum LogicalSnapshotSchemaVersion {
+    /// Initial generation-neutral projection contract.
+    #[serde(rename = "1.0")]
+    V1_0,
+}
+
 /// `repo.status` result data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "RepoStatusData")]
+pub struct RepoStatusDataV1_1 {
+    /// Overall repository health.
+    pub repository_state: RepositoryState,
+    /// Explicit generation requested by the caller, null for the active selector.
+    pub requested_generation: RequiredNullable<GenerationId>,
+    /// Exact immutable generation resolved for this response.
+    pub resolved_generation: GenerationId,
+    /// Active generation summary, null when no generation is published.
+    pub active_generation: RequiredNullable<GenerationSummary>,
+    /// Publication relationship of the selected generation.
+    pub publication_state: GenerationPublicationState,
+    /// Durable bytes retained for the selected immutable generation.
+    pub retained_durable_bytes: u64,
+    /// Registered repository alias, when configured.
+    pub alias: RequiredNullable<String>,
+    /// Coverage at the requested granularity.
+    pub coverage: CoverageReport,
+    /// Bounded operation list, most recent first.
+    #[schemars(length(max = 100))]
+    pub operations: Vec<OperationSummary>,
+    /// Recommended next actions for the agent.
+    #[schemars(length(max = 8))]
+    pub recommended_actions: Vec<crate::vertical::SourceFreeMessage>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
+}
+
+/// Current `repo.status` result data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RepoStatusData {
@@ -188,6 +240,8 @@ pub struct RepoStatusData {
     pub publication_state: GenerationPublicationState,
     /// Durable bytes retained for the selected immutable generation.
     pub retained_durable_bytes: u64,
+    /// Generation-neutral identity, null when no supported persisted sidecar is available.
+    pub logical_snapshot: RequiredNullable<LogicalSnapshotIdentity>,
     /// Registered repository alias, when configured.
     pub alias: RequiredNullable<String>,
     /// Coverage at the requested granularity.
@@ -237,10 +291,67 @@ pub struct RepoStatusDataV1_0 {
 pub type RepoStatusOutputV1_0 = ToolResponse<ReadEnvelope<RepoStatusDataV1_0>>;
 
 /// Checked `repo.status` output for additive schema 1.1.
-pub type RepoStatusOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<RepoStatusData>>;
+pub type RepoStatusOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<RepoStatusDataV1_1>>;
+
+/// Version marker carried by current `repo.status` responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum RepoStatusSchemaVersion {
+    /// Repository status contract version 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Strict current response envelope for generation-pinned repository status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RepoStatusReadEnvelope<T> {
+    /// Tool response schema version.
+    pub schema_version: RepoStatusSchemaVersion,
+    /// Resolved repository.
+    pub repository: ResolvedRepository,
+    /// Pinned generation and freshness.
+    pub generation: GenerationSummary,
+    /// Relevant coverage.
+    pub coverage: CoverageSummary,
+    /// Tool-specific result.
+    pub data: T,
+    /// Whether any hard or requested limit stopped completion.
+    pub truncated: bool,
+    /// Authoritative execution completeness and safe continuation semantics.
+    pub completeness: ResultCompleteness,
+    /// Safe continuation cursor, when the result is pageable.
+    pub next_cursor: RequiredNullable<ContinuationCursor>,
+    /// Runtime resource accounting.
+    pub usage: UsageSummary,
+    /// Source-free warnings.
+    #[schemars(length(max = 100))]
+    pub warnings: Vec<ResponseWarning>,
+    /// Response-level classification for all repository-derived content.
+    pub trust: TrustClassification,
+}
+
+/// Checked error response for repository-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RepoStatusErrorResponse {
+    /// Tool error schema version.
+    pub schema_version: RepoStatusSchemaVersion,
+    /// Stable source-redacted error.
+    pub error: PublicError,
+}
+
+/// Checked success-or-error response for repository-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RepoStatusToolResponse<T> {
+    /// Successful repository status response.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(RepoStatusErrorResponse),
+}
 
 /// Current checked success-or-error output for `repo.status`.
-pub type RepoStatusOutput = RepoStatusOutputV1_1;
+pub type RepoStatusOutput = RepoStatusToolResponse<RepoStatusReadEnvelope<RepoStatusData>>;
 
 /// Strict input for `repo.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -412,9 +523,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CatalogEnvelope, CatalogSnapshotId, CoverageReport, LanguageCoverageReport, RepoListData,
-        RepoListInput, RepoListOutput, RepoListSchemaVersion, RepoStatusInput, RepositoryEntry,
-        RepositoryState,
+        CatalogEnvelope, CatalogSnapshotId, CoverageReport, LanguageCoverageReport,
+        LogicalSnapshotIdentity, LogicalSnapshotSchemaVersion, RepoListData, RepoListInput,
+        RepoListOutput, RepoListSchemaVersion, RepoStatusInput, RepositoryEntry, RepositoryState,
     };
     use crate::{
         ErrorCode, TrustClassification,
@@ -444,6 +555,42 @@ mod tests {
             "host_path": "must not be accepted"
         }));
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn logical_snapshot_identity_is_strict_and_source_free() {
+        let fixture = json!({
+            "schema_version": "1.0",
+            "hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+        });
+        let identity: LogicalSnapshotIdentity =
+            serde_json::from_value(fixture.clone()).expect("valid logical identity decodes");
+        assert_eq!(identity.schema_version, LogicalSnapshotSchemaVersion::V1_0);
+
+        let schema = serde_json::to_value(schemars::schema_for!(LogicalSnapshotIdentity))
+            .expect("logical identity schema serializes");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("logical identity schema compiles");
+        assert!(validator.is_valid(&fixture));
+
+        for invalid in [
+            json!({
+                "schema_version": "1.1",
+                "hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+            }),
+            json!({
+                "schema_version": "1.0",
+                "hash": "not-a-content-hash"
+            }),
+            json!({
+                "schema_version": "1.0",
+                "hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                "source_path": "C:/private/repository"
+            }),
+        ] {
+            assert!(!validator.is_valid(&invalid));
+            assert!(serde_json::from_value::<LogicalSnapshotIdentity>(invalid).is_err());
+        }
     }
 
     #[test]

@@ -40,7 +40,8 @@ use rootlight_client::{
     HistoryBreakingCandidate as ClientHistoryBreakingCandidate,
     HistoryCompare as ClientHistoryCompare, HistoryLineageMatch as ClientHistoryLineageMatch,
     HistoryMatchedStates as ClientHistoryMatchedStates,
-    HistorySemanticChange as ClientHistorySemanticChange, LocateHit, OperationKind, OperationStage,
+    HistorySemanticChange as ClientHistorySemanticChange, LocateHit,
+    LogicalSnapshotIdentity as ClientLogicalSnapshotIdentity, OperationKind, OperationStage,
     OperationState as ClientOperationState, PlanChange as ClientPlanChange,
     PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
     PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
@@ -82,7 +83,7 @@ use rootlight_mcp_contract::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
         FlowTraceOutput, RelationKind, SymbolRelationshipsOutputV1_0,
     },
-    repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
+    repository::{LogicalSnapshotSchemaVersion, RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisReadEnvelope, AnalysisTier, AnalysisToolResponse, CacheStatus, Freshness,
         IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage, OperationState,
@@ -1895,6 +1896,10 @@ fn repository_status_response() -> RepositoryStatus {
         state: "ready".to_owned(),
         publication_state: "published".to_owned(),
         retained_durable_bytes: 0,
+        logical_snapshot: Some(ClientLogicalSnapshotIdentity {
+            schema_version: "1.0".to_owned(),
+            hash: ContentHash::from_bytes([42; 32]),
+        }),
         coverage: vec![RepositoryCoverageEntry {
             language: "rust".to_owned(),
             tier: "tier_c".to_owned(),
@@ -6744,7 +6749,7 @@ async fn repo_status_maps_active_generation_and_coverage() {
             .is_some_and(|elapsed| elapsed >= 1)
     );
     let output: RepoStatusOutput = decode(output);
-    let AnalysisToolResponse::Success(output) = output else {
+    let RepoStatusOutput::Success(output) = output else {
         panic!("expected repo status success");
     };
     assert_eq!(output.data.repository_state, RepositoryState::Ready);
@@ -6762,6 +6767,16 @@ async fn repo_status_maps_active_generation_and_coverage() {
     assert_eq!(output.repository.display_name, "fixture");
     assert_eq!(output.data.resolved_generation, generation());
     assert_eq!(output.data.requested_generation.0, None);
+    let logical_snapshot = output
+        .data
+        .logical_snapshot
+        .0
+        .expect("current status exposes the generation-neutral identity");
+    assert_eq!(
+        logical_snapshot.schema_version,
+        LogicalSnapshotSchemaVersion::V1_0
+    );
+    assert_eq!(logical_snapshot.hash, ContentHash::from_bytes([42; 32]));
     assert_eq!(
         output.data.publication_state,
         GenerationPublicationState::Published
@@ -6774,6 +6789,46 @@ async fn repo_status_maps_active_generation_and_coverage() {
         request.coverage_detail(),
         client::RepositoryStatusCoverageDetail::Language
     );
+}
+
+#[tokio::test]
+async fn repo_status_emits_required_null_for_a_legacy_generation() {
+    let mut status = repository_status_response();
+    status.logical_snapshot = None;
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+
+    let output = execute(
+        &harness.executor,
+        VerticalTool::RepoStatus,
+        json!({"repository": {"repository_id": repository()}}),
+    )
+    .await
+    .expect("legacy repository status maps");
+    assert!(output["data"]["logical_snapshot"].is_null());
+    let RepoStatusOutput::Success(output) = decode(output) else {
+        panic!("expected repository status success");
+    };
+    assert_eq!(output.data.logical_snapshot.0, None);
+}
+
+#[tokio::test]
+async fn repo_status_rejects_an_unknown_logical_snapshot_version() {
+    let mut status = repository_status_response();
+    status
+        .logical_snapshot
+        .as_mut()
+        .expect("fixture exposes a logical snapshot")
+        .schema_version = "1.1".to_owned();
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+
+    let error = execute(
+        &harness.executor,
+        VerticalTool::RepoStatus,
+        json!({"repository": {"repository_id": repository()}}),
+    )
+    .await
+    .expect_err("unknown logical snapshot versions fail closed");
+    assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
 }
 
 #[tokio::test]
@@ -6811,7 +6866,7 @@ async fn repo_status_projects_bounded_operations_and_freshness_controls() {
         .await
         .expect("repo status maps requested operations"),
     );
-    let AnalysisToolResponse::Success(output) = output else {
+    let RepoStatusOutput::Success(output) = output else {
         panic!("expected repository status success");
     };
 
@@ -6862,7 +6917,7 @@ async fn repo_status_preserves_exact_generation_when_active_changes() {
         .await
         .expect("retained exact generation reports status"),
     );
-    let AnalysisToolResponse::Success(output) = output else {
+    let RepoStatusOutput::Success(output) = output else {
         panic!("expected exact repo status success");
     };
 
@@ -6985,7 +7040,7 @@ async fn repo_status_lifecycle_states_and_errors_match_the_versioned_golden() {
             .await
             .expect("golden lifecycle state maps"),
         );
-        let AnalysisToolResponse::Success(output) = output else {
+        let RepoStatusOutput::Success(output) = output else {
             panic!("expected repository status success");
         };
         let observed = json!({
@@ -9573,7 +9628,7 @@ async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
     .await
     .expect("explain executes");
     let output: RepoStatusOutput = decode(output);
-    let AnalysisToolResponse::Success(output) = output else {
+    let RepoStatusOutput::Success(output) = output else {
         panic!("expected explain success");
     };
     let explanation = output.data.explanation.expect("explain returns a plan");

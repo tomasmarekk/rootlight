@@ -143,7 +143,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-repo-index-input-1.2.schema.json")
             }
             Self::RepoStatus => include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-input-1.2.schema.json"
             ),
             Self::RepoList => {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-input-2.0.schema.json")
@@ -207,7 +207,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-index-output-1.2.schema.json"
             ),
             Self::RepoStatus => include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-output-1.2.schema.json"
             ),
             Self::RepoList => {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-output-2.0.schema.json")
@@ -269,8 +269,8 @@ impl VerticalTool {
         match self {
             Self::OperationStatus => Some("1.2"),
             Self::RepoIndex => Some("1.1"),
-            Self::RepoStatus
-            | Self::SymbolExplain
+            Self::RepoStatus => Some("1.1"),
+            Self::SymbolExplain
             | Self::SymbolRelationships
             | Self::ChangeImpact
             | Self::TestsSelect
@@ -290,6 +290,7 @@ impl VerticalTool {
         match self {
             Self::OperationStatus => Some("1.1"),
             Self::RepoIndex => Some(crate::MCP_SCHEMA_VERSION),
+            Self::RepoStatus => Some(crate::MCP_SCHEMA_VERSION),
             _ => None,
         }
     }
@@ -311,7 +312,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-index-input-1.1.schema.json"
             )),
             Self::RepoStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-input-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.2.schema.json"
@@ -358,7 +359,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-index-output-1.1.schema.json"
             )),
             Self::RepoStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-output-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.2.schema.json"
@@ -407,6 +408,9 @@ impl VerticalTool {
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-input-1.0.schema.json"
             )),
+            Self::RepoStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
+            )),
             _ => None,
         }
     }
@@ -420,6 +424,9 @@ impl VerticalTool {
             )),
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-output-1.0.schema.json"
+            )),
+            Self::RepoStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
             )),
             _ => None,
         }
@@ -2945,7 +2952,8 @@ mod tests {
         FlowTraceOutput, SymbolRelationshipsInput, SymbolRelationshipsOutputV1_0,
     };
     use crate::repository::{
-        RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutputV1_0, RepoStatusOutputV1_1,
+        RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput, RepoStatusOutputV1_0,
+        RepoStatusOutputV1_1,
     };
 
     #[test]
@@ -3126,14 +3134,14 @@ mod tests {
                         VerticalTool::RepoStatus,
                         &input,
                         VerticalTool::RepoStatus
-                            .previous_input_schema_json()
+                            .legacy_input_schema_json()
                             .expect("repo.status retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<RepoStatusOutputV1_0>(
                         VerticalTool::RepoStatus,
                         &output,
                         VerticalTool::RepoStatus
-                            .previous_output_schema_json()
+                            .legacy_output_schema_json()
                             .expect("repo.status retains its 1.0 output schema"),
                     );
                 }
@@ -3480,6 +3488,68 @@ mod tests {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
         }
+    }
+
+    #[test]
+    fn repo_status_retains_exact_one_one_and_one_zero_contracts() {
+        let tool = VerticalTool::RepoStatus;
+        assert_eq!(tool.contract_version(), "1.2");
+        assert_eq!(tool.previous_contract_version(), Some("1.1"));
+        assert_eq!(tool.legacy_contract_version(), Some("1.0"));
+
+        let mut current = retained_tool_output("repo.status");
+        current["schema_version"] = json!("1.2");
+        current["data"]["retained_durable_bytes"] = json!(768);
+        current["data"]["logical_snapshot"] = json!({
+            "schema_version": "1.0",
+            "hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+        });
+        let current_schema: Value =
+            serde_json::from_str(tool.output_schema_json()).expect("current schema is valid JSON");
+        let current_validator =
+            jsonschema::draft202012::new(&current_schema).expect("current schema compiles");
+        assert!(current_validator.is_valid(&current));
+        serde_json::from_value::<RepoStatusOutput>(current.clone())
+            .expect("current output decodes through the 1.2 contract");
+
+        let mut missing_identity = current.clone();
+        missing_identity["data"]
+            .as_object_mut()
+            .expect("repo.status data is an object")
+            .remove("logical_snapshot");
+        assert!(!current_validator.is_valid(&missing_identity));
+
+        let mut previous = current;
+        previous["schema_version"] = json!("1.1");
+        previous["data"]
+            .as_object_mut()
+            .expect("repo.status data is an object")
+            .remove("logical_snapshot");
+        let previous_schema: Value = serde_json::from_str(
+            tool.previous_output_schema_json()
+                .expect("repo.status retains its 1.1 output schema"),
+        )
+        .expect("previous schema is valid JSON");
+        let previous_validator =
+            jsonschema::draft202012::new(&previous_schema).expect("previous schema compiles");
+        assert!(previous_validator.is_valid(&previous));
+        serde_json::from_value::<RepoStatusOutputV1_1>(previous.clone())
+            .expect("previous output decodes through the 1.1 contract");
+
+        previous["data"]["logical_snapshot"] = Value::Null;
+        assert!(!previous_validator.is_valid(&previous));
+
+        let legacy = retained_tool_output("repo.status");
+        let legacy_schema: Value = serde_json::from_str(
+            tool.legacy_output_schema_json()
+                .expect("repo.status retains its 1.0 output schema"),
+        )
+        .expect("legacy schema is valid JSON");
+        let legacy_validator =
+            jsonschema::draft202012::new(&legacy_schema).expect("legacy schema compiles");
+        assert!(legacy_validator.is_valid(&legacy));
+        serde_json::from_value::<RepoStatusOutputV1_0>(legacy)
+            .expect("legacy output decodes through the 1.0 contract");
     }
 
     #[test]

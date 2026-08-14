@@ -930,6 +930,41 @@ fn clean_equivalence_is_exact_and_reports_domain_mismatch() {
         report.require_equivalent(),
         Err(IncrementalError::LogicalInequality)
     ));
+    assert_eq!(
+        incremental.logical_snapshot_hash(),
+        clean.logical_snapshot_hash()
+    );
+    assert_ne!(
+        incremental.logical_snapshot_hash(),
+        divergent.logical_snapshot_hash()
+    );
+}
+
+#[test]
+fn logical_snapshot_hash_binds_component_record_counts() {
+    let baseline = EquivalenceSnapshot::new(all_logical_components(None), &cancellation())
+        .expect("baseline snapshot is complete");
+    let changed_counts = [
+        LogicalDomain::Discovery,
+        LogicalDomain::NormalizedIr,
+        LogicalDomain::LogicalStore,
+        LogicalDomain::QueryOutputs,
+        LogicalDomain::Coverage,
+        LogicalDomain::Provenance,
+        LogicalDomain::StableIds,
+    ]
+    .into_iter()
+    .map(|domain| {
+        LogicalComponent::from_canonical_bytes(domain, &[1], 2, 1024, &cancellation())
+            .expect("fixture component hashes")
+    });
+    let changed_counts = EquivalenceSnapshot::new(changed_counts, &cancellation())
+        .expect("count-divergent snapshot is complete");
+
+    assert_ne!(
+        baseline.logical_snapshot_hash(),
+        changed_counts.logical_snapshot_hash()
+    );
 }
 
 #[test]
