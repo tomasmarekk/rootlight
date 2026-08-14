@@ -819,7 +819,7 @@ impl FirstSliceSharedGenerationExport {
     }
 }
 
-/// Bounded repository identity and capacity reservation made before indexing.
+/// Bounded repository identity and durable-capacity admission for one index.
 #[derive(Debug)]
 pub struct FirstSliceIndexAdmission {
     /// Stable identity reserved for the canonical repository root.
@@ -831,7 +831,19 @@ pub struct FirstSliceIndexAdmission {
     /// Conservative upper bound reserved for durable staging and publication.
     pub estimated_disk_bytes: u64,
     reservation_inserted: bool,
-    storage_reservation: Option<DurableStorageReservation>,
+    storage_admission: DurableStorageAdmissionState,
+}
+
+#[derive(Debug)]
+enum DurableStorageAdmissionState {
+    Deferred,
+    Reserved(Option<DurableStorageReservation>),
+}
+
+#[derive(Clone, Copy)]
+enum DurableStorageAdmissionTiming {
+    Immediate,
+    BeforePreparation,
 }
 
 impl FirstSliceIndexAdmission {
@@ -3693,6 +3705,42 @@ impl FirstSliceService {
         path: &Path,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexAdmission, FirstSliceError> {
+        self.admit_repository_with_storage_timing(
+            path,
+            cancellation,
+            DurableStorageAdmissionTiming::Immediate,
+        )
+    }
+
+    /// Reserves a repository identity for a detached durable operation.
+    ///
+    /// Durable capacity is still admitted atomically before discovery begins.
+    /// Deferring only the physical catalog scan lets the caller publish the
+    /// durable operation handle before a cold, bounded inventory walk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the root, repository-retention, random-identity, and
+    /// cancellation failures from [`Self::admit_repository`]. Storage failures
+    /// are returned by the subsequent preparation boundary.
+    pub fn admit_repository_for_detached_operation(
+        &self,
+        path: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexAdmission, FirstSliceError> {
+        self.admit_repository_with_storage_timing(
+            path,
+            cancellation,
+            DurableStorageAdmissionTiming::BeforePreparation,
+        )
+    }
+
+    fn admit_repository_with_storage_timing(
+        &self,
+        path: &Path,
+        cancellation: &Cancellation,
+        storage_timing: DurableStorageAdmissionTiming,
+    ) -> Result<FirstSliceIndexAdmission, FirstSliceError> {
         require_deadline(cancellation)?;
         check_cancellation(cancellation)?;
         let canonical = canonical_repository_root(path, cancellation)?;
@@ -3737,21 +3785,27 @@ impl FirstSliceService {
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
         let estimated_disk_bytes =
             self.durable_initial_admission_reservation(maximum_source_bytes)?;
-        let storage_reservation =
-            match self.begin_durable_storage_reservation(repository, estimated_disk_bytes) {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    self.release_index_admission(FirstSliceIndexAdmission {
-                        repository,
-                        root_identity,
-                        parent: self.active_by_repository.get(&repository).copied(),
-                        estimated_disk_bytes,
-                        reservation_inserted,
-                        storage_reservation: None,
-                    });
-                    return Err(error);
+        let storage_admission = match storage_timing {
+            DurableStorageAdmissionTiming::Immediate => {
+                match self.begin_durable_storage_reservation(repository, estimated_disk_bytes) {
+                    Ok(reservation) => DurableStorageAdmissionState::Reserved(reservation),
+                    Err(error) => {
+                        self.release_index_admission(FirstSliceIndexAdmission {
+                            repository,
+                            root_identity,
+                            parent: self.active_by_repository.get(&repository).copied(),
+                            estimated_disk_bytes,
+                            reservation_inserted,
+                            storage_admission: DurableStorageAdmissionState::Reserved(None),
+                        });
+                        return Err(error);
+                    }
                 }
-            };
+            }
+            DurableStorageAdmissionTiming::BeforePreparation => {
+                DurableStorageAdmissionState::Deferred
+            }
+        };
         if let Err(error) = check_cancellation(cancellation) {
             self.release_index_admission(FirstSliceIndexAdmission {
                 repository,
@@ -3759,7 +3813,7 @@ impl FirstSliceService {
                 parent: self.active_by_repository.get(&repository).copied(),
                 estimated_disk_bytes,
                 reservation_inserted,
-                storage_reservation,
+                storage_admission,
             });
             return Err(error);
         }
@@ -3769,7 +3823,7 @@ impl FirstSliceService {
             parent: self.active_by_repository.get(&repository).copied(),
             estimated_disk_bytes,
             reservation_inserted,
-            storage_reservation,
+            storage_admission,
         })
     }
 
@@ -3791,7 +3845,9 @@ impl FirstSliceService {
 
     /// Releases an uncommitted repository identity reservation.
     pub fn release_index_admission(&self, admission: FirstSliceIndexAdmission) {
-        if let (Some(durable), Some(reservation)) = (&self.durable, admission.storage_reservation) {
+        if let (Some(durable), DurableStorageAdmissionState::Reserved(Some(reservation))) =
+            (&self.durable, admission.storage_admission)
+        {
             let _ = durable.release_staging_reservation(reservation);
         }
         if !admission.reservation_inserted {
@@ -4028,6 +4084,24 @@ impl FirstSliceService {
             .ensure_staging_capacity(repository, policy)?
             .map(|(_, reservation)| Some(reservation))
             .map_err(storage_admission_error)
+    }
+
+    fn complete_durable_storage_admission(
+        &self,
+        admission: &mut FirstSliceIndexAdmission,
+    ) -> Result<(), FirstSliceError> {
+        if matches!(
+            admission.storage_admission,
+            DurableStorageAdmissionState::Reserved(_)
+        ) {
+            return Ok(());
+        }
+        let reservation = self.begin_durable_storage_reservation(
+            admission.repository,
+            admission.estimated_disk_bytes,
+        )?;
+        admission.storage_admission = DurableStorageAdmissionState::Reserved(reservation);
+        Ok(())
     }
 
     fn resize_durable_storage_reservation(
@@ -4562,13 +4636,17 @@ impl FirstSliceService {
         cancellation
             .check()
             .map_err(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))?;
+        self.complete_durable_storage_admission(admission)?;
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
         if root_identity != admission.root_identity {
             return Err(FirstSliceError::Identity);
         }
         let storage_reservation = StorageReservationGuard {
-            reservation: admission.storage_reservation.take(),
+            reservation: match &mut admission.storage_admission {
+                DurableStorageAdmissionState::Reserved(reservation) => reservation.take(),
+                DurableStorageAdmissionState::Deferred => return Err(FirstSliceError::Retention),
+            },
         };
         let root_path = sanitized_repository_root_path(&canonical)?;
         let existing_repository = self.repositories.get(&root_identity).copied();
@@ -18115,6 +18193,51 @@ mod tests {
                 .receipt,
             active
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn detached_admission_defers_disk_failure_until_preparation() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn deferred_admission() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        service.set_available_disk_bytes_override(0);
+
+        let mut admission = service
+            .admit_repository_for_detached_operation(fixture.path(), &cancellation)
+            .expect("detached identity admission does not scan durable storage");
+        let error = match service.prepare_repository_after_admission_with_progress(
+            fixture.path(),
+            FirstSliceIndexMode::Structural,
+            &mut admission,
+            &cancellation,
+            |_| {},
+        ) {
+            Ok(_) => panic!("preparation must enforce deferred storage admission"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            FirstSliceError::InsufficientDiskSpace {
+                available_bytes: 0,
+                ..
+            }
+        ));
+        service.release_index_admission(admission);
+        assert!(service.list_repositories().is_empty());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

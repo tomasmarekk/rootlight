@@ -4337,7 +4337,12 @@ fn repository_index_with_intent(
         unix_time_ms()?
     };
     let service_guard = read_service(service)?;
-    let mut admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
+    let deferred_storage_admission = detached && reply.is_some();
+    let mut admission = match if deferred_storage_admission {
+        service_guard.admit_repository_for_detached_operation(&root, &context.cancellation)
+    } else {
+        service_guard.admit_rust_fixture(&root, &context.cancellation)
+    } {
         Ok(admission) => admission,
         Err(error) => {
             drop(service_guard);
@@ -16488,6 +16493,74 @@ mod tests {
         ));
         assert_eq!(terminal.state, OperationState::Succeeded);
         assert!(published);
+    }
+
+    #[test]
+    fn detached_index_acknowledges_before_storage_admission_failure() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn detached_storage_failure() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(
+            Some(
+                "version = \"1.2\"\n[storage]\nmaximum_repository_bytes = 134217728\nmaximum_catalog_bytes = 1073741824\nretained_generations = 2\nminimum_free_disk_bytes = 67108864\n",
+            ),
+            DEFAULT_GENERATION_RETENTION,
+        )
+        .expect("bounded storage policy resolves");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (daemon, workers) = runtime
+            .block_on(FirstSliceDaemon::start_durable_with_policy(
+                actor.handle(),
+                paths.state_dir(),
+                policy,
+                Arc::new(DaemonState::starting()),
+                None,
+            ))
+            .expect("durable daemon starts");
+        let operation = OperationId::from_bytes([104; 16]);
+
+        let accepted = execute_with_timeout(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(operation)),
+                detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            }),
+        )
+        .expect("detached operation is acknowledged");
+        let FirstSliceIpcResponse::RepositoryIndex(accepted) = accepted else {
+            panic!("repository index response expected");
+        };
+        assert!(accepted.published_generation.is_none());
+        let terminal = wait_for_terminal_operation(&journal, operation);
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(
+            terminal.error.as_ref().map(PublicError::code),
+            Some(ErrorCode::ResourceExhausted)
+        );
+
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
     }
 
     #[test]

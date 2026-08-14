@@ -204,6 +204,7 @@ pub(super) struct DurableCatalog {
     maximum_repositories: usize,
     staging_bytes: Arc<AtomicU64>,
     storage_reservations: Arc<Mutex<DurableStorageReservations>>,
+    verified_source_blobs: Mutex<BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>>,
 }
 
 pub(super) struct DurablePreparedGeneration {
@@ -543,6 +544,14 @@ struct ScannedSourceBlob {
     payload_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VerifiedSourceBlobMetadata {
+    payload_bytes: u64,
+    modified_ns: u128,
+    volume: u64,
+    file_index: u64,
+}
+
 #[derive(Default)]
 struct ScannedRepositoryStorage {
     repository: Option<RepositoryId>,
@@ -824,6 +833,7 @@ impl DurableCatalog {
             maximum_repositories,
             staging_bytes: Arc::new(AtomicU64::new(0)),
             storage_reservations: Arc::new(Mutex::new(DurableStorageReservations::default())),
+            verified_source_blobs: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -1045,6 +1055,10 @@ impl DurableCatalog {
     pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let mut verified_source_blobs = self
+            .verified_source_blobs
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
         // Scanning the committed tree makes crash recovery, publication, and compaction visible
         // without trusting counters that may not have been flushed before process termination.
         scan_storage_inventory(
@@ -1052,6 +1066,7 @@ impl DurableCatalog {
             &self.quarantine,
             self.maximum_repositories,
             available_bytes,
+            &mut verified_source_blobs,
         )
     }
 
@@ -2311,6 +2326,7 @@ fn scan_storage_inventory(
     quarantine: &PrivateDirectory<'_>,
     maximum_repositories: usize,
     available_bytes: u64,
+    verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
 ) -> Result<DurableStorageInventory, FirstSliceError> {
     let repository_names = private_entry_names(repositories)?;
     if repository_names.len() > maximum_repositories {
@@ -2334,6 +2350,7 @@ fn scan_storage_inventory(
             repository_id,
             &repository,
             &mut budget,
+            verified_source_blobs,
         )?);
     }
     build_storage_inventory(
@@ -2347,6 +2364,7 @@ fn scan_repository_storage(
     repository_id: RepositoryId,
     repository: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
+    verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
 ) -> Result<ScannedRepositoryStorage, FirstSliceError> {
     let mut scanned = ScannedRepositoryStorage {
         repository: Some(repository_id),
@@ -2385,7 +2403,13 @@ fn scan_repository_storage(
                 return Err(FirstSliceError::CatalogCorrupt);
             }
         } else if text == SOURCE_BLOBS_DIRECTORY {
-            scan_source_blob_storage(repository, budget, &mut scanned)?;
+            scan_source_blob_storage(
+                repository_id,
+                repository,
+                budget,
+                &mut scanned,
+                verified_source_blobs,
+            )?;
         } else if let Ok(generation) = GenerationId::from_str(text) {
             let generation_directory = PrivateDirectory::open(repository.capability(), &name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
@@ -2466,9 +2490,11 @@ fn generation_source_digests(
 }
 
 fn scan_source_blob_storage(
+    repository_id: RepositoryId,
     repository: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
     scanned: &mut ScannedRepositoryStorage,
+    verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
 ) -> Result<(), FirstSliceError> {
     let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
@@ -2494,25 +2520,70 @@ fn scan_source_blob_storage(
         if payload_bytes > MAX_SNAPSHOT_BYTES || payload_bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
-        let payload = blob
-            .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), payload_bytes)
-            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        if content_hash_bytes(&payload) != digest
-            || scanned
-                .source_blobs
-                .insert(
-                    digest,
-                    ScannedSourceBlob {
-                        bytes,
-                        payload_bytes,
-                    },
-                )
-                .is_some()
+        let verification_key = (repository_id, digest);
+        let metadata_before = source_blob_verification_metadata(&payload_metadata);
+        if metadata_before.is_none()
+            || verified_source_blobs.get(&verification_key).copied() != metadata_before
+        {
+            let payload = blob
+                .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), payload_bytes)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            if content_hash_bytes(&payload) != digest {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            let metadata_after = blob
+                .capability()
+                .symlink_metadata(Path::new(SOURCE_BLOB_PAYLOAD_FILENAME))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let metadata_after = source_blob_verification_metadata(&metadata_after);
+            if metadata_before != metadata_after {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            if let Some(metadata) = metadata_after {
+                // Atomically published blobs are immutable, but the owner can
+                // still alter state externally. Reuse is therefore bound to
+                // file identity, size, and mtime rather than the digest path.
+                verified_source_blobs.insert(verification_key, metadata);
+            } else {
+                verified_source_blobs.remove(&verification_key);
+            }
+        }
+        if scanned
+            .source_blobs
+            .insert(
+                digest,
+                ScannedSourceBlob {
+                    bytes,
+                    payload_bytes,
+                },
+            )
+            .is_some()
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
     }
     Ok(())
+}
+
+fn source_blob_verification_metadata(
+    metadata: &cap_std::fs::Metadata,
+) -> Option<VerifiedSourceBlobMetadata> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .into_std()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(VerifiedSourceBlobMetadata {
+        payload_bytes: metadata.len(),
+        modified_ns,
+        volume: cap_fs_ext::MetadataExt::dev(metadata),
+        file_index: cap_fs_ext::MetadataExt::ino(metadata),
+    })
 }
 
 fn build_storage_inventory(
@@ -4245,6 +4316,87 @@ mod tests {
         let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
         assert_eq!(
             catalog.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+    }
+
+    #[test]
+    fn storage_inventory_revalidates_changed_cached_blob() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn inventory_cache() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("generation publishes")
+        };
+        let blobs = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(SOURCE_BLOBS_DIRECTORY);
+        let payload_path = fs::read_dir(blobs)
+            .expect("source blobs read")
+            .next()
+            .expect("one source blob exists")
+            .expect("source blob entry reads")
+            .path()
+            .join(SOURCE_BLOB_PAYLOAD_FILENAME);
+        let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
+        catalog
+            .storage_inventory()
+            .expect("cold inventory verifies source content");
+        assert_eq!(
+            catalog
+                .verified_source_blobs
+                .lock()
+                .expect("verified blob cache remains available")
+                .len(),
+            1
+        );
+        catalog
+            .storage_inventory()
+            .expect("unchanged warm inventory remains valid");
+        let restored = catalog
+            .restore_active(&cancellation)
+            .expect("active generation restores");
+        let file = restored
+            .first()
+            .and_then(|generation| generation.verified.document().files.first())
+            .expect("restored generation contains one file");
+        let mut corrupted = fs::read(&payload_path).expect("source blob reads");
+        corrupted[0] ^= 1;
+        fs::write(&payload_path, corrupted).expect("same-length corruption writes");
+
+        assert_eq!(
+            catalog.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            catalog.read_source(receipt.repository, receipt.generation, file, &cancellation),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        let reopened =
+            DurableCatalog::open(paths.state_dir(), 2).expect("fresh durable catalog reopens");
+        assert_eq!(
+            reopened.storage_inventory(),
             Err(FirstSliceError::CatalogCorrupt)
         );
     }

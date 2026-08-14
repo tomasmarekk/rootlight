@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 blake3.workspace = true
+cap-fs-ext.workspace = true
 cap-std.workspace = true
 getrandom.workspace = true
 flate2.workspace = true
