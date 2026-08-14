@@ -1349,17 +1349,17 @@ mod tests {
             json!([
                 {
                     "tool": "repo.index",
-                    "current_version": "1.1",
+                    "current_version": "1.3",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "repo.status",
-                    "current_version": "1.1",
+                    "current_version": "1.2",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "operation.status",
-                    "current_version": "1.2",
+                    "current_version": "1.4",
                     "projected_version": "1.0",
                 },
                 {
