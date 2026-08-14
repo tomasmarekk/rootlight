@@ -10578,6 +10578,17 @@ fn build_service_error(
             )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
             .next_action(NextAction::CollectSupportBundle);
+        if resource == rootlight_service::FirstSliceResource::DiscoveryEntries {
+            let configuration_key = static_safe_label("analysis.max_discovery_entries");
+            builder = builder
+                .detail(
+                    static_detail_key("configuration_key"),
+                    PublicValue::Label(configuration_key.clone()),
+                )
+                .next_action(NextAction::UpdateConfiguration {
+                    key: configuration_key,
+                });
+        }
     }
     if let FirstSliceError::RepositoryCapacityLimit {
         observed,
@@ -12680,13 +12691,17 @@ mod tests {
 
     #[test]
     fn admission_error_families_preserve_bounded_public_details_and_retry_truth() {
-        let entries = build_service_error(
+        let entries = repository_index_error(
             FirstSliceError::ResourceLimit {
                 resource: rootlight_service::FirstSliceResource::DiscoveryEntries,
                 observed: 91,
                 limit: 90,
             },
-            None,
+            RepositoryIndexErrorContext {
+                operation: OperationId::from_bytes([31; 16]),
+                repository: RepositoryId::from_bytes([32; 16]),
+                provider: repository_index_provider(FirstSliceIndexMode::Structural),
+            },
         );
         assert_eq!(entries.code(), ErrorCode::ResourceExhausted);
         assert!(!entries.retryable());
@@ -12705,6 +12720,42 @@ mod tests {
         assert_eq!(
             entries.details().get(&static_detail_key("limit")),
             Some(&PublicValue::Unsigned(90))
+        );
+        assert_eq!(
+            entries
+                .details()
+                .get(&static_detail_key("configuration_key")),
+            Some(&PublicValue::Label(static_safe_label(
+                "analysis.max_discovery_entries"
+            )))
+        );
+        assert_eq!(
+            entries.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+                NextAction::UpdateConfiguration {
+                    key: static_safe_label("analysis.max_discovery_entries"),
+                },
+            ]
+        );
+
+        let source_files = build_service_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::SourceFiles,
+                observed: 11,
+                limit: 10,
+            },
+            None,
+        );
+        assert!(
+            !source_files
+                .details()
+                .contains_key(&static_detail_key("configuration_key"))
+        );
+        assert_eq!(
+            source_files.next_actions(),
+            &[NextAction::CollectSupportBundle]
         );
 
         let file_bytes = build_service_error(
