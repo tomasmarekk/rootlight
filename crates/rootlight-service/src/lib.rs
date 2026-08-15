@@ -12646,8 +12646,14 @@ fn missing_structural_declaration_count(
             .iter()
             .flat_map(|document| document.entities.iter()),
     );
-    let project = project_declaration_keys(project_document);
-    u64::try_from(structural.difference(&project).count()).map_err(|_| FirstSliceError::Limits)
+    let project = project_declaration_index(project_document);
+    u64::try_from(
+        structural
+            .iter()
+            .filter(|declaration| !project.preserves(declaration))
+            .count(),
+    )
+    .map_err(|_| FirstSliceError::Limits)
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -12670,15 +12676,47 @@ fn structural_declaration_keys<'a>(
     declarations
 }
 
-fn project_declaration_keys(document: &NormalizedIrDocument) -> BTreeSet<ProjectDeclarationKey> {
-    let mut declarations = BTreeSet::new();
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectDeclarationIdentity {
+    file: FileId,
+    kind: EntityKind,
+    canonical_name: String,
+}
+
+#[derive(Debug, Default)]
+struct ProjectDeclarationIndex {
+    exact: BTreeSet<ProjectDeclarationKey>,
+    definition_sites: BTreeMap<ProjectDeclarationIdentity, BTreeSet<(u64, u64)>>,
+}
+
+impl ProjectDeclarationIndex {
+    fn preserves(&self, declaration: &ProjectDeclarationKey) -> bool {
+        if self.exact.contains(declaration) {
+            return true;
+        }
+        let identity = ProjectDeclarationIdentity {
+            file: declaration.source.file(),
+            kind: declaration.kind,
+            canonical_name: declaration.canonical_name.clone(),
+        };
+        let Some(sites) = self.definition_sites.get(&identity) else {
+            return false;
+        };
+        sites
+            .range((declaration.source.start_byte(), 0)..=(declaration.source.end_byte(), u64::MAX))
+            .any(|(_, end)| *end <= declaration.source.end_byte())
+    }
+}
+
+fn project_declaration_index(document: &NormalizedIrDocument) -> ProjectDeclarationIndex {
+    let mut declarations = ProjectDeclarationIndex::default();
     let mut identity = BTreeMap::new();
     for entity in &document.entities {
         let Some(key) = project_declaration_key(entity) else {
             continue;
         };
         identity.insert(entity.id, (entity.kind, entity.canonical_name.clone()));
-        declarations.insert(key);
+        declarations.exact.insert(key);
     }
     for occurrence in &document.occurrences {
         if occurrence.role != OccurrenceRole::Definition {
@@ -12691,13 +12729,18 @@ fn project_declaration_keys(document: &NormalizedIrDocument) -> BTreeSet<Project
             continue;
         };
         // Project analysis intentionally unifies repeated declarations under
-        // one stable entity. Every exact definition occurrence preserves the
-        // source representative that bounded structural output may select.
-        declarations.insert(ProjectDeclarationKey {
-            source: occurrence.source.span(),
-            kind: *kind,
-            canonical_name: canonical_name.clone(),
-        });
+        // one stable entity. Its definition occurrence identifies the name
+        // token inside every declaration span that structural output may keep.
+        let source = occurrence.source.span();
+        declarations
+            .definition_sites
+            .entry(ProjectDeclarationIdentity {
+                file: source.file(),
+                kind: *kind,
+                canonical_name: canonical_name.clone(),
+            })
+            .or_default()
+            .insert((source.start_byte(), source.end_byte()));
     }
     declarations
 }
@@ -17885,7 +17928,7 @@ mod tests {
         let file = FileId::from_bytes([72; 20]);
         let symbol = SymbolId::from_bytes([73; 20]);
         let provenance = FactId::from_bytes([74; 20]);
-        let entity = |evidence_start: u64, symbol| EntityRecord {
+        let entity = |evidence_start: u64, evidence_end: u64, symbol| EntityRecord {
             id: symbol,
             repository,
             generation,
@@ -17903,7 +17946,7 @@ mod tests {
                 source: Some(SourceRef::new(
                     repository,
                     generation,
-                    SourceSpan::new(file, evidence_start, evidence_start + 5)
+                    SourceSpan::new(file, evidence_start, evidence_end)
                         .expect("fixture declaration span is valid"),
                     content_hash(b"function App() {}"),
                     None,
@@ -17912,9 +17955,9 @@ mod tests {
             },
         };
         let mut structural = NormalizedIrDocument::empty(repository, generation);
-        structural.entities.push(entity(100, symbol));
+        structural.entities.push(entity(100, 120, symbol));
         let mut project = NormalizedIrDocument::empty(repository, generation);
-        project.entities.push(entity(10, symbol));
+        project.entities.push(entity(10, 30, symbol));
 
         assert_eq!(
             missing_structural_declaration_count(&[structural.clone()], &project, true)
@@ -17925,7 +17968,7 @@ mod tests {
         let definition_source = SourceRef::new(
             repository,
             generation,
-            SourceSpan::new(file, 100, 105).expect("fixture definition span is valid"),
+            SourceSpan::new(file, 109, 112).expect("fixture definition span is valid"),
             content_hash(b"function App() {}"),
             None,
         );
@@ -17953,6 +17996,28 @@ mod tests {
             0
         );
 
+        project.occurrences[0].source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 121, 124).expect("fixture outside span is valid"),
+            content_hash(b"function App() {}"),
+            None,
+        );
+        project.occurrences[0].evidence.source = Some(project.occurrences[0].source.clone());
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("outside definition comparison succeeds"),
+            1
+        );
+
+        project.occurrences[0].source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 109, 112).expect("fixture definition span is valid"),
+            content_hash(b"function App() {}"),
+            None,
+        );
+        project.occurrences[0].evidence.source = Some(project.occurrences[0].source.clone());
         project.occurrences[0].target = OccurrenceTarget::Resolved {
             symbol: SymbolId::from_bytes([76; 20]),
         };
