@@ -20,6 +20,7 @@ pub use incremental::{
 };
 pub use lowering::{
     TreeSitterAnalyzer, TreeSitterAnalyzerConfigError, TreeSitterStructuralArtifact,
+    structural_entity_kind, structural_entity_kind_from_source,
 };
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};

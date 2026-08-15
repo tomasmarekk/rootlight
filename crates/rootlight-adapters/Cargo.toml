@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
+rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
@@ -19,7 +20,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 

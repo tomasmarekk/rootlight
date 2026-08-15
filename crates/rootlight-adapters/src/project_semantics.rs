@@ -15,6 +15,7 @@ use rootlight_adapter_sdk::{
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport, execute_parse,
 };
+use rootlight_adapter_treesitter::structural_entity_kind_from_source;
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
@@ -123,159 +124,6 @@ impl SemanticProjectLanguage {
             }
             Self::TypeScript => TYPESCRIPT_CALL_CONFIDENCE,
             Self::JavaScript | Self::Python => DYNAMIC_CALL_CONFIDENCE,
-        }
-    }
-
-    fn entity_kind(self, declaration: &str, is_nested: bool) -> EntityKind {
-        let header = declaration.trim_start();
-        match self {
-            Self::Rust => {
-                let keywords = tokenize_identifiers(header);
-                if keywords.iter().any(|keyword| keyword == "struct")
-                    || keywords.iter().any(|keyword| keyword == "union")
-                {
-                    EntityKind::Struct
-                } else if keywords.iter().any(|keyword| keyword == "enum") {
-                    EntityKind::Enum
-                } else if keywords.iter().any(|keyword| keyword == "trait") {
-                    EntityKind::Trait
-                } else if keywords.iter().any(|keyword| keyword == "type") {
-                    EntityKind::TypeAlias
-                } else if keywords.iter().any(|keyword| keyword == "const")
-                    || keywords.iter().any(|keyword| keyword == "static")
-                {
-                    EntityKind::Constant
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::TypeScript => {
-                if header.contains("interface ") {
-                    EntityKind::Interface
-                } else if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if header.contains("type ") {
-                    EntityKind::TypeAlias
-                } else if header.contains("function ") {
-                    EntityKind::Function
-                } else if is_nested || (header.contains('(') && !header.contains('=')) {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Variable
-                }
-            }
-            Self::JavaScript => {
-                if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("function ") {
-                    EntityKind::Function
-                } else if is_nested || (header.contains('(') && !header.contains('=')) {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Variable
-                }
-            }
-            Self::Python => {
-                if starts_with_word(header, "class") {
-                    EntityKind::Class
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::Go => {
-                if header.contains("interface") {
-                    EntityKind::Interface
-                } else if header.contains("struct") {
-                    EntityKind::Struct
-                } else if starts_with_word(header, "type") {
-                    EntityKind::TypeAlias
-                } else if starts_with_word(header, "const") {
-                    EntityKind::Constant
-                } else if starts_with_word(header, "var") {
-                    EntityKind::Variable
-                } else if header.starts_with("func (") || is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::Java => {
-                if header.contains("interface ") {
-                    EntityKind::Interface
-                } else if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("record ") {
-                    EntityKind::Struct
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::Cpp => {
-                if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("struct ") || header.contains("union ") {
-                    EntityKind::Struct
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if starts_with_word(header, "typedef") || header.contains("using ") {
-                    EntityKind::TypeAlias
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::CSharp => {
-                if header.contains("interface ") {
-                    EntityKind::Interface
-                } else if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("struct ") || header.contains("record ") {
-                    EntityKind::Struct
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::Php => {
-                if header.contains("interface ") {
-                    EntityKind::Interface
-                } else if header.contains("trait ") {
-                    EntityKind::Trait
-                } else if header.contains("class ") {
-                    EntityKind::Class
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if is_nested {
-                    EntityKind::Method
-                } else {
-                    EntityKind::Function
-                }
-            }
-            Self::C => {
-                if header.contains("struct ") || header.contains("union ") {
-                    EntityKind::Struct
-                } else if header.contains("enum ") {
-                    EntityKind::Enum
-                } else if starts_with_word(header, "typedef") {
-                    EntityKind::TypeAlias
-                } else {
-                    EntityKind::Function
-                }
-            }
         }
     }
 }
@@ -531,17 +379,21 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
         .collect::<BTreeMap<_, _>>();
     let mut selected = BTreeSet::new();
     for fact in facts.iter().filter(|fact| {
-        fact.kind() == SyntaxFactKind::Declaration
-            || is_definition_fact(fact)
+        matches!(
+            fact.kind(),
+            SyntaxFactKind::Declaration | SyntaxFactKind::Module
+        ) || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
             || is_identity_capture_fact(fact)
     }) {
         select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
     }
-    for declaration in facts
-        .iter()
-        .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
-    {
+    for declaration in facts.iter().filter(|fact| {
+        matches!(
+            fact.kind(),
+            SyntaxFactKind::Declaration | SyntaxFactKind::Module
+        )
+    }) {
         if let Some(definition) = facts
             .iter()
             .filter(|fact| {
@@ -942,6 +794,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 None,
             );
             let module_symbol = module_claim.symbol;
+            let mut module_flags = generated_flag(input.is_generated());
+            module_flags.push(EntityFlag::Synthetic);
             self.records.push(IrRecord::Entity(EntityRecord {
                 id: module_symbol,
                 repository: source.repository(),
@@ -954,7 +808,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 qualified_name: path.clone(),
                 container: Some(ContainerRef::File(source.span().file())),
                 visibility: EntityVisibility::Unknown,
-                flags: generated_flag(input.is_generated()),
+                flags: module_flags,
                 provenance: provenance_id,
                 evidence: direct_evidence(source.clone()),
             }));
@@ -1029,7 +883,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 let parent_declaration = fact
                     .parent()
                     .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
-                if fact.kind() == SyntaxFactKind::Declaration {
+                if matches!(
+                    fact.kind(),
+                    SyntaxFactKind::Declaration | SyntaxFactKind::Module
+                ) {
                     nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
                 } else {
                     nearest_declaration.insert(fact.local_id(), parent_declaration);
@@ -1058,7 +915,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             }
             let mut declaration_facts = facts
                 .iter()
-                .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
+                .filter(|fact| {
+                    matches!(
+                        fact.kind(),
+                        SyntaxFactKind::Declaration | SyntaxFactKind::Module
+                    )
+                })
                 .collect::<Vec<_>>();
             let positive_test_declarations =
                 positive_test_declarations(self.analyzer.language, &facts);
@@ -1203,6 +1065,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         fact.kind() == SyntaxFactKind::Occurrence
                             && !is_call_fact(fact)
                             && contains_span(declaration.span(), fact.span())
+                            && nearest_declaration.get(&fact.local_id()).copied().flatten()
+                                == Some(declaration.local_id())
                     })
                     .min_by_key(|fact| {
                         (
@@ -1277,10 +1141,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     &header,
                     name,
                 );
-                let kind = self
-                    .analyzer
-                    .language
-                    .entity_kind(declaration_text, is_type_member);
+                let Some(mut kind) =
+                    structural_entity_kind_from_source(declaration, declaration_text)
+                else {
+                    continue;
+                };
+                if kind == EntityKind::Function && is_type_member {
+                    kind = EntityKind::Method;
+                }
                 declaration_kinds.insert(declaration.local_id(), kind);
                 declaration_names.insert(declaration.local_id(), name.to_owned());
                 let signature = if supports_symbol_signature(kind) {
@@ -3589,13 +3457,6 @@ fn is_identifier(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
-}
-
-fn starts_with_word(value: &str, word: &str) -> bool {
-    value == word
-        || value
-            .strip_prefix(word)
-            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
 }
 
 fn declaration_header(language: SemanticProjectLanguage, declaration: &str) -> String {

@@ -723,7 +723,7 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
-        if let Some(kind) = entity_kind(fact) {
+        if let Some(kind) = structural_entity_kind(fact) {
             entity_candidates = checked_add(entity_candidates, 1)?;
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
@@ -1400,7 +1400,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let parent_declaration = fact
                 .parent()
                 .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
-            if entity_kind(fact).is_some() {
+            if structural_entity_kind(fact).is_some() {
                 nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
                 captures.entry(fact.local_id()).or_default();
             } else {
@@ -1494,7 +1494,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 nearest_scope_ancestor.insert(fact.local_id(), Some(context));
                 continue;
             }
-            let Some(mut kind) = entity_kind(fact) else {
+            let declaration_text = self.text_for_span(fact.span())?;
+            let Some(mut kind) = structural_entity_kind_from_source(fact, declaration_text) else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
@@ -2579,7 +2580,7 @@ fn rust_test_declarations(facts: &[&SyntaxFact]) -> BTreeSet<u64> {
             pending_parents.insert(fact.parent());
             continue;
         }
-        if entity_kind(fact).is_some()
+        if structural_entity_kind(fact).is_some()
             && pending_parents.remove(&fact.parent())
             && fact.syntax_kind().as_str() == "rust.function.declaration"
         {
@@ -2612,7 +2613,13 @@ fn test_source_path(path: &str) -> bool {
         || matches!(stem, "test" | "tests")
 }
 
-fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+/// Returns the grammar-reviewed base entity kind for one structural syntax fact.
+///
+/// Contextual lowering may refine a function to a method when its parent is a
+/// type or a Rust `impl`. Whole-project analysis uses the same base classifier
+/// before applying that identical contextual refinement.
+#[must_use]
+pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
@@ -2656,6 +2663,30 @@ fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label.contains("parameter") => Some(EntityKind::Parameter),
         SyntaxFactKind::Declaration if label.contains("variable") => Some(EntityKind::Variable),
         _ => None,
+    }
+}
+
+/// Refines a base structural kind using only the captured declaration source.
+///
+/// The Go grammar represents aliases, structs, and interfaces with one
+/// `type_spec` node. Its declaration text is therefore the only reviewed local
+/// evidence that can distinguish those kinds without repository execution.
+#[must_use]
+pub fn structural_entity_kind_from_source(
+    fact: &SyntaxFact,
+    declaration: &str,
+) -> Option<EntityKind> {
+    let kind = structural_entity_kind(fact)?;
+    if fact.syntax_kind().as_str() != "go.type.declaration" {
+        return Some(kind);
+    }
+    let header = declaration.trim_start();
+    if header.contains("interface") {
+        Some(EntityKind::Interface)
+    } else if header.contains("struct") {
+        Some(EntityKind::Struct)
+    } else {
+        Some(kind)
     }
 }
 
@@ -3067,6 +3098,8 @@ mod tests {
     fn language_specific_declarations_map_conservatively() {
         for (label, expected) in [
             ("java.constructor.declaration", EntityKind::Constructor),
+            ("java.field.declaration", EntityKind::Field),
+            ("java.local_variable.declaration", EntityKind::Variable),
             ("java.record.declaration", EntityKind::Struct),
             ("java.annotation.declaration", EntityKind::Interface),
             ("java.annotation_element.declaration", EntityKind::Method),
@@ -3077,9 +3110,34 @@ mod tests {
             ("go.constant.declaration", EntityKind::Constant),
             ("typescript.interface.declaration", EntityKind::Interface),
             ("typescript.type_alias.declaration", EntityKind::TypeAlias),
+            ("typescript.variable.declaration", EntityKind::Variable),
+            ("javascript.variable.declaration", EntityKind::Variable),
         ] {
-            assert_eq!(entity_kind(&declaration(label)), Some(expected));
+            assert_eq!(structural_entity_kind(&declaration(label)), Some(expected));
         }
+        let file = FileId::from_bytes([3; 20]);
+        let module = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Module,
+            SourceSpan::new(file, 0, 1).expect("test span is ordered"),
+            0,
+            SyntaxKindLabel::new("java.package.module").expect("test label is valid"),
+        );
+        assert_eq!(structural_entity_kind(&module), Some(EntityKind::Module));
+        let go_type = declaration("go.type.declaration");
+        assert_eq!(
+            structural_entity_kind_from_source(&go_type, "type Worker struct{}"),
+            Some(EntityKind::Struct)
+        );
+        assert_eq!(
+            structural_entity_kind_from_source(&go_type, "type Worker interface{}"),
+            Some(EntityKind::Interface)
+        );
+        assert_eq!(
+            structural_entity_kind_from_source(&go_type, "type Worker string"),
+            Some(EntityKind::TypeAlias)
+        );
     }
 
     #[test]

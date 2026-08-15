@@ -4,7 +4,7 @@
 //! classes as audited query packs, keeping these contract tests deterministic.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::Arc,
@@ -1286,6 +1286,119 @@ fn singleton_retains_large_declaration_identity_set_and_bounds_candidate_fanout(
 }
 
 #[test]
+fn bounded_project_analysis_preserves_structural_declaration_kinds() {
+    let repeated_calls = "target();\n".repeat(400);
+    let java = format!(
+        "package example;\nclass Worker {{\n  int field = 1;\n  Worker() {{}}\n  int target() {{ return field; }}\n  int run() {{ int local = 0;\n{repeated_calls}  return local;\n  }}\n}}\n"
+    );
+    let typescript = format!(
+        "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\n"
+    );
+    let javascript = format!(
+        "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\n"
+    );
+
+    let fixtures = [
+        ProjectFixture::new(
+            ["src/Helper.java", "src/Worker.java"],
+            [
+                "package example;\nclass Helper { int value = 1; }\n",
+                java.as_str(),
+            ],
+            SemanticProjectLanguage::Java,
+        ),
+        ProjectFixture::new(
+            ["src/helper.ts", "src/worker.ts"],
+            ["export const support = 1;\n", typescript.as_str()],
+            SemanticProjectLanguage::TypeScript,
+        ),
+        ProjectFixture::new(
+            ["src/helper.js", "src/worker.js"],
+            ["export const support = 1;\n", javascript.as_str()],
+            SemanticProjectLanguage::JavaScript,
+        ),
+    ];
+    for fixture in &fixtures {
+        assert_bounded_project_preserves_structural_declarations(fixture);
+    }
+}
+
+fn assert_bounded_project_preserves_structural_declarations(fixture: &ProjectFixture) {
+    let project_output = analyze_with_real_parser(fixture);
+    assert!(
+        project_output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "project-syntax-fact-limit"),
+        "{} fixture must exercise bounded project syntax",
+        fixture.language.as_str()
+    );
+
+    let limits = real_parser_limits();
+    let provider = Arc::new(real_parser());
+    let analyzer = TreeSitterAnalyzer::new(
+        provider,
+        producer_identity(),
+        LanguageId::new(fixture.language.as_str()).expect("language is valid"),
+        fixture.language.as_str(),
+        content_hash(b"real-parser-binary"),
+    )
+    .expect("structural analyzer constructs");
+    let mut structural_entities = Vec::new();
+    for (snapshot, source) in fixture.snapshots.iter().zip(&fixture.sources) {
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(snapshot, source).expect("snapshot binds"),
+            LanguageId::new(fixture.language.as_str()).expect("language is valid"),
+            EncodingId::utf8(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            fixture.build_context,
+            &limits,
+        )
+        .expect("analysis request is valid")
+        .with_generated_status(false);
+        let output = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("structural analysis commits");
+        structural_entities.extend(output.document().entities.iter().cloned());
+    }
+
+    let declarations = |entities: &[rootlight_ir::EntityRecord]| {
+        entities
+            .iter()
+            .filter(|entity| {
+                entity.kind != EntityKind::ExternalSymbol
+                    && !entity.flags.contains(&EntityFlag::Synthetic)
+            })
+            .filter_map(|entity| {
+                entity.evidence.source.as_ref().map(|source| {
+                    (
+                        (source.span(), entity.kind, entity.canonical_name.clone()),
+                        entity.id,
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let structural = declarations(&structural_entities);
+    let project = declarations(&project_output.document().entities);
+    for (key, structural_id) in structural {
+        assert_eq!(
+            project.get(&key),
+            Some(&structural_id),
+            "{} project declaration does not preserve the structural key and identity: {key:?}",
+            fixture.language.as_str(),
+        );
+    }
+}
+
+#[test]
 fn excessive_parser_diagnostics_commit_a_bounded_summary() {
     let fixture = ProjectFixture::new(
         ["dep.py", "main.py"],
@@ -1531,13 +1644,18 @@ fn fixture_facts(source: &str, file: rootlight_ids::FileId, language: &str) -> V
                 .any(|keyword| before.trim_start().ends_with(keyword));
             if declaration {
                 let declaration_id = local_id;
+                let declaration_kind = if before.trim_start().ends_with("class ") {
+                    format!("{language}.class.declaration")
+                } else {
+                    format!("{language}.function.declaration")
+                };
                 facts.push(SyntaxFact::new(
                     declaration_id,
                     Some(1),
                     SyntaxFactKind::Declaration,
                     span(file, line_start, line_end),
                     1,
-                    SyntaxKindLabel::new("fixture.declaration").expect("label is valid"),
+                    SyntaxKindLabel::new(&declaration_kind).expect("label is valid"),
                 ));
                 local_id += 1;
                 facts.push(SyntaxFact::new(
@@ -1546,7 +1664,8 @@ fn fixture_facts(source: &str, file: rootlight_ids::FileId, language: &str) -> V
                     SyntaxFactKind::Occurrence,
                     span(file, offset, offset + name.len()),
                     2,
-                    SyntaxKindLabel::new("fixture.identifier").expect("label is valid"),
+                    SyntaxKindLabel::new(&format!("{language}.definition"))
+                        .expect("label is valid"),
                 ));
                 local_id += 1;
                 if let Some(open) = line.find('(')
