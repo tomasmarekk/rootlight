@@ -1294,8 +1294,37 @@ fn bounded_project_analysis_preserves_structural_declaration_kinds() {
     let typescript = format!(
         "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\n"
     );
-    let javascript = format!(
+    let mut javascript = format!(
         "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\nfunction scopedData() {{\n  const [data, setData] = getData();\n  useEffect(() => {{\n    if (data) {{ const data = load(); setData(data); }}\n  }});\n}}\nfunction firstHooks() {{ api({{ onError() {{}}, onReady() {{}} }}); }}\nfunction secondHooks() {{ api({{ onError() {{}}, onReady() {{}} }}); }}\n"
+    );
+    javascript.push_str(
+        r#"
+function renderStream() {
+  const {pipe} = renderToPipeableStream(Root, {
+    onShellReady() {
+      const injector = new Transform({
+        transform(chunk, encoding, callback) {
+          callback(chunk, encoding);
+        },
+      });
+      pipe(injector);
+    },
+    onError(error) {
+      report(error);
+    },
+  });
+}
+function iterableValues() {
+  const iterable = {
+    async *[Symbol.asyncIterator]() {
+      for (let i = 0; i < 30; i++) {
+        yield i;
+      }
+    },
+  };
+  return iterable;
+}
+"#,
     );
 
     let fixtures = [
@@ -1319,11 +1348,25 @@ fn bounded_project_analysis_preserves_structural_declaration_kinds() {
         ),
     ];
     for fixture in &fixtures {
-        assert_bounded_project_preserves_structural_declarations(fixture);
+        let declarations = assert_bounded_project_preserves_structural_declarations(fixture);
+        if fixture.language == SemanticProjectLanguage::JavaScript {
+            for expected in [
+                (EntityKind::Method, "onShellReady"),
+                (EntityKind::Method, "onError"),
+                (EntityKind::Variable, "i"),
+            ] {
+                assert!(
+                    declarations.contains(&(expected.0, expected.1.to_owned())),
+                    "the JavaScript regression must exercise {expected:?}"
+                );
+            }
+        }
     }
 }
 
-fn assert_bounded_project_preserves_structural_declarations(fixture: &ProjectFixture) {
+fn assert_bounded_project_preserves_structural_declarations(
+    fixture: &ProjectFixture,
+) -> BTreeSet<(EntityKind, String)> {
     let project_output = analyze_with_real_parser(fixture);
     assert!(
         project_output
@@ -1388,14 +1431,18 @@ fn assert_bounded_project_preserves_structural_declarations(fixture: &ProjectFix
     };
     let structural = declarations(&structural_entities);
     let project = declarations(&project_output.document().entities);
-    for (key, structural_id) in structural {
+    for (key, structural_id) in &structural {
         assert_eq!(
-            project.get(&key),
-            Some(&structural_id),
+            project.get(key),
+            Some(structural_id),
             "{} project declaration does not preserve the structural key and identity: {key:?}",
             fixture.language.as_str(),
         );
     }
+    structural
+        .into_keys()
+        .map(|(_source, kind, name)| (kind, name))
+        .collect()
 }
 
 #[test]

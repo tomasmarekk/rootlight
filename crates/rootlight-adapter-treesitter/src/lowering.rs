@@ -1374,22 +1374,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
         let mut ordered_facts: Vec<_> = self.parse_output.facts().iter().collect();
-        ordered_facts.sort_by(|left, right| {
-            (
-                left.depth(),
-                left.span().start_byte(),
-                left.span().end_byte(),
-                syntax_fact_kind_tag(left.kind()),
-                left.syntax_kind().as_str(),
-            )
-                .cmp(&(
-                    right.depth(),
-                    right.span().start_byte(),
-                    right.span().end_byte(),
-                    syntax_fact_kind_tag(right.kind()),
-                    right.syntax_kind().as_str(),
-                ))
-        });
+        ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
         let file_is_test = test_source_path(self.request.source().path().as_str());
         let mut nearest_declaration = HashMap::new();
@@ -2707,6 +2692,29 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
                 && !matches!(character, '/' | '\\' | '(' | ')' | '{' | '}' | '[' | ']')
         }))
     .then_some(candidate)
+}
+
+/// Orders syntax facts exactly as structural declaration association consumes them.
+///
+/// Whole-project analyzers must use this order before resolving nearest
+/// declarations. Parser-local identifiers are intentionally excluded because
+/// their assignment order is not part of the structural identity contract.
+#[must_use]
+pub fn structural_syntax_fact_order(left: &SyntaxFact, right: &SyntaxFact) -> std::cmp::Ordering {
+    (
+        left.depth(),
+        left.span().start_byte(),
+        left.span().end_byte(),
+        syntax_fact_kind_tag(left.kind()),
+        left.syntax_kind().as_str(),
+    )
+        .cmp(&(
+            right.depth(),
+            right.span().start_byte(),
+            right.span().end_byte(),
+            syntax_fact_kind_tag(right.kind()),
+            right.syntax_kind().as_str(),
+        ))
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
