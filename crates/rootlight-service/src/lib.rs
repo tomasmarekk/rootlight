@@ -12628,13 +12628,6 @@ fn project_documents_match_inputs(
     observed_mapping_count == expected_mapping_count
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ProjectDeclarationKey {
-    source: SourceSpan,
-    kind: EntityKind,
-    canonical_name: String,
-}
-
 fn missing_structural_declaration_count(
     structural_documents: &[NormalizedIrDocument],
     project_document: &NormalizedIrDocument,
@@ -12648,18 +12641,18 @@ fn missing_structural_declaration_count(
     if !require_explicit_check && !entity_coverage_is_bounded {
         return Ok(0);
     }
-    let structural = project_declaration_keys(
+    let structural = project_declaration_symbols(
         structural_documents
             .iter()
             .flat_map(|document| document.entities.iter()),
-    )?;
-    let project = project_declaration_keys(project_document.entities.iter())?;
+    );
+    let project = project_declaration_symbols(project_document.entities.iter());
     u64::try_from(structural.difference(&project).count()).map_err(|_| FirstSliceError::Limits)
 }
 
-fn project_declaration_keys<'a>(
+fn project_declaration_symbols<'a>(
     entities: impl Iterator<Item = &'a rootlight_ir::EntityRecord>,
-) -> Result<BTreeSet<ProjectDeclarationKey>, FirstSliceError> {
+) -> BTreeSet<SymbolId> {
     let mut declarations = BTreeSet::new();
     for entity in entities {
         if entity.kind == EntityKind::ExternalSymbol
@@ -12667,16 +12660,13 @@ fn project_declaration_keys<'a>(
         {
             continue;
         }
-        let Some(source) = entity.evidence.source.as_ref() else {
-            continue;
-        };
-        declarations.insert(ProjectDeclarationKey {
-            source: source.span(),
-            kind: entity.kind,
-            canonical_name: entity.canonical_name.clone(),
-        });
+        // Project analysis unifies repeated stable declarations into one entity
+        // while retaining every definition site as an occurrence. The bounded
+        // structural pass can choose a different evidence representative, so
+        // only the validated generation-stable symbol identity is authoritative.
+        declarations.insert(entity.id);
     }
-    Ok(declarations)
+    declarations
 }
 
 fn merge_project_documents(
@@ -17839,6 +17829,58 @@ mod tests {
             diagnostic.code == "project-adapter-capacity-fallback"
                 && diagnostic.message == "project analysis for python used structural fallback"
         }));
+    }
+
+    #[test]
+    fn bounded_project_syntax_accepts_a_unified_declaration_representative() {
+        let repository = derive_repository(b"unified-declaration-repository").id();
+        let generation = GenerationId::from_bytes([71; 20]);
+        let file = FileId::from_bytes([72; 20]);
+        let symbol = SymbolId::from_bytes([73; 20]);
+        let provenance = FactId::from_bytes([74; 20]);
+        let entity = |evidence_start: u64, symbol| EntityRecord {
+            id: symbol,
+            repository,
+            generation,
+            kind: EntityKind::Function,
+            language: "javascript".to_owned(),
+            tier: AnalysisTier::TierB,
+            canonical_name: "App".to_owned(),
+            display_name: "App".to_owned(),
+            qualified_name: "App".to_owned(),
+            container: Some(ContainerRef::Repository(repository)),
+            visibility: EntityVisibility::Unknown,
+            flags: Vec::new(),
+            provenance,
+            evidence: FactEvidence {
+                source: Some(SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, evidence_start, evidence_start + 5)
+                        .expect("fixture declaration span is valid"),
+                    content_hash(b"function App() {}"),
+                    None,
+                )),
+                derivation: Vec::new(),
+            },
+        };
+        let mut structural = NormalizedIrDocument::empty(repository, generation);
+        structural.entities.push(entity(100, symbol));
+        let mut project = NormalizedIrDocument::empty(repository, generation);
+        project.entities.push(entity(10, symbol));
+
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("unified declaration comparison succeeds"),
+            0
+        );
+
+        project.entities[0].id = SymbolId::from_bytes([75; 20]);
+        assert_eq!(
+            missing_structural_declaration_count(&[structural], &project, true)
+                .expect("missing declaration comparison succeeds"),
+            1
+        );
     }
 
     #[test]
