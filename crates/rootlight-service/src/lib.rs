@@ -12641,32 +12641,79 @@ fn missing_structural_declaration_count(
     if !require_explicit_check && !entity_coverage_is_bounded {
         return Ok(0);
     }
-    let structural = project_declaration_symbols(
+    let structural = structural_declaration_keys(
         structural_documents
             .iter()
             .flat_map(|document| document.entities.iter()),
     );
-    let project = project_declaration_symbols(project_document.entities.iter());
+    let project = project_declaration_keys(project_document);
     u64::try_from(structural.difference(&project).count()).map_err(|_| FirstSliceError::Limits)
 }
 
-fn project_declaration_symbols<'a>(
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectDeclarationKey {
+    source: SourceSpan,
+    kind: EntityKind,
+    canonical_name: String,
+}
+
+fn structural_declaration_keys<'a>(
     entities: impl Iterator<Item = &'a rootlight_ir::EntityRecord>,
-) -> BTreeSet<SymbolId> {
+) -> BTreeSet<ProjectDeclarationKey> {
     let mut declarations = BTreeSet::new();
     for entity in entities {
-        if entity.kind == EntityKind::ExternalSymbol
-            || entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
-        {
+        let Some(key) = project_declaration_key(entity) else {
             continue;
-        }
-        // Project analysis unifies repeated stable declarations into one entity
-        // while retaining every definition site as an occurrence. The bounded
-        // structural pass can choose a different evidence representative, so
-        // only the validated generation-stable symbol identity is authoritative.
-        declarations.insert(entity.id);
+        };
+        declarations.insert(key);
     }
     declarations
+}
+
+fn project_declaration_keys(document: &NormalizedIrDocument) -> BTreeSet<ProjectDeclarationKey> {
+    let mut declarations = BTreeSet::new();
+    let mut identity = BTreeMap::new();
+    for entity in &document.entities {
+        let Some(key) = project_declaration_key(entity) else {
+            continue;
+        };
+        identity.insert(entity.id, (entity.kind, entity.canonical_name.clone()));
+        declarations.insert(key);
+    }
+    for occurrence in &document.occurrences {
+        if occurrence.role != OccurrenceRole::Definition {
+            continue;
+        }
+        let rootlight_ir::OccurrenceTarget::Resolved { symbol } = &occurrence.target else {
+            continue;
+        };
+        let Some((kind, canonical_name)) = identity.get(symbol) else {
+            continue;
+        };
+        // Project analysis intentionally unifies repeated declarations under
+        // one stable entity. Every exact definition occurrence preserves the
+        // source representative that bounded structural output may select.
+        declarations.insert(ProjectDeclarationKey {
+            source: occurrence.source.span(),
+            kind: *kind,
+            canonical_name: canonical_name.clone(),
+        });
+    }
+    declarations
+}
+
+fn project_declaration_key(entity: &rootlight_ir::EntityRecord) -> Option<ProjectDeclarationKey> {
+    if entity.kind == EntityKind::ExternalSymbol
+        || entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+    {
+        return None;
+    }
+    let source = entity.evidence.source.as_ref()?;
+    Some(ProjectDeclarationKey {
+        source: source.span(),
+        kind: entity.kind,
+        canonical_name: entity.canonical_name.clone(),
+    })
 }
 
 fn merge_project_documents(
@@ -17832,7 +17879,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_project_syntax_accepts_a_unified_declaration_representative() {
+    fn bounded_project_syntax_accepts_an_exact_unified_definition_site() {
         let repository = derive_repository(b"unified-declaration-repository").id();
         let generation = GenerationId::from_bytes([71; 20]);
         let file = FileId::from_bytes([72; 20]);
@@ -17871,14 +17918,47 @@ mod tests {
 
         assert_eq!(
             missing_structural_declaration_count(&[structural.clone()], &project, true)
-                .expect("unified declaration comparison succeeds"),
+                .expect("different declaration representative compares"),
+            1
+        );
+
+        let definition_source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 100, 105).expect("fixture definition span is valid"),
+            content_hash(b"function App() {}"),
+            None,
+        );
+        project.occurrences.push(OccurrenceRecord {
+            id: FactId::from_bytes([75; 20]),
+            repository,
+            generation,
+            file,
+            source: definition_source.clone(),
+            role: OccurrenceRole::Definition,
+            enclosing: None,
+            target: OccurrenceTarget::Resolved { symbol },
+            syntactic_text_hash: content_hash(b"App"),
+            syntax_kind: "identifier.definition".to_owned(),
+            provenance,
+            confidence: rootlight_ir::Confidence::new(1000).expect("fixture confidence is valid"),
+            evidence: FactEvidence {
+                source: Some(definition_source),
+                derivation: Vec::new(),
+            },
+        });
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("unified definition comparison succeeds"),
             0
         );
 
-        project.entities[0].id = SymbolId::from_bytes([75; 20]);
+        project.occurrences[0].target = OccurrenceTarget::Resolved {
+            symbol: SymbolId::from_bytes([76; 20]),
+        };
         assert_eq!(
             missing_structural_declaration_count(&[structural], &project, true)
-                .expect("missing declaration comparison succeeds"),
+                .expect("unresolved declaration identity compares"),
             1
         );
     }
