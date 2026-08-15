@@ -142,6 +142,9 @@ const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const REFINEMENT_ADMISSION_WAIT: Duration = Duration::from_secs(2);
 const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+// Semantic refinement starts after structural publication and must cover the
+// reviewed two-hour large-repository profile while remaining time-bounded.
+const DETACHED_SEMANTIC_REFINEMENT_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WATCHER_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(250);
 const WATCHER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -5297,7 +5300,7 @@ fn complete_auto_structural_index(
     let semantic_operation = semantic_refinement_operation(operation);
 
     let refinement_deadline = Instant::now()
-        .checked_add(DETACHED_INDEX_TIMEOUT)
+        .checked_add(DETACHED_SEMANTIC_REFINEMENT_TIMEOUT)
         .ok_or_else(internal_error)?;
     let semantic_record = ensure_semantic_refinement_operation(
         SemanticRefinementAdmission {
@@ -13943,6 +13946,22 @@ mod tests {
                 .expect("queue rejection is persisted")
                 .code(),
             ErrorCode::ResourceExhausted
+        );
+        let semantic_context = journal
+            .repository_operation_context(semantic_operation)
+            .expect("semantic repository context is durable");
+        let deadline_unix_ms = semantic_record
+            .deadline_unix_ms
+            .expect("detached semantic refinement has a deadline");
+        let admitted_timeout_ms = deadline_unix_ms
+            .checked_sub(semantic_context.started_unix_ms)
+            .expect("semantic deadline follows admission");
+        let configured_timeout_ms = u64::try_from(DETACHED_SEMANTIC_REFINEMENT_TIMEOUT.as_millis())
+            .expect("semantic timeout fits");
+        assert!(
+            (configured_timeout_ms.saturating_sub(5_000)..=configured_timeout_ms)
+                .contains(&admitted_timeout_ms),
+            "semantic refinement retains the reviewed two-hour deadline"
         );
         assert!(
             semantic_refinements
