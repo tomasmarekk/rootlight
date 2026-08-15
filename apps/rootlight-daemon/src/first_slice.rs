@@ -103,6 +103,8 @@ use rootlight_service::{
         CatalogSortKey,
     },
 };
+#[cfg(test)]
+use rootlight_service::{FirstSliceProjectCoverageLanguage, FirstSliceProjectCoverageReason};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::graph_projection::{
@@ -10524,6 +10526,10 @@ fn build_service_error(
         FirstSliceError::ResourceLimit { resource, .. } => {
             let failure_stage = if resource == rootlight_service::FirstSliceResource::Repositories {
                 "admission"
+            } else if context
+                .is_some_and(|context| context.provider == "rootlight-project-analyzer")
+            {
+                "analysis"
             } else {
                 "executing"
             };
@@ -10616,6 +10622,13 @@ fn build_service_error(
             "analysis",
         ),
         FirstSliceError::IncompleteCoverage => (
+            ErrorCode::IncompleteCoverage,
+            "semantic refinement coverage is incomplete",
+            false,
+            "incomplete_coverage",
+            "analysis",
+        ),
+        FirstSliceError::ProjectCoverageIncomplete { .. } => (
             ErrorCode::IncompleteCoverage,
             "semantic refinement coverage is incomplete",
             false,
@@ -10973,11 +10986,36 @@ fn build_service_error(
             )
             .next_action(NextAction::CollectSupportBundle);
     }
-    if error == FirstSliceError::IncompleteCoverage {
-        builder = builder.detail(
-            static_detail_key("structural_fallback"),
-            PublicValue::Boolean(true),
-        );
+    if matches!(
+        error,
+        FirstSliceError::IncompleteCoverage | FirstSliceError::ProjectCoverageIncomplete { .. }
+    ) {
+        builder = builder
+            .detail(
+                static_detail_key("structural_fallback"),
+                PublicValue::Boolean(true),
+            )
+            .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::ProjectCoverageIncomplete {
+        language,
+        reason,
+        missing_declarations,
+    } = error
+    {
+        builder = builder
+            .detail(
+                static_detail_key("language"),
+                PublicValue::Label(static_safe_label(language.as_str())),
+            )
+            .detail(
+                static_detail_key("coverage_reason"),
+                PublicValue::Label(static_safe_label(reason.as_str())),
+            )
+            .detail(
+                static_detail_key("missing_declarations"),
+                PublicValue::Unsigned(missing_declarations),
+            );
     }
     if error == FirstSliceError::AdapterWallTimeLimit {
         builder = builder
@@ -12680,8 +12718,124 @@ mod tests {
                 .get(&static_detail_key("structural_fallback")),
             Some(&PublicValue::Boolean(true))
         );
-        assert_eq!(incomplete.next_actions(), &[NextAction::InspectOperation]);
+        assert_eq!(
+            incomplete.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+            ]
+        );
         assert!(!semantic_refinement_degrades_adapter(&incomplete));
+
+        let declaration_loss = repository_index_error(
+            FirstSliceError::ProjectCoverageIncomplete {
+                language: FirstSliceProjectCoverageLanguage::Java,
+                reason: FirstSliceProjectCoverageReason::StructuralDeclarationLoss,
+                missing_declarations: 1_584,
+            },
+            context,
+        );
+        assert_eq!(declaration_loss.code(), ErrorCode::IncompleteCoverage);
+        assert!(!declaration_loss.retryable());
+        assert_eq!(
+            declaration_loss
+                .details()
+                .get(&static_detail_key("language")),
+            Some(&PublicValue::Label(static_safe_label("java")))
+        );
+        assert_eq!(
+            declaration_loss
+                .details()
+                .get(&static_detail_key("coverage_reason")),
+            Some(&PublicValue::Label(static_safe_label(
+                "structural_declaration_loss"
+            )))
+        );
+        assert_eq!(
+            declaration_loss
+                .details()
+                .get(&static_detail_key("missing_declarations")),
+            Some(&PublicValue::Unsigned(1_584))
+        );
+        assert_eq!(
+            declaration_loss
+                .details()
+                .get(&static_detail_key("structural_fallback")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            declaration_loss.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+            ]
+        );
+        assert!(!semantic_refinement_degrades_adapter(&declaration_loss));
+
+        let facts_truncated = repository_index_error(
+            FirstSliceError::ProjectCoverageIncomplete {
+                language: FirstSliceProjectCoverageLanguage::TypeScript,
+                reason: FirstSliceProjectCoverageReason::FactsTruncated,
+                missing_declarations: 0,
+            },
+            context,
+        );
+        assert_eq!(facts_truncated.code(), ErrorCode::IncompleteCoverage);
+        assert_eq!(
+            facts_truncated
+                .details()
+                .get(&static_detail_key("language")),
+            Some(&PublicValue::Label(static_safe_label("typescript")))
+        );
+        assert_eq!(
+            facts_truncated
+                .details()
+                .get(&static_detail_key("coverage_reason")),
+            Some(&PublicValue::Label(static_safe_label(
+                "project_facts_truncated"
+            )))
+        );
+        assert_eq!(
+            facts_truncated
+                .details()
+                .get(&static_detail_key("missing_declarations")),
+            Some(&PublicValue::Unsigned(0))
+        );
+        assert!(!semantic_refinement_degrades_adapter(&facts_truncated));
+
+        let normalized_capacity = repository_index_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::Entities,
+                observed: 3,
+                limit: 2,
+            },
+            context,
+        );
+        assert_eq!(normalized_capacity.code(), ErrorCode::ResourceExhausted);
+        assert_eq!(
+            normalized_capacity
+                .details()
+                .get(&static_detail_key("failure_stage")),
+            Some(&PublicValue::Label(static_safe_label("analysis")))
+        );
+        assert_eq!(
+            normalized_capacity
+                .details()
+                .get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("entities")))
+        );
+        assert_eq!(
+            normalized_capacity
+                .details()
+                .get(&static_detail_key("observed")),
+            Some(&PublicValue::Unsigned(3))
+        );
+        assert_eq!(
+            normalized_capacity
+                .details()
+                .get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(2))
+        );
         assert!(semantic_refinement_degrades_adapter(&process));
     }
 

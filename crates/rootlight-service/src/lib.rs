@@ -3609,6 +3609,15 @@ pub enum FirstSliceProjectAnalysisError {
     /// Project facts exceeded the generation's normalized-IR capacity.
     #[error("project adapter output exceeded normalized fact capacity")]
     Capacity,
+    /// Aggregate project facts were truncated before semantic composition.
+    #[error("project adapter facts were truncated")]
+    FactsTruncated,
+    /// Project output omitted structural declarations required for safe replacement.
+    #[error("project adapter omitted {missing_declarations} structural declarations")]
+    StructuralDeclarationLoss {
+        /// Exact source-free count of missing structural declaration claims.
+        missing_declarations: u64,
+    },
 }
 
 impl FirstSliceProjectAnalysisError {
@@ -3625,6 +3634,8 @@ impl FirstSliceProjectAnalysisError {
             Self::ProcessFailure => "project-adapter-process-fallback",
             Self::Analysis => "project-adapter-analysis-fallback",
             Self::Capacity => "project-adapter-capacity-fallback",
+            Self::FactsTruncated => "project-adapter-facts-truncated-fallback",
+            Self::StructuralDeclarationLoss { .. } => "project-adapter-declaration-loss-fallback",
         }
     }
 }
@@ -4991,9 +5002,10 @@ impl FirstSliceService {
     ///
     /// Returns [`FirstSliceError::Catalog`] when durable publication is
     /// unavailable, [`FirstSliceError::Adapter`] when no deep analyzer is
-    /// configured or the adapter fails, [`FirstSliceError::IncompleteCoverage`]
-    /// when bounded output cannot preserve the structural declaration set, and
-    /// the normal bounded indexing failures from
+    /// configured or the adapter fails,
+    /// [`FirstSliceError::ProjectCoverageIncomplete`] when bounded project
+    /// output cannot safely replace structural facts, and the normal bounded
+    /// indexing failures from
     /// [`Self::index_repository_with_mode`]. At least two retained generations
     /// are required so the structural parent remains queryable after
     /// refinement.
@@ -5812,6 +5824,7 @@ impl FirstSliceService {
             &sources,
             &source_languages,
             mode,
+            representation == DurableGenerationRepresentation::RecoverySnapshot,
             cancellation,
             structurally_examined_files,
             structurally_examined_bytes,
@@ -6189,8 +6202,8 @@ impl FirstSliceService {
     ///
     /// Returns [`FirstSliceError::Catalog`] when durable publication is
     /// unavailable, [`FirstSliceError::Adapter`] when deep analysis is
-    /// unavailable or fails, [`FirstSliceError::IncompleteCoverage`] when
-    /// bounded output cannot preserve the structural declaration set,
+    /// unavailable or fails, [`FirstSliceError::ProjectCoverageIncomplete`]
+    /// when bounded project output cannot safely replace structural facts,
     /// [`FirstSliceError::Identity`] when the active lineage changed during
     /// preparation, and the normal bounded preparation failures from
     /// [`Self::prepare_repository_with_mode`].
@@ -6297,6 +6310,7 @@ impl FirstSliceService {
         sources: &[RustSourceInput],
         source_languages: &BTreeMap<FileId, String>,
         mode: FirstSliceIndexMode,
+        require_complete_project_analysis: bool,
         cancellation: &Cancellation,
         baseline_files_examined: u64,
         baseline_bytes_examined: u64,
@@ -6440,15 +6454,39 @@ impl FirstSliceService {
                                         document.diagnostics.iter().any(|diagnostic| {
                                             diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
                                         });
-                                    if aggregate_facts_truncated
-                                        || !project_document_preserves_structural_declarations(
+                                    let missing_declarations =
+                                        missing_structural_declaration_count(
                                             &fallback_documents,
                                             &document,
                                             syntax_facts_bounded,
-                                        )?
-                                    {
-                                        fallback_error =
-                                            Some(FirstSliceProjectAnalysisError::Capacity);
+                                        )?;
+                                    if aggregate_facts_truncated || missing_declarations > 0 {
+                                        if require_complete_project_analysis {
+                                            let language =
+                                                FirstSliceProjectCoverageLanguage::from_label(
+                                                    &language,
+                                                )
+                                                .ok_or(FirstSliceError::Adapter)?;
+                                            let reason = if aggregate_facts_truncated {
+                                                FirstSliceProjectCoverageReason::FactsTruncated
+                                            } else {
+                                                FirstSliceProjectCoverageReason::StructuralDeclarationLoss
+                                            };
+                                            return Err(
+                                                FirstSliceError::ProjectCoverageIncomplete {
+                                                    language,
+                                                    reason,
+                                                    missing_declarations,
+                                                },
+                                            );
+                                        }
+                                        fallback_error = Some(if aggregate_facts_truncated {
+                                            FirstSliceProjectAnalysisError::FactsTruncated
+                                        } else {
+                                            FirstSliceProjectAnalysisError::StructuralDeclarationLoss {
+                                                missing_declarations,
+                                            }
+                                        });
                                     } else {
                                         match append_project_document_with_capacity(
                                             target,
@@ -6456,15 +6494,19 @@ impl FirstSliceService {
                                             self.analysis_limits.ir(),
                                             &mut append_state,
                                         ) {
-                                            Ok(ProjectDocumentAppend::Complete) => continue,
-                                            Ok(ProjectDocumentAppend::CapacityExceeded) => {
+                                            Ok(()) => continue,
+                                            Err(error @ FirstSliceError::ResourceLimit { .. })
+                                                if require_complete_project_analysis =>
+                                            {
+                                                return Err(error);
+                                            }
+                                            Err(FirstSliceError::ResourceLimit { .. }) => {
                                                 fallback_error =
                                                     Some(FirstSliceProjectAnalysisError::Capacity);
                                             }
-                                            Err(
-                                                error @ (FirstSliceError::Limits
-                                                | FirstSliceError::ResourceLimit { .. }),
-                                            ) => return Err(error),
+                                            Err(error @ FirstSliceError::Limits) => {
+                                                return Err(error);
+                                            }
                                             Err(_) => {
                                                 fallback_error =
                                                     Some(FirstSliceProjectAnalysisError::Analysis);
@@ -10396,6 +10438,88 @@ impl FirstSliceResource {
     }
 }
 
+/// Closed project languages safe to expose in semantic coverage diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceProjectCoverageLanguage {
+    /// Rust project analysis.
+    Rust,
+    /// TypeScript project analysis.
+    TypeScript,
+    /// JavaScript project analysis.
+    JavaScript,
+    /// Python project analysis.
+    Python,
+    /// Go project analysis.
+    Go,
+    /// Java project analysis.
+    Java,
+    /// C++ project analysis.
+    Cpp,
+    /// C# project analysis.
+    CSharp,
+    /// PHP project analysis.
+    Php,
+    /// C project analysis.
+    C,
+}
+
+impl FirstSliceProjectCoverageLanguage {
+    const fn from_label(label: &str) -> Option<Self> {
+        match label.as_bytes() {
+            b"rust" => Some(Self::Rust),
+            b"typescript" => Some(Self::TypeScript),
+            b"javascript" => Some(Self::JavaScript),
+            b"python" => Some(Self::Python),
+            b"go" => Some(Self::Go),
+            b"java" => Some(Self::Java),
+            b"cpp" => Some(Self::Cpp),
+            b"csharp" => Some(Self::CSharp),
+            b"php" => Some(Self::Php),
+            b"c" => Some(Self::C),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical source-free language label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Php => "php",
+            Self::C => "c",
+        }
+    }
+}
+
+/// Closed reason why bounded project evidence cannot replace structural facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceProjectCoverageReason {
+    /// Aggregate project facts were truncated before composition.
+    FactsTruncated,
+    /// Project output omitted structural declaration claims.
+    StructuralDeclarationLoss,
+}
+
+impl FirstSliceProjectCoverageReason {
+    /// Returns the stable source-free diagnostic label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FactsTruncated => "project_facts_truncated",
+            Self::StructuralDeclarationLoss => "structural_declaration_loss",
+        }
+    }
+}
+
 /// Supported configuration that governs repository-registration capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -10511,6 +10635,18 @@ pub enum FirstSliceError {
     /// Bounded semantic output could not safely replace structural evidence.
     #[error("first-slice semantic refinement coverage is incomplete")]
     IncompleteCoverage,
+    /// Bounded project evidence could not safely replace structural facts.
+    #[error(
+        "first-slice project coverage for {language:?} is incomplete: {reason:?}, missing {missing_declarations} declarations"
+    )]
+    ProjectCoverageIncomplete {
+        /// Canonical project language.
+        language: FirstSliceProjectCoverageLanguage,
+        /// Closed coverage failure reason.
+        reason: FirstSliceProjectCoverageReason,
+        /// Exact source-free number of omitted structural declarations.
+        missing_declarations: u64,
+    },
     /// The isolated project adapter crossed its configured wall-time ceiling.
     #[error("first-slice project adapter wall-time limit was reached")]
     AdapterWallTimeLimit,
@@ -12499,18 +12635,18 @@ struct ProjectDeclarationKey {
     canonical_name: String,
 }
 
-fn project_document_preserves_structural_declarations(
+fn missing_structural_declaration_count(
     structural_documents: &[NormalizedIrDocument],
     project_document: &NormalizedIrDocument,
     require_explicit_check: bool,
-) -> Result<bool, FirstSliceError> {
+) -> Result<u64, FirstSliceError> {
     let entity_coverage_is_bounded = project_document.coverage_records.iter().any(|coverage| {
         coverage.domain == IrFactDomain::Entities
             && coverage.status != CoverageStatus::Complete
             && coverage.skipped > 0
     });
     if !require_explicit_check && !entity_coverage_is_bounded {
-        return Ok(true);
+        return Ok(0);
     }
     let structural = project_declaration_keys(
         structural_documents
@@ -12518,7 +12654,7 @@ fn project_document_preserves_structural_declarations(
             .flat_map(|document| document.entities.iter()),
     )?;
     let project = project_declaration_keys(project_document.entities.iter())?;
-    Ok(structural.is_subset(&project))
+    u64::try_from(structural.difference(&project).count()).map_err(|_| FirstSliceError::Limits)
 }
 
 fn project_declaration_keys<'a>(
@@ -12947,7 +13083,9 @@ fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
         "project-adapter-output-limit-fallback" => Some(FirstSliceError::AdapterOutputLimit),
         "project-adapter-memory-limit-fallback" => Some(FirstSliceError::AdapterMemoryLimit),
         "project-adapter-process-fallback" => Some(FirstSliceError::AdapterProcessFailure),
-        "project-adapter-capacity-fallback" => Some(FirstSliceError::IncompleteCoverage),
+        "project-adapter-capacity-fallback"
+        | "project-adapter-facts-truncated-fallback"
+        | "project-adapter-declaration-loss-fallback" => Some(FirstSliceError::IncompleteCoverage),
         _ if is_project_fallback_code(code) => Some(FirstSliceError::Adapter),
         _ => None,
     }
@@ -13300,24 +13438,12 @@ fn append_project_document_with_capacity(
     source: NormalizedIrDocument,
     limits: &IrLimits,
     append_state: &mut DocumentAppendState,
-) -> Result<ProjectDocumentAppend, FirstSliceError> {
+) -> Result<(), FirstSliceError> {
     // Decide whether to retain full project facts before the shared append path
     // can reserve or truncate any target-owned collection.
-    match preflight_normalized_document_append(target, &source, limits) {
-        Ok(()) => {}
-        Err(FirstSliceError::ResourceLimit { .. }) => {
-            return Ok(ProjectDocumentAppend::CapacityExceeded);
-        }
-        Err(error) => return Err(error),
-    }
+    preflight_normalized_document_append(target, &source, limits)?;
     append_normalized_document(target, source, limits, append_state)?;
-    Ok(ProjectDocumentAppend::Complete)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectDocumentAppend {
-    Complete,
-    CapacityExceeded,
+    Ok(())
 }
 
 fn preflight_normalized_document_append(
@@ -16276,9 +16402,12 @@ mod tests {
                 capacity_document,
                 &capacity_limits,
                 &mut append_state,
-            )
-            .expect("project capacity exhaustion is classified"),
-            ProjectDocumentAppend::CapacityExceeded
+            ),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Entities,
+                observed: 1,
+                limit: 0,
+            })
         );
         assert!(target.entities.is_empty());
         assert!(target.files.is_empty());
@@ -16316,7 +16445,11 @@ mod tests {
                 &capacity_limits,
                 &mut rejected_state,
             ),
-            Ok(ProjectDocumentAppend::CapacityExceeded)
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Entities,
+                observed: 1,
+                limit: 0,
+            })
         );
         assert_eq!(rejected_target, expected_target);
 
@@ -17594,6 +17727,14 @@ mod tests {
             project_fallback_error("project-adapter-capacity-fallback"),
             Some(FirstSliceError::IncompleteCoverage)
         );
+        assert_eq!(
+            project_fallback_error("project-adapter-facts-truncated-fallback"),
+            Some(FirstSliceError::IncompleteCoverage)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-declaration-loss-fallback"),
+            Some(FirstSliceError::IncompleteCoverage)
+        );
         assert_eq!(project_fallback_error("unrelated-diagnostic"), None);
     }
 
@@ -17784,7 +17925,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(located.data.hits.len(), 1);
         assert!(receipt.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "project-adapter-capacity-fallback"
+            diagnostic.code == "project-adapter-declaration-loss-fallback"
                 && diagnostic.message == "project analysis for python used structural fallback"
         }));
     }
@@ -17846,7 +17987,14 @@ mod tests {
             .support_inventory_snapshot()
             .expect("post-refinement storage inventory verifies");
 
-        assert_eq!(error, FirstSliceError::IncompleteCoverage);
+        assert!(matches!(
+            error,
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Entities,
+                observed: 3,
+                limit: 2,
+            }
+        ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(progress.iter().all(|observed| observed.stage
             != FirstSliceIndexStage::Persistence
@@ -19674,14 +19822,22 @@ mod tests {
                     &cancellation,
                 )
                 .expect("structural generation publishes");
-            assert!(matches!(
-                service.prepare_semantic_refinement(
-                    fixture.path(),
-                    structural.generation,
-                    &cancellation,
-                ),
-                Err(FirstSliceError::IncompleteCoverage)
-            ));
+            let error = match service.prepare_semantic_refinement(
+                fixture.path(),
+                structural.generation,
+                &cancellation,
+            ) {
+                Ok(_) => panic!("incomplete project coverage cannot publish"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                FirstSliceError::ProjectCoverageIncomplete {
+                    language: FirstSliceProjectCoverageLanguage::Python,
+                    reason: FirstSliceProjectCoverageReason::StructuralDeclarationLoss,
+                    missing_declarations: 1,
+                }
+            );
             structural
         };
 
