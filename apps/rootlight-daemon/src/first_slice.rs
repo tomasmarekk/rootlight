@@ -4275,6 +4275,26 @@ enum RepositoryIndexIntent {
     SemanticRefinement { structural_generation: GenerationId },
 }
 
+fn repository_index_work_deadline(
+    intent: RepositoryIndexIntent,
+    detached: bool,
+    admitted_deadline: Instant,
+    now: Instant,
+) -> Result<Instant, PublicError> {
+    if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. }) {
+        // The semantic queue has already persisted its reviewed deadline.
+        // Shortening it here would make durable admission disagree with the
+        // cancellation token that owns the actual refinement work.
+        return Ok(admitted_deadline);
+    }
+    if detached {
+        return now
+            .checked_add(DETACHED_INDEX_TIMEOUT)
+            .ok_or_else(internal_error);
+    }
+    Ok(admitted_deadline)
+}
+
 fn repository_index_with_intent(
     lanes: &FirstSliceServiceLanes,
     resources: ServiceRequestResources<'_>,
@@ -4349,13 +4369,8 @@ fn repository_index_with_intent(
         return Err(invalid_argument());
     }
     let detached = request.detached;
-    let work_deadline = if detached {
-        Instant::now()
-            .checked_add(DETACHED_INDEX_TIMEOUT)
-            .ok_or_else(internal_error)?
-    } else {
-        context.deadline
-    };
+    let work_deadline =
+        repository_index_work_deadline(intent, detached, context.deadline, Instant::now())?;
     let lifecycle_deadline = lifecycle_deadline(work_deadline)?;
     let deadline_unix_ms = deadline_unix_ms(work_deadline)?;
     let plan_hash = match intent {
@@ -13972,6 +13987,36 @@ mod tests {
         drop(receiver);
         drop(handle);
         actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn semantic_refinement_preserves_its_admitted_work_deadline() {
+        let now = Instant::now();
+        let admitted_deadline = now + DETACHED_SEMANTIC_REFINEMENT_TIMEOUT;
+        let structural_generation = GenerationId::from_bytes([37; 20]);
+
+        assert_eq!(
+            repository_index_work_deadline(
+                RepositoryIndexIntent::SemanticRefinement {
+                    structural_generation,
+                },
+                true,
+                admitted_deadline,
+                now,
+            )
+            .expect("semantic deadline is valid"),
+            admitted_deadline
+        );
+        assert_eq!(
+            repository_index_work_deadline(
+                RepositoryIndexIntent::Requested,
+                true,
+                admitted_deadline,
+                now,
+            )
+            .expect("detached index deadline is valid"),
+            now + DETACHED_INDEX_TIMEOUT
+        );
     }
 
     #[test]
