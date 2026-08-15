@@ -1289,20 +1289,20 @@ fn singleton_retains_large_declaration_identity_set_and_bounds_candidate_fanout(
 fn bounded_project_analysis_preserves_structural_declaration_kinds() {
     let repeated_calls = "target();\n".repeat(400);
     let java = format!(
-        "package example;\nclass Worker {{\n  int field = 1;\n  Worker() {{}}\n  int target() {{ return field; }}\n  int run() {{ int local = 0;\n{repeated_calls}  return local;\n  }}\n}}\n"
+        "package example.deep;\nclass Worker {{\n  int field = 1;\n  Worker() {{}}\n  int target() {{ return field; }}\n  int run() {{ int local = 0;\n{repeated_calls}  return local;\n  }}\n}}\n"
     );
     let typescript = format!(
         "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\n"
     );
     let javascript = format!(
-        "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\n"
+        "class Worker {{\n  field = 1;\n  target() {{ return this.field; }}\n  run() {{ let local = 0;\n{repeated_calls}    return local;\n  }}\n}}\nconst helper = () => 1;\nfunction scopedData() {{\n  const [data, setData] = getData();\n  useEffect(() => {{\n    if (data) {{ const data = load(); setData(data); }}\n  }});\n}}\nfunction firstHooks() {{ api({{ onError() {{}}, onReady() {{}} }}); }}\nfunction secondHooks() {{ api({{ onError() {{}}, onReady() {{}} }}); }}\n"
     );
 
     let fixtures = [
         ProjectFixture::new(
             ["src/Helper.java", "src/Worker.java"],
             [
-                "package example;\nclass Helper { int value = 1; }\n",
+                "package example.deep;\nclass Helper { int value = 1; }\n",
                 java.as_str(),
             ],
             SemanticProjectLanguage::Java,

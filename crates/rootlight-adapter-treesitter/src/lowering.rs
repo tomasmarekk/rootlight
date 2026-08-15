@@ -1535,7 +1535,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
-                let Some(name) = captured_name(text, self.request.limits().ir().max_string_bytes)
+                let Some(name) =
+                    structural_captured_name(text, self.request.limits().ir().max_string_bytes)
                 else {
                     nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                     nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -2690,7 +2691,13 @@ pub fn structural_entity_kind_from_source(
     }
 }
 
-fn captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
+/// Returns the bounded name accepted from a reviewed structural capture.
+///
+/// Project analyzers use the same boundary when preserving structural
+/// declarations so grammar-valid scoped names cannot disappear during
+/// semantic refinement.
+#[must_use]
+pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
     let candidate = text.trim();
     (!candidate.is_empty()
         && candidate.len() <= maximum_bytes

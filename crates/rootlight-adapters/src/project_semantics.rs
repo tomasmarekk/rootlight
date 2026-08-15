@@ -15,7 +15,7 @@ use rootlight_adapter_sdk::{
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport, execute_parse,
 };
-use rootlight_adapter_treesitter::structural_entity_kind_from_source;
+use rootlight_adapter_treesitter::{structural_captured_name, structural_entity_kind_from_source};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
@@ -1063,28 +1063,21 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .iter()
                     .filter(|fact| {
                         fact.kind() == SyntaxFactKind::Occurrence
+                            && is_definition_fact(fact)
                             && !is_call_fact(fact)
                             && contains_span(declaration.span(), fact.span())
                             && nearest_declaration.get(&fact.local_id()).copied().flatten()
                                 == Some(declaration.local_id())
                     })
-                    .min_by_key(|fact| {
-                        (
-                            !is_definition_fact(fact),
-                            fact.span().start_byte(),
-                            span_len(fact.span()),
-                        )
-                    });
+                    .min_by_key(|fact| (fact.span().start_byte(), span_len(fact.span())));
                 let Some(definition) = definition else {
                     continue;
                 };
-                let Some(name) = source_text(bytes, definition.span()) else {
+                let Some(name) = source_text(bytes, definition.span()).and_then(|name| {
+                    structural_captured_name(name, self.request.limits().ir().max_string_bytes)
+                }) else {
                     continue;
                 };
-                if !is_identifier(name) || name.len() > self.request.limits().ir().max_string_bytes
-                {
-                    continue;
-                }
                 let declaration_text = source_text(bytes, declaration.span())
                     .ok_or_else(|| provider_failure("project-declaration-span"))?;
                 let header = declaration_header(self.analyzer.language, declaration_text);
