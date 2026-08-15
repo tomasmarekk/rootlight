@@ -1335,8 +1335,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             self.symbol_by_declaration
                 .insert((draft.file, draft.local_id), symbol);
             qualified_by_declaration.insert((draft.file, draft.local_id), qualified_name.clone());
-            // Repeated declarations with the same stable signature share one
-            // entity; their distinct definition occurrences retain each site.
+            // Resolution needs every declaration span even when repeated
+            // declarations intentionally share one public stable entity.
+            self.entities.push(SemanticEntity {
+                symbol,
+                name: draft.name.clone(),
+                kind: draft.kind,
+                visibility: draft.visibility,
+                declaring_type: draft.declaring_type.clone(),
+                arity: draft.arity,
+                is_test: draft.is_test,
+                file: draft.file,
+                span: draft.span,
+                source: draft.source.clone(),
+            });
             if !materialized_symbols.insert(symbol) {
                 continue;
             }
@@ -1402,18 +1414,6 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             )
             .map_err(|_| provider_failure("project-signature-envelope"))?;
             self.records.push(IrRecord::Extension(envelope));
-            self.entities.push(SemanticEntity {
-                symbol,
-                name: draft.name,
-                kind: draft.kind,
-                visibility: draft.visibility,
-                declaring_type: draft.declaring_type,
-                arity: draft.arity,
-                is_test: draft.is_test,
-                file: draft.file,
-                span: draft.span,
-                source: draft.source,
-            });
             self.state_mut_by_file(draft.file)?
                 .increment(FactDomain::Entities)?;
             self.state_mut_by_file(draft.file)?
@@ -1432,11 +1432,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 RelationEndpoint::Entity(symbol),
                 EXACT_CONFIDENCE,
                 EvidenceKind::Syntax,
-                self.entities
-                    .last()
-                    .ok_or_else(|| provider_failure("project-entity"))?
-                    .source
-                    .clone(),
+                draft.source,
             )?;
         }
         Ok(())

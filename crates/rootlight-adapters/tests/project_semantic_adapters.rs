@@ -172,6 +172,56 @@ fn function_identity_is_stable_when_only_its_body_changes() {
 }
 
 #[test]
+fn repeated_declarations_retain_each_resolved_definition_site() {
+    let source = "export function shared(value) { return value; }\n\
+                  export function shared(value) { return value; }\n";
+    let fixture = ProjectFixture::new(
+        ["src/shared.js"],
+        [source],
+        SemanticProjectLanguage::JavaScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let entities = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function && entity.display_name == "shared")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entities.len(),
+        1,
+        "repeated declarations share one public entity"
+    );
+    let symbol = entities[0].id;
+    let definition_sites = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition
+                && occurrence.target == OccurrenceTarget::Resolved { symbol }
+        })
+        .map(|occurrence| occurrence.source.span())
+        .collect::<BTreeSet<_>>();
+    let expected_sites = source
+        .match_indices("shared")
+        .map(|(start, name)| {
+            SourceSpan::new(
+                fixture.snapshots[0].file(),
+                u64::try_from(start).expect("fixture offset fits"),
+                u64::try_from(start + name.len()).expect("fixture offset fits"),
+            )
+            .expect("fixture span is valid")
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        definition_sites, expected_sites,
+        "every repeated declaration retains its distinct resolved name site"
+    );
+}
+
+#[test]
 fn python_symbol_identity_matches_structural_and_project_analysis() {
     let fixture = ProjectFixture::new(
         ["Lib/asyncio/helpers.py", "Lib/asyncio/base_events.py"],
