@@ -3185,6 +3185,7 @@ mod tests {
             index_stage: index_stage.to_owned(),
             retry_after_ms,
             evidence: None,
+            planning: None,
         }
     }
 
