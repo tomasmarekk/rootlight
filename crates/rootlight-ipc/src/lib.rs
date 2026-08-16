@@ -58,7 +58,11 @@ const RETRY_PAUSE: Duration = Duration::from_millis(1);
 #[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
 #[cfg(windows)]
+const ERROR_NO_DATA: i32 = 232;
+#[cfg(windows)]
 const WINDOWS_CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const WINDOWS_PIPE_WRITE_CHUNK_BYTES: usize = 512;
 
 /// Platform endpoint selected for the current Rootlight user instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,18 @@ impl FrameCodec {
         let mut header = [0_u8; FRAME_HEADER_BYTES];
         read_exact_bounded(stream, &mut header, self.timeout)?;
         self.decode_message(stream, header)
+    }
+
+    fn read_stream_message<M: Message + Default>(
+        &self,
+        stream: &mut Stream,
+    ) -> Result<M, IpcError> {
+        let mut header = [0_u8; FRAME_HEADER_BYTES];
+        read_exact_bounded_with_policy(stream, &mut header, self.timeout, cfg!(windows))?;
+        let declared = self.validate_declared_length(header)?;
+        let mut payload = self.allocate_payload(declared)?;
+        read_exact_bounded_with_policy(stream, &mut payload, self.timeout, cfg!(windows))?;
+        decode_payload(&payload)
     }
 
     fn decode_message<M: Message + Default, R: io::Read>(
@@ -423,10 +439,17 @@ impl AsyncLocalListener {
 }
 
 fn is_retryable_listener_accept(source: &io::Error) -> bool {
-    matches!(
+    let transient_connection_loss = matches!(
         source.kind(),
         io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
-    )
+    );
+    #[cfg(windows)]
+    // A named-pipe client can close after signalling readiness but before the
+    // server accepts it. Windows reports that lost connection as ERROR_NO_DATA;
+    // the listener instance remains valid for the next client.
+    let transient_connection_loss =
+        transient_connection_loss || source.raw_os_error() == Some(ERROR_NO_DATA);
+    transient_connection_loss
 }
 
 /// Verifies that an accepted local peer belongs to the current user.
@@ -636,7 +659,7 @@ pub fn write_client_hello(
 ///
 /// Returns [`IpcError`] when the hello frame is malformed, oversized, or late.
 pub fn read_client_hello(codec: FrameCodec, stream: &mut Stream) -> Result<ClientHello, IpcError> {
-    codec.read_message(stream)
+    codec.read_stream_message(stream)
 }
 
 /// Writes the server negotiation frame.
@@ -658,7 +681,7 @@ pub fn write_server_hello(
 ///
 /// Returns [`IpcError`] when the hello frame is malformed, oversized, or late.
 pub fn read_server_hello(codec: FrameCodec, stream: &mut Stream) -> Result<ServerHello, IpcError> {
-    codec.read_message(stream)
+    codec.read_stream_message(stream)
 }
 
 /// Writes one request frame.
@@ -680,7 +703,7 @@ pub fn write_request(
 ///
 /// Returns [`IpcError`] when the request frame is malformed, oversized, or late.
 pub fn read_request(codec: FrameCodec, stream: &mut Stream) -> Result<RequestEnvelope, IpcError> {
-    codec.read_message(stream)
+    codec.read_stream_message(stream)
 }
 
 /// Writes one response frame.
@@ -702,7 +725,7 @@ pub fn write_response(
 ///
 /// Returns [`IpcError`] when the response frame is malformed, oversized, or late.
 pub fn read_response(codec: FrameCodec, stream: &mut Stream) -> Result<ResponseEnvelope, IpcError> {
-    codec.read_message(stream)
+    codec.read_stream_message(stream)
 }
 
 /// Writes the client negotiation frame asynchronously.
@@ -879,6 +902,15 @@ fn read_exact_bounded(
     buffer: &mut [u8],
     timeout: Duration,
 ) -> Result<(), IpcError> {
+    read_exact_bounded_with_policy(stream, buffer, timeout, false)
+}
+
+fn read_exact_bounded_with_policy(
+    stream: &mut impl io::Read,
+    buffer: &mut [u8],
+    timeout: Duration,
+    retry_partial_zero: bool,
+) -> Result<(), IpcError> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or(IpcError::InvalidLimit)?;
@@ -887,6 +919,7 @@ fn read_exact_bounded(
         ensure_before_deadline(deadline)?;
         match stream.read(&mut buffer[filled..]) {
             Ok(0) if filled == 0 => wait_for_io(deadline)?,
+            Ok(0) if retry_partial_zero => wait_for_io(deadline)?,
             Ok(0) => return Err(IpcError::UnexpectedEof),
             Ok(read) => {
                 filled = filled
@@ -912,8 +945,25 @@ fn write_all_bounded(
     let mut written = 0;
     while written < buffer.len() {
         ensure_before_deadline(deadline)?;
-        match stream.write(&buffer[written..]) {
-            Ok(0) => return Err(IpcError::WriteZero),
+        #[cfg(windows)]
+        let pending = &buffer[written
+            ..written
+                .saturating_add(WINDOWS_PIPE_WRITE_CHUNK_BYTES)
+                .min(buffer.len())];
+        #[cfg(not(windows))]
+        let pending = &buffer[written..];
+        match stream.write(pending) {
+            Ok(0) => {
+                #[cfg(windows)]
+                {
+                    // PIPE_NOWAIT can report a zero-byte write while the
+                    // connected server is still accepting the pipe. Retry
+                    // within the existing elapsed deadline.
+                    wait_for_io(deadline)?;
+                }
+                #[cfg(not(windows))]
+                return Err(IpcError::WriteZero);
+            }
             Ok(count) => {
                 written = written
                     .checked_add(count)
@@ -1269,6 +1319,10 @@ mod tests {
         assert!(!is_retryable_listener_accept(&io::Error::from(
             io::ErrorKind::WouldBlock
         )));
+        #[cfg(windows)]
+        assert!(is_retryable_listener_accept(&io::Error::from_raw_os_error(
+            ERROR_NO_DATA
+        )));
     }
 
     #[test]
@@ -1302,6 +1356,32 @@ mod tests {
             .accept_timeout(Duration::from_secs(1))
             .expect("first client accepts");
         drop((accepted, first));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nonblocking_pipe_chunks_frames_larger_than_the_transport_buffer() {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, "sync-backpressure");
+        let listener = LocalListener::bind(endpoint.clone()).expect("listener binds");
+        let mut expected = request(92);
+        expected.instance_nonce = vec![7; 1_024];
+        let server = thread::spawn({
+            let expected = expected.clone();
+            move || {
+                let mut stream = listener
+                    .accept_timeout(Duration::from_secs(1))
+                    .expect("connection accepts");
+                let received = read_request(FrameCodec::default(), &mut stream)
+                    .expect("large request decodes");
+                assert_eq!(received, expected);
+            }
+        });
+
+        let mut stream = connect(&endpoint).expect("client connects");
+        write_request(FrameCodec::default(), &mut stream, &expected).expect("large request writes");
+
+        server.join().expect("server thread joins");
     }
 
     #[cfg(windows)]
