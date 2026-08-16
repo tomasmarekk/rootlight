@@ -95,7 +95,7 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 13] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 14] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -109,6 +109,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 13] = [
     ("1.11", "protobuf/1.11/rootlight.desc"),
     ("1.14", "protobuf/1.14/rootlight.desc"),
     ("1.15", "protobuf/1.15/rootlight.desc"),
+    ("1.16", "protobuf/1.16/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
     "Cargo.lock",
@@ -882,6 +883,8 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "mcp-operation-status-output-1.2.schema.json",
         "mcp-operation-status-input-1.3.schema.json",
         "mcp-operation-status-output-1.3.schema.json",
+        "mcp-operation-status-input-1.4.schema.json",
+        "mcp-operation-status-output-1.4.schema.json",
     ] {
         let retained = workspace_root.join(SCHEMA_ROOT).join("json").join(name);
         write_bytes(&schema_root.join(name), &read_bytes(&retained)?)?;
@@ -903,13 +906,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         &schema_root,
         "operation.status",
         "input",
-        "1.4",
+        "1.5",
     )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::OperationStatusOutput>(
         &schema_root,
         "operation.status",
         "output",
-        "1.4",
+        "1.5",
     )?;
     write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
     write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
@@ -2251,6 +2254,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.4.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.5.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),

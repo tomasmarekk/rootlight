@@ -83,6 +83,7 @@ const CAPABILITIES: &[&str] = &[
     "operation.cancel",
     "operation.lifecycle.v1",
     "operation.status",
+    "operation.status.incremental-planning.v1",
     "operation.submit",
     "repository.index.clean-rebuild.v1",
     "repository.index.v1",
@@ -6379,6 +6380,7 @@ impl ControlService {
                         "support.bundle.v8" => selected_minor >= 15,
                         "repository.index.clean-rebuild.v1"
                         | "repository.status.logical-snapshot.v1" => selected_minor >= 16,
+                        "operation.status.incremental-planning.v1" => selected_minor >= 17,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -7783,6 +7785,11 @@ fn select_first_slice_response_minor(
     {
         response.selected_analysis_mode = daemon::RepositoryIndexAnalysisMode::Unspecified as i32;
     }
+    if selected_protocol_minor < 17
+        && let FirstSliceIpcResponse::RepositoryOperationStatus(response) = response
+    {
+        response.planning = None;
+    }
 }
 
 #[cfg(test)]
@@ -7878,6 +7885,11 @@ fn first_slice_response_correlates_for_minor(
                     }
                     Ok(daemon::OperationState::Unspecified) | Err(_) => false,
                 }
+                && repository_operation_planning_correlates(
+                    response,
+                    operation,
+                    selected_protocol_minor,
+                )
         }
         (
             FirstSliceIpcRequest::CodeLocate(request),
@@ -8827,6 +8839,134 @@ fn repository_index_mode_correlates(request: i32, response: i32) -> bool {
             daemon::RepositoryIndexMode::RepositoryIndexRebuild
         )
     )
+}
+
+fn repository_operation_planning_correlates(
+    response: &daemon::RepositoryOperationStatusResponse,
+    operation: &daemon::OperationStatus,
+    selected_protocol_minor: u32,
+) -> bool {
+    let Some(planning) = response.planning.as_ref() else {
+        return true;
+    };
+    if selected_protocol_minor < 17
+        || daemon::OperationKind::try_from(operation.kind)
+            != Ok(daemon::OperationKind::RepositoryIndex)
+        || daemon::OperationState::try_from(operation.state) == Ok(daemon::OperationState::Queued)
+        || !repository_operation_planning_is_canonical(planning)
+    {
+        return false;
+    }
+
+    let evidence_present = response.build_strategy
+        != daemon::RepositoryBuildStrategy::Unspecified as i32
+        || response.fallback_reason.is_some()
+        || response.invalidation_trace_json.is_some()
+        || response.fact_work.is_some()
+        || [
+            response.invalidated_units,
+            response.changed_inputs,
+            response.changed_files,
+            response.reused_files,
+            response.rebuilt_files,
+            response.reused_facts,
+            response.rebuilt_facts,
+            response.referenced_bytes,
+            response.newly_written_bytes,
+            response.reserved_memory_bytes,
+            response.owned_memory_bytes,
+            response.retained_durable_bytes,
+        ]
+        .into_iter()
+        .any(|counter| counter != 0);
+    !evidence_present
+        || (daemon::OperationState::try_from(operation.state)
+            == Ok(daemon::OperationState::Succeeded)
+            && planning.build_strategy == response.build_strategy
+            && planning.fallback_reason == response.fallback_reason
+            && response.invalidated_units <= planning.estimated_analysis_units
+            && response.rebuilt_files <= planning.estimated_files
+            && response.rebuilt_facts <= planning.estimated_facts
+            && response.newly_written_bytes <= planning.estimated_durable_bytes)
+}
+
+fn repository_operation_planning_is_canonical(
+    planning: &daemon::RepositoryOperationPlanning,
+) -> bool {
+    let Ok(strategy) = daemon::RepositoryBuildStrategy::try_from(planning.build_strategy) else {
+        return false;
+    };
+    let fallback = planning
+        .fallback_reason
+        .map(daemon::RepositoryFallbackReason::try_from)
+        .transpose();
+    if matches!(strategy, daemon::RepositoryBuildStrategy::Unspecified)
+        || !matches!(
+            fallback,
+            Ok(None
+                | Some(
+                    daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration
+                        | daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded
+                ))
+        )
+        || (strategy
+            == daemon::RepositoryBuildStrategy::RepositoryBuildConservativeRepositoryRebuild)
+            != planning.fallback_reason.is_some()
+    {
+        return false;
+    }
+    let Some(keys) = planning.dependency_keys.as_ref() else {
+        return false;
+    };
+    let Ok(sample_count) = u64::try_from(keys.samples.len()) else {
+        return false;
+    };
+    keys.samples.len() <= rootlight_operations::MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS
+        && sample_count <= keys.total
+        && keys.complete == (sample_count == keys.total)
+        && keys
+            .samples
+            .iter()
+            .all(|key| repository_planning_dependency_key_order(key).is_some())
+        && keys.samples.windows(2).all(|pair| {
+            repository_planning_dependency_key_order(&pair[0])
+                < repository_planning_dependency_key_order(&pair[1])
+        })
+}
+
+fn repository_planning_dependency_key_order(
+    key: &daemon::RepositoryPlanningDependencyKey,
+) -> Option<(i32, &[u8])> {
+    use daemon::repository_planning_dependency_key::Subject;
+
+    let kind = daemon::RepositoryPlanningDependencyKind::try_from(key.kind).ok()?;
+    let subject = match (kind, key.subject.as_ref()) {
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath,
+            Some(Subject::File(file)),
+        ) if file.value.len() == 20 => file.value.as_slice(),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyPublicSurface
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBodySummary
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyImportSet
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBuildTarget
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyCompilerOptions
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDependencyVersion
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyGrammarVersion
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyAdapterVersion
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDerivedPlan,
+            Some(Subject::Fact(fact)),
+        ) if fact.value.len() == 20 => fact.value.as_slice(),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyResolverVersion
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyConfigurationRevision
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencySearchRevision,
+            None,
+        ) => &[],
+        _ => return None,
+    };
+    Some((key.kind, subject))
 }
 
 fn repository_index_analysis_mode_correlates(
@@ -12870,6 +13010,7 @@ mod tests {
                     "support.bundle.v8" => minor >= 15,
                     "repository.index.clean-rebuild.v1"
                     | "repository.status.logical-snapshot.v1" => minor >= 16,
+                    "operation.status.incremental-planning.v1" => minor >= 17,
                     "code.locate.v1"
                     | "repository.index.v1"
                     | "source.read.v1"
@@ -12919,6 +13060,13 @@ mod tests {
                     .iter()
                     .any(|capability| capability == "repository.status.logical-snapshot.v1"),
                 minor >= 16
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| { capability == "operation.status.incremental-planning.v1" }),
+                minor >= 17
             );
         }
     }
@@ -19754,6 +19902,98 @@ mod tests {
         assert!(first_slice_response_correlates(
             &status_request,
             &FirstSliceIpcResponse::RepositoryOperationStatus(status_response.clone())
+        ));
+        let planning = daemon::RepositoryOperationPlanning {
+            build_strategy:
+                daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32,
+            fallback_reason: None,
+            estimated_analysis_units: 4,
+            estimated_files: 3,
+            estimated_facts: 48,
+            estimated_cost_units: 96,
+            estimated_durable_bytes: 16_384,
+            dependency_keys: Some(daemon::RepositoryPlanningDependencyKeys {
+                total: 2,
+                samples: vec![
+                    daemon::RepositoryPlanningDependencyKey {
+                        kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyResolverVersion
+                            as i32,
+                        subject: None,
+                    },
+                    daemon::RepositoryPlanningDependencyKey {
+                        kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyConfigurationRevision
+                            as i32,
+                        subject: None,
+                    },
+                ],
+                complete: true,
+            }),
+        };
+        let mut running_with_planning = status_response.clone();
+        let running_operation = running_with_planning
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        running_operation.state = daemon::OperationState::Running as i32;
+        running_operation.stage = daemon::OperationStage::Executing as i32;
+        running_with_planning.planning = Some(planning.clone());
+        assert!(first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(running_with_planning.clone()),
+            17,
+        ));
+        assert!(!first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(running_with_planning.clone()),
+            16,
+        ));
+        let mut downgraded =
+            FirstSliceIpcResponse::RepositoryOperationStatus(running_with_planning.clone());
+        select_first_slice_response_minor(&mut downgraded, 16);
+        let FirstSliceIpcResponse::RepositoryOperationStatus(downgraded) = downgraded else {
+            panic!("operation status response remains typed");
+        };
+        assert!(downgraded.planning.is_none());
+
+        let mut terminal_with_planning = running_with_planning.clone();
+        terminal_with_planning
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .state = daemon::OperationState::Succeeded as i32;
+        terminal_with_planning.published_generation = Some(generation.clone());
+        terminal_with_planning.build_strategy =
+            daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32;
+        terminal_with_planning.invalidated_units = 4;
+        terminal_with_planning.rebuilt_files = 3;
+        terminal_with_planning.rebuilt_facts = 48;
+        terminal_with_planning.newly_written_bytes = 16_384;
+        assert!(first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(terminal_with_planning.clone()),
+            17,
+        ));
+        let mut mismatched_plan = terminal_with_planning.clone();
+        mismatched_plan
+            .planning
+            .as_mut()
+            .expect("planning exists")
+            .build_strategy = daemon::RepositoryBuildStrategy::RepositoryBuildInitial as i32;
+        assert!(!first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(mismatched_plan),
+            17,
+        ));
+        let mut underestimated_plan = terminal_with_planning;
+        underestimated_plan
+            .planning
+            .as_mut()
+            .expect("planning exists")
+            .estimated_facts = 47;
+        assert!(!first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(underestimated_plan),
+            17,
         ));
         status_response.retry_after_ms = Some(0);
         assert!(first_slice_response_correlates(

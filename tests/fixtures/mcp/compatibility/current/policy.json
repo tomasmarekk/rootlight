@@ -28,7 +28,7 @@
         "tool": "repo.status"
       },
       {
-        "current_version": "1.4",
+        "current_version": "1.5",
         "projected_version": "1.0",
         "tool": "operation.status"
       },
@@ -100,7 +100,7 @@
     },
     {
       "tool": "operation.status",
-      "version": "1.4"
+      "version": "1.5"
     },
     {
       "tool": "code.locate",

@@ -36,7 +36,7 @@ use rootlight_daemon_core::{
 };
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{
-    ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
+    ContentHash, FactId, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
 };
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, FactDomain as IrFactDomain,
@@ -60,8 +60,9 @@ use rootlight_operations::{
     RepositoryIncrementalFactWorkEvidence, RepositoryNormalizedFactDomain,
     RepositoryNormalizedFactWorkCollection, RepositoryNormalizedFactWorkGroup,
     RepositoryOperationContext, RepositoryOperationEvidence, RepositoryOperationMode,
-    RepositoryOperationSubmission, RepositoryPlannedFactDomain,
+    RepositoryOperationPlanning, RepositoryOperationSubmission, RepositoryPlannedFactDomain,
     RepositoryPlannedFactWorkCollection, RepositoryPlannedFactWorkGroup,
+    RepositoryPlanningDependencyKey, RepositoryPlanningDependencyKeys,
 };
 use rootlight_protocol::{
     MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
@@ -89,8 +90,9 @@ use rootlight_service::{
     FirstSliceFactWorkDisposition, FirstSliceGenerationContext, FirstSliceGitEvidenceError,
     FirstSliceIndexAdmission, FirstSliceIndexAdmissionMetadata, FirstSliceIndexMode,
     FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexOptions,
-    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
-    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
+    FirstSliceIndexPlanning, FirstSliceIndexProgress, FirstSliceIndexProvider,
+    FirstSliceIndexReceipt, FirstSliceObservedFreshness, FirstSliceOperationContext,
+    FirstSlicePlanningDependencyKey, FirstSlicePreparationError, FirstSliceProjectAnalysis,
     FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
     FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
     FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
@@ -4315,6 +4317,11 @@ enum RepositoryIndexIntent {
     SemanticRefinement { structural_generation: GenerationId },
 }
 
+enum RepositoryPreparationFailure {
+    Service(FirstSliceError),
+    Journal(PublicError),
+}
+
 fn repository_index_work_deadline(
     intent: RepositoryIndexIntent,
     detached: bool,
@@ -4841,27 +4848,53 @@ fn repository_index_with_intent(
             };
             let service = read_service(service)?;
             match intent {
-                RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => service
-                    .prepare_repository_after_admission_with_options_and_progress(
+                RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => {
+                    let mut observe_planning = |planning: &FirstSliceIndexPlanning| {
+                        let planning = repository_operation_planning(planning)?;
+                        journal_lifecycle_call(
+                            runtime,
+                            journal.record_repository_planning_until(
+                                operation,
+                                planning,
+                                lifecycle_deadline,
+                            ),
+                        )
+                        .map(|_| ())
+                    };
+                    service
+                        .prepare_repository_after_admission_with_options_and_observers(
+                            &root,
+                            if clean_rebuild {
+                                FirstSliceIndexOptions::clean_rebuild(mode)
+                            } else {
+                                FirstSliceIndexOptions::incremental(mode)
+                            },
+                            &mut admission,
+                            &cancellation,
+                            &mut observe_progress,
+                            &mut observe_planning,
+                        )
+                        .map_err(|error| match error {
+                            FirstSlicePreparationError::Service(error) => {
+                                RepositoryPreparationFailure::Service(error)
+                            }
+                            FirstSlicePreparationError::PlanningObserver(error) => {
+                                RepositoryPreparationFailure::Journal(error)
+                            }
+                            _ => RepositoryPreparationFailure::Journal(internal_error()),
+                        })
+                }
+                RepositoryIndexIntent::SemanticRefinement {
+                    structural_generation,
+                } => service
+                    .prepare_semantic_refinement_after_admission_with_progress(
                         &root,
-                        if clean_rebuild {
-                            FirstSliceIndexOptions::clean_rebuild(mode)
-                        } else {
-                            FirstSliceIndexOptions::incremental(mode)
-                        },
+                        structural_generation,
                         &mut admission,
                         &cancellation,
                         &mut observe_progress,
-                    ),
-                RepositoryIndexIntent::SemanticRefinement {
-                    structural_generation,
-                } => service.prepare_semantic_refinement_after_admission_with_progress(
-                    &root,
-                    structural_generation,
-                    &mut admission,
-                    &cancellation,
-                    &mut observe_progress,
-                ),
+                    )
+                    .map_err(RepositoryPreparationFailure::Service),
             }
         };
         if let Some(error) = progress_failure {
@@ -5264,7 +5297,7 @@ fn repository_index_with_intent(
                     Ok(response)
                 }
             }
-            Err(error) => {
+            Err(RepositoryPreparationFailure::Service(error)) => {
                 let public = repository_index_error(
                     error,
                     RepositoryIndexErrorContext {
@@ -5283,6 +5316,18 @@ fn repository_index_with_intent(
                     &public,
                 )?;
                 Err(public)
+            }
+            Err(RepositoryPreparationFailure::Journal(error)) => {
+                finish_failed_index(
+                    runtime,
+                    lifecycle_deadline,
+                    journal,
+                    metadata,
+                    operation,
+                    &cancellation,
+                    &error,
+                )?;
+                Err(error)
             }
         }
     })();
@@ -6061,27 +6106,8 @@ fn repository_operation_evidence(
 ) -> RepositoryOperationEvidence {
     let fact_work = repository_incremental_fact_work(&evidence);
     RepositoryOperationEvidence {
-        build_strategy: match evidence.strategy {
-            FirstSliceIndexOperationStrategy::Initial => RepositoryBuildStrategy::Initial,
-            FirstSliceIndexOperationStrategy::DependencyDirected => {
-                RepositoryBuildStrategy::DependencyDirected
-            }
-            FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild => {
-                RepositoryBuildStrategy::ConservativeRepositoryRebuild
-            }
-            FirstSliceIndexOperationStrategy::RetainedGeneration => {
-                RepositoryBuildStrategy::RetainedGeneration
-            }
-            FirstSliceIndexOperationStrategy::CleanRebuild => RepositoryBuildStrategy::CleanRebuild,
-        },
-        fallback_reason: evidence.fallback_reason.map(|reason| match reason {
-            ServiceFallbackReason::MissingDependencyDeclaration => {
-                RepositoryFallbackReason::MissingDependencyDeclaration
-            }
-            ServiceFallbackReason::ClosureWorkExceeded => {
-                RepositoryFallbackReason::ClosureWorkExceeded
-            }
-        }),
+        build_strategy: repository_build_strategy(evidence.strategy),
+        fallback_reason: evidence.fallback_reason.map(repository_fallback_reason),
         invalidated_units: evidence.invalidated_units,
         changed_inputs: evidence.changed_inputs,
         changed_files: evidence.changed_files,
@@ -6096,6 +6122,108 @@ fn repository_operation_evidence(
         retained_durable_bytes: evidence.retained_durable_bytes,
         fact_work,
     }
+}
+
+fn repository_operation_planning(
+    planning: &FirstSliceIndexPlanning,
+) -> Result<RepositoryOperationPlanning, PublicError> {
+    Ok(RepositoryOperationPlanning {
+        build_strategy: repository_build_strategy(planning.strategy()),
+        fallback_reason: planning.fallback_reason().map(repository_fallback_reason),
+        estimated_analysis_units: planning.estimated_analysis_units(),
+        estimated_files: planning.estimated_files(),
+        estimated_facts: planning.estimated_facts(),
+        estimated_cost_units: planning.estimated_cost_units(),
+        estimated_durable_bytes: planning.estimated_durable_bytes(),
+        dependency_keys: RepositoryPlanningDependencyKeys {
+            total: planning.dependency_keys().total(),
+            samples: planning
+                .dependency_keys()
+                .samples()
+                .iter()
+                .copied()
+                .map(repository_planning_dependency_key)
+                .collect::<Result<Vec<_>, _>>()?,
+            complete: planning.dependency_keys().is_complete(),
+        },
+    })
+}
+
+const fn repository_build_strategy(
+    strategy: FirstSliceIndexOperationStrategy,
+) -> RepositoryBuildStrategy {
+    match strategy {
+        FirstSliceIndexOperationStrategy::Initial => RepositoryBuildStrategy::Initial,
+        FirstSliceIndexOperationStrategy::DependencyDirected => {
+            RepositoryBuildStrategy::DependencyDirected
+        }
+        FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild => {
+            RepositoryBuildStrategy::ConservativeRepositoryRebuild
+        }
+        FirstSliceIndexOperationStrategy::RetainedGeneration => {
+            RepositoryBuildStrategy::RetainedGeneration
+        }
+        FirstSliceIndexOperationStrategy::CleanRebuild => RepositoryBuildStrategy::CleanRebuild,
+    }
+}
+
+const fn repository_fallback_reason(reason: ServiceFallbackReason) -> RepositoryFallbackReason {
+    match reason {
+        ServiceFallbackReason::MissingDependencyDeclaration => {
+            RepositoryFallbackReason::MissingDependencyDeclaration
+        }
+        ServiceFallbackReason::ClosureWorkExceeded => RepositoryFallbackReason::ClosureWorkExceeded,
+    }
+}
+
+fn repository_planning_dependency_key(
+    key: FirstSlicePlanningDependencyKey,
+) -> Result<RepositoryPlanningDependencyKey, PublicError> {
+    Ok(match key {
+        FirstSlicePlanningDependencyKey::FileContent(file) => {
+            RepositoryPlanningDependencyKey::FileContent(file)
+        }
+        FirstSlicePlanningDependencyKey::FilePath(file) => {
+            RepositoryPlanningDependencyKey::FilePath(file)
+        }
+        FirstSlicePlanningDependencyKey::PublicSurface(fact) => {
+            RepositoryPlanningDependencyKey::PublicSurface(fact)
+        }
+        FirstSlicePlanningDependencyKey::BodySummary(fact) => {
+            RepositoryPlanningDependencyKey::BodySummary(fact)
+        }
+        FirstSlicePlanningDependencyKey::ImportSet(fact) => {
+            RepositoryPlanningDependencyKey::ImportSet(fact)
+        }
+        FirstSlicePlanningDependencyKey::BuildTarget(fact) => {
+            RepositoryPlanningDependencyKey::BuildTarget(fact)
+        }
+        FirstSlicePlanningDependencyKey::CompilerOptions(fact) => {
+            RepositoryPlanningDependencyKey::CompilerOptions(fact)
+        }
+        FirstSlicePlanningDependencyKey::DependencyVersion(fact) => {
+            RepositoryPlanningDependencyKey::DependencyVersion(fact)
+        }
+        FirstSlicePlanningDependencyKey::GrammarVersion(fact) => {
+            RepositoryPlanningDependencyKey::GrammarVersion(fact)
+        }
+        FirstSlicePlanningDependencyKey::AdapterVersion(fact) => {
+            RepositoryPlanningDependencyKey::AdapterVersion(fact)
+        }
+        FirstSlicePlanningDependencyKey::ResolverVersion => {
+            RepositoryPlanningDependencyKey::ResolverVersion
+        }
+        FirstSlicePlanningDependencyKey::ConfigurationRevision => {
+            RepositoryPlanningDependencyKey::ConfigurationRevision
+        }
+        FirstSlicePlanningDependencyKey::SearchRevision => {
+            RepositoryPlanningDependencyKey::SearchRevision
+        }
+        FirstSlicePlanningDependencyKey::DerivedPlan(fact) => {
+            RepositoryPlanningDependencyKey::DerivedPlan(fact)
+        }
+        _ => return Err(internal_error()),
+    })
 }
 
 fn repository_incremental_fact_work(
@@ -6335,6 +6463,9 @@ fn repository_operation_status(
     };
     let record =
         persist_visible_operation_resources(journal, runtime, context.deadline, record, &metadata)?;
+    let operation_planning = repository_context
+        .as_ref()
+        .and_then(|context| context.planning.clone());
     if metadata.publication == PublicationState::FailedClosed {
         // Journal success closes the cancellation race before the process-local
         // generation commit. A later commit failure cannot rewrite that durable
@@ -6344,7 +6475,7 @@ fn repository_operation_status(
         visible.state = OperationState::Failed;
         visible.error = Some(failed_closed_publication(operation));
         let (peak_rss_bytes, written_bytes) = public_operation_resources(&visible, &metadata);
-        return Ok(daemon::RepositoryOperationStatusResponse {
+        let mut response = daemon::RepositoryOperationStatusResponse {
             schema_version: Some(schema_version()),
             operation: Some(operation_record_to_wire_for_minor(
                 &visible,
@@ -6360,7 +6491,15 @@ fn repository_operation_status(
             index_stage: repository_operation_stage(&visible).to_owned(),
             semantic_operation: None,
             ..Default::default()
-        });
+        };
+        if let Some(planning) = operation_planning.as_ref() {
+            project_repository_operation_planning(
+                &mut response,
+                planning,
+                context.selected_protocol_minor,
+            );
+        }
+        return Ok(response);
     }
     let published_generation = if record.kind == OperationKind::RepositoryIndex
         && record.state == OperationState::Succeeded
@@ -6417,6 +6556,13 @@ fn repository_operation_status(
         semantic_operation: semantic_operation.map(operation_to_wire),
         ..Default::default()
     };
+    if let Some(planning) = operation_planning.as_ref() {
+        project_repository_operation_planning(
+            &mut response,
+            planning,
+            context.selected_protocol_minor,
+        );
+    }
     if let Some(evidence) = repository_operation_status_evidence(&record, repository_context) {
         let expose_trace = context.selected_protocol_minor >= 16
             || evidence.build_strategy != RepositoryBuildStrategy::CleanRebuild;
@@ -6497,6 +6643,106 @@ fn completed_auto_semantic_operation(
     }
 }
 
+fn project_repository_operation_planning(
+    response: &mut daemon::RepositoryOperationStatusResponse,
+    planning: &RepositoryOperationPlanning,
+    selected_protocol_minor: u32,
+) {
+    if selected_protocol_minor < 17 {
+        return;
+    }
+    response.planning = Some(daemon::RepositoryOperationPlanning {
+        build_strategy: repository_build_strategy_to_wire(planning.build_strategy) as i32,
+        fallback_reason: planning
+            .fallback_reason
+            .map(|reason| repository_fallback_reason_to_wire(reason) as i32),
+        estimated_analysis_units: planning.estimated_analysis_units,
+        estimated_files: planning.estimated_files,
+        estimated_facts: planning.estimated_facts,
+        estimated_cost_units: planning.estimated_cost_units,
+        estimated_durable_bytes: planning.estimated_durable_bytes,
+        dependency_keys: Some(daemon::RepositoryPlanningDependencyKeys {
+            total: planning.dependency_keys.total,
+            samples: planning
+                .dependency_keys
+                .samples
+                .iter()
+                .map(repository_planning_dependency_key_to_wire)
+                .collect(),
+            complete: planning.dependency_keys.complete,
+        }),
+    });
+}
+
+fn repository_planning_dependency_key_to_wire(
+    key: &RepositoryPlanningDependencyKey,
+) -> daemon::RepositoryPlanningDependencyKey {
+    use daemon::repository_planning_dependency_key::Subject;
+
+    let (kind, subject) = match key {
+        RepositoryPlanningDependencyKey::FileContent(file) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent,
+            Some(Subject::File(file_to_wire(*file))),
+        ),
+        RepositoryPlanningDependencyKey::FilePath(file) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath,
+            Some(Subject::File(file_to_wire(*file))),
+        ),
+        RepositoryPlanningDependencyKey::PublicSurface(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyPublicSurface,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::BodySummary(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBodySummary,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::ImportSet(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyImportSet,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::BuildTarget(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBuildTarget,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::CompilerOptions(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyCompilerOptions,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::DependencyVersion(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDependencyVersion,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::GrammarVersion(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyGrammarVersion,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::AdapterVersion(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyAdapterVersion,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+        RepositoryPlanningDependencyKey::ResolverVersion => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyResolverVersion,
+            None,
+        ),
+        RepositoryPlanningDependencyKey::ConfigurationRevision => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyConfigurationRevision,
+            None,
+        ),
+        RepositoryPlanningDependencyKey::SearchRevision => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencySearchRevision,
+            None,
+        ),
+        RepositoryPlanningDependencyKey::DerivedPlan(fact) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDerivedPlan,
+            Some(Subject::Fact(analysis_unit_to_wire(*fact))),
+        ),
+    };
+    daemon::RepositoryPlanningDependencyKey {
+        kind: kind as i32,
+        subject,
+    }
+}
+
 fn project_repository_operation_evidence(
     response: &mut daemon::RepositoryOperationStatusResponse,
     evidence: RepositoryOperationEvidence,
@@ -6510,7 +6756,28 @@ fn project_repository_operation_evidence(
     if selected_protocol_minor >= 15 {
         response.fact_work = evidence.fact_work.as_ref().map(fact_work_to_wire);
     }
-    response.build_strategy = match evidence.build_strategy {
+    response.build_strategy = repository_build_strategy_to_wire(evidence.build_strategy) as i32;
+    response.fallback_reason = evidence
+        .fallback_reason
+        .map(|reason| repository_fallback_reason_to_wire(reason) as i32);
+    response.invalidated_units = evidence.invalidated_units;
+    response.changed_inputs = evidence.changed_inputs;
+    response.changed_files = evidence.changed_files;
+    response.reused_files = evidence.reused_files;
+    response.rebuilt_files = evidence.rebuilt_files;
+    response.reused_facts = evidence.reused_facts;
+    response.rebuilt_facts = evidence.rebuilt_facts;
+    response.referenced_bytes = evidence.referenced_bytes;
+    response.newly_written_bytes = evidence.newly_written_bytes;
+    response.reserved_memory_bytes = evidence.reserved_memory_bytes;
+    response.owned_memory_bytes = evidence.owned_memory_bytes;
+    response.retained_durable_bytes = evidence.retained_durable_bytes;
+}
+
+const fn repository_build_strategy_to_wire(
+    strategy: RepositoryBuildStrategy,
+) -> daemon::RepositoryBuildStrategy {
+    match strategy {
         RepositoryBuildStrategy::Initial => daemon::RepositoryBuildStrategy::RepositoryBuildInitial,
         RepositoryBuildStrategy::DependencyDirected => {
             daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected
@@ -6524,29 +6791,20 @@ fn project_repository_operation_evidence(
         RepositoryBuildStrategy::CleanRebuild => {
             daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
         }
-    } as i32;
-    response.fallback_reason = evidence.fallback_reason.map(|reason| {
-        (match reason {
-            RepositoryFallbackReason::MissingDependencyDeclaration => {
-                daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration
-            }
-            RepositoryFallbackReason::ClosureWorkExceeded => {
-                daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded
-            }
-        }) as i32
-    });
-    response.invalidated_units = evidence.invalidated_units;
-    response.changed_inputs = evidence.changed_inputs;
-    response.changed_files = evidence.changed_files;
-    response.reused_files = evidence.reused_files;
-    response.rebuilt_files = evidence.rebuilt_files;
-    response.reused_facts = evidence.reused_facts;
-    response.rebuilt_facts = evidence.rebuilt_facts;
-    response.referenced_bytes = evidence.referenced_bytes;
-    response.newly_written_bytes = evidence.newly_written_bytes;
-    response.reserved_memory_bytes = evidence.reserved_memory_bytes;
-    response.owned_memory_bytes = evidence.owned_memory_bytes;
-    response.retained_durable_bytes = evidence.retained_durable_bytes;
+    }
+}
+
+const fn repository_fallback_reason_to_wire(
+    reason: RepositoryFallbackReason,
+) -> daemon::RepositoryFallbackReason {
+    match reason {
+        RepositoryFallbackReason::MissingDependencyDeclaration => {
+            daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration
+        }
+        RepositoryFallbackReason::ClosureWorkExceeded => {
+            daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded
+        }
+    }
 }
 
 fn fact_work_to_wire(
@@ -9984,6 +10242,12 @@ fn file_to_wire(value: FileId) -> common::FileId {
     }
 }
 
+fn analysis_unit_to_wire(value: FactId) -> common::AnalysisUnitId {
+    common::AnalysisUnitId {
+        value: value.as_bytes().to_vec(),
+    }
+}
+
 fn content_hash_to_wire(value: ContentHash) -> common::ContentHash {
     common::ContentHash {
         value: value.as_bytes().to_vec(),
@@ -11936,6 +12200,67 @@ mod tests {
     }
 
     #[test]
+    fn prework_planning_is_visible_only_in_protocol_1_17() {
+        let file = FileId::from_bytes([117; 20]);
+        let fact = FactId::from_bytes([118; 20]);
+        let planning = RepositoryOperationPlanning {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            estimated_analysis_units: 3,
+            estimated_files: 2,
+            estimated_facts: 64,
+            estimated_cost_units: 72,
+            estimated_durable_bytes: 4_096,
+            dependency_keys: RepositoryPlanningDependencyKeys {
+                total: 3,
+                samples: vec![
+                    RepositoryPlanningDependencyKey::FileContent(file),
+                    RepositoryPlanningDependencyKey::BodySummary(fact),
+                    RepositoryPlanningDependencyKey::ResolverVersion,
+                ],
+                complete: true,
+            },
+        };
+        let mut previous = daemon::RepositoryOperationStatusResponse::default();
+        project_repository_operation_planning(&mut previous, &planning, 16);
+        assert!(previous.planning.is_none());
+
+        let mut current = daemon::RepositoryOperationStatusResponse::default();
+        project_repository_operation_planning(&mut current, &planning, 17);
+        let visible = current
+            .planning
+            .expect("protocol 1.17 carries pre-work planning");
+        assert_eq!(
+            visible.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32
+        );
+        assert_eq!(visible.estimated_analysis_units, 3);
+        assert_eq!(visible.estimated_files, 2);
+        assert_eq!(visible.estimated_facts, 64);
+        assert_eq!(visible.estimated_cost_units, 72);
+        assert_eq!(visible.estimated_durable_bytes, 4_096);
+        let keys = visible
+            .dependency_keys
+            .expect("bounded dependency keys are retained");
+        assert_eq!(keys.total, 3);
+        assert!(keys.complete);
+        assert_eq!(keys.samples.len(), 3);
+        assert!(matches!(
+            keys.samples[0].subject,
+            Some(daemon::repository_planning_dependency_key::Subject::File(
+                ref value
+            )) if value.value == file.as_bytes()
+        ));
+        assert!(matches!(
+            keys.samples[1].subject,
+            Some(daemon::repository_planning_dependency_key::Subject::Fact(
+                ref value
+            )) if value.value == fact.as_bytes()
+        ));
+        assert!(keys.samples[2].subject.is_none());
+    }
+
+    #[test]
     fn failed_repository_status_preserves_terminal_error_without_success_evidence() {
         let operation = OperationId::from_bytes([121; 16]);
         let repository = RepositoryId::from_bytes([121; 16]);
@@ -12068,6 +12393,18 @@ mod tests {
             status.build_strategy,
             daemon::RepositoryBuildStrategy::Unspecified as i32
         );
+        let planning = status
+            .planning
+            .expect("pre-work planning remains visible independently of success evidence");
+        assert_eq!(
+            planning.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32
+        );
+        assert_eq!(planning.estimated_analysis_units, 1);
+        assert_eq!(planning.estimated_files, 1);
+        assert_eq!(planning.estimated_facts, 1);
+        assert_eq!(planning.estimated_cost_units, 1);
+        assert_eq!(planning.estimated_durable_bytes, 1);
         assert!(status.fallback_reason.is_none());
         assert!(status.fact_work.is_none());
         assert!(status.invalidation_trace_json.is_none());
@@ -14303,13 +14640,20 @@ mod tests {
                 .expect("scheduled semantic child has a stable identity"),
             semantic_refinement_operation(operation)
         );
-        assert_eq!(
-            journal
-                .repository_operation_context(operation)
-                .expect("auto operation context persists")
-                .mode,
-            RepositoryOperationMode::Auto
-        );
+        let auto_operation_context = journal
+            .repository_operation_context(operation)
+            .expect("auto operation context persists");
+        assert_eq!(auto_operation_context.mode, RepositoryOperationMode::Auto);
+        let planning = auto_operation_context
+            .planning
+            .as_ref()
+            .expect("pre-work planning persists before publication");
+        assert_eq!(planning.build_strategy, RepositoryBuildStrategy::Initial);
+        assert!(planning.estimated_analysis_units > 0);
+        assert!(planning.estimated_files > 0);
+        assert!(planning.estimated_facts > 0);
+        assert!(planning.estimated_cost_units >= planning.estimated_facts);
+        assert!(planning.estimated_durable_bytes > 0);
         let delivered = runtime
             .block_on(reply_receiver)
             .expect("structural response is delivered")
@@ -14480,6 +14824,7 @@ mod tests {
             status.build_strategy,
             daemon::RepositoryBuildStrategy::RepositoryBuildInitial as i32
         );
+        assert!(status.planning.is_some());
         assert!(status.rebuilt_files > 0);
         assert!(status.rebuilt_facts > 0);
         assert_eq!(status.newly_written_bytes, status.written_bytes);
@@ -18984,6 +19329,19 @@ mod tests {
         let FirstSliceIpcResponse::RepositoryOperationStatus(current) = current else {
             panic!("operation status response expected");
         };
+        let planning = current
+            .planning
+            .as_ref()
+            .expect("running operation exposes pre-work planning");
+        assert_eq!(
+            planning.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildInitial as i32
+        );
+        assert!(planning.estimated_analysis_units > 0);
+        assert!(planning.estimated_files > 0);
+        assert!(planning.estimated_facts > 0);
+        assert!(planning.estimated_cost_units >= planning.estimated_facts);
+        assert!(planning.estimated_durable_bytes > 0);
         let revision = current.operation.expect("operation status exists").revision;
         let polling_daemon = daemon.clone();
         let (poll_started_sender, poll_started_receiver) = mpsc::sync_channel(1);

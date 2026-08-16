@@ -149,7 +149,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-input-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-input-1.4.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-input-1.5.schema.json"
             ),
             Self::CodeLocate => include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
@@ -213,7 +213,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-output-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-output-1.4.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-output-1.5.schema.json"
             ),
             Self::CodeLocate => include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
@@ -267,7 +267,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::OperationStatus => Some("1.3"),
+            Self::OperationStatus => Some("1.4"),
             Self::RepoIndex => Some("1.2"),
             Self::RepoStatus => Some("1.1"),
             Self::SymbolExplain
@@ -288,7 +288,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::OperationStatus => Some("1.2"),
+            Self::OperationStatus => Some("1.3"),
             Self::RepoIndex => Some("1.1"),
             Self::RepoStatus => Some(crate::MCP_SCHEMA_VERSION),
             _ => None,
@@ -298,6 +298,15 @@ impl VerticalTool {
     /// Third retained additive-minor contract version, when required.
     #[must_use]
     pub const fn second_legacy_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some("1.2"),
+            _ => None,
+        }
+    }
+
+    /// Fourth retained additive-minor contract version, when required.
+    #[must_use]
+    pub const fn third_legacy_contract_version(self) -> Option<&'static str> {
         match self {
             Self::OperationStatus => Some("1.1"),
             _ => None,
@@ -324,7 +333,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-status-input-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-input-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-input-1.4.schema.json"
             )),
             Self::SymbolExplain => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
@@ -371,7 +380,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-status-output-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-output-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-output-1.4.schema.json"
             )),
             Self::SymbolExplain => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
@@ -412,7 +421,7 @@ impl VerticalTool {
     pub const fn legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::OperationStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-input-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-input-1.3.schema.json"
             )),
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-input-1.1.schema.json"
@@ -429,7 +438,7 @@ impl VerticalTool {
     pub const fn legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::OperationStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-output-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-output-1.3.schema.json"
             )),
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-output-1.1.schema.json"
@@ -446,7 +455,7 @@ impl VerticalTool {
     pub const fn second_legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::OperationStatus => Some(include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-input-1.2.schema.json"
             )),
             _ => None,
         }
@@ -455,6 +464,28 @@ impl VerticalTool {
     /// Third retained additive-minor output schema, when required.
     #[must_use]
     pub const fn second_legacy_output_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-operation-status-output-1.2.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Fourth retained additive-minor input schema, when required.
+    #[must_use]
+    pub const fn third_legacy_input_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-operation-status-input-1.1.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Fourth retained additive-minor output schema, when required.
+    #[must_use]
+    pub const fn third_legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.1.schema.json"
@@ -529,6 +560,15 @@ pub enum OperationSchemaVersionV1_1 {
 /// Version marker carried by additive operation-status responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum OperationStatusSchemaVersion {
+    /// Tool contract version 1.5.
+    #[serde(rename = "1.5")]
+    V1_5,
+}
+
+/// Version marker carried by operation-status responses retained at 1.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "OperationStatusSchemaVersion")]
+pub enum OperationStatusSchemaVersionV1_4 {
     /// Tool contract version 1.4.
     #[serde(rename = "1.4")]
     V1_4,
@@ -1911,7 +1951,8 @@ pub struct OperationIncrementalEvidence {
 /// `operation.status` result data for schema 1.4.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OperationStatusData {
+#[schemars(rename = "OperationStatusData")]
+pub struct OperationStatusDataV1_4 {
     /// Current operation view.
     pub operation: OperationDetailV1_2,
     /// Generation published by the operation, if any.
@@ -1935,6 +1976,140 @@ pub struct OperationStatusData {
 /// Strict output for operation-status schema 1.4.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "OperationStatusSuccess")]
+pub struct OperationStatusSuccessV1_4 {
+    /// Tool response schema version.
+    pub schema_version: OperationStatusSchemaVersionV1_4,
+    /// Operation result.
+    pub data: OperationStatusDataV1_4,
+}
+
+/// Checked error response for operation-status schema 1.4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "OperationStatusErrorResponse")]
+pub struct OperationStatusErrorResponseV1_4 {
+    /// Tool error schema version.
+    pub schema_version: OperationStatusSchemaVersionV1_4,
+    /// Stable source-redacted error including current remediation actions.
+    pub error: McpPublicError,
+}
+
+/// Success-or-error response for operation-status schema 1.4.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(rename = "OperationStatusToolResponse")]
+pub enum OperationStatusToolResponseV1_4<T> {
+    /// Tool-specific successful response.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(OperationStatusErrorResponseV1_4),
+}
+
+/// Checked `operation.status` output retained for explicit 1.4 callers.
+pub type OperationStatusOutputV1_4 = OperationStatusToolResponseV1_4<OperationStatusSuccessV1_4>;
+
+/// One typed source-free dependency key selected before fact construction.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+pub enum OperationPlanningDependencyKey {
+    /// Actual bytes of one file.
+    FileContent(FileId),
+    /// Canonical path semantics of one file.
+    FilePath(FileId),
+    /// Exported surface of one analysis unit.
+    PublicSurface(FactId),
+    /// Body summary of one analysis unit.
+    BodySummary(FactId),
+    /// Import set of one analysis unit.
+    ImportSet(FactId),
+    /// Build-target membership.
+    BuildTarget(FactId),
+    /// Compiler and macro options.
+    CompilerOptions(FactId),
+    /// One dependency or lockfile resolution.
+    DependencyVersion(FactId),
+    /// Parser grammar identity.
+    GrammarVersion(FactId),
+    /// Adapter producer identity.
+    AdapterVersion(FactId),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(FactId),
+}
+
+/// Bounded canonical identities for dependency keys that selected a closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationPlanningDependencyKeys {
+    /// Exact number of selected dependency keys.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    #[schemars(length(max = 32))]
+    pub samples: Vec<OperationPlanningDependencyKey>,
+    /// Whether the sample contains every selected key.
+    pub complete: bool,
+}
+
+/// Source-free estimates selected before repository fact construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationPlanning {
+    /// Construction strategy selected by incremental planning.
+    pub build_strategy: OperationBuildStrategy,
+    /// Explicit reason dependency-directed planning was abandoned.
+    pub fallback_reason: RequiredNullable<OperationFallbackReason>,
+    /// Conservative upper bound for analysis units selected by the closure.
+    pub estimated_analysis_units: u64,
+    /// Conservative upper bound for source files selected by the closure.
+    pub estimated_files: u64,
+    /// Conservative upper bound for normalized facts selected for rebuilding.
+    pub estimated_facts: u64,
+    /// Deterministic producer-defined upper bound for logical planning cost.
+    pub estimated_cost_units: u64,
+    /// Conservative upper bound for operation-owned durable bytes.
+    pub estimated_durable_bytes: u64,
+    /// Exact count and bounded identities for dependency keys selecting the closure.
+    pub dependency_keys: OperationPlanningDependencyKeys,
+}
+
+/// `operation.status` result data for schema 1.5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStatusData {
+    /// Current operation view.
+    pub operation: OperationDetailV1_2,
+    /// Generation published by the operation, if any.
+    pub published_generation: RequiredNullable<GenerationId>,
+    /// Separately journaled semantic refinement created by a successful Auto operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_operation_id: Option<OperationId>,
+    /// Current source-free repository-index stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 128))]
+    pub index_stage: Option<String>,
+    /// Bounded source-free planning visible before terminal publication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning: Option<OperationPlanning>,
+    /// Final invalidation, reuse, and rebuild evidence, when published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<OperationIncrementalEvidence>,
+    /// Terminal public error, if any.
+    pub error: RequiredNullable<McpPublicError>,
+    /// Recommended delay before polling again.
+    pub retry_after_ms: RequiredNullable<u32>,
+}
+
+/// Strict output for operation-status schema 1.5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OperationStatusSuccess {
     /// Tool response schema version.
     pub schema_version: OperationStatusSchemaVersion,
@@ -1942,7 +2117,7 @@ pub struct OperationStatusSuccess {
     pub data: OperationStatusData,
 }
 
-/// Checked error response for operation-status schema 1.4.
+/// Checked error response for operation-status schema 1.5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OperationStatusErrorResponse {
@@ -1952,7 +2127,7 @@ pub struct OperationStatusErrorResponse {
     pub error: McpPublicError,
 }
 
-/// Success-or-error response for operation-status schema 1.4.
+/// Success-or-error response for operation-status schema 1.5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum OperationStatusToolResponse<T> {
@@ -3133,9 +3308,10 @@ mod tests {
     use super::{
         CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput,
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        OperationStatusOutputV1_3, RepoIndexInput, RepoIndexOutput, RepoIndexOutputV1_0,
-        RepoIndexOutputV1_1, RepoIndexOutputV1_2, SourceReadInput, SourceReadOutput,
-        SymbolExplainInput, SymbolExplainOutputV1_0, SymbolExplainOutputV1_1, VerticalTool,
+        OperationStatusOutputV1_3, OperationStatusOutputV1_4, RepoIndexInput, RepoIndexOutput,
+        RepoIndexOutputV1_0, RepoIndexOutputV1_1, RepoIndexOutputV1_2, SourceReadInput,
+        SourceReadOutput, SymbolExplainInput, SymbolExplainOutputV1_0, SymbolExplainOutputV1_1,
+        VerticalTool,
     };
     use crate::change::{
         ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareInputV1_0,
@@ -3277,15 +3453,26 @@ mod tests {
             "OperationBuildStrategy",
             "clean_rebuild"
         ));
-        for schema in [
+        let previous_status: Value = serde_json::from_str(
             VerticalTool::OperationStatus
                 .previous_output_schema_json()
-                .expect("operation.status retains schema 1.3"),
+                .expect("operation.status retains schema 1.4"),
+        )
+        .expect("retained operation.status 1.4 schema is valid");
+        assert!(schema_enum_contains(
+            &previous_status,
+            "OperationBuildStrategy",
+            "clean_rebuild"
+        ));
+        for schema in [
             VerticalTool::OperationStatus
                 .legacy_output_schema_json()
-                .expect("operation.status retains schema 1.2"),
+                .expect("operation.status retains schema 1.3"),
             VerticalTool::OperationStatus
                 .second_legacy_output_schema_json()
+                .expect("operation.status retains schema 1.2"),
+            VerticalTool::OperationStatus
+                .third_legacy_output_schema_json()
                 .expect("operation.status retains schema 1.1"),
             VerticalTool::OperationStatus
                 .initial_output_schema_json()
@@ -3940,9 +4127,12 @@ mod tests {
                 tool.name()
             );
         }
-        let current_operation_error = error("1.4");
+        let current_operation_error = error("1.5");
         serde_json::from_value::<OperationStatusOutput>(current_operation_error)
             .expect("current operation error decodes");
+        let retained_operation_1_4 = error("1.4");
+        serde_json::from_value::<OperationStatusOutputV1_4>(retained_operation_1_4)
+            .expect("retained operation 1.4 error decodes");
         let retained_operation_1_3 = error("1.3");
         serde_json::from_value::<OperationStatusOutputV1_3>(retained_operation_1_3)
             .expect("retained operation 1.3 error decodes");
@@ -4051,25 +4241,30 @@ mod tests {
             assert!(!schema.contains("delete_repository"));
         }
 
-        let current_status = current_error("1.4");
+        let current_status = current_error("1.5");
         serde_json::from_value::<OperationStatusOutput>(current_status.clone())
             .expect("current operation error actions decode");
         assert_schema_fixture(
             VerticalTool::OperationStatus.output_schema_json(),
             &current_status,
-            "operation.status 1.4 actions",
+            "operation.status 1.5 actions",
         );
         let previous_status = VerticalTool::OperationStatus
             .previous_output_schema_json()
-            .expect("operation.status retains schema 1.3");
+            .expect("operation.status retains schema 1.4");
         assert!(previous_status.contains("update_configuration"));
         assert!(previous_status.contains("delete_repository"));
+        let legacy_status = VerticalTool::OperationStatus
+            .legacy_output_schema_json()
+            .expect("operation.status retains schema 1.3");
+        assert!(legacy_status.contains("update_configuration"));
+        assert!(legacy_status.contains("delete_repository"));
         for schema in [
             VerticalTool::OperationStatus
-                .legacy_output_schema_json()
+                .second_legacy_output_schema_json()
                 .expect("operation.status retains schema 1.2"),
             VerticalTool::OperationStatus
-                .second_legacy_output_schema_json()
+                .third_legacy_output_schema_json()
                 .expect("operation.status retains schema 1.1"),
             VerticalTool::OperationStatus
                 .initial_output_schema_json()

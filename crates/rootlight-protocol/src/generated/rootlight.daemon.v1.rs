@@ -1028,6 +1028,70 @@ pub struct RepositoryIncrementalFactWorkEvidence {
     #[allow(missing_docs)]
     pub normalized: ::core::option::Option<RepositoryNormalizedFactWorkCollection>,
 }
+/// One typed source-free dependency key selected before fact construction.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryPlanningDependencyKey {
+    #[prost(enumeration = "RepositoryPlanningDependencyKind", tag = "1")]
+    #[allow(missing_docs)]
+    pub kind: i32,
+    #[prost(oneof = "repository_planning_dependency_key::Subject", tags = "2, 3")]
+    #[allow(missing_docs)]
+    pub subject: ::core::option::Option<repository_planning_dependency_key::Subject>,
+}
+/// Nested message and enum types in `RepositoryPlanningDependencyKey`.
+pub mod repository_planning_dependency_key {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Subject {
+        #[prost(message, tag = "2")]
+        #[allow(missing_docs)]
+        File(super::super::super::common::v1::FileId),
+        #[prost(message, tag = "3")]
+        #[allow(missing_docs)]
+        Fact(super::super::super::common::v1::AnalysisUnitId),
+    }
+}
+/// Bounded canonical identities for dependency keys that selected a closure.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryPlanningDependencyKeys {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub total: u64,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub samples: ::prost::alloc::vec::Vec<RepositoryPlanningDependencyKey>,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+}
+/// Source-free estimates selected before repository fact construction.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryOperationPlanning {
+    #[prost(enumeration = "RepositoryBuildStrategy", tag = "1")]
+    #[allow(missing_docs)]
+    pub build_strategy: i32,
+    #[prost(enumeration = "RepositoryFallbackReason", optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub fallback_reason: ::core::option::Option<i32>,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub estimated_analysis_units: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub estimated_files: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub estimated_facts: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub estimated_cost_units: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub estimated_durable_bytes: u64,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub dependency_keys: ::core::option::Option<RepositoryPlanningDependencyKeys>,
+}
 /// Returns journal state plus durable first-slice publication metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RepositoryOperationStatusResponse {
@@ -1123,6 +1187,10 @@ pub struct RepositoryOperationStatusResponse {
     #[prost(message, optional, tag = "27")]
     #[allow(missing_docs)]
     pub fact_work: ::core::option::Option<RepositoryIncrementalFactWorkEvidence>,
+    /// Bounded pre-execution planning, visible while the operation is running.
+    #[prost(message, optional, tag = "28")]
+    #[allow(missing_docs)]
+    pub planning: ::core::option::Option<RepositoryOperationPlanning>,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4220,6 +4288,144 @@ impl RepositoryFallbackReason {
             }
             "REPOSITORY_FALLBACK_CLOSURE_WORK_EXCEEDED" => {
                 Some(Self::RepositoryFallbackClosureWorkExceeded)
+            }
+            _ => None,
+        }
+    }
+}
+/// Closed dependency-key family used by repository pre-execution planning.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryPlanningDependencyKind {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyFileContent = 1,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyFilePath = 2,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyPublicSurface = 3,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyBodySummary = 4,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyImportSet = 5,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyBuildTarget = 6,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyCompilerOptions = 7,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyDependencyVersion = 8,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyGrammarVersion = 9,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyAdapterVersion = 10,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyResolverVersion = 11,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyConfigurationRevision = 12,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencySearchRevision = 13,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyDerivedPlan = 14,
+}
+impl RepositoryPlanningDependencyKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_PLANNING_DEPENDENCY_KIND_UNSPECIFIED",
+            Self::RepositoryPlanningDependencyFileContent => {
+                "REPOSITORY_PLANNING_DEPENDENCY_FILE_CONTENT"
+            }
+            Self::RepositoryPlanningDependencyFilePath => {
+                "REPOSITORY_PLANNING_DEPENDENCY_FILE_PATH"
+            }
+            Self::RepositoryPlanningDependencyPublicSurface => {
+                "REPOSITORY_PLANNING_DEPENDENCY_PUBLIC_SURFACE"
+            }
+            Self::RepositoryPlanningDependencyBodySummary => {
+                "REPOSITORY_PLANNING_DEPENDENCY_BODY_SUMMARY"
+            }
+            Self::RepositoryPlanningDependencyImportSet => {
+                "REPOSITORY_PLANNING_DEPENDENCY_IMPORT_SET"
+            }
+            Self::RepositoryPlanningDependencyBuildTarget => {
+                "REPOSITORY_PLANNING_DEPENDENCY_BUILD_TARGET"
+            }
+            Self::RepositoryPlanningDependencyCompilerOptions => {
+                "REPOSITORY_PLANNING_DEPENDENCY_COMPILER_OPTIONS"
+            }
+            Self::RepositoryPlanningDependencyDependencyVersion => {
+                "REPOSITORY_PLANNING_DEPENDENCY_DEPENDENCY_VERSION"
+            }
+            Self::RepositoryPlanningDependencyGrammarVersion => {
+                "REPOSITORY_PLANNING_DEPENDENCY_GRAMMAR_VERSION"
+            }
+            Self::RepositoryPlanningDependencyAdapterVersion => {
+                "REPOSITORY_PLANNING_DEPENDENCY_ADAPTER_VERSION"
+            }
+            Self::RepositoryPlanningDependencyResolverVersion => {
+                "REPOSITORY_PLANNING_DEPENDENCY_RESOLVER_VERSION"
+            }
+            Self::RepositoryPlanningDependencyConfigurationRevision => {
+                "REPOSITORY_PLANNING_DEPENDENCY_CONFIGURATION_REVISION"
+            }
+            Self::RepositoryPlanningDependencySearchRevision => {
+                "REPOSITORY_PLANNING_DEPENDENCY_SEARCH_REVISION"
+            }
+            Self::RepositoryPlanningDependencyDerivedPlan => {
+                "REPOSITORY_PLANNING_DEPENDENCY_DERIVED_PLAN"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_PLANNING_DEPENDENCY_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_PLANNING_DEPENDENCY_FILE_CONTENT" => {
+                Some(Self::RepositoryPlanningDependencyFileContent)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_FILE_PATH" => {
+                Some(Self::RepositoryPlanningDependencyFilePath)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_PUBLIC_SURFACE" => {
+                Some(Self::RepositoryPlanningDependencyPublicSurface)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_BODY_SUMMARY" => {
+                Some(Self::RepositoryPlanningDependencyBodySummary)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_IMPORT_SET" => {
+                Some(Self::RepositoryPlanningDependencyImportSet)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_BUILD_TARGET" => {
+                Some(Self::RepositoryPlanningDependencyBuildTarget)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_COMPILER_OPTIONS" => {
+                Some(Self::RepositoryPlanningDependencyCompilerOptions)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_DEPENDENCY_VERSION" => {
+                Some(Self::RepositoryPlanningDependencyDependencyVersion)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_GRAMMAR_VERSION" => {
+                Some(Self::RepositoryPlanningDependencyGrammarVersion)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_ADAPTER_VERSION" => {
+                Some(Self::RepositoryPlanningDependencyAdapterVersion)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_RESOLVER_VERSION" => {
+                Some(Self::RepositoryPlanningDependencyResolverVersion)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_CONFIGURATION_REVISION" => {
+                Some(Self::RepositoryPlanningDependencyConfigurationRevision)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_SEARCH_REVISION" => {
+                Some(Self::RepositoryPlanningDependencySearchRevision)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_DERIVED_PLAN" => {
+                Some(Self::RepositoryPlanningDependencyDerivedPlan)
             }
             _ => None,
         }

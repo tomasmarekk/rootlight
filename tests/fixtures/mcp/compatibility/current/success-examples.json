@@ -201,11 +201,12 @@
             "started_at": "2026-07-18T00:00:00Z",
             "state": "running"
           },
+          "planning": null,
           "published_generation": null,
           "retry_after_ms": null,
           "semantic_operation_id": null
         },
-        "schema_version": "1.4"
+        "schema_version": "1.5"
       },
       "tool": "operation.status"
     },

@@ -601,6 +601,34 @@ message RepositoryIncrementalFactWorkEvidence {
   RepositoryNormalizedFactWorkCollection normalized = 2;
 }
 
+// One typed source-free dependency key selected before fact construction.
+message RepositoryPlanningDependencyKey {
+  RepositoryPlanningDependencyKind kind = 1;
+  oneof subject {
+    rootlight.common.v1.FileId file = 2;
+    rootlight.common.v1.AnalysisUnitId fact = 3;
+  }
+}
+
+// Bounded canonical identities for dependency keys that selected a closure.
+message RepositoryPlanningDependencyKeys {
+  uint64 total = 1;
+  repeated RepositoryPlanningDependencyKey samples = 2;
+  bool complete = 3;
+}
+
+// Source-free estimates selected before repository fact construction.
+message RepositoryOperationPlanning {
+  RepositoryBuildStrategy build_strategy = 1;
+  optional RepositoryFallbackReason fallback_reason = 2;
+  uint64 estimated_analysis_units = 3;
+  uint64 estimated_files = 4;
+  uint64 estimated_facts = 5;
+  uint64 estimated_cost_units = 6;
+  uint64 estimated_durable_bytes = 7;
+  RepositoryPlanningDependencyKeys dependency_keys = 8;
+}
+
 // Returns journal state plus durable first-slice publication metadata.
 message RepositoryOperationStatusResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -635,6 +663,8 @@ message RepositoryOperationStatusResponse {
   uint64 retained_durable_bytes = 26;
   // Bounded source-free grouped incremental evidence.
   optional RepositoryIncrementalFactWorkEvidence fact_work = 27;
+  // Bounded pre-execution planning, visible while the operation is running.
+  optional RepositoryOperationPlanning planning = 28;
 }
 
 // Operation-local construction strategy retained with the durable receipt.
@@ -652,6 +682,25 @@ enum RepositoryFallbackReason {
   REPOSITORY_FALLBACK_REASON_UNSPECIFIED = 0;
   REPOSITORY_FALLBACK_MISSING_DEPENDENCY_DECLARATION = 1;
   REPOSITORY_FALLBACK_CLOSURE_WORK_EXCEEDED = 2;
+}
+
+// Closed dependency-key family used by repository pre-execution planning.
+enum RepositoryPlanningDependencyKind {
+  REPOSITORY_PLANNING_DEPENDENCY_KIND_UNSPECIFIED = 0;
+  REPOSITORY_PLANNING_DEPENDENCY_FILE_CONTENT = 1;
+  REPOSITORY_PLANNING_DEPENDENCY_FILE_PATH = 2;
+  REPOSITORY_PLANNING_DEPENDENCY_PUBLIC_SURFACE = 3;
+  REPOSITORY_PLANNING_DEPENDENCY_BODY_SUMMARY = 4;
+  REPOSITORY_PLANNING_DEPENDENCY_IMPORT_SET = 5;
+  REPOSITORY_PLANNING_DEPENDENCY_BUILD_TARGET = 6;
+  REPOSITORY_PLANNING_DEPENDENCY_COMPILER_OPTIONS = 7;
+  REPOSITORY_PLANNING_DEPENDENCY_DEPENDENCY_VERSION = 8;
+  REPOSITORY_PLANNING_DEPENDENCY_GRAMMAR_VERSION = 9;
+  REPOSITORY_PLANNING_DEPENDENCY_ADAPTER_VERSION = 10;
+  REPOSITORY_PLANNING_DEPENDENCY_RESOLVER_VERSION = 11;
+  REPOSITORY_PLANNING_DEPENDENCY_CONFIGURATION_REVISION = 12;
+  REPOSITORY_PLANNING_DEPENDENCY_SEARCH_REVISION = 13;
+  REPOSITORY_PLANNING_DEPENDENCY_DERIVED_PLAN = 14;
 }
 
 // First-slice lexical locate mode.

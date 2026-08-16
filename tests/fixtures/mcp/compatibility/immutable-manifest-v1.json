@@ -10,18 +10,18 @@
     },
     {
       "path": "current/catalog.json",
-      "bytes": 1383688,
-      "sha256": "2f5b3699ed19c6a91f44e678769c7c7a615e3a2be3eede027e58d32a962187d5"
+      "bytes": 1396290,
+      "sha256": "31c6e630b23ae4419ea1dd25b9bd8a0f54cce31a876b1f32c2c5313d9340c62a"
     },
     {
       "path": "current/error-examples.json",
       "bytes": 5718,
-      "sha256": "db33ff658f896fa9eebd93d2db6eea17b95e8833eba37bb97518c403f826e8b4"
+      "sha256": "989dfcd436c5854d5382741e6ea19846515a7f72eb614c4dc5a99859da1108ac"
     },
     {
       "path": "current/policy.json",
       "bytes": 3880,
-      "sha256": "abdc7df2a4451e6751ab5919bb7a76b94218eaa87455fc6d5b89ec463a28c96a"
+      "sha256": "4de891a8567492d0a3018f0e1852748f501621e0b2b007b2850945fc0f217b6a"
     },
     {
       "path": "current/profiles.json",
@@ -30,8 +30,8 @@
     },
     {
       "path": "current/success-examples.json",
-      "bytes": 36700,
-      "sha256": "a56a7db30f23ddbd9bc79bd64d90a8352feb82e4a95d967ce399a50f4008c531"
+      "bytes": 36728,
+      "sha256": "49a70bad1ac5254b83a8cf34cdcc5eab4cfaf850bf81256349730140800a64c9"
     },
     {
       "path": "release-history-v1.json",

@@ -34,8 +34,8 @@ use rootlight_mcp_contract::{
     repository::{RepoListInput, RepoStatusOutput, RepoStatusOutputV1_0, RepoStatusOutputV1_1},
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        OperationStatusOutputV1_3, RepoIndexOutputV1_0, RepoIndexOutputV1_1, RepoIndexOutputV1_2,
-        SymbolExplainOutputV1_0,
+        OperationStatusOutputV1_3, OperationStatusOutputV1_4, RepoIndexOutputV1_0,
+        RepoIndexOutputV1_1, RepoIndexOutputV1_2, SymbolExplainOutputV1_0,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -508,11 +508,13 @@ struct ToolContract {
     previous_input_validator: Option<Validator>,
     legacy_input_validator: Option<Validator>,
     second_legacy_input_validator: Option<Validator>,
+    third_legacy_input_validator: Option<Validator>,
     initial_input_validator: Option<Validator>,
     output_validator: Validator,
     previous_output_validator: Option<Validator>,
     legacy_output_validator: Option<Validator>,
     second_legacy_output_validator: Option<Validator>,
+    third_legacy_output_validator: Option<Validator>,
     initial_output_validator: Option<Validator>,
 }
 
@@ -522,6 +524,7 @@ enum ContractSelection {
     Previous,
     Legacy,
     SecondLegacy,
+    ThirdLegacy,
     Initial,
 }
 
@@ -549,6 +552,12 @@ impl ContractSelection {
                 Some(Self::SecondLegacy)
             }
             Some(requested)
+                if contract.tool.third_legacy_contract_version() == Some(requested)
+                    && contract.third_legacy_output_validator.is_some() =>
+            {
+                Some(Self::ThirdLegacy)
+            }
+            Some(requested)
                 if contract.tool.initial_contract_version() == Some(requested)
                     && contract.initial_output_validator.is_some() =>
             {
@@ -570,6 +579,9 @@ impl ContractSelection {
             Self::SecondLegacy => tool
                 .second_legacy_contract_version()
                 .expect("second legacy selection requires a retained version"),
+            Self::ThirdLegacy => tool
+                .third_legacy_contract_version()
+                .expect("third legacy selection requires a retained version"),
             Self::Initial => tool
                 .initial_contract_version()
                 .expect("initial selection requires a retained version"),
@@ -1153,6 +1165,25 @@ impl ToolContract {
                     })
                 })
                 .transpose()?;
+        let third_legacy_input_validator =
+            tool.third_legacy_input_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "third legacy input", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "third legacy input",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "third legacy input",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let initial_input_validator = tool
             .initial_input_schema_json()
             .map(|schema| {
@@ -1237,6 +1268,25 @@ impl ToolContract {
                     })
                 })
                 .transpose()?;
+        let third_legacy_output_validator =
+            tool.third_legacy_output_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "third legacy output", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "third legacy output",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "third legacy output",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let initial_output_validator = tool
             .initial_output_schema_json()
             .map(|schema| {
@@ -1280,11 +1330,13 @@ impl ToolContract {
             previous_input_validator,
             legacy_input_validator,
             second_legacy_input_validator,
+            third_legacy_input_validator,
             initial_input_validator,
             output_validator,
             previous_output_validator,
             legacy_output_validator,
             second_legacy_output_validator,
+            third_legacy_output_validator,
             initial_output_validator,
         })
     }
@@ -1304,6 +1356,10 @@ impl ToolContract {
                 .second_legacy_output_validator
                 .as_ref()
                 .expect("second legacy selection requires a compiled schema"),
+            ContractSelection::ThirdLegacy => self
+                .third_legacy_output_validator
+                .as_ref()
+                .expect("third legacy selection requires a compiled schema"),
             ContractSelection::Initial => self
                 .initial_output_validator
                 .as_ref()
@@ -1329,9 +1385,17 @@ impl ToolContract {
                 .or(self.legacy_input_validator.as_ref())
                 .or(self.previous_input_validator.as_ref())
                 .unwrap_or(&self.input_validator),
+            ContractSelection::ThirdLegacy => self
+                .third_legacy_input_validator
+                .as_ref()
+                .or(self.second_legacy_input_validator.as_ref())
+                .or(self.legacy_input_validator.as_ref())
+                .or(self.previous_input_validator.as_ref())
+                .unwrap_or(&self.input_validator),
             ContractSelection::Initial => self
                 .initial_input_validator
                 .as_ref()
+                .or(self.third_legacy_input_validator.as_ref())
                 .or(self.second_legacy_input_validator.as_ref())
                 .or(self.legacy_input_validator.as_ref())
                 .or(self.previous_input_validator.as_ref())
@@ -1852,7 +1916,7 @@ fn typed_selected_output_is_valid(
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
@@ -1874,10 +1938,14 @@ fn typed_selected_output_is_valid(
         ContractSelection::Legacy => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
+            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::ThirdLegacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
@@ -2029,7 +2097,8 @@ fn tool_error(
 ) -> Result<HandlerResponse, ToolResultError> {
     let schema_version = selection.error_schema_version(contract.tool);
     let mut error = serde_json::to_value(error).map_err(|_| ToolResultError::Serialize)?;
-    select_public_error_version(selection, &mut error).map_err(|_| ToolResultError::Serialize)?;
+    select_public_error_version(contract.tool, selection, &mut error)
+        .map_err(|_| ToolResultError::Serialize)?;
     let structured = json!({
         "schema_version": schema_version,
         "error": error,
@@ -2100,7 +2169,7 @@ fn typed_selected_error_output_is_valid(
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
@@ -2122,10 +2191,14 @@ fn typed_selected_error_output_is_valid(
         ContractSelection::Legacy => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
-            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_3::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
+            VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::ThirdLegacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
@@ -2159,7 +2232,7 @@ fn select_output_version(
         .and_then(Value::as_object_mut)
         .ok_or(())?;
     if tool == VerticalTool::OperationStatus {
-        select_public_error_version(selection, data.get_mut("error").ok_or(())?)?;
+        select_public_error_version(tool, selection, data.get_mut("error").ok_or(())?)?;
     }
     match tool {
         VerticalTool::RepoIndex => match selection {
@@ -2170,7 +2243,9 @@ fn select_output_version(
                 reject_retained_rebuild_mode(data)?;
                 data.remove("semantic_operation_id");
             }
-            ContractSelection::Current | ContractSelection::SecondLegacy => return Err(()),
+            ContractSelection::Current
+            | ContractSelection::SecondLegacy
+            | ContractSelection::ThirdLegacy => return Err(()),
         },
         VerticalTool::RepoStatus => match selection {
             ContractSelection::Previous => {
@@ -2182,18 +2257,25 @@ fn select_output_version(
             }
             ContractSelection::Current
             | ContractSelection::SecondLegacy
+            | ContractSelection::ThirdLegacy
             | ContractSelection::Initial => return Err(()),
         },
         VerticalTool::OperationStatus => match selection {
             ContractSelection::Previous => {
-                strip_current_only_incremental_evidence(data)?;
+                data.remove("planning");
             }
             ContractSelection::Legacy => {
-                strip_current_only_incremental_evidence(data)?;
-                remove_operation_fact_work(data)?;
+                data.remove("planning");
+                strip_clean_rebuild_incremental_evidence(data)?;
             }
             ContractSelection::SecondLegacy => {
-                strip_current_only_incremental_evidence(data)?;
+                data.remove("planning");
+                strip_clean_rebuild_incremental_evidence(data)?;
+                remove_operation_fact_work(data)?;
+            }
+            ContractSelection::ThirdLegacy => {
+                data.remove("planning");
+                strip_clean_rebuild_incremental_evidence(data)?;
                 remove_operation_fact_work(data)?;
                 let resources = data
                     .get_mut("operation")
@@ -2206,6 +2288,7 @@ fn select_output_version(
             ContractSelection::Initial => {
                 data.remove("semantic_operation_id");
                 data.remove("index_stage");
+                data.remove("planning");
                 data.remove("incremental");
                 let resources = data
                     .get_mut("operation")
@@ -2352,7 +2435,7 @@ fn remove_operation_fact_work(data: &mut Map<String, Value>) -> Result<(), ()> {
     Ok(())
 }
 
-fn strip_current_only_incremental_evidence(data: &mut Map<String, Value>) -> Result<(), ()> {
+fn strip_clean_rebuild_incremental_evidence(data: &mut Map<String, Value>) -> Result<(), ()> {
     let Some(incremental) = data.get("incremental") else {
         return Ok(());
     };
@@ -2383,12 +2466,19 @@ fn reject_retained_rebuild_mode(data: &Map<String, Value>) -> Result<(), ()> {
     Ok(())
 }
 
-fn select_public_error_version(selection: ContractSelection, error: &mut Value) -> Result<(), ()> {
-    if matches!(
+fn select_public_error_version(
+    tool: VerticalTool,
+    selection: ContractSelection,
+    error: &mut Value,
+) -> Result<(), ()> {
+    let retains_extended_actions = matches!(
         selection,
         ContractSelection::Current | ContractSelection::Previous
-    ) || error.is_null()
-    {
+    ) || matches!(
+        (tool, selection),
+        (VerticalTool::OperationStatus, ContractSelection::Legacy)
+    );
+    if retains_extended_actions || error.is_null() {
         return Ok(());
     }
     let actions = error
@@ -3856,8 +3946,8 @@ mod tests {
                     "9164d550332bd45b55dd6a3c556f7d35eb6b5a211d510bd2d5af33577e1eac43".to_owned(),
                 ),
                 (
-                    690_659,
-                    "835a290d54be6ebc27064c56663c4aa8b354c1ad5130998d426767b025125f06".to_owned(),
+                    696_290,
+                    "28adc4373b5f5f5941f709073598ae40ab63ddaf855b4498ecd9b17fd0dc036c".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -4389,7 +4479,7 @@ mod tests {
             .await;
         let result = success(response);
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["schema_version"], "1.4");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.5");
         assert_eq!(result["structuredContent"]["error"]["code"], "NOT_FOUND");
         serde_json::from_value::<OperationStatusOutput>(result["structuredContent"].clone())
             .expect("domain error uses the advertised typed envelope");
@@ -4764,9 +4854,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operation_status_serves_current_and_four_retained_minor_contracts() {
+    async fn operation_status_serves_current_and_five_retained_minor_contracts() {
         let Value::Object(output) = json!({
-            "schema_version": "1.4",
+            "schema_version": "1.5",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -4793,6 +4883,23 @@ mod tests {
                 "published_generation": null,
                 "semantic_operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
                 "index_stage": "analysis",
+                "planning": {
+                    "build_strategy": "dependency_directed",
+                    "fallback_reason": null,
+                    "estimated_analysis_units": 2,
+                    "estimated_files": 1,
+                    "estimated_facts": 4,
+                    "estimated_cost_units": 8,
+                    "estimated_durable_bytes": 1024,
+                    "dependency_keys": {
+                        "total": 1,
+                        "samples": [{
+                            "kind": "file_content",
+                            "subject": rootlight_ids::FileId::from_bytes([3; 20])
+                        }],
+                        "complete": true
+                    }
+                },
                 "incremental": {
                     "build_strategy": "dependency_directed",
                     "fallback_reason": null,
@@ -4896,12 +5003,13 @@ mod tests {
         )
         .expect("registry compiles");
 
-        for (version, retained_durable, incremental, referenced, fact_work, actions) in [
-            ("1.4", true, true, true, true, 2),
-            ("1.3", true, true, true, true, 2),
-            ("1.2", true, true, true, false, 0),
-            ("1.1", false, true, true, false, 0),
-            ("1.0", false, false, false, false, 0),
+        for (version, planning, retained_durable, incremental, referenced, fact_work, actions) in [
+            ("1.5", true, true, true, true, true, 2),
+            ("1.4", false, true, true, true, true, 2),
+            ("1.3", false, true, true, true, true, 2),
+            ("1.2", false, true, true, true, false, 0),
+            ("1.1", false, false, true, true, false, 0),
+            ("1.0", false, false, false, false, false, 0),
         ] {
             let response = router
                 .handle(
@@ -4925,6 +5033,7 @@ mod tests {
             assert_eq!(result["structuredContent"]["schema_version"], version);
             let data = &result["structuredContent"]["data"];
             let resources = &data["operation"]["resources"];
+            assert_eq!(data.get("planning").is_some(), planning);
             assert_eq!(
                 resources.get("retained_durable_bytes").is_some(),
                 retained_durable
@@ -5104,7 +5213,7 @@ mod tests {
         let contract =
             ToolContract::compile(VerticalTool::OperationStatus).expect("contract compiles");
         let output = json!({
-            "schema_version": "1.4",
+            "schema_version": "1.5",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -5256,10 +5365,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clean_rebuild_status_is_current_only_and_retained_versions_strip_incremental_evidence()
-    {
+    async fn clean_rebuild_status_is_retained_in_one_four_and_stripped_from_older_versions() {
         let Value::Object(output) = json!({
-            "schema_version": "1.4",
+            "schema_version": "1.5",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -5309,7 +5417,7 @@ mod tests {
         )
         .expect("registry compiles");
 
-        for version in ["1.4", "1.3", "1.2", "1.1", "1.0"] {
+        for version in ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] {
             let result = success(
                 router
                     .handle(
@@ -5331,7 +5439,7 @@ mod tests {
             );
             assert_eq!(result["isError"], false);
             assert_eq!(result["structuredContent"]["schema_version"], version);
-            if version == "1.4" {
+            if matches!(version, "1.5" | "1.4") {
                 assert_eq!(
                     result["structuredContent"]["data"]["incremental"]["build_strategy"],
                     "clean_rebuild"

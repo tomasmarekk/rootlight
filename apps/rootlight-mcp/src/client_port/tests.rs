@@ -365,6 +365,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 bytes_examined: 16,
                 index_stage: "discovery".to_owned(),
                 retry_after_ms: Some(10),
+                planning: None,
                 evidence: None,
             })
         })

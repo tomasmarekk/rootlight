@@ -103,7 +103,8 @@ use rootlight_mcp_contract::{
         OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
         OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
         OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
-        OperationPlannedFactWorkCollection, OperationPlannedFactWorkGroup, OperationProgress,
+        OperationPlannedFactWorkCollection, OperationPlannedFactWorkGroup, OperationPlanning,
+        OperationPlanningDependencyKey, OperationPlanningDependencyKeys, OperationProgress,
         OperationResourcesV1_2 as OperationResources, OperationSchemaVersion, OperationState,
         OperationStatusData, OperationStatusInput, OperationStatusSchemaVersion,
         OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
@@ -7353,6 +7354,23 @@ fn map_operation_status(
     if operation.operation != expected_operation || !valid_publication {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
+    if let Some(planning) = response.planning.as_ref() {
+        if operation.kind != client::OperationKind::RepositoryIndex
+            || operation.state == client::OperationState::Queued
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        if let Some(evidence) = response.evidence.as_ref()
+            && (planning.build_strategy != evidence.build_strategy
+                || planning.fallback_reason != evidence.fallback_reason
+                || evidence.invalidated_units > planning.estimated_analysis_units
+                || evidence.rebuilt_files > planning.estimated_files
+                || evidence.rebuilt_facts > planning.estimated_facts
+                || evidence.newly_written_bytes > planning.estimated_durable_bytes)
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+    }
     let error = operation_status_error(&operation)?
         .as_ref()
         .map(McpPublicError::try_from)
@@ -7360,7 +7378,7 @@ fn map_operation_status(
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: OperationStatusSchemaVersion::V1_4,
+        schema_version: OperationStatusSchemaVersion::V1_5,
         data: OperationStatusData {
             operation: OperationDetail {
                 kind: kind.to_owned(),
@@ -7403,6 +7421,7 @@ fn map_operation_status(
             semantic_operation_id: response.semantic_operation,
             index_stage: (operation.kind == client::OperationKind::RepositoryIndex)
                 .then_some(response.index_stage),
+            planning: response.planning.map(map_operation_planning).transpose()?,
             incremental: response
                 .evidence
                 .map(map_operation_incremental_evidence)
@@ -7411,6 +7430,122 @@ fn map_operation_status(
             retry_after_ms: RequiredNullable(response.retry_after_ms),
         },
     })
+}
+
+fn map_operation_planning(
+    planning: client::RepositoryOperationPlanning,
+) -> Result<OperationPlanning, ToolExecutionError> {
+    let sample_count = u64::try_from(planning.dependency_keys.samples.len())
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if planning.dependency_keys.samples.len() > 32
+        || sample_count > planning.dependency_keys.total
+        || planning.dependency_keys.complete != (sample_count == planning.dependency_keys.total)
+        || !planning
+            .dependency_keys
+            .samples
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || (planning.build_strategy
+            == client::RepositoryBuildStrategy::ConservativeRepositoryRebuild)
+            != planning.fallback_reason.is_some()
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    Ok(OperationPlanning {
+        build_strategy: map_operation_build_strategy(planning.build_strategy),
+        fallback_reason: RequiredNullable(
+            planning.fallback_reason.map(map_operation_fallback_reason),
+        ),
+        estimated_analysis_units: planning.estimated_analysis_units,
+        estimated_files: planning.estimated_files,
+        estimated_facts: planning.estimated_facts,
+        estimated_cost_units: planning.estimated_cost_units,
+        estimated_durable_bytes: planning.estimated_durable_bytes,
+        dependency_keys: OperationPlanningDependencyKeys {
+            total: planning.dependency_keys.total,
+            samples: planning
+                .dependency_keys
+                .samples
+                .into_iter()
+                .map(|key| match key {
+                    client::RepositoryPlanningDependencyKey::FileContent(id) => {
+                        OperationPlanningDependencyKey::FileContent(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::FilePath(id) => {
+                        OperationPlanningDependencyKey::FilePath(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::PublicSurface(id) => {
+                        OperationPlanningDependencyKey::PublicSurface(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::BodySummary(id) => {
+                        OperationPlanningDependencyKey::BodySummary(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::ImportSet(id) => {
+                        OperationPlanningDependencyKey::ImportSet(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::BuildTarget(id) => {
+                        OperationPlanningDependencyKey::BuildTarget(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::CompilerOptions(id) => {
+                        OperationPlanningDependencyKey::CompilerOptions(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::DependencyVersion(id) => {
+                        OperationPlanningDependencyKey::DependencyVersion(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::GrammarVersion(id) => {
+                        OperationPlanningDependencyKey::GrammarVersion(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::AdapterVersion(id) => {
+                        OperationPlanningDependencyKey::AdapterVersion(id)
+                    }
+                    client::RepositoryPlanningDependencyKey::ResolverVersion => {
+                        OperationPlanningDependencyKey::ResolverVersion
+                    }
+                    client::RepositoryPlanningDependencyKey::ConfigurationRevision => {
+                        OperationPlanningDependencyKey::ConfigurationRevision
+                    }
+                    client::RepositoryPlanningDependencyKey::SearchRevision => {
+                        OperationPlanningDependencyKey::SearchRevision
+                    }
+                    client::RepositoryPlanningDependencyKey::DerivedPlan(id) => {
+                        OperationPlanningDependencyKey::DerivedPlan(id)
+                    }
+                })
+                .collect(),
+            complete: planning.dependency_keys.complete,
+        },
+    })
+}
+
+const fn map_operation_build_strategy(
+    strategy: client::RepositoryBuildStrategy,
+) -> OperationBuildStrategy {
+    match strategy {
+        client::RepositoryBuildStrategy::Initial => OperationBuildStrategy::Initial,
+        client::RepositoryBuildStrategy::DependencyDirected => {
+            OperationBuildStrategy::DependencyDirected
+        }
+        client::RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+            OperationBuildStrategy::ConservativeRepositoryRebuild
+        }
+        client::RepositoryBuildStrategy::RetainedGeneration => {
+            OperationBuildStrategy::RetainedGeneration
+        }
+        client::RepositoryBuildStrategy::CleanRebuild => OperationBuildStrategy::CleanRebuild,
+    }
+}
+
+const fn map_operation_fallback_reason(
+    reason: client::RepositoryFallbackReason,
+) -> OperationFallbackReason {
+    match reason {
+        client::RepositoryFallbackReason::MissingDependencyDeclaration => {
+            OperationFallbackReason::MissingDependencyDeclaration
+        }
+        client::RepositoryFallbackReason::ClosureWorkExceeded => {
+            OperationFallbackReason::ClosureWorkExceeded
+        }
+    }
 }
 
 fn map_operation_incremental_evidence(
@@ -7422,27 +7557,10 @@ fn map_operation_incremental_evidence(
         .map(|fact_work| map_operation_fact_work(&evidence, fact_work))
         .transpose()?;
     Ok(OperationIncrementalEvidence {
-        build_strategy: match evidence.build_strategy {
-            client::RepositoryBuildStrategy::Initial => OperationBuildStrategy::Initial,
-            client::RepositoryBuildStrategy::DependencyDirected => {
-                OperationBuildStrategy::DependencyDirected
-            }
-            client::RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
-                OperationBuildStrategy::ConservativeRepositoryRebuild
-            }
-            client::RepositoryBuildStrategy::RetainedGeneration => {
-                OperationBuildStrategy::RetainedGeneration
-            }
-            client::RepositoryBuildStrategy::CleanRebuild => OperationBuildStrategy::CleanRebuild,
-        },
-        fallback_reason: RequiredNullable(evidence.fallback_reason.map(|reason| match reason {
-            client::RepositoryFallbackReason::MissingDependencyDeclaration => {
-                OperationFallbackReason::MissingDependencyDeclaration
-            }
-            client::RepositoryFallbackReason::ClosureWorkExceeded => {
-                OperationFallbackReason::ClosureWorkExceeded
-            }
-        })),
+        build_strategy: map_operation_build_strategy(evidence.build_strategy),
+        fallback_reason: RequiredNullable(
+            evidence.fallback_reason.map(map_operation_fallback_reason),
+        ),
         invalidated_units: evidence.invalidated_units,
         changed_inputs: evidence.changed_inputs,
         changed_files: evidence.changed_files,

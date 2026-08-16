@@ -302,9 +302,10 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         data.insert("logical_snapshot".to_owned(), Value::Null);
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "operation.status", "1.4", |data| {
+    upgrade_additive_success_example(&mut tools, "operation.status", "1.5", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         data.insert("index_stage".to_owned(), json!("analysis"));
+        data.insert("planning".to_owned(), Value::Null);
         let resources = data
             .get_mut("operation")
             .and_then(Value::as_object_mut)
@@ -411,6 +412,8 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
             tool.legacy_output_schema_json()
         } else if tool.second_legacy_contract_version() == Some(output_version) {
             tool.second_legacy_output_schema_json()
+        } else if tool.third_legacy_contract_version() == Some(output_version) {
+            tool.third_legacy_output_schema_json()
         } else if tool.initial_contract_version() == Some(output_version) {
             tool.initial_output_schema_json()
         } else {
@@ -1359,7 +1362,7 @@ mod tests {
                 },
                 {
                     "tool": "operation.status",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
                 {

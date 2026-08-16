@@ -134,6 +134,7 @@ use serde::{Deserialize, Serialize, ser::SerializeSeq};
 
 const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 const DISCOVERY_PROGRESS_INTERVAL_FILES: u64 = 64;
+const MAX_FIRST_SLICE_PLANNING_DEPENDENCY_KEYS: usize = 32;
 const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
 const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
@@ -401,6 +402,191 @@ pub enum FirstSliceIndexOperationStrategy {
     CleanRebuild,
     /// An identical retained generation was reactivated without rebuilding it.
     RetainedGeneration,
+}
+
+/// One canonical changed-input key retained in a bounded pre-work plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum FirstSlicePlanningDependencyKey {
+    /// Actual bytes of one file.
+    FileContent(FileId),
+    /// Canonical path semantics of one file.
+    FilePath(FileId),
+    /// Exported surface of one analysis unit.
+    PublicSurface(FactId),
+    /// Body summary of one analysis unit.
+    BodySummary(FactId),
+    /// Import set of one analysis unit.
+    ImportSet(FactId),
+    /// Build-target membership.
+    BuildTarget(FactId),
+    /// Compiler and macro options.
+    CompilerOptions(FactId),
+    /// Dependency identity.
+    DependencyVersion(FactId),
+    /// Grammar identity.
+    GrammarVersion(FactId),
+    /// Adapter identity.
+    AdapterVersion(FactId),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(FactId),
+}
+
+/// Bounded canonical changed-input identities retained in a pre-work plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSlicePlanningDependencyKeys {
+    total: u64,
+    samples: Vec<FirstSlicePlanningDependencyKey>,
+    complete: bool,
+}
+
+impl FirstSlicePlanningDependencyKeys {
+    /// Returns the exact number of changed dependency keys.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// Returns at most 32 canonical changed dependency keys.
+    #[must_use]
+    pub fn samples(&self) -> &[FirstSlicePlanningDependencyKey] {
+        &self.samples
+    }
+
+    /// Reports whether every changed dependency key is retained.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+/// Source-free work and resource bounds selected before generation construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceIndexPlanning {
+    strategy: FirstSliceIndexOperationStrategy,
+    fallback_reason: Option<FallbackReason>,
+    estimated_analysis_units: u64,
+    estimated_files: u64,
+    estimated_facts: u64,
+    estimated_cost_units: u64,
+    estimated_durable_bytes: u64,
+    dependency_keys: FirstSlicePlanningDependencyKeys,
+}
+
+impl FirstSliceIndexPlanning {
+    /// Returns the construction strategy selected before generation work.
+    #[must_use]
+    pub const fn strategy(&self) -> FirstSliceIndexOperationStrategy {
+        self.strategy
+    }
+
+    /// Returns why fine-grained planning fell back, when it did.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+
+    /// Returns the upper bound for analysis units selected by the closure.
+    #[must_use]
+    pub const fn estimated_analysis_units(&self) -> u64 {
+        self.estimated_analysis_units
+    }
+
+    /// Returns the upper bound for files that may require reconstruction.
+    #[must_use]
+    pub const fn estimated_files(&self) -> u64 {
+        self.estimated_files
+    }
+
+    /// Returns the generation-wide upper bound for rebuilt normalized facts.
+    #[must_use]
+    pub const fn estimated_facts(&self) -> u64 {
+        self.estimated_facts
+    }
+
+    /// Returns deterministic closure plus bounded reconstruction cost units.
+    #[must_use]
+    pub const fn estimated_cost_units(&self) -> u64 {
+        self.estimated_cost_units
+    }
+
+    /// Returns the already-admitted upper bound for operation-owned durable bytes.
+    #[must_use]
+    pub const fn estimated_durable_bytes(&self) -> u64 {
+        self.estimated_durable_bytes
+    }
+
+    /// Returns bounded canonical changed-input identities.
+    #[must_use]
+    pub const fn dependency_keys(&self) -> &FirstSlicePlanningDependencyKeys {
+        &self.dependency_keys
+    }
+
+    fn retained_generation(estimated_durable_bytes: u64) -> Self {
+        Self {
+            strategy: FirstSliceIndexOperationStrategy::RetainedGeneration,
+            fallback_reason: None,
+            estimated_analysis_units: 0,
+            estimated_files: 0,
+            estimated_facts: 0,
+            estimated_cost_units: 0,
+            estimated_durable_bytes,
+            dependency_keys: FirstSlicePlanningDependencyKeys {
+                total: 0,
+                samples: Vec::new(),
+                complete: true,
+            },
+        }
+    }
+}
+
+/// Preparation failure separated by service ownership and observer ownership.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum FirstSlicePreparationError<ObserverError> {
+    /// Repository preparation failed inside the first-slice service.
+    Service(FirstSliceError),
+    /// The caller-owned pre-work observer rejected the selected plan.
+    PlanningObserver(ObserverError),
+}
+
+struct FirstSlicePreparationObservers<Progress, Planning> {
+    progress: Progress,
+    planning: Planning,
+}
+
+impl<ObserverError> From<FirstSliceError> for FirstSlicePreparationError<ObserverError> {
+    fn from(error: FirstSliceError) -> Self {
+        Self::Service(error)
+    }
+}
+
+impl<ObserverError: std::fmt::Display> std::fmt::Display
+    for FirstSlicePreparationError<ObserverError>
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Service(error) => error.fmt(formatter),
+            Self::PlanningObserver(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<ObserverError: std::error::Error + 'static> std::error::Error
+    for FirstSlicePreparationError<ObserverError>
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Service(error) => Some(error),
+            Self::PlanningObserver(error) => Some(error),
+        }
+    }
 }
 
 /// Final source-free reuse, rebuild, I/O, and memory evidence for one index.
@@ -2033,6 +2219,7 @@ struct PreparedIncrementalState {
 struct PreparedIncrementalPlan {
     state: PreparedIncrementalState,
     reusable_parser_artifacts: BTreeSet<ArtifactId>,
+    planning: FirstSliceIndexPlanning,
 }
 
 struct RustSourceInput {
@@ -5255,13 +5442,52 @@ impl FirstSliceService {
         cancellation: &Cancellation,
         observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
-        self.prepare_repository_with_representation_and_progress(
+        match self.prepare_repository_after_admission_with_options_and_observers(
+            path,
+            options,
+            admission,
+            cancellation,
+            observe_progress,
+            |_| Ok::<(), std::convert::Infallible>(()),
+        ) {
+            Ok(preparation) => Ok(preparation),
+            Err(FirstSlicePreparationError::Service(error)) => Err(error),
+            Err(FirstSlicePreparationError::PlanningObserver(error)) => match error {},
+        }
+    }
+
+    /// Builds one hidden generation and exposes the selected plan before analysis.
+    ///
+    /// The planning observer runs synchronously after bounded invalidation
+    /// planning and before parser, lowering, or durable generation work. Returning
+    /// an error aborts preparation immediately without translating the
+    /// caller-owned failure into a service error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSlicePreparationError::Service`] for the same failures as
+    /// [`Self::prepare_repository_after_admission_with_options_and_progress`], or
+    /// [`FirstSlicePreparationError::PlanningObserver`] when the planning observer
+    /// rejects the selected pre-work plan.
+    pub fn prepare_repository_after_admission_with_options_and_observers<ObserverError>(
+        &self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        admission: &mut FirstSliceIndexAdmission,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+        observe_planning: impl FnMut(&FirstSliceIndexPlanning) -> Result<(), ObserverError>,
+    ) -> Result<FirstSliceIndexPreparation, FirstSlicePreparationError<ObserverError>> {
+        self.prepare_repository_with_representation_and_observers(
             path,
             options,
             DurableGenerationRepresentation::Oracle,
             admission,
             cancellation,
-            observe_progress,
+            FirstSlicePreparationObservers {
+                progress: observe_progress,
+                planning: observe_planning,
+            },
         )
     }
 
@@ -5272,8 +5498,41 @@ impl FirstSliceService {
         representation: DurableGenerationRepresentation,
         admission: &mut FirstSliceIndexAdmission,
         cancellation: &Cancellation,
-        mut observe_progress: impl FnMut(FirstSliceIndexProgress),
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        match self.prepare_repository_with_representation_and_observers(
+            path,
+            options,
+            representation,
+            admission,
+            cancellation,
+            FirstSlicePreparationObservers {
+                progress: observe_progress,
+                planning: |_: &FirstSliceIndexPlanning| Ok::<(), std::convert::Infallible>(()),
+            },
+        ) {
+            Ok(preparation) => Ok(preparation),
+            Err(FirstSlicePreparationError::Service(error)) => Err(error),
+            Err(FirstSlicePreparationError::PlanningObserver(error)) => match error {},
+        }
+    }
+
+    fn prepare_repository_with_representation_and_observers<ObserverError>(
+        &self,
+        path: &Path,
+        options: FirstSliceIndexOptions,
+        representation: DurableGenerationRepresentation,
+        admission: &mut FirstSliceIndexAdmission,
+        cancellation: &Cancellation,
+        observers: FirstSlicePreparationObservers<
+            impl FnMut(FirstSliceIndexProgress),
+            impl FnMut(&FirstSliceIndexPlanning) -> Result<(), ObserverError>,
+        >,
+    ) -> Result<FirstSliceIndexPreparation, FirstSlicePreparationError<ObserverError>> {
+        let FirstSlicePreparationObservers {
+            progress: mut observe_progress,
+            planning: mut observe_planning,
+        } = observers;
         let FirstSliceIndexOptions { mode, reuse_policy } = options;
         let started = Instant::now();
         require_deadline(cancellation)?;
@@ -5284,12 +5543,14 @@ impl FirstSliceService {
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
         if root_identity != admission.root_identity {
-            return Err(FirstSliceError::Identity);
+            return Err(FirstSliceError::Identity.into());
         }
         let storage_reservation = StorageReservationGuard {
             reservation: match &mut admission.storage_admission {
                 DurableStorageAdmissionState::Reserved(reservation) => reservation.take(),
-                DurableStorageAdmissionState::Deferred => return Err(FirstSliceError::Retention),
+                DurableStorageAdmissionState::Deferred => {
+                    return Err(FirstSliceError::Retention.into());
+                }
             },
         };
         let root_path = sanitized_repository_root_path(&canonical)?;
@@ -5308,10 +5569,12 @@ impl FirstSliceService {
                 .ok_or(FirstSliceError::Retention)?
                 >= self.maximum_repositories
         {
-            return Err(self.repository_capacity_limit(
-                self.repository_display_names.len() + pending.len(),
-                pending.len(),
-            ));
+            return Err(self
+                .repository_capacity_limit(
+                    self.repository_display_names.len() + pending.len(),
+                    pending.len(),
+                )
+                .into());
         }
         let repository_result = match existing_repository {
             Some(repository) => repository,
@@ -5323,7 +5586,7 @@ impl FirstSliceService {
         check_cancellation(cancellation)?;
         let repository = repository_result;
         if repository != admission.repository {
-            return Err(FirstSliceError::Identity);
+            return Err(FirstSliceError::Identity.into());
         }
         let display_name = match reserved_repository {
             Some((_, display_name, _)) => fallible_copy_string(display_name)?,
@@ -5340,7 +5603,7 @@ impl FirstSliceService {
         let provider_set_hash = self.provider_set_hash(mode)?;
         let active = self.active_by_repository.get(&repository).copied();
         if reuse_policy == FirstSliceReusePolicy::CleanRebuild && active.is_none() {
-            return Err(FirstSliceError::RepositoryNotFound);
+            return Err(FirstSliceError::RepositoryNotFound.into());
         }
         let parent_baseline = if reuse_policy == FirstSliceReusePolicy::Incremental {
             active.and_then(|generation| self.incremental_baselines.get(&generation))
@@ -5397,6 +5660,10 @@ impl FirstSliceService {
                 && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
+                let planning =
+                    FirstSliceIndexPlanning::retained_generation(admission.estimated_disk_bytes);
+                observe_planning(&planning)
+                    .map_err(FirstSlicePreparationError::PlanningObserver)?;
                 return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
             }
         }
@@ -5491,7 +5758,7 @@ impl FirstSliceService {
                 || snapshot.content_hash() != input.content_hash
                 || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
             {
-                return Err(FirstSliceError::DiscoveryDrift);
+                return Err(FirstSliceError::DiscoveryDrift.into());
             }
             let Some(language) = supported_source_language(input, &self.analyzers) else {
                 retained_sources.push(RustSourceInput {
@@ -5517,7 +5784,7 @@ impl FirstSliceService {
                 .insert(input.file, language.to_owned())
                 .is_some()
             {
-                return Err(FirstSliceError::Identity);
+                return Err(FirstSliceError::Identity.into());
             }
             sources.push(RustSourceInput {
                 snapshot,
@@ -5540,7 +5807,7 @@ impl FirstSliceService {
                 .insert(source.snapshot.file(), analysis_limits)
                 .is_some()
             {
-                return Err(FirstSliceError::Identity);
+                return Err(FirstSliceError::Identity.into());
             }
         }
         attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
@@ -5572,6 +5839,10 @@ impl FirstSliceService {
                 && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
+                let planning =
+                    FirstSliceIndexPlanning::retained_generation(admission.estimated_disk_bytes);
+                observe_planning(&planning)
+                    .map_err(FirstSlicePreparationError::PlanningObserver)?;
                 return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
             }
         }
@@ -5589,6 +5860,9 @@ impl FirstSliceService {
             && let Some(receipt) = self.receipts.get(&generation).cloned()
         {
             check_cancellation(cancellation)?;
+            let planning =
+                FirstSliceIndexPlanning::retained_generation(admission.estimated_disk_bytes);
+            observe_planning(&planning).map_err(FirstSlicePreparationError::PlanningObserver)?;
             return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
         }
         let reserved_memory_bytes =
@@ -5632,9 +5906,14 @@ impl FirstSliceService {
                 discovery: &incremental,
                 source_files: &source_files,
                 semantic_inputs: &[],
+                estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
+                    .map_err(|_| FirstSliceError::Limits)?,
+                estimated_durable_bytes: admission.estimated_disk_bytes,
             },
             cancellation,
         )?;
+        observe_planning(&incremental_plan.planning)
+            .map_err(FirstSlicePreparationError::PlanningObserver)?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
         let mut disposition_append_state = DocumentAppendState::from_document(&document)?;
         for input in &unsupported_sources {
@@ -5756,7 +6035,9 @@ impl FirstSliceService {
                                 false,
                                 false,
                             ),
-                            Err(error) => return Err(map_adapter_error(error, cancellation)),
+                            Err(error) => {
+                                return Err(map_adapter_error(error, cancellation).into());
+                            }
                         }
                     };
                 if parser_reused {
@@ -5800,7 +6081,7 @@ impl FirstSliceService {
                         None,
                         false,
                     ),
-                    Err(error) => return Err(map_adapter_error(error, cancellation)),
+                    Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                 }
             };
             if !normalized_reused {
@@ -5899,7 +6180,7 @@ impl FirstSliceService {
             // A semantic refinement must decide eligibility before opening
             // durable staging; otherwise an honest fallback rewrites a complete
             // structural candidate that can never become active.
-            return Err(error);
+            return Err(error.into());
         }
         let semantic_inputs = first_slice_semantic_inputs(&document, &source_files, cancellation)?;
         let final_incremental_plan = prepare_incremental_state(
@@ -5912,13 +6193,16 @@ impl FirstSliceService {
                 discovery: &incremental,
                 source_files: &source_files,
                 semantic_inputs: &semantic_inputs,
+                estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
+                    .map_err(|_| FirstSliceError::Limits)?,
+                estimated_durable_bytes: admission.estimated_disk_bytes,
             },
             cancellation,
         )?;
         if final_incremental_plan.reusable_parser_artifacts
             != incremental_plan.reusable_parser_artifacts
         {
-            return Err(FirstSliceError::Incremental);
+            return Err(FirstSliceError::Incremental.into());
         }
         incremental_plan = final_incremental_plan;
         let fully_examined_files = structurally_examined_files
@@ -6224,7 +6508,7 @@ impl FirstSliceService {
                     .map_err(storage_admission_error)?;
                 Some(admitted)
             } else {
-                return Err(FirstSliceError::Retention);
+                return Err(FirstSliceError::Retention.into());
             }
         } else {
             None
@@ -10919,6 +11203,8 @@ struct FirstSliceIncrementalPlanningContext<'a> {
     discovery: &'a IncrementalDiscovery,
     source_files: &'a BTreeSet<FileId>,
     semantic_inputs: &'a [InputFingerprint],
+    estimated_facts: u64,
+    estimated_durable_bytes: u64,
 }
 
 fn prepare_incremental_state(
@@ -10934,6 +11220,8 @@ fn prepare_incremental_state(
         discovery,
         source_files,
         semantic_inputs,
+        estimated_facts,
+        estimated_durable_bytes,
     } = context;
     check_cancellation(cancellation)?;
     let parent_inputs = match parent {
@@ -10986,6 +11274,13 @@ fn prepare_incremental_state(
     .map_err(|error| map_incremental_error(error, cancellation))?;
     let evidence =
         summarize_incremental_evidence(has_parent, reuse_policy, discovery, source_files, &plan)?;
+    let planning = first_slice_index_planning(
+        &evidence,
+        source_files,
+        &plan,
+        estimated_facts,
+        estimated_durable_bytes,
+    )?;
     let reusable_parser_artifacts = if reuse_policy == FirstSliceReusePolicy::CleanRebuild {
         BTreeSet::new()
     } else {
@@ -11002,7 +11297,104 @@ fn prepare_incremental_state(
             evidence,
         },
         reusable_parser_artifacts,
+        planning,
     })
+}
+
+fn first_slice_index_planning(
+    evidence: &FirstSliceIncrementalEvidence,
+    source_files: &BTreeSet<FileId>,
+    plan: &InvalidationPlan,
+    estimated_facts: u64,
+    estimated_durable_bytes: u64,
+) -> Result<FirstSliceIndexPlanning, FirstSliceError> {
+    // Generation-bound identities can rebuild normalized records for files whose
+    // parser artifacts remain reusable, so the pre-work upper bound covers the
+    // complete current source set rather than only directly invalidated files.
+    let estimated_files = u64::try_from(source_files.len()).map_err(|_| FirstSliceError::Limits)?;
+    let estimated_analysis_units =
+        u64::try_from(plan.reanalyze().count()).map_err(|_| FirstSliceError::Limits)?;
+    let closure_work = u64::try_from(plan.closure_work()).map_err(|_| FirstSliceError::Limits)?;
+    let estimated_cost_units = closure_work
+        .checked_add(estimated_analysis_units)
+        .and_then(|total| total.checked_add(estimated_files))
+        .and_then(|total| total.checked_add(estimated_facts))
+        .ok_or(FirstSliceError::Limits)?;
+    let total_dependency_keys =
+        u64::try_from(plan.changes().changes().len()).map_err(|_| FirstSliceError::Limits)?;
+    let retained_dependency_keys = plan
+        .changes()
+        .changes()
+        .len()
+        .min(MAX_FIRST_SLICE_PLANNING_DEPENDENCY_KEYS);
+    let mut dependency_key_samples = Vec::new();
+    dependency_key_samples
+        .try_reserve_exact(retained_dependency_keys)
+        .map_err(|_| FirstSliceError::Limits)?;
+    dependency_key_samples.extend(
+        plan.changes()
+            .changes()
+            .iter()
+            .take(MAX_FIRST_SLICE_PLANNING_DEPENDENCY_KEYS)
+            .map(|change| first_slice_planning_dependency_key(change.key())),
+    );
+    let retained_dependency_keys =
+        u64::try_from(dependency_key_samples.len()).map_err(|_| FirstSliceError::Limits)?;
+
+    Ok(FirstSliceIndexPlanning {
+        strategy: first_slice_operation_strategy(evidence.strategy),
+        fallback_reason: evidence.fallback_reason,
+        estimated_analysis_units,
+        estimated_files,
+        estimated_facts,
+        estimated_cost_units,
+        estimated_durable_bytes,
+        dependency_keys: FirstSlicePlanningDependencyKeys {
+            total: total_dependency_keys,
+            samples: dependency_key_samples,
+            complete: total_dependency_keys == retained_dependency_keys,
+        },
+    })
+}
+
+const fn first_slice_operation_strategy(
+    strategy: FirstSliceBuildStrategy,
+) -> FirstSliceIndexOperationStrategy {
+    match strategy {
+        FirstSliceBuildStrategy::Initial => FirstSliceIndexOperationStrategy::Initial,
+        FirstSliceBuildStrategy::DependencyDirected => {
+            FirstSliceIndexOperationStrategy::DependencyDirected
+        }
+        FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
+            FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild
+        }
+        FirstSliceBuildStrategy::CleanRebuild => FirstSliceIndexOperationStrategy::CleanRebuild,
+    }
+}
+
+const fn first_slice_planning_dependency_key(key: InputKey) -> FirstSlicePlanningDependencyKey {
+    match key {
+        InputKey::FileContent(file) => FirstSlicePlanningDependencyKey::FileContent(file),
+        InputKey::FilePath(file) => FirstSlicePlanningDependencyKey::FilePath(file),
+        InputKey::PublicSurface(unit) => {
+            FirstSlicePlanningDependencyKey::PublicSurface(unit.as_fact_id())
+        }
+        InputKey::BodySummary(unit) => {
+            FirstSlicePlanningDependencyKey::BodySummary(unit.as_fact_id())
+        }
+        InputKey::ImportSet(unit) => FirstSlicePlanningDependencyKey::ImportSet(unit.as_fact_id()),
+        InputKey::BuildTarget(fact) => FirstSlicePlanningDependencyKey::BuildTarget(fact),
+        InputKey::CompilerOptions(fact) => FirstSlicePlanningDependencyKey::CompilerOptions(fact),
+        InputKey::DependencyVersion(fact) => {
+            FirstSlicePlanningDependencyKey::DependencyVersion(fact)
+        }
+        InputKey::GrammarVersion(fact) => FirstSlicePlanningDependencyKey::GrammarVersion(fact),
+        InputKey::AdapterVersion(fact) => FirstSlicePlanningDependencyKey::AdapterVersion(fact),
+        InputKey::ResolverVersion => FirstSlicePlanningDependencyKey::ResolverVersion,
+        InputKey::ConfigurationRevision => FirstSlicePlanningDependencyKey::ConfigurationRevision,
+        InputKey::SearchRevision => FirstSlicePlanningDependencyKey::SearchRevision,
+        InputKey::DerivedPlan(fact) => FirstSlicePlanningDependencyKey::DerivedPlan(fact),
+    }
 }
 
 fn incremental_planning_limits(
@@ -20848,6 +21240,142 @@ mod tests {
         assert_eq!(
             released.repository_headroom,
             released.effective_maximum_repositories
+        );
+    }
+
+    #[test]
+    fn planning_observer_rejection_stops_before_generation_construction() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn planned() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let service = FirstSliceService::new(2).expect("service initializes");
+        let mut admission = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("repository admission succeeds");
+        let repository = admission.repository;
+
+        let result = service.prepare_repository_after_admission_with_options_and_observers(
+            fixture.path(),
+            FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural),
+            &mut admission,
+            &cancellation,
+            |_| {},
+            |_| Err("planning journal unavailable"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(FirstSlicePreparationError::PlanningObserver(
+                "planning journal unavailable"
+            ))
+        ));
+        assert!(service.receipts.is_empty());
+        assert_eq!(service.active_generation_for(repository), None);
+        service.release_index_admission(admission);
+        assert!(service.list_repositories().is_empty());
+    }
+
+    #[test]
+    fn prework_planning_bounds_terminal_incremental_evidence() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = fixture.path().join("lib.rs");
+        fs::write(&source, EQUIVALENCE_INITIAL).expect("initial source writes");
+        fs::write(
+            fixture.path().join("unchanged.rs"),
+            "pub fn unchanged() -> bool { true }\n",
+        )
+        .expect("unchanged source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        let mut retained_admission = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("retained admission succeeds");
+        let retained_durable_bound = retained_admission.estimated_disk_bytes;
+        let mut retained_planning = None;
+        let retained = service
+            .prepare_repository_after_admission_with_options_and_observers(
+                fixture.path(),
+                FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural),
+                &mut retained_admission,
+                &cancellation,
+                |_| {},
+                |planning| {
+                    retained_planning = Some(planning.clone());
+                    Ok::<(), std::convert::Infallible>(())
+                },
+            )
+            .expect("unchanged repository prepares");
+        assert!(matches!(
+            retained,
+            FirstSliceIndexPreparation::Retained { .. }
+        ));
+        let retained_planning = retained_planning.expect("retained plan is observed");
+        assert_eq!(
+            retained_planning.strategy(),
+            FirstSliceIndexOperationStrategy::RetainedGeneration
+        );
+        assert_eq!(retained_planning.estimated_analysis_units(), 0);
+        assert_eq!(retained_planning.estimated_files(), 0);
+        assert_eq!(retained_planning.estimated_facts(), 0);
+        assert_eq!(retained_planning.estimated_cost_units(), 0);
+        assert_eq!(
+            retained_planning.estimated_durable_bytes(),
+            retained_durable_bound
+        );
+        assert_eq!(retained_planning.dependency_keys().total(), 0);
+        assert!(retained_planning.dependency_keys().is_complete());
+        service.release_index_admission(retained_admission);
+
+        fs::write(&source, EQUIVALENCE_BODY_EDIT).expect("body edit writes");
+        let mut admission = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("incremental admission succeeds");
+        let mut planning = None;
+        let prepared = service
+            .prepare_repository_after_admission_with_options_and_observers(
+                fixture.path(),
+                FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural),
+                &mut admission,
+                &cancellation,
+                |_| {},
+                |observed| {
+                    planning = Some(observed.clone());
+                    Ok::<(), std::convert::Infallible>(())
+                },
+            )
+            .expect("incremental successor prepares");
+        let commit = service
+            .publish_prepared_with_metrics(prepared, &cancellation)
+            .expect("incremental successor publishes");
+        let evidence = commit.evidence();
+        let planning = planning.expect("incremental plan is observed");
+
+        assert_eq!(planning.strategy(), evidence.strategy);
+        assert_eq!(planning.fallback_reason(), evidence.fallback_reason);
+        assert!(evidence.invalidated_units <= planning.estimated_analysis_units());
+        assert!(evidence.rebuilt_files <= planning.estimated_files());
+        assert!(evidence.rebuilt_facts <= planning.estimated_facts());
+        assert!(evidence.newly_written_bytes <= planning.estimated_durable_bytes());
+        assert!(
+            planning
+                .dependency_keys()
+                .samples()
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            planning.dependency_keys().is_complete(),
+            planning.dependency_keys().total()
+                == u64::try_from(planning.dependency_keys().samples().len())
+                    .expect("bounded dependency sample length is representable")
         );
     }
 

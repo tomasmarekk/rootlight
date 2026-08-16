@@ -58,7 +58,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "ba6641eb29367ac4d7e93df2caffd5429dd5770bd1df6633c52a25d0f136bf29"
+      "blake3": "256eabcdc2ed9c32b136e7fdf7eed0555d703d09cf0526d4c3a0aac6ba226d57"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",
@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "f0607e39869a1a6961772963b1b8dba7a573d58230499a46d5e5c81262d09c03"
+      "blake3": "f88382ead67a8c3ea6491f90f9f7038be983fffb99e9b988fcaaadc106024a61"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -82,7 +82,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "871b215543566c6e95f7168e657d185ffd10b61b84ea0f94dc8d19d0864ad74e"
+      "blake3": "c402af4f90cd1af05e7b4afe48bf50762b26e72d3903f3f2d195dd194a91f182"
     },
     {
       "path": "proto/ui_graph_v1.proto",
@@ -147,6 +147,10 @@
     {
       "path": "tests/fixtures/compatibility/protobuf/1.15/rootlight.desc",
       "blake3": "1534f4c93e313761b6fe606b6b50ea43106fd26cacd9513c16b7efba9b9728d4"
+    },
+    {
+      "path": "tests/fixtures/compatibility/protobuf/1.16/rootlight.desc",
+      "blake3": "3db758f37dab3810bbd70efb9f972ce7498166ee87c45cbca6dc82b399162437"
     },
     {
       "path": "tests/fixtures/compatibility/protobuf/1.2/rootlight.desc",
@@ -222,7 +226,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "b3d4a89b8112439d8a60fafa35207992beeac90fb5eabb56ca68927a2770d495"
+      "blake3": "85dd44dcd7ee07c113feb57f1389b5cf70f77e0812862749e3e4ce6cc0ff3701"
     }
   ],
   "artifacts": [
@@ -240,7 +244,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "d68e78f876c24debb7a41509b57d4d3eba734eea07763e81f52b0686751bb426"
+      "blake3": "01e5c8c274c492c5834ae73fb1c07ef9ef60e9f00df51dc76a6bc8b5c73315cc"
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.ui.graph.v1.rs",
@@ -411,6 +415,10 @@
       "blake3": "dadcb0d7569932c34a26a461285205dca657db4c310d02c6cff2cb2ef1d6a612"
     },
     {
+      "path": "schemas/generated/json/mcp-operation-status-input-1.5.schema.json",
+      "blake3": "62553f8b0aee5c52e84cf023fcccb296801e75bd9af1152f8121b0e8ce615f15"
+    },
+    {
       "path": "schemas/generated/json/mcp-operation-status-output-1.0.schema.json",
       "blake3": "99a58a55799211581ae45fde6d87eeb864d3cbb2ba391f6bf9463e0d4917491f"
     },
@@ -429,6 +437,10 @@
     {
       "path": "schemas/generated/json/mcp-operation-status-output-1.4.schema.json",
       "blake3": "59bc9c274ca5ac3981aaab4a135c4181d7e9383333e938a65ed94d3896efb378"
+    },
+    {
+      "path": "schemas/generated/json/mcp-operation-status-output-1.5.schema.json",
+      "blake3": "e03e2ff880d18faf721115d816ce9f27e4bbc33485a4124296778b815e8baab5"
     },
     {
       "path": "schemas/generated/json/mcp-plan-change-input-1.0.schema.json",
@@ -596,7 +608,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "3db758f37dab3810bbd70efb9f972ce7498166ee87c45cbca6dc82b399162437"
+      "blake3": "f54b0ab424a35d1e94d1d2300e56ad45af3948709c7b1d28dcef4e24086fe7bd"
     }
   ]
 }

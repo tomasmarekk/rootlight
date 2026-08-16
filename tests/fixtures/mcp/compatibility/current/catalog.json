@@ -4107,7 +4107,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.4",
+            "contractVersion": "1.5",
             "explainSupported": false,
             "fallbackSummary": "bounded operation read and cancel",
             "generation": "none",
@@ -4156,7 +4156,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.4",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `operation.status`.",
@@ -5806,6 +5806,346 @@
               ],
               "type": "object"
             },
+            "OperationPlanning": {
+              "additionalProperties": false,
+              "description": "Source-free estimates selected before repository fact construction.",
+              "properties": {
+                "build_strategy": {
+                  "$ref": "#/$defs/OperationBuildStrategy",
+                  "description": "Construction strategy selected by incremental planning."
+                },
+                "dependency_keys": {
+                  "$ref": "#/$defs/OperationPlanningDependencyKeys",
+                  "description": "Exact count and bounded identities for dependency keys selecting the closure."
+                },
+                "estimated_analysis_units": {
+                  "description": "Conservative upper bound for analysis units selected by the closure.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "estimated_cost_units": {
+                  "description": "Deterministic producer-defined upper bound for logical planning cost.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "estimated_durable_bytes": {
+                  "description": "Conservative upper bound for operation-owned durable bytes.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "estimated_facts": {
+                  "description": "Conservative upper bound for normalized facts selected for rebuilding.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "estimated_files": {
+                  "description": "Conservative upper bound for source files selected by the closure.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "fallback_reason": {
+                  "$ref": "#/$defs/RequiredNullable3",
+                  "description": "Explicit reason dependency-directed planning was abandoned."
+                }
+              },
+              "required": [
+                "build_strategy",
+                "fallback_reason",
+                "estimated_analysis_units",
+                "estimated_files",
+                "estimated_facts",
+                "estimated_cost_units",
+                "estimated_durable_bytes",
+                "dependency_keys"
+              ],
+              "type": "object"
+            },
+            "OperationPlanningDependencyKey": {
+              "description": "One typed source-free dependency key selected before fact construction.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "Actual bytes of one file.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_content",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FileId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Canonical path semantics of one file.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_path",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FileId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Exported surface of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "public_surface",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Body summary of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "body_summary",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Import set of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "import_set",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Build-target membership.",
+                  "properties": {
+                    "kind": {
+                      "const": "build_target",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Compiler and macro options.",
+                  "properties": {
+                    "kind": {
+                      "const": "compiler_options",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "One dependency or lockfile resolution.",
+                  "properties": {
+                    "kind": {
+                      "const": "dependency_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Parser grammar identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "grammar_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Adapter producer identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "adapter_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global resolver revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "resolver_version",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global analysis-configuration revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "configuration_revision",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global search revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "search_revision",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Derived plan or projection identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "derived_plan",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FactId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "OperationPlanningDependencyKeys": {
+              "additionalProperties": false,
+              "description": "Bounded canonical identities for dependency keys that selected a closure.",
+              "properties": {
+                "complete": {
+                  "description": "Whether the sample contains every selected key.",
+                  "type": "boolean"
+                },
+                "samples": {
+                  "description": "Canonical ascending identity sample.",
+                  "items": {
+                    "$ref": "#/$defs/OperationPlanningDependencyKey"
+                  },
+                  "maxItems": 32,
+                  "type": "array"
+                },
+                "total": {
+                  "description": "Exact number of selected dependency keys.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total",
+                "samples",
+                "complete"
+              ],
+              "type": "object"
+            },
             "OperationProgress": {
               "additionalProperties": false,
               "description": "Progress units reported by an operation.",
@@ -5948,7 +6288,7 @@
             },
             "OperationStatusData": {
               "additionalProperties": false,
-              "description": "`operation.status` result data for schema 1.4.",
+              "description": "`operation.status` result data for schema 1.5.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/RequiredNullable4",
@@ -5977,6 +6317,17 @@
                 "operation": {
                   "$ref": "#/$defs/OperationDetailV1_2",
                   "description": "Current operation view."
+                },
+                "planning": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationPlanning"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Bounded source-free planning visible before terminal publication."
                 },
                 "published_generation": {
                   "$ref": "#/$defs/RequiredNullable2",
@@ -6008,7 +6359,7 @@
             },
             "OperationStatusErrorResponse": {
               "additionalProperties": false,
-              "description": "Checked error response for operation-status schema 1.4.",
+              "description": "Checked error response for operation-status schema 1.5.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/McpPublicError",
@@ -6029,15 +6380,15 @@
               "description": "Version marker carried by additive operation-status responses.",
               "oneOf": [
                 {
-                  "const": "1.4",
-                  "description": "Tool contract version 1.4.",
+                  "const": "1.5",
+                  "description": "Tool contract version 1.5.",
                   "type": "string"
                 }
               ]
             },
             "OperationStatusSuccess": {
               "additionalProperties": false,
-              "description": "Strict output for operation-status schema 1.4.",
+              "description": "Strict output for operation-status schema 1.5.",
               "properties": {
                 "data": {
                   "$ref": "#/$defs/OperationStatusData",
@@ -6253,7 +6604,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.4",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -6265,7 +6616,7 @@
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for operation-status schema 1.4.",
+          "description": "Success-or-error response for operation-status schema 1.5.",
           "title": "OperationStatusToolResponse",
           "type": "object",
           "unevaluatedProperties": false

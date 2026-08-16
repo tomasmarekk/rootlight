@@ -53,9 +53,11 @@ use rootlight_client::{
     RepositoryCatalogState, RepositoryCoverageEntry, RepositoryFactWorkCause,
     RepositoryFactWorkDisposition, RepositoryIncrementalFactWorkEvidence, RepositoryList,
     RepositoryListEntry, RepositoryNormalizedFactDomain, RepositoryNormalizedFactWorkCollection,
-    RepositoryNormalizedFactWorkGroup, RepositoryOperationEvidence, RepositoryPlannedFactDomain,
-    RepositoryPlannedFactWorkCollection, RepositoryPlannedFactWorkGroup, RepositoryStatus,
-    RepositoryStatusOperation, ResultCompleteness as ClientResultCompleteness,
+    RepositoryNormalizedFactWorkGroup, RepositoryOperationEvidence, RepositoryOperationPlanning,
+    RepositoryPlannedFactDomain, RepositoryPlannedFactWorkCollection,
+    RepositoryPlannedFactWorkGroup, RepositoryPlanningDependencyKey,
+    RepositoryPlanningDependencyKeys, RepositoryStatus, RepositoryStatusOperation,
+    ResultCompleteness as ClientResultCompleteness,
     ResultCompletenessState as ClientResultCompletenessState, SourceChunk as ClientSourceChunk,
     SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
     TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
@@ -3487,6 +3489,23 @@ async fn maps_operation_status_action_time_progress_and_resources() {
         bytes_examined: 300,
         index_stage: "analysis".to_owned(),
         retry_after_ms: Some(0),
+        planning: Some(RepositoryOperationPlanning {
+            build_strategy: ClientBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            estimated_analysis_units: 2,
+            estimated_files: 1,
+            estimated_facts: 12,
+            estimated_cost_units: 24,
+            estimated_durable_bytes: 2_048,
+            dependency_keys: RepositoryPlanningDependencyKeys {
+                total: 2,
+                samples: vec![
+                    RepositoryPlanningDependencyKey::FileContent(file()),
+                    RepositoryPlanningDependencyKey::BodySummary(analysis_unit()),
+                ],
+                complete: true,
+            },
+        }),
         evidence: None,
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
@@ -3514,6 +3533,10 @@ async fn maps_operation_status_action_time_progress_and_resources() {
     assert_eq!(output.data.operation.progress.completed_units, 4);
     assert_eq!(output.data.operation.progress.total_units.0, Some(10));
     assert_eq!(output.data.retry_after_ms.0, Some(0));
+    let planning = output.data.planning.expect("running planning is projected");
+    assert_eq!(planning.estimated_analysis_units, 2);
+    assert_eq!(planning.dependency_keys.total, 2);
+    assert_eq!(planning.dependency_keys.samples.len(), 2);
     assert_eq!(
         harness.only_call(),
         ObservedCall::OperationStatus(OperationStatusPortRequest {
@@ -3538,6 +3561,20 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
         bytes_examined: 512,
         index_stage: "complete".to_owned(),
         retry_after_ms: None,
+        planning: Some(RepositoryOperationPlanning {
+            build_strategy: ClientBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            estimated_analysis_units: 2,
+            estimated_files: 1,
+            estimated_facts: 12,
+            estimated_cost_units: 24,
+            estimated_durable_bytes: 2_048,
+            dependency_keys: RepositoryPlanningDependencyKeys {
+                total: 1,
+                samples: vec![RepositoryPlanningDependencyKey::ResolverVersion],
+                complete: true,
+            },
+        }),
         evidence: Some(RepositoryOperationEvidence {
             build_strategy: ClientBuildStrategy::DependencyDirected,
             fallback_reason: None,
@@ -3619,6 +3656,14 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
     assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
     assert_eq!(output.data.operation.resources.reserved_memory_bytes, 4_096);
     assert_eq!(output.data.operation.resources.owned_memory_bytes, 3_072);
+    assert_eq!(
+        output
+            .data
+            .planning
+            .expect("terminal planning is projected")
+            .estimated_facts,
+        12
+    );
 }
 
 #[tokio::test]
@@ -3634,6 +3679,7 @@ async fn maps_clean_rebuild_strategy_with_planned_user_cause_and_normalized_tech
         bytes_examined: 512,
         index_stage: "complete".to_owned(),
         retry_after_ms: None,
+        planning: None,
         evidence: Some(RepositoryOperationEvidence {
             build_strategy: ClientBuildStrategy::CleanRebuild,
             fallback_reason: None,
@@ -3662,7 +3708,7 @@ async fn maps_clean_rebuild_strategy_with_planned_user_cause_and_normalized_tech
     .await
     .expect("clean-rebuild operation evidence maps");
 
-    assert_eq!(encoded["schema_version"], "1.4");
+    assert_eq!(encoded["schema_version"], "1.5");
     assert_eq!(
         encoded["data"]["incremental"]["build_strategy"],
         "clean_rebuild"
@@ -3694,6 +3740,7 @@ fn rejects_user_requested_clean_rebuild_as_a_normalized_fact_work_cause() {
         bytes_examined: 512,
         index_stage: "complete".to_owned(),
         retry_after_ms: None,
+        planning: None,
         evidence: Some(RepositoryOperationEvidence {
             build_strategy: ClientBuildStrategy::CleanRebuild,
             fallback_reason: None,
@@ -3730,6 +3777,7 @@ fn rejects_nonconserving_grouped_fact_work() {
         bytes_examined: 512,
         index_stage: "complete".to_owned(),
         retry_after_ms: None,
+        planning: None,
         evidence: Some(RepositoryOperationEvidence {
             build_strategy: ClientBuildStrategy::DependencyDirected,
             fallback_reason: None,
@@ -3768,6 +3816,7 @@ async fn maps_recovery_operation_status_without_index_projection() {
         bytes_examined: 300,
         index_stage: "persistence".to_owned(),
         retry_after_ms: None,
+        planning: None,
         evidence: None,
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
@@ -3822,6 +3871,7 @@ async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
             bytes_examined: 300,
             index_stage: "analysis".to_owned(),
             retry_after_ms: None,
+            planning: None,
             evidence: None,
         };
         let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));

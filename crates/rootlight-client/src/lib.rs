@@ -96,6 +96,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "operation.cancel",
     "operation.lifecycle.v1",
     "operation.status",
+    "operation.status.incremental-planning.v1",
     "operation.submit",
     "repository.index.clean-rebuild.v1",
     "repository.index.v1",
@@ -141,6 +142,8 @@ const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
 const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
 const MAX_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 1_042;
 const GROUPED_FACT_WORK_PROTOCOL_MINOR: u32 = 15;
+const REPOSITORY_OPERATION_PLANNING_PROTOCOL_MINOR: u32 = 17;
+const MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS: usize = 32;
 const MAX_REPOSITORY_FACT_WORK_GROUPS: usize = 32;
 const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
 const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASSES: usize = 16;
@@ -910,6 +913,72 @@ pub enum RepositoryFallbackReason {
     ClosureWorkExceeded,
 }
 
+/// One typed source-free dependency key selected before fact construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+pub enum RepositoryPlanningDependencyKey {
+    /// Actual bytes of one file.
+    FileContent(FileId),
+    /// Canonical path semantics of one file.
+    FilePath(FileId),
+    /// Exported surface of one analysis unit.
+    PublicSurface(FactId),
+    /// Body summary of one analysis unit.
+    BodySummary(FactId),
+    /// Import set of one analysis unit.
+    ImportSet(FactId),
+    /// Build-target membership.
+    BuildTarget(FactId),
+    /// Compiler and macro options.
+    CompilerOptions(FactId),
+    /// One dependency or lockfile resolution.
+    DependencyVersion(FactId),
+    /// Parser grammar identity.
+    GrammarVersion(FactId),
+    /// Adapter producer identity.
+    AdapterVersion(FactId),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(FactId),
+}
+
+/// Bounded canonical identities for dependency keys that selected a closure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryPlanningDependencyKeys {
+    /// Exact number of selected dependency keys.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    pub samples: Vec<RepositoryPlanningDependencyKey>,
+    /// Whether the sample contains every selected key.
+    pub complete: bool,
+}
+
+/// Source-free estimates selected before repository fact construction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryOperationPlanning {
+    /// Construction strategy selected by incremental planning.
+    pub build_strategy: RepositoryBuildStrategy,
+    /// Explicit reason dependency-directed planning was abandoned.
+    pub fallback_reason: Option<RepositoryFallbackReason>,
+    /// Conservative upper bound for analysis units selected by the closure.
+    pub estimated_analysis_units: u64,
+    /// Conservative upper bound for source files selected by the closure.
+    pub estimated_files: u64,
+    /// Conservative upper bound for normalized facts selected for rebuilding.
+    pub estimated_facts: u64,
+    /// Deterministic producer-defined upper bound for logical planning cost.
+    pub estimated_cost_units: u64,
+    /// Conservative upper bound for operation-owned durable bytes.
+    pub estimated_durable_bytes: u64,
+    /// Exact count and bounded identities for dependency keys selecting the closure.
+    pub dependency_keys: RepositoryPlanningDependencyKeys,
+}
+
 /// Whether one incremental fact scope was rebuilt or reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1137,6 +1206,8 @@ pub struct RepositoryOperationStatus {
     pub retry_after_ms: Option<u32>,
     /// Final incremental and generation-resource evidence, when published.
     pub evidence: Option<RepositoryOperationEvidence>,
+    /// Bounded source-free planning visible before terminal publication.
+    pub planning: Option<RepositoryOperationPlanning>,
 }
 
 /// One generation-pinned lexical result.
@@ -9282,12 +9353,28 @@ fn parse_repository_operation_status_for_minor(
         .semantic_operation
         .map(|operation| parse_operation(Some(operation)))
         .transpose()?;
+    let planning = parse_repository_operation_planning(
+        response.planning,
+        operation.kind,
+        operation.state,
+        selected_protocol_minor,
+    )?;
     let evidence = parse_repository_operation_evidence(
         operation.kind,
         operation.state,
         evidence_wire,
         selected_protocol_minor,
     )?;
+    if let (Some(planning), Some(evidence)) = (&planning, &evidence)
+        && (planning.build_strategy != evidence.build_strategy
+            || planning.fallback_reason != evidence.fallback_reason
+            || evidence.invalidated_units > planning.estimated_analysis_units
+            || evidence.rebuilt_files > planning.estimated_files
+            || evidence.rebuilt_facts > planning.estimated_facts
+            || evidence.newly_written_bytes > planning.estimated_durable_bytes)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     let index_stage =
         parse_repository_index_stage(response.index_stage, operation.state, operation.stage)?;
     let coherent = match (operation.kind, operation.state) {
@@ -9357,6 +9444,7 @@ fn parse_repository_operation_status_for_minor(
         index_stage,
         retry_after_ms: response.retry_after_ms,
         evidence,
+        planning,
     })
 }
 
@@ -9403,6 +9491,213 @@ impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvi
     }
 }
 
+fn parse_repository_operation_planning(
+    response: Option<daemon::RepositoryOperationPlanning>,
+    kind: OperationKind,
+    state: OperationState,
+    selected_protocol_minor: u32,
+) -> Result<Option<RepositoryOperationPlanning>, ClientError> {
+    let Some(response) = response else {
+        return Ok(None);
+    };
+    if selected_protocol_minor < REPOSITORY_OPERATION_PLANNING_PROTOCOL_MINOR
+        || kind != OperationKind::RepositoryIndex
+        || state == OperationState::Queued
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let build_strategy =
+        parse_repository_build_strategy(response.build_strategy, selected_protocol_minor)?;
+    let fallback_reason = parse_repository_fallback_reason(response.fallback_reason)?;
+    if (build_strategy == RepositoryBuildStrategy::ConservativeRepositoryRebuild)
+        != fallback_reason.is_some()
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let keys = response
+        .dependency_keys
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    let samples = keys
+        .samples
+        .into_iter()
+        .map(parse_repository_planning_dependency_key)
+        .collect::<Result<Vec<_>, _>>()?;
+    let sample_count =
+        u64::try_from(samples.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    if samples.len() > MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS
+        || sample_count > keys.total
+        || keys.complete != (sample_count == keys.total)
+        || !samples.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(Some(RepositoryOperationPlanning {
+        build_strategy,
+        fallback_reason,
+        estimated_analysis_units: response.estimated_analysis_units,
+        estimated_files: response.estimated_files,
+        estimated_facts: response.estimated_facts,
+        estimated_cost_units: response.estimated_cost_units,
+        estimated_durable_bytes: response.estimated_durable_bytes,
+        dependency_keys: RepositoryPlanningDependencyKeys {
+            total: keys.total,
+            samples,
+            complete: keys.complete,
+        },
+    }))
+}
+
+fn parse_repository_planning_dependency_key(
+    key: daemon::RepositoryPlanningDependencyKey,
+) -> Result<RepositoryPlanningDependencyKey, ClientError> {
+    use daemon::repository_planning_dependency_key::Subject;
+
+    let kind = daemon::RepositoryPlanningDependencyKind::try_from(key.kind)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    match (kind, key.subject) {
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent,
+            Some(Subject::File(file)),
+        ) => Ok(RepositoryPlanningDependencyKey::FileContent(parse_file(
+            Some(file),
+        )?)),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath,
+            Some(Subject::File(file)),
+        ) => Ok(RepositoryPlanningDependencyKey::FilePath(parse_file(Some(
+            file,
+        ))?)),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyPublicSurface,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::PublicSurface(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBodySummary,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::BodySummary(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyImportSet,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::ImportSet(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBuildTarget,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::BuildTarget(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyCompilerOptions,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::CompilerOptions(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDependencyVersion,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::DependencyVersion(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyGrammarVersion,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::GrammarVersion(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyAdapterVersion,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::AdapterVersion(
+            parse_planning_fact(fact)?,
+        )),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyResolverVersion,
+            None,
+        ) => Ok(RepositoryPlanningDependencyKey::ResolverVersion),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyConfigurationRevision,
+            None,
+        ) => Ok(RepositoryPlanningDependencyKey::ConfigurationRevision),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencySearchRevision,
+            None,
+        ) => Ok(RepositoryPlanningDependencyKey::SearchRevision),
+        (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyDerivedPlan,
+            Some(Subject::Fact(fact)),
+        ) => Ok(RepositoryPlanningDependencyKey::DerivedPlan(
+            parse_planning_fact(fact)?,
+        )),
+        _ => Err(ClientError::InvalidResponseCorrelation),
+    }
+}
+
+fn parse_planning_fact(fact: common::AnalysisUnitId) -> Result<FactId, ClientError> {
+    let bytes: [u8; 20] = fact
+        .value
+        .try_into()
+        .map_err(|_| ClientError::InvalidIdentifier)?;
+    Ok(FactId::from_bytes(bytes))
+}
+
+fn parse_repository_build_strategy(
+    strategy: i32,
+    selected_protocol_minor: u32,
+) -> Result<RepositoryBuildStrategy, ClientError> {
+    match daemon::RepositoryBuildStrategy::try_from(strategy)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryBuildStrategy::RepositoryBuildInitial => {
+            Ok(RepositoryBuildStrategy::Initial)
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected => {
+            Ok(RepositoryBuildStrategy::DependencyDirected)
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildConservativeRepositoryRebuild => {
+            Ok(RepositoryBuildStrategy::ConservativeRepositoryRebuild)
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration => {
+            Ok(RepositoryBuildStrategy::RetainedGeneration)
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
+            if selected_protocol_minor >= 16 =>
+        {
+            Ok(RepositoryBuildStrategy::CleanRebuild)
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
+        | daemon::RepositoryBuildStrategy::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
+}
+
+fn parse_repository_fallback_reason(
+    reason: Option<i32>,
+) -> Result<Option<RepositoryFallbackReason>, ClientError> {
+    reason
+        .map(|reason| {
+            match daemon::RepositoryFallbackReason::try_from(reason)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+            {
+                daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration => {
+                    Ok(RepositoryFallbackReason::MissingDependencyDeclaration)
+                }
+                daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded => {
+                    Ok(RepositoryFallbackReason::ClosureWorkExceeded)
+                }
+                daemon::RepositoryFallbackReason::Unspecified => {
+                    Err(ClientError::InvalidResponseCorrelation)
+                }
+            }
+        })
+        .transpose()
+}
+
 fn parse_repository_operation_evidence(
     kind: OperationKind,
     state: OperationState,
@@ -9440,49 +9735,9 @@ fn parse_repository_operation_evidence(
     if kind != OperationKind::RepositoryIndex || state != OperationState::Succeeded {
         return Err(ClientError::InvalidResponseCorrelation);
     }
-    let build_strategy = match daemon::RepositoryBuildStrategy::try_from(response.build_strategy)
-        .map_err(|_| ClientError::InvalidResponseCorrelation)?
-    {
-        daemon::RepositoryBuildStrategy::RepositoryBuildInitial => RepositoryBuildStrategy::Initial,
-        daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected => {
-            RepositoryBuildStrategy::DependencyDirected
-        }
-        daemon::RepositoryBuildStrategy::RepositoryBuildConservativeRepositoryRebuild => {
-            RepositoryBuildStrategy::ConservativeRepositoryRebuild
-        }
-        daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration => {
-            RepositoryBuildStrategy::RetainedGeneration
-        }
-        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild
-            if selected_protocol_minor >= 16 =>
-        {
-            RepositoryBuildStrategy::CleanRebuild
-        }
-        daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild => {
-            return Err(ClientError::InvalidResponseCorrelation);
-        }
-        daemon::RepositoryBuildStrategy::Unspecified => {
-            return Err(ClientError::InvalidResponseCorrelation);
-        }
-    };
-    let fallback_reason = response
-        .fallback_reason
-        .map(|reason| {
-            match daemon::RepositoryFallbackReason::try_from(reason)
-                .map_err(|_| ClientError::InvalidResponseCorrelation)?
-            {
-                daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration => {
-                    Ok(RepositoryFallbackReason::MissingDependencyDeclaration)
-                }
-                daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded => {
-                    Ok(RepositoryFallbackReason::ClosureWorkExceeded)
-                }
-                daemon::RepositoryFallbackReason::Unspecified => {
-                    Err(ClientError::InvalidResponseCorrelation)
-                }
-            }
-        })
-        .transpose()?;
+    let build_strategy =
+        parse_repository_build_strategy(response.build_strategy, selected_protocol_minor)?;
+    let fallback_reason = parse_repository_fallback_reason(response.fallback_reason)?;
     if (build_strategy == RepositoryBuildStrategy::ConservativeRepositoryRebuild)
         != fallback_reason.is_some()
         || build_strategy == RepositoryBuildStrategy::RetainedGeneration
@@ -16438,6 +16693,7 @@ mod tests {
                 "operation.cancel",
                 "operation.lifecycle.v1",
                 "operation.status",
+                "operation.status.incremental-planning.v1",
                 "operation.submit",
                 "repository.index.clean-rebuild.v1",
                 "repository.index.v1",
@@ -17280,6 +17536,100 @@ mod tests {
             ..Default::default()
         };
         assert!(parse_repository_operation_status(status.clone(), operation).is_ok());
+        let planning = daemon::RepositoryOperationPlanning {
+            build_strategy:
+                daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32,
+            fallback_reason: None,
+            estimated_analysis_units: 2,
+            estimated_files: 1,
+            estimated_facts: 17,
+            estimated_cost_units: 34,
+            estimated_durable_bytes: 2_048,
+            dependency_keys: Some(daemon::RepositoryPlanningDependencyKeys {
+                total: 2,
+                samples: vec![
+                    daemon::RepositoryPlanningDependencyKey {
+                        kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent
+                            as i32,
+                        subject: Some(
+                            daemon::repository_planning_dependency_key::Subject::File(
+                                file_to_wire(FileId::from_bytes([3; 20])),
+                            ),
+                        ),
+                    },
+                    daemon::RepositoryPlanningDependencyKey {
+                        kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyBodySummary
+                            as i32,
+                        subject: Some(
+                            daemon::repository_planning_dependency_key::Subject::Fact(
+                                common::AnalysisUnitId { value: vec![4; 20] },
+                            ),
+                        ),
+                    },
+                ],
+                complete: true,
+            }),
+        };
+        let mut running_with_planning = status.clone();
+        let running_operation = running_with_planning
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        running_operation.state = daemon::OperationState::Running as i32;
+        running_operation.stage = daemon::OperationStage::Executing as i32;
+        running_with_planning.published_generation = None;
+        running_with_planning.index_stage = "analysis".to_owned();
+        running_with_planning.retry_after_ms = Some(10);
+        running_with_planning.planning = Some(planning.clone());
+        assert!(matches!(
+            parse_repository_operation_status_for_minor(
+                running_with_planning.clone(),
+                operation,
+                16,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let parsed_running = parse_repository_operation_status_for_minor(
+            running_with_planning.clone(),
+            operation,
+            17,
+        )
+        .expect("minor seventeen accepts bounded running planning");
+        assert_eq!(
+            parsed_running
+                .planning
+                .expect("running planning is retained")
+                .dependency_keys
+                .samples
+                .len(),
+            2
+        );
+        let mut incoherent_subject = running_with_planning.clone();
+        incoherent_subject
+            .planning
+            .as_mut()
+            .and_then(|planning| planning.dependency_keys.as_mut())
+            .expect("planning keys exist")
+            .samples[0]
+            .subject = Some(daemon::repository_planning_dependency_key::Subject::Fact(
+            common::AnalysisUnitId { value: vec![3; 20] },
+        ));
+        assert!(matches!(
+            parse_repository_operation_status_for_minor(incoherent_subject, operation, 17),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut noncanonical = running_with_planning;
+        noncanonical
+            .planning
+            .as_mut()
+            .and_then(|planning| planning.dependency_keys.as_mut())
+            .expect("planning keys exist")
+            .samples
+            .reverse();
+        assert!(matches!(
+            parse_repository_operation_status_for_minor(noncanonical, operation, 17),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let mut incremental_status = status.clone();
         incremental_status.build_strategy =
             daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32;
@@ -17344,11 +17694,13 @@ mod tests {
                 complete: true,
             }),
         });
+        incremental_status.planning = Some(planning);
         assert!(matches!(
             parse_repository_operation_status_for_minor(incremental_status.clone(), operation, 14,),
             Err(ClientError::InvalidResponseCorrelation)
         ));
         let mut clean_status = incremental_status.clone();
+        clean_status.planning = None;
         clean_status.build_strategy =
             daemon::RepositoryBuildStrategy::RepositoryBuildCleanRebuild as i32;
         clean_status.reused_files = 0;
@@ -17373,6 +17725,16 @@ mod tests {
                 .build_strategy,
             RepositoryBuildStrategy::CleanRebuild
         );
+        let mut underestimated = incremental_status.clone();
+        underestimated
+            .planning
+            .as_mut()
+            .expect("planning exists")
+            .estimated_facts = 16;
+        assert!(matches!(
+            parse_repository_operation_status(underestimated, operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let incremental = parse_repository_operation_status(incremental_status, operation)
             .expect("durable incremental evidence decodes");
         let evidence = incremental

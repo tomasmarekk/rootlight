@@ -45,7 +45,7 @@ pub const MCP_SCHEMA_VERSION: &str = "1.0";
 pub const MCP_OPERATION_SCHEMA_VERSION: &str = "1.3";
 
 /// The additive operation-status tool schema version.
-pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.4";
+pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.5";
 
 /// The additive analysis-tool schema version.
 pub const MCP_ANALYSIS_SCHEMA_VERSION: &str = "1.1";
