@@ -48,7 +48,7 @@ use rootlight_operations::{
     MAX_RECENT_TERMINAL_OPERATIONS, OperationCounts as DurableOperationCounts, OperationError,
     OperationJournal, OperationKind, OperationRecord, OperationStage, OperationState,
     OperationSubmission, PlanHash, Progress, RecoveryClass, RepositoryOperationContext,
-    RepositoryOperationEvidence, SubmissionOutcome,
+    RepositoryOperationEvidence, RepositoryOperationPlanning, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -1448,6 +1448,12 @@ enum JournalCommand {
         claim: MutationClaim,
         reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
     },
+    RecordRepositoryPlanning {
+        operation: OperationId,
+        planning: RepositoryOperationPlanning,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
+    },
     RecordRepositoryEvidence {
         operation: OperationId,
         evidence: RepositoryOperationEvidence,
@@ -2027,6 +2033,35 @@ impl JournalActorHandle {
             JournalCommand::RecordRepositoryPublication {
                 operation,
                 generation,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists immutable pre-execution repository planning before a deadline.
+    ///
+    /// The journal revision advances with the planning sidecar, allowing a
+    /// concurrent status wait to observe the plan while execution remains active.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, lifecycle, conflict, corruption,
+    /// or journal failure.
+    pub async fn record_repository_planning_until(
+        &self,
+        operation: OperationId,
+        planning: RepositoryOperationPlanning,
+        deadline: Instant,
+    ) -> Result<RepositoryOperationContext, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::RecordRepositoryPlanning {
+                operation,
+                planning,
                 claim: claim.clone(),
                 reply,
             },
@@ -2996,6 +3031,16 @@ fn execute_journal_command(
         } => {
             let _ = reply.send(execute_claimed(Some(&claim), || {
                 journal.record_repository_publication(operation, generation)
+            }));
+        }
+        JournalCommand::RecordRepositoryPlanning {
+            operation,
+            planning,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.record_repository_planning(operation, planning)
             }));
         }
         JournalCommand::RecordRepositoryEvidence {
@@ -14413,6 +14458,111 @@ mod tests {
                 .progress,
             completed.progress
         );
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn journal_actor_exposes_repository_planning_while_running() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([53; 16]);
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([53; 32]),
+            ClientInstanceId::SYSTEM,
+            true,
+            None,
+            None,
+        )
+        .expect("repository submission is valid")
+        .with_repository_context(
+            rootlight_operations::RepositoryOperationSubmission::new(
+                RepositoryId::from_bytes([53; 16]),
+                Some(GenerationId::from_bytes([53; 20])),
+                53_000,
+                8_192,
+                rootlight_operations::RepositoryOperationMode::Deep,
+            )
+            .expect("repository context is valid"),
+        )
+        .expect("repository context attaches");
+        journal
+            .submit(submission)
+            .expect("repository operation submits");
+        let running = journal
+            .start_execution(operation)
+            .expect("repository operation starts");
+        let planning = RepositoryOperationPlanning {
+            build_strategy: rootlight_operations::RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            estimated_analysis_units: 4,
+            estimated_files: 3,
+            estimated_facts: 48,
+            estimated_cost_units: 96,
+            estimated_durable_bytes: 16_384,
+            dependency_keys: rootlight_operations::RepositoryPlanningDependencyKeys {
+                total: 2,
+                samples: vec![
+                    rootlight_operations::RepositoryPlanningDependencyKey::ResolverVersion,
+                    rootlight_operations::RepositoryPlanningDependencyKey::ConfigurationRevision,
+                ],
+                complete: true,
+            },
+        };
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+
+        let planned = handle
+            .record_repository_planning_until(
+                operation,
+                planning.clone(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("planning persists");
+        assert_eq!(planned.planning, Some(planning.clone()));
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("running status remains readable")
+                .state,
+            OperationState::Running
+        );
+        assert!(
+            journal
+                .status(operation)
+                .expect("planning revision remains readable")
+                .revision
+                > running.revision
+        );
+        assert_eq!(
+            handle
+                .repository_operation_context(operation)
+                .await
+                .expect("actor reloads planning")
+                .planning,
+            Some(planning.clone())
+        );
+        let mut conflicting = planning.clone();
+        conflicting.estimated_cost_units += 1;
+        assert!(matches!(
+            handle
+                .record_repository_planning_until(
+                    operation,
+                    conflicting,
+                    Instant::now() - Duration::from_millis(1),
+                )
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert_eq!(
+            journal
+                .repository_operation_context(operation)
+                .expect("expired mutation preserves planning")
+                .planning,
+            Some(planning)
+        );
+
         actor.join().expect("actor joins");
     }
 

@@ -86,6 +86,8 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
 // safely ignore this namespaced retry intent without a rollback-breaking DDL change.
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const REPOSITORY_OPERATION_META_PREFIX: &str = "operation_repository_context/";
+// A sidecar keeps the frozen v1-v7 repository-context bytes rollback-readable.
+const REPOSITORY_OPERATION_PLANNING_META_PREFIX: &str = "operation_repository_planning/";
 const VERSION_FIVE_REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 5;
 const VERSION_SIX_REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 6;
 const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 7;
@@ -106,6 +108,10 @@ const MAX_REPOSITORY_FACT_WORK_PROVIDER_PASS_BYTES: usize = 128;
 /// Maximum canonical identities sampled by one durable fact-work group.
 pub const MAX_REPOSITORY_FACT_WORK_ID_SAMPLES: usize = 4;
 const REPOSITORY_OPERATION_FACT_WORK_VERSION: u8 = 1;
+/// Maximum dependency-key identities retained with pre-execution planning evidence.
+pub const MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS: usize = 32;
+const MAX_REPOSITORY_OPERATION_PLANNING_BYTES: usize = 1024;
+const REPOSITORY_OPERATION_PLANNING_VERSION: u8 = 1;
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 // Older journals used this marker before `error_json` stored typed public errors.
@@ -346,6 +352,92 @@ impl RepositoryFallbackReason {
             _ => Err(OperationError::CorruptState),
         }
     }
+}
+
+/// One typed source-free dependency key selected by incremental planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryPlanningDependencyKey {
+    /// Actual bytes of one file.
+    FileContent(FileId),
+    /// Canonical path semantics of one file.
+    FilePath(FileId),
+    /// Exported surface of one analysis unit.
+    PublicSurface(FactId),
+    /// Body summary of one analysis unit.
+    BodySummary(FactId),
+    /// Import set of one analysis unit.
+    ImportSet(FactId),
+    /// Build-target membership.
+    BuildTarget(FactId),
+    /// Compiler and macro options.
+    CompilerOptions(FactId),
+    /// One dependency or lockfile resolution.
+    DependencyVersion(FactId),
+    /// Parser grammar identity.
+    GrammarVersion(FactId),
+    /// Adapter producer identity.
+    AdapterVersion(FactId),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(FactId),
+}
+
+impl RepositoryPlanningDependencyKey {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::FileContent(_) => 1,
+            Self::FilePath(_) => 2,
+            Self::PublicSurface(_) => 3,
+            Self::BodySummary(_) => 4,
+            Self::ImportSet(_) => 5,
+            Self::BuildTarget(_) => 6,
+            Self::CompilerOptions(_) => 7,
+            Self::DependencyVersion(_) => 8,
+            Self::GrammarVersion(_) => 9,
+            Self::AdapterVersion(_) => 10,
+            Self::ResolverVersion => 11,
+            Self::ConfigurationRevision => 12,
+            Self::SearchRevision => 13,
+            Self::DerivedPlan(_) => 14,
+        }
+    }
+}
+
+/// Bounded canonical identities for dependency keys that selected a closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPlanningDependencyKeys {
+    /// Exact number of selected dependency keys.
+    pub total: u64,
+    /// Canonical ascending identity sample.
+    pub samples: Vec<RepositoryPlanningDependencyKey>,
+    /// Whether the sample contains every selected key.
+    pub complete: bool,
+}
+
+/// Durable source-free estimates selected before repository fact construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryOperationPlanning {
+    /// Construction strategy selected by incremental planning.
+    pub build_strategy: RepositoryBuildStrategy,
+    /// Explicit reason dependency-directed planning was abandoned.
+    pub fallback_reason: Option<RepositoryFallbackReason>,
+    /// Conservative upper bound for analysis units selected by the closure.
+    pub estimated_analysis_units: u64,
+    /// Conservative upper bound for source files selected by the closure.
+    pub estimated_files: u64,
+    /// Conservative upper bound for normalized facts selected for rebuilding.
+    pub estimated_facts: u64,
+    /// Deterministic producer-defined upper bound for logical planning cost.
+    pub estimated_cost_units: u64,
+    /// Conservative upper bound for operation-owned durable bytes.
+    pub estimated_durable_bytes: u64,
+    /// Exact count and bounded identities for dependency keys selecting the closure.
+    pub dependency_keys: RepositoryPlanningDependencyKeys,
 }
 
 /// Whether one incremental fact scope was rebuilt or reused.
@@ -733,6 +825,8 @@ pub struct RepositoryOperationContext {
     pub published_generation: Option<GenerationId>,
     /// Final source-free reuse, rebuild, I/O, and memory evidence.
     pub evidence: Option<RepositoryOperationEvidence>,
+    /// Durable pre-execution closure and cost estimates.
+    pub planning: Option<RepositoryOperationPlanning>,
 }
 
 impl RepositoryOperationContext {
@@ -1297,6 +1391,7 @@ impl OperationJournal {
                     bytes_examined: 0,
                     published_generation: None,
                     evidence: None,
+                    planning: None,
                 },
             )?;
         }
@@ -1406,6 +1501,7 @@ impl OperationJournal {
                     bytes_examined: 0,
                     published_generation: None,
                     evidence: None,
+                    planning: None,
                 },
             )?;
             records.push(
@@ -2778,12 +2874,14 @@ impl OperationJournal {
                     .execute(
                         "DELETE FROM application_meta
                          WHERE key IN (
-                             ?1 || lower(hex(?3)),
-                             ?2 || lower(hex(?3))
+                             ?1 || lower(hex(?4)),
+                             ?2 || lower(hex(?4)),
+                             ?3 || lower(hex(?4))
                          )",
                         params![
                             RELATIVE_TIMEOUT_META_PREFIX,
                             REPOSITORY_OPERATION_META_PREFIX,
+                            REPOSITORY_OPERATION_PLANNING_META_PREFIX,
                             operation.as_bytes().as_slice()
                         ],
                     )
@@ -2867,6 +2965,71 @@ impl OperationJournal {
         Ok(context)
     }
 
+    /// Persists immutable pre-execution closure and cost estimates.
+    ///
+    /// Matching retries are idempotent. A new planning record advances the
+    /// operation revision atomically so status waiters can observe it while the
+    /// operation is still running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::NotFound`] without retained index context,
+    /// [`OperationError::IllegalTransition`] outside running execution, or a
+    /// typed conflict, corruption, allocation, or storage failure.
+    pub fn record_repository_planning(
+        &self,
+        operation: OperationId,
+        planning: RepositoryOperationPlanning,
+    ) -> Result<RepositoryOperationContext, OperationError> {
+        validate_repository_operation_planning(&planning)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if record.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::NotFound);
+        }
+        if record.state != OperationState::Running {
+            return Err(OperationError::IllegalTransition {
+                from: record.state,
+                to: OperationState::Running,
+            });
+        }
+        if record.stage != OperationStage::Executing {
+            return Err(OperationError::InvalidStage);
+        }
+        let mut context = load_repository_operation_context(&transaction, operation)?
+            .ok_or(OperationError::NotFound)?;
+        match &context.planning {
+            Some(existing) if existing != &planning => {
+                return Err(OperationError::SubmissionConflict);
+            }
+            Some(_) => {
+                transaction.commit().map_err(map_sqlite_error)?;
+                return Ok(context);
+            }
+            None => {}
+        }
+        store_repository_operation_planning(&transaction, operation, &planning)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations SET revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND state = 'running' AND stage = 'executing'",
+                params![
+                    u64_to_i64(next_revision(record.revision)?)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(record.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        context.planning = Some(planning);
+        Ok(context)
+    }
+
     /// Persists the immutable generation published by a successful index operation.
     ///
     /// This projection outlives generation-retention pruning, so operation
@@ -2927,6 +3090,7 @@ impl OperationJournal {
         operation: OperationId,
         evidence: RepositoryOperationEvidence,
     ) -> Result<RepositoryOperationContext, OperationError> {
+        validate_repository_operation_evidence(&evidence)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
@@ -2941,6 +3105,9 @@ impl OperationJournal {
         }
         let mut context = load_repository_operation_context(&transaction, operation)?
             .ok_or(OperationError::NotFound)?;
+        if let Some(planning) = &context.planning {
+            validate_repository_planning_outcome(planning, &evidence)?;
+        }
         match &context.evidence {
             Some(existing) if existing != &evidence => {
                 return Err(OperationError::SubmissionConflict);
@@ -3292,12 +3459,14 @@ impl OperationJournal {
                     .execute(
                         "DELETE FROM application_meta
                          WHERE key IN (
-                             ?1 || lower(hex(?3)),
-                             ?2 || lower(hex(?3))
+                             ?1 || lower(hex(?4)),
+                             ?2 || lower(hex(?4)),
+                             ?3 || lower(hex(?4))
                          )",
                         params![
                             RELATIVE_TIMEOUT_META_PREFIX,
                             REPOSITORY_OPERATION_META_PREFIX,
+                            REPOSITORY_OPERATION_PLANNING_META_PREFIX,
                             operation.as_bytes().as_slice()
                         ],
                     )
@@ -4824,6 +4993,40 @@ fn validate_repository_operation_evidence(
     Ok(())
 }
 
+fn validate_repository_operation_planning(
+    planning: &RepositoryOperationPlanning,
+) -> Result<(), OperationError> {
+    let keys = &planning.dependency_keys;
+    let retained_keys =
+        u64::try_from(keys.samples.len()).map_err(|_| OperationError::CorruptState)?;
+    if keys.samples.len() > MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS
+        || keys.total < retained_keys
+        || keys.complete != (keys.total == retained_keys)
+        || !keys.samples.windows(2).all(|pair| pair[0] < pair[1])
+        || (planning.build_strategy == RepositoryBuildStrategy::ConservativeRepositoryRebuild)
+            != planning.fallback_reason.is_some()
+    {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(())
+}
+
+fn validate_repository_planning_outcome(
+    planning: &RepositoryOperationPlanning,
+    evidence: &RepositoryOperationEvidence,
+) -> Result<(), OperationError> {
+    if planning.build_strategy != evidence.build_strategy
+        || planning.fallback_reason != evidence.fallback_reason
+        || evidence.invalidated_units > planning.estimated_analysis_units
+        || evidence.rebuilt_files > planning.estimated_files
+        || evidence.rebuilt_facts > planning.estimated_facts
+        || evidence.newly_written_bytes > planning.estimated_durable_bytes
+    {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(())
+}
+
 fn append_repository_fact_work_collection_header(
     encoded: &mut Vec<u8>,
     retained_groups: usize,
@@ -5046,6 +5249,175 @@ impl<'a> RepositoryFactWorkDecoder<'a> {
     fn is_finished(&self) -> bool {
         self.position == self.encoded.len()
     }
+}
+
+fn repository_planning_dependency_subject(
+    key: &RepositoryPlanningDependencyKey,
+) -> Option<&[u8; 20]> {
+    match key {
+        RepositoryPlanningDependencyKey::FileContent(id)
+        | RepositoryPlanningDependencyKey::FilePath(id) => Some(id.as_bytes()),
+        RepositoryPlanningDependencyKey::PublicSurface(id)
+        | RepositoryPlanningDependencyKey::BodySummary(id)
+        | RepositoryPlanningDependencyKey::ImportSet(id)
+        | RepositoryPlanningDependencyKey::BuildTarget(id)
+        | RepositoryPlanningDependencyKey::CompilerOptions(id)
+        | RepositoryPlanningDependencyKey::DependencyVersion(id)
+        | RepositoryPlanningDependencyKey::GrammarVersion(id)
+        | RepositoryPlanningDependencyKey::AdapterVersion(id)
+        | RepositoryPlanningDependencyKey::DerivedPlan(id) => Some(id.as_bytes()),
+        RepositoryPlanningDependencyKey::ResolverVersion
+        | RepositoryPlanningDependencyKey::ConfigurationRevision
+        | RepositoryPlanningDependencyKey::SearchRevision => None,
+    }
+}
+
+fn encode_repository_operation_planning(
+    planning: &RepositoryOperationPlanning,
+) -> Result<Vec<u8>, OperationError> {
+    validate_repository_operation_planning(planning)?;
+    let mut encoded = Vec::new();
+    encoded.push(REPOSITORY_OPERATION_PLANNING_VERSION);
+    encoded.push(planning.build_strategy.tag());
+    encoded.push(
+        planning
+            .fallback_reason
+            .map_or(0, RepositoryFallbackReason::tag),
+    );
+    for value in [
+        planning.estimated_analysis_units,
+        planning.estimated_files,
+        planning.estimated_facts,
+        planning.estimated_cost_units,
+        planning.estimated_durable_bytes,
+        planning.dependency_keys.total,
+    ] {
+        encoded.extend_from_slice(&value.to_be_bytes());
+    }
+    encoded.push(
+        u8::try_from(planning.dependency_keys.samples.len())
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    encoded.push(u8::from(planning.dependency_keys.complete));
+    for key in &planning.dependency_keys.samples {
+        encoded.push(key.tag());
+        if let Some(subject) = repository_planning_dependency_subject(key) {
+            encoded.extend_from_slice(subject);
+        }
+    }
+    if encoded.len() > MAX_REPOSITORY_OPERATION_PLANNING_BYTES {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(encoded)
+}
+
+fn decode_repository_planning_dependency_key(
+    decoder: &mut RepositoryFactWorkDecoder<'_>,
+) -> Result<RepositoryPlanningDependencyKey, OperationError> {
+    let tag = decoder.read_u8()?;
+    let mut subject = || {
+        decoder
+            .read_bytes(20)?
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)
+    };
+    match tag {
+        1 => Ok(RepositoryPlanningDependencyKey::FileContent(
+            FileId::from_bytes(subject()?),
+        )),
+        2 => Ok(RepositoryPlanningDependencyKey::FilePath(
+            FileId::from_bytes(subject()?),
+        )),
+        3 => Ok(RepositoryPlanningDependencyKey::PublicSurface(
+            FactId::from_bytes(subject()?),
+        )),
+        4 => Ok(RepositoryPlanningDependencyKey::BodySummary(
+            FactId::from_bytes(subject()?),
+        )),
+        5 => Ok(RepositoryPlanningDependencyKey::ImportSet(
+            FactId::from_bytes(subject()?),
+        )),
+        6 => Ok(RepositoryPlanningDependencyKey::BuildTarget(
+            FactId::from_bytes(subject()?),
+        )),
+        7 => Ok(RepositoryPlanningDependencyKey::CompilerOptions(
+            FactId::from_bytes(subject()?),
+        )),
+        8 => Ok(RepositoryPlanningDependencyKey::DependencyVersion(
+            FactId::from_bytes(subject()?),
+        )),
+        9 => Ok(RepositoryPlanningDependencyKey::GrammarVersion(
+            FactId::from_bytes(subject()?),
+        )),
+        10 => Ok(RepositoryPlanningDependencyKey::AdapterVersion(
+            FactId::from_bytes(subject()?),
+        )),
+        11 => Ok(RepositoryPlanningDependencyKey::ResolverVersion),
+        12 => Ok(RepositoryPlanningDependencyKey::ConfigurationRevision),
+        13 => Ok(RepositoryPlanningDependencyKey::SearchRevision),
+        14 => Ok(RepositoryPlanningDependencyKey::DerivedPlan(
+            FactId::from_bytes(subject()?),
+        )),
+        _ => Err(OperationError::CorruptState),
+    }
+}
+
+fn decode_repository_operation_planning(
+    encoded: &[u8],
+) -> Result<RepositoryOperationPlanning, OperationError> {
+    if encoded.is_empty() || encoded.len() > MAX_REPOSITORY_OPERATION_PLANNING_BYTES {
+        return Err(OperationError::CorruptState);
+    }
+    let mut decoder = RepositoryFactWorkDecoder::new(encoded);
+    if decoder.read_u8()? != REPOSITORY_OPERATION_PLANNING_VERSION {
+        return Err(OperationError::CorruptState);
+    }
+    let build_strategy = RepositoryBuildStrategy::from_tag(decoder.read_u8()?)?;
+    let fallback_reason = match decoder.read_u8()? {
+        0 => None,
+        tag => Some(RepositoryFallbackReason::from_tag(tag)?),
+    };
+    let estimated_analysis_units = decoder.read_u64()?;
+    let estimated_files = decoder.read_u64()?;
+    let estimated_facts = decoder.read_u64()?;
+    let estimated_cost_units = decoder.read_u64()?;
+    let estimated_durable_bytes = decoder.read_u64()?;
+    let total = decoder.read_u64()?;
+    let retained = usize::from(decoder.read_u8()?);
+    let complete = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(OperationError::CorruptState),
+    };
+    if retained > MAX_REPOSITORY_PLANNING_DEPENDENCY_KEYS {
+        return Err(OperationError::CorruptState);
+    }
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(retained)
+        .map_err(|_| OperationError::CorruptState)?;
+    for _ in 0..retained {
+        samples.push(decode_repository_planning_dependency_key(&mut decoder)?);
+    }
+    if !decoder.is_finished() {
+        return Err(OperationError::CorruptState);
+    }
+    let planning = RepositoryOperationPlanning {
+        build_strategy,
+        fallback_reason,
+        estimated_analysis_units,
+        estimated_files,
+        estimated_facts,
+        estimated_cost_units,
+        estimated_durable_bytes,
+        dependency_keys: RepositoryPlanningDependencyKeys {
+            total,
+            samples,
+            complete,
+        },
+    };
+    validate_repository_operation_planning(&planning)?;
+    Ok(planning)
 }
 
 fn decode_repository_fact_work_files(
@@ -5559,6 +5931,7 @@ fn decode_repository_operation_context(
         bytes_examined,
         published_generation,
         evidence,
+        planning: None,
     })
 }
 
@@ -5582,6 +5955,48 @@ fn store_repository_operation_context(
     Ok(())
 }
 
+fn store_repository_operation_planning(
+    connection: &Connection,
+    operation: OperationId,
+    planning: &RepositoryOperationPlanning,
+) -> Result<(), OperationError> {
+    let encoded = encode_repository_operation_planning(planning)?;
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value)
+             VALUES (?1 || lower(hex(?2)), ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                REPOSITORY_OPERATION_PLANNING_META_PREFIX,
+                operation.as_bytes().as_slice(),
+                encoded.as_slice(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
+}
+
+fn load_repository_operation_planning(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<RepositoryOperationPlanning>, OperationError> {
+    let encoded = connection
+        .query_row(
+            "SELECT value FROM application_meta
+             WHERE key = ?1 || lower(hex(?2))",
+            params![
+                REPOSITORY_OPERATION_PLANNING_META_PREFIX,
+                operation.as_bytes().as_slice()
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    encoded
+        .map(|encoded| decode_repository_operation_planning(&encoded))
+        .transpose()
+}
+
 fn load_repository_operation_context(
     connection: &Connection,
     operation: OperationId,
@@ -5599,7 +6014,11 @@ fn load_repository_operation_context(
         .optional()
         .map_err(map_sqlite_error)?;
     encoded
-        .map(|encoded| decode_repository_operation_context(operation, &encoded))
+        .map(|encoded| {
+            let mut context = decode_repository_operation_context(operation, &encoded)?;
+            context.planning = load_repository_operation_planning(connection, operation)?;
+            Ok(context)
+        })
         .transpose()
 }
 
@@ -5637,29 +6056,47 @@ fn load_repository_operation_contexts_for_kind(
         .map_err(|_| OperationError::CatalogRowLimitExceeded)?;
     let mut statement = connection
         .prepare(
-            "SELECT operations.operation, application_meta.value
+            "SELECT operations.operation, context.value, planning.value
              FROM operations
-             JOIN application_meta
-               ON application_meta.key =
+             JOIN application_meta AS context
+               ON context.key =
                   ?1 || lower(hex(operations.operation))
+             LEFT JOIN application_meta AS planning
+               ON planning.key =
+                  ?3 || lower(hex(operations.operation))
              WHERE operations.kind IN ('repository_index', 'recovery')
                AND (?2 IS NULL OR operations.kind = ?2)
              ORDER BY operations.sequence DESC",
         )
         .map_err(map_sqlite_error)?;
     let rows = statement
-        .query_map(params![REPOSITORY_OPERATION_META_PREFIX, kind], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
+        .query_map(
+            params![
+                REPOSITORY_OPERATION_META_PREFIX,
+                kind,
+                REPOSITORY_OPERATION_PLANNING_META_PREFIX,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            },
+        )
         .map_err(map_sqlite_error)?;
     for row in rows {
-        let (operation, encoded) = row.map_err(map_sqlite_error)?;
+        let (operation, encoded, planning) = row.map_err(map_sqlite_error)?;
         let operation = OperationId::from_bytes(
             operation
                 .try_into()
                 .map_err(|_| OperationError::CorruptState)?,
         );
-        contexts.push(decode_repository_operation_context(operation, &encoded)?);
+        let mut context = decode_repository_operation_context(operation, &encoded)?;
+        context.planning = planning
+            .map(|encoded| decode_repository_operation_planning(&encoded))
+            .transpose()?;
+        contexts.push(context);
     }
     Ok(contexts)
 }
@@ -5692,12 +6129,14 @@ fn prune_terminal_recovery_history(
             .execute(
                 "DELETE FROM application_meta
                  WHERE key IN (
-                     ?1 || lower(hex(?3)),
-                     ?2 || lower(hex(?3))
+                     ?1 || lower(hex(?4)),
+                     ?2 || lower(hex(?4)),
+                     ?3 || lower(hex(?4))
                  )",
                 params![
                     RELATIVE_TIMEOUT_META_PREFIX,
                     REPOSITORY_OPERATION_META_PREFIX,
+                    REPOSITORY_OPERATION_PLANNING_META_PREFIX,
                     context.operation.as_bytes().as_slice()
                 ],
             )
@@ -5756,6 +6195,60 @@ fn validate_repository_operation_contexts(connection: &Connection) -> Result<(),
         );
         decode_repository_operation_context(operation, &encoded)?;
     }
+    validate_repository_operation_planning_records(connection)
+}
+
+fn validate_repository_operation_planning_records(
+    connection: &Connection,
+) -> Result<(), OperationError> {
+    let pattern = format!("{REPOSITORY_OPERATION_PLANNING_META_PREFIX}*");
+    let mut statement = connection
+        .prepare(
+            "SELECT operations.operation, operations.kind, application_meta.value
+             FROM application_meta
+             LEFT JOIN operations
+               ON application_meta.key =
+                  ?1 || lower(hex(operations.operation))
+             WHERE application_meta.key GLOB ?2",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map(
+            params![REPOSITORY_OPERATION_PLANNING_META_PREFIX, pattern],
+            |row| {
+                Ok((
+                    row.get::<_, Option<Vec<u8>>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .map_err(map_sqlite_error)?;
+    let mut count = 0_usize;
+    for row in rows {
+        let (operation, kind, encoded) = row.map_err(map_sqlite_error)?;
+        count = count
+            .checked_add(1)
+            .ok_or(OperationError::CatalogRowLimitExceeded)?;
+        if count > MAX_OPERATION_ROWS || kind.as_deref() != Some("repository_index") {
+            return Err(OperationError::CorruptState);
+        }
+        let operation = OperationId::from_bytes(
+            operation
+                .ok_or(OperationError::CorruptState)?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        );
+        let planning = decode_repository_operation_planning(&encoded)?;
+        let context = load_repository_operation_context(connection, operation)?
+            .ok_or(OperationError::CorruptState)?;
+        if context.planning.as_ref() != Some(&planning) {
+            return Err(OperationError::CorruptState);
+        }
+        if let Some(evidence) = &context.evidence {
+            validate_repository_planning_outcome(&planning, evidence)?;
+        }
+    }
     Ok(())
 }
 
@@ -5773,6 +6266,19 @@ fn reconcile_repository_operation_contexts(connection: &Connection) -> Result<()
                          ?2 || lower(hex(operations.operation))
                )",
             params![pattern, REPOSITORY_OPERATION_META_PREFIX],
+        )
+        .map_err(map_sqlite_error)?;
+    let planning_pattern = format!("{REPOSITORY_OPERATION_PLANNING_META_PREFIX}*");
+    connection
+        .execute(
+            "DELETE FROM application_meta
+             WHERE key GLOB ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM operations
+                   WHERE application_meta.key =
+                         ?2 || lower(hex(operations.operation))
+               )",
+            params![planning_pattern, REPOSITORY_OPERATION_PLANNING_META_PREFIX],
         )
         .map_err(map_sqlite_error)?;
     validate_repository_operation_contexts(connection)
@@ -6876,6 +7382,26 @@ mod tests {
         }
     }
 
+    fn sample_repository_planning() -> RepositoryOperationPlanning {
+        RepositoryOperationPlanning {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            estimated_analysis_units: 2,
+            estimated_files: 2,
+            estimated_facts: 12,
+            estimated_cost_units: 64,
+            estimated_durable_bytes: 4_096,
+            dependency_keys: RepositoryPlanningDependencyKeys {
+                total: 2,
+                samples: vec![
+                    RepositoryPlanningDependencyKey::FileContent(FileId::from_bytes([1; 20])),
+                    RepositoryPlanningDependencyKey::BodySummary(FactId::from_bytes([2; 20])),
+                ],
+                complete: true,
+            },
+        }
+    }
+
     fn sample_repository_context(
         evidence: Option<RepositoryOperationEvidence>,
     ) -> RepositoryOperationContext {
@@ -6891,6 +7417,7 @@ mod tests {
             bytes_examined: 0x3132_3334_3536_3738,
             published_generation: Some(GenerationId::from_bytes([5; 20])),
             evidence,
+            planning: None,
         }
     }
 
@@ -7357,6 +7884,207 @@ mod tests {
                 .expect("decoded v6 context re-encodes"),
             version_six
         );
+    }
+
+    #[test]
+    fn repository_planning_sidecar_is_bounded_canonical_and_roundtrips() {
+        let planning = sample_repository_planning();
+        let mut context = sample_repository_context(Some(sample_repository_evidence(None)));
+        let version_five =
+            encode_repository_operation_context(&context).expect("v5 context encodes");
+        context.planning = Some(planning.clone());
+        assert_eq!(
+            encode_repository_operation_context(&context)
+                .expect("planning does not alter frozen context bytes"),
+            version_five
+        );
+
+        let encoded =
+            encode_repository_operation_planning(&planning).expect("planning sidecar encodes");
+        assert!(encoded.len() <= MAX_REPOSITORY_OPERATION_PLANNING_BYTES);
+        assert_eq!(encoded[0], REPOSITORY_OPERATION_PLANNING_VERSION);
+        assert_eq!(
+            decode_repository_operation_planning(&encoded).expect("planning sidecar decodes"),
+            planning
+        );
+
+        let mut noncanonical = sample_repository_planning();
+        noncanonical.dependency_keys.samples.reverse();
+        assert!(matches!(
+            encode_repository_operation_planning(&noncanonical),
+            Err(OperationError::CorruptState)
+        ));
+
+        let mut incomplete = sample_repository_planning();
+        incomplete.dependency_keys.total = 3;
+        incomplete.dependency_keys.complete = false;
+        let encoded =
+            encode_repository_operation_planning(&incomplete).expect("bounded sample encodes");
+        assert_eq!(
+            decode_repository_operation_planning(&encoded)
+                .expect("bounded planning sample decodes"),
+            incomplete
+        );
+
+        let mut oversized = sample_repository_planning();
+        oversized.dependency_keys.samples = (0_u8..=32)
+            .map(|seed| {
+                RepositoryPlanningDependencyKey::FileContent(FileId::from_bytes([seed; 20]))
+            })
+            .collect();
+        oversized.dependency_keys.total = 33;
+        assert!(matches!(
+            encode_repository_operation_planning(&oversized),
+            Err(OperationError::CorruptState)
+        ));
+    }
+
+    #[test]
+    fn repository_planning_dependency_key_tags_are_frozen() {
+        let file = FileId::from_bytes([7; 20]);
+        let fact = FactId::from_bytes([8; 20]);
+        let keys = vec![
+            RepositoryPlanningDependencyKey::FileContent(file),
+            RepositoryPlanningDependencyKey::FilePath(file),
+            RepositoryPlanningDependencyKey::PublicSurface(fact),
+            RepositoryPlanningDependencyKey::BodySummary(fact),
+            RepositoryPlanningDependencyKey::ImportSet(fact),
+            RepositoryPlanningDependencyKey::BuildTarget(fact),
+            RepositoryPlanningDependencyKey::CompilerOptions(fact),
+            RepositoryPlanningDependencyKey::DependencyVersion(fact),
+            RepositoryPlanningDependencyKey::GrammarVersion(fact),
+            RepositoryPlanningDependencyKey::AdapterVersion(fact),
+            RepositoryPlanningDependencyKey::ResolverVersion,
+            RepositoryPlanningDependencyKey::ConfigurationRevision,
+            RepositoryPlanningDependencyKey::SearchRevision,
+            RepositoryPlanningDependencyKey::DerivedPlan(fact),
+        ];
+        assert_eq!(
+            keys.iter()
+                .copied()
+                .map(|key| key.tag())
+                .collect::<Vec<_>>(),
+            (1_u8..=14).collect::<Vec<_>>()
+        );
+
+        let mut planning = sample_repository_planning();
+        planning.dependency_keys.total = 14;
+        planning.dependency_keys.samples = keys;
+        let encoded =
+            encode_repository_operation_planning(&planning).expect("all key variants encode");
+        assert_eq!(
+            decode_repository_operation_planning(&encoded).expect("all key variants decode"),
+            planning
+        );
+    }
+
+    #[test]
+    fn repository_planning_is_running_visible_revisioned_and_restart_durable() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(93);
+        let repository = RepositoryId::from_bytes([8; 16]);
+        let planning = sample_repository_planning();
+        let visible_revision;
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(repository_submission(operation, repository, 4_000))
+                .expect("repository operation submits");
+            let running = journal
+                .start_execution(operation)
+                .expect("repository operation starts");
+            let planned = journal
+                .record_repository_planning(operation, planning.clone())
+                .expect("running planning persists");
+            visible_revision = journal
+                .status(operation)
+                .expect("running status remains visible")
+                .revision;
+            assert!(visible_revision > running.revision);
+            assert_eq!(planned.planning, Some(planning.clone()));
+            assert_eq!(
+                journal
+                    .repository_operation_context(operation)
+                    .expect("running context reloads")
+                    .planning,
+                Some(planning.clone())
+            );
+
+            let retried = journal
+                .record_repository_planning(operation, planning.clone())
+                .expect("matching planning retry is idempotent");
+            assert_eq!(retried.planning, Some(planning.clone()));
+            assert_eq!(
+                journal
+                    .status(operation)
+                    .expect("idempotent retry leaves status readable")
+                    .revision,
+                visible_revision
+            );
+
+            let mut conflicting = planning.clone();
+            conflicting.estimated_cost_units += 1;
+            assert!(matches!(
+                journal.record_repository_planning(operation, conflicting),
+                Err(OperationError::SubmissionConflict)
+            ));
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        assert_eq!(
+            reopened.status(operation).expect("operation reloads").state,
+            OperationState::Interrupted
+        );
+        assert_eq!(
+            reopened
+                .repository_operation_context(operation)
+                .expect("planning survives restart")
+                .planning,
+            Some(planning)
+        );
+        assert!(
+            reopened
+                .status(operation)
+                .expect("recovered status reloads")
+                .revision
+                > visible_revision
+        );
+        reopened
+            .quick_check()
+            .expect("planning sidecar remains valid after restart");
+    }
+
+    #[test]
+    fn repository_planning_bounds_terminal_evidence() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(94);
+        journal
+            .submit(repository_submission(
+                operation,
+                RepositoryId::from_bytes([9; 16]),
+                4_000,
+            ))
+            .expect("repository operation submits");
+        journal
+            .start_execution(operation)
+            .expect("repository operation starts");
+        let mut planning = sample_repository_planning();
+        planning.estimated_facts = 10;
+        journal
+            .record_repository_planning(operation, planning)
+            .expect("planning persists");
+        journal
+            .transition(operation, OperationState::Succeeded, None)
+            .expect("repository operation succeeds");
+
+        assert!(matches!(
+            journal.record_repository_evidence(
+                operation,
+                sample_repository_evidence(Some(sample_fact_work()))
+            ),
+            Err(OperationError::CorruptState)
+        ));
     }
 
     #[test]
