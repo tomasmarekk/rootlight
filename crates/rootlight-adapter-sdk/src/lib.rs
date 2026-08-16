@@ -13,6 +13,7 @@ mod limits;
 mod report;
 mod request;
 mod sink;
+mod structural;
 pub mod testkit;
 
 pub use descriptor::{
@@ -42,4 +43,8 @@ pub use sink::{
     ProjectAnalysisOutput, ProjectLanguageAnalyzer, SyntaxFact, SyntaxFactBatch, SyntaxFactKind,
     SyntaxFactSink, SyntaxKindLabel, execute_analysis, execute_parse, execute_parse_transaction,
     execute_project_analysis,
+};
+pub use structural::{
+    structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
+    structural_syntax_fact_order,
 };

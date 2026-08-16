@@ -20,10 +20,12 @@ pub use incremental::{
 };
 pub use lowering::{
     TreeSitterAnalyzer, TreeSitterAnalyzerConfigError, TreeSitterStructuralArtifact,
+};
+pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
+pub use rootlight_adapter_sdk::{
     structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
     structural_syntax_fact_order,
 };
-pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
 
 /// Exact adapter crate version compiled into this runtime.

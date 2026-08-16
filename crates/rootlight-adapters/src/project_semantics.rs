@@ -14,8 +14,6 @@ use rootlight_adapter_sdk::{
     ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport, execute_parse,
-};
-use rootlight_adapter_treesitter::{
     structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
     structural_syntax_fact_order,
 };
