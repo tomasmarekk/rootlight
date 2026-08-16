@@ -13286,10 +13286,33 @@ fn project_declaration_index(document: &NormalizedIrDocument) -> ProjectDeclarat
         if occurrence.role != OccurrenceRole::Definition {
             continue;
         }
-        let rootlight_ir::OccurrenceTarget::Resolved { symbol } = &occurrence.target else {
-            continue;
+        // Repeated declarations can retain a complete ambiguity set when
+        // bounded structural and project passes choose different representatives.
+        // Treat it as one declaration identity only when every candidate agrees.
+        let definition_identity = match &occurrence.target {
+            rootlight_ir::OccurrenceTarget::Resolved { symbol } => identity.get(symbol),
+            rootlight_ir::OccurrenceTarget::Candidates {
+                symbols,
+                total_count,
+                completeness,
+            } if *completeness == CoverageStatus::Complete
+                && u64::try_from(symbols.len()) == Ok(*total_count) =>
+            {
+                let Some((first, remaining)) = symbols.split_first() else {
+                    continue;
+                };
+                let Some(expected) = identity.get(first) else {
+                    continue;
+                };
+                remaining
+                    .iter()
+                    .all(|symbol| identity.get(symbol) == Some(expected))
+                    .then_some(expected)
+            }
+            rootlight_ir::OccurrenceTarget::Candidates { .. }
+            | rootlight_ir::OccurrenceTarget::Unresolved { .. } => None,
         };
-        let Some((kind, canonical_name)) = identity.get(symbol) else {
+        let Some((kind, canonical_name)) = definition_identity else {
             continue;
         };
         // Project analysis intentionally unifies repeated declarations under
@@ -18582,6 +18605,39 @@ mod tests {
                 .expect("unified definition comparison succeeds"),
             0
         );
+
+        let candidate_symbol = SymbolId::from_bytes([76; 20]);
+        project.entities.push(entity(10, 30, candidate_symbol));
+        project.occurrences[0].target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol, candidate_symbol],
+            total_count: 2,
+            completeness: CoverageStatus::Complete,
+        };
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("uniform complete candidates compare"),
+            0
+        );
+
+        project.entities[1].kind = EntityKind::Method;
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("mixed candidate identities compare"),
+            1
+        );
+        project.entities[1].kind = EntityKind::Function;
+        project.occurrences[0].target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol, candidate_symbol],
+            total_count: 2,
+            completeness: CoverageStatus::Bounded,
+        };
+        assert_eq!(
+            missing_structural_declaration_count(&[structural.clone()], &project, true)
+                .expect("bounded candidates compare"),
+            1
+        );
+        project.entities.pop();
+        project.occurrences[0].target = OccurrenceTarget::Resolved { symbol };
 
         project.occurrences[0].source = SourceRef::new(
             repository,
