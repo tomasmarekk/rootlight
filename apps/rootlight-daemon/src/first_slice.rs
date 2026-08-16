@@ -29,9 +29,9 @@ use rootlight_adapter_host::{
     project_adapter_identity_with_cancellation,
 };
 use rootlight_daemon_core::{
-    ControlRequest, ControlResponse, DaemonState, FirstSliceEffectiveBudget, FirstSliceIpcContext,
-    FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
-    HealthStatus, IndexSupportInventory, JournalActorHandle, PROTOCOL_MINOR,
+    ControlRequest, ControlResponse, DaemonLifecycle, DaemonState, FirstSliceEffectiveBudget,
+    FirstSliceIpcContext, FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest,
+    FirstSliceIpcResponse, HealthStatus, IndexSupportInventory, JournalActorHandle, PROTOCOL_MINOR,
     RepositoryIndexProvider, ResourcePressure, ServiceError, operation_record_to_wire_for_minor,
 };
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
@@ -1042,13 +1042,13 @@ impl FirstSliceDaemon {
         if restore_active {
             support_state.set_generation_status(HealthStatus::Unavailable);
         }
-        Self::start_workers(
+        let workers = Self::start_workers(
             journal,
             service,
             None,
             Vec::new(),
             durable_contexts,
-            Some(support_state),
+            Some(Arc::clone(&support_state)),
             restore_active.then_some(DeferredRecoveryWork {
                 restore: deferred_restore,
                 installed_generations: BTreeSet::new(),
@@ -1059,7 +1059,11 @@ impl FirstSliceDaemon {
                 #[cfg(test)]
                 after_active_restore: None,
             }),
-        )
+        )?;
+        if !restore_active {
+            support_state.set_lifecycle(DaemonLifecycle::Ready);
+        }
+        Ok(workers)
     }
 
     #[cfg(test)]
@@ -1417,6 +1421,7 @@ impl FirstSliceDaemon {
                 let worker_cancellation = cancellation.clone();
                 let recovery_lanes = lanes.clone();
                 let recovery_state = recovery_lanes.support_state.clone();
+                let recovery_readiness = Arc::clone(&recovery_lanes.recovery_ready);
                 let recovery_journal = journal.clone();
                 let recovery_metadata = Arc::clone(&metadata);
                 let recovery_stopping = Arc::clone(&stopping);
@@ -1442,7 +1447,12 @@ impl FirstSliceDaemon {
                         if result.is_err()
                             && let Some(state) = recovery_state.as_deref()
                         {
-                            state.set_generation_status(HealthStatus::Failed);
+                            if recovery_readiness.load(Ordering::Acquire) {
+                                state.set_generation_status(HealthStatus::Degraded);
+                            } else {
+                                state.set_generation_status(HealthStatus::Failed);
+                                state.set_lifecycle(DaemonLifecycle::Faulted);
+                            }
                         }
                         result
                     })
@@ -3004,7 +3014,7 @@ fn durable_recovery_worker(
         // Active generations become queryable before retained history finishes,
         // but mutation and watcher admission remain closed until the full batch
         // has either restored or reached a durable terminal result.
-        lanes.recovery_ready.store(true, Ordering::Release);
+        publish_active_recovery_readiness(&lanes, degraded)?;
         #[cfg(test)]
         if let Some(after_active_restore) = deferred.after_active_restore.take() {
             after_active_restore(&lanes, &cancellation)?;
@@ -3197,6 +3207,34 @@ fn refresh_recovery_support_inventory(
     Ok(())
 }
 
+fn publish_active_recovery_readiness(
+    lanes: &FirstSliceServiceLanes,
+    degraded: bool,
+) -> Result<(), FirstSliceHostError> {
+    if let Some(state) = lanes.support_state.as_deref() {
+        let inventory = lanes
+            .service
+            .read()
+            .map_err(|_| FirstSliceHostError::ThreadPanicked)
+            .and_then(|service| {
+                startup_index_support_inventory(&service).map_err(FirstSliceHostError::Service)
+            })?;
+        state
+            .replace_index_support_inventory(inventory)
+            .map_err(FirstSliceHostError::Journal)?;
+        if degraded {
+            state.set_generation_status(HealthStatus::Degraded);
+        }
+    }
+    lanes.recovery_ready.store(true, Ordering::Release);
+    if let Some(state) = lanes.support_state.as_deref() {
+        // Publishing Ready after the release store makes the active-generation
+        // barrier observable to every client that accepts the lifecycle state.
+        state.set_lifecycle(DaemonLifecycle::Ready);
+    }
+    Ok(())
+}
+
 fn complete_durable_recovery(
     lanes: &FirstSliceServiceLanes,
     degraded: bool,
@@ -3205,7 +3243,6 @@ fn complete_durable_recovery(
     if degraded && let Some(state) = lanes.support_state.as_deref() {
         state.set_generation_status(HealthStatus::Degraded);
     }
-    lanes.recovery_ready.store(true, Ordering::Release);
     lanes.recovery_complete.store(true, Ordering::Release);
     Ok(())
 }
@@ -14647,14 +14684,16 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
+        let support_state = Arc::new(DaemonState::starting());
         let (daemon, workers) = runtime
             .block_on(FirstSliceDaemon::start_durable(
                 actor.handle(),
                 paths.state_dir(),
-                Arc::new(DaemonState::starting()),
+                Arc::clone(&support_state),
                 None,
             ))
             .expect("daemon restores unpublished operation context");
+        assert_eq!(support_state.lifecycle(), DaemonLifecycle::Ready);
 
         let status = execute(
             &daemon,
@@ -17379,6 +17418,11 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
+        let starting_state = Arc::clone(&state);
+        let after_start: RecoveryWorkerStartHook = Box::new(move |cancellation, stopping| {
+            assert_eq!(starting_state.lifecycle(), DaemonLifecycle::Starting);
+            after_start(cancellation, stopping)
+        });
         let result = durable_recovery_worker(
             DeferredRecoveryWork {
                 restore,
@@ -17448,7 +17492,7 @@ mod tests {
                 .code(),
             ErrorCode::Internal
         );
-        assert!(recovery_ready);
+        assert!(!recovery_ready);
         assert!(recovery_complete);
         assert_eq!(generation_status, HealthStatus::Degraded);
     }
@@ -17502,6 +17546,14 @@ mod tests {
                 Some(Box::new(|lanes, cancellation| {
                     assert!(lanes.recovery_ready.load(Ordering::Acquire));
                     assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                    assert_eq!(
+                        lanes
+                            .support_state
+                            .as_deref()
+                            .expect("recovery publishes support state")
+                            .lifecycle(),
+                        DaemonLifecycle::Ready
+                    );
                     let recoveries = lanes
                         .recovering_repositories
                         .read()
@@ -17551,6 +17603,14 @@ mod tests {
                 Box::new(|_, _| Ok(())),
                 Some(Box::new(|lanes, _| {
                     assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                    assert_eq!(
+                        lanes
+                            .support_state
+                            .as_deref()
+                            .expect("recovery publishes support state")
+                            .lifecycle(),
+                        DaemonLifecycle::Ready
+                    );
                     assert_eq!(
                         lanes
                             .service

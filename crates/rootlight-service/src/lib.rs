@@ -107,7 +107,7 @@ pub use rootlight_query::{
     TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{
-    GenerationSet, QueryBudget, QueryError, SOURCE_FALLBACK_TEXT_BYTES,
+    GenerationSet, QueryBudget, QueryError, QueryService, SOURCE_FALLBACK_TEXT_BYTES,
     project_lexical_documents_with_sources,
 };
 use rootlight_resolve::{
@@ -136,6 +136,7 @@ const DISCOVERY_PROGRESS_INTERVAL_FILES: u64 = 64;
 const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
 const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
+const RECOVERY_SMOKE_QUERY: &str = "__rootlight_startup_recovery_smoke__";
 // Divide the generation-wide syntax-fact allowance across every admitted
 // source so large repositories degrade per file instead of exhausting memory.
 const MAX_FIRST_SLICE_STRUCTURAL_FACTS: usize = 1_048_576;
@@ -3690,6 +3691,29 @@ pub trait FirstSliceProjectAnalyzer: Send + Sync {
 
 type PendingRepositoryRegistration = (RepositoryId, String, Option<String>);
 
+fn smoke_query_restored_generation(
+    restored: &RestoredGeneration,
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let service = QueryService::new(restored.verified.snapshot(), &restored.search)
+        .map_err(|error| map_query_error(error, cancellation))?;
+    let plan = service
+        .plan_code_locate(
+            RECOVERY_SMOKE_QUERY.to_owned(),
+            LocateMode::Exact,
+            1,
+            0,
+            SearchBudget::default(),
+            QueryBudget::default(),
+        )
+        .map_err(|error| map_query_error(error, cancellation))?;
+    service
+        .execute_code_locate(&plan, cancellation)
+        .map_err(|error| map_query_error(error, cancellation))?;
+    Ok(())
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -4731,6 +4755,11 @@ impl FirstSliceService {
         activate_latest: bool,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
+        if activate_latest {
+            for generation in &restored {
+                smoke_query_restored_generation(generation, cancellation)?;
+            }
+        }
         let mut active = BTreeMap::<RepositoryId, (u64, GenerationId)>::new();
         let mut legacy_generation_counts = BTreeMap::<RepositoryId, u64>::new();
         let mut global_activation_order = self

@@ -124,7 +124,6 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let listener = Arc::new(AsyncLocalListener::bind(endpoint.clone())?);
     let discovery = DiscoveryRecord::new(&paths, std::process::id(), &endpoint, nonce)?;
     state.set_endpoint_status(HealthStatus::Healthy);
-    state.set_lifecycle(DaemonLifecycle::Ready);
     paths.publish(&discovery)?;
     let discovery = DiscoveryGuard::new(paths, nonce);
 

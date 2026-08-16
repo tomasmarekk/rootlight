@@ -128,6 +128,7 @@ const COORDINATED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const START_CHILD_CLEANUP_ATTEMPTS: usize = 3;
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const START_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const MAX_REPOSITORY_CATALOG_PAGE_SIZE: u16 = 200;
 const MAX_REPOSITORY_CATALOG_QUERY_CHARS: usize = 256;
@@ -3291,6 +3292,9 @@ impl Client {
                     client: ready.client,
                     owned: None,
                 });
+            }
+            ProbeOutcome::Recovering => {
+                return wait_for_existing_ready(paths, client_instance_id);
             }
             ProbeOutcome::Unavailable if policy == ConnectPolicy::ExistingOnly => {
                 return Err(ClientError::DaemonUnavailable);
@@ -7114,37 +7118,47 @@ fn coordinate_start(
     client_instance_id: [u8; 16],
     ownership: StartupOwnership,
 ) -> Result<StartupConnection, ClientError> {
-    let coordination_deadline = initial_start_deadline(Instant::now())?;
+    let mut deadlines = StartupDeadlines::new(Instant::now())?;
     loop {
         match paths.acquire_launch_lock() {
             Ok(launch) => {
-                let probe = probe_ready_client(paths, client_instance_id);
-                if let Ok(ProbeOutcome::Ready(ready)) = probe {
-                    return Ok(StartupConnection {
-                        client: ready.client,
-                        owned: None,
-                    });
+                match probe_ready_client(paths, client_instance_id) {
+                    Ok(ProbeOutcome::Ready(ready)) => {
+                        return Ok(StartupConnection {
+                            client: ready.client,
+                            owned: None,
+                        });
+                    }
+                    Ok(ProbeOutcome::Recovering) => {
+                        deadlines.authorize_recovery(Instant::now())?;
+                        drop(launch);
+                        wait_before_startup_probe(deadlines)?;
+                        continue;
+                    }
+                    Ok(ProbeOutcome::Unavailable) => {}
+                    Err(error) if startup_probe_retryable(&error) => {}
+                    Err(error) => return Err(error),
                 }
-                if let Err(error) = probe
-                    && !startup_probe_retryable(&error)
-                {
-                    return Err(error);
-                }
-                if Instant::now() >= coordination_deadline {
+                if deadlines.expired(Instant::now()) {
                     return Err(ClientError::DaemonStartTimedOut);
                 }
                 let startup = CoordinatedStartup::spawn(launch, ownership, paths)?;
-                let deadlines = StartupDeadlines::new(Instant::now())?;
                 return wait_for_ready_daemon(paths, client_instance_id, deadlines, startup);
             }
             Err(rootlight_runtime::RuntimeError::LaunchBusy) => {
-                if let ProbeOutcome::Ready(ready) = probe_ready_client(paths, client_instance_id)? {
-                    return Ok(StartupConnection {
-                        client: ready.client,
-                        owned: None,
-                    });
+                match probe_ready_client(paths, client_instance_id)? {
+                    ProbeOutcome::Ready(ready) => {
+                        return Ok(StartupConnection {
+                            client: ready.client,
+                            owned: None,
+                        });
+                    }
+                    ProbeOutcome::Recovering => {
+                        deadlines.authorize_recovery(Instant::now())?;
+                    }
+                    ProbeOutcome::Unavailable => {}
                 }
-                wait_before_deadline(coordination_deadline)?;
+                wait_before_startup_probe(deadlines)?;
             }
             Err(error) => return Err(ClientError::Runtime(error)),
         }
@@ -7175,6 +7189,12 @@ fn wait_for_ready_daemon(
             return Err(error);
         }
         let probe = probe_ready_client(paths, client_instance_id);
+        if matches!(probe, Ok(ProbeOutcome::Recovering))
+            && let Err(error) = deadlines.authorize_recovery(Instant::now())
+        {
+            startup.terminate()?;
+            return Err(error);
+        }
         let action = match classify_startup_probe(
             probe,
             startup.startup_signal_pending(),
@@ -7199,7 +7219,7 @@ fn wait_for_ready_daemon(
                 });
             }
             StartupProbeAction::Continue => {
-                std::thread::sleep(START_POLL_INTERVAL);
+                std::thread::sleep(deadlines.poll_interval());
             }
             StartupProbeAction::TimedOut => {
                 startup.terminate()?;
@@ -7227,7 +7247,7 @@ fn classify_startup_probe(
         }
         Ok(ProbeOutcome::Ready(_)) if startup_signal_pending => Ok(StartupProbeAction::Continue),
         Ok(ProbeOutcome::Ready(ready)) => Ok(StartupProbeAction::Ready(ready)),
-        Ok(ProbeOutcome::Unavailable) => {
+        Ok(ProbeOutcome::Recovering | ProbeOutcome::Unavailable) => {
             if deadlines.expired(now) {
                 Ok(StartupProbeAction::TimedOut)
             } else {
@@ -7260,16 +7280,26 @@ impl StartupDeadlines {
     }
 
     fn authorize_recovery(&mut self, observed_at: Instant) -> Result<(), ClientError> {
-        self.recovery = Some(
-            observed_at
-                .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
-                .ok_or(ClientError::InvalidRequestTimeout)?,
-        );
+        if self.recovery.is_none() {
+            self.recovery = Some(
+                observed_at
+                    .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
+                    .ok_or(ClientError::InvalidRequestTimeout)?,
+            );
+        }
         Ok(())
     }
 
     fn expired(self, now: Instant) -> bool {
         now >= self.recovery.unwrap_or(self.initial)
+    }
+
+    fn poll_interval(self) -> Duration {
+        if self.recovery.is_some() {
+            START_RECOVERY_POLL_INTERVAL
+        } else {
+            START_POLL_INTERVAL
+        }
     }
 }
 
@@ -7492,6 +7522,7 @@ fn terminate_startup_process_until(
 #[derive(Debug)]
 enum ProbeOutcome {
     Ready(ReadyDaemon),
+    Recovering,
     Unavailable,
 }
 
@@ -7555,14 +7586,28 @@ fn classify_health_probe(
             if health.lifecycle == DaemonLifecycle::Ready
                 && health.catalog_status == HealthStatus::Healthy
                 && matches!(
+                    health.generation_status,
+                    HealthStatus::Healthy | HealthStatus::Degraded | HealthStatus::NotConfigured
+                )
+                && matches!(
                     health.endpoint_status,
                     HealthStatus::Healthy | HealthStatus::NotConfigured
                 ) =>
         {
-            // Connection coordination needs the published control endpoint, not
-            // completion of generation recovery. First-slice requests retain
-            // their own bounded recovery response until last-good data is loaded.
             Ok(ProbeOutcome::Ready(ReadyDaemon { client, identity }))
+        }
+        Ok(health)
+            if matches!(
+                health.lifecycle,
+                DaemonLifecycle::Starting | DaemonLifecycle::Ready
+            ) && health.catalog_status == HealthStatus::Healthy
+                && health.generation_status == HealthStatus::Unavailable
+                && matches!(
+                    health.endpoint_status,
+                    HealthStatus::Healthy | HealthStatus::NotConfigured
+                ) =>
+        {
+            Ok(ProbeOutcome::Recovering)
         }
         Ok(_) => Ok(ProbeOutcome::Unavailable),
         Err(ClientError::Ipc(error)) if ipc_unavailable(&error) => Ok(ProbeOutcome::Unavailable),
@@ -7570,11 +7615,36 @@ fn classify_health_probe(
     }
 }
 
-fn wait_before_deadline(deadline: Instant) -> Result<(), ClientError> {
-    if Instant::now() >= deadline {
+fn wait_for_existing_ready(
+    paths: &RuntimePaths,
+    client_instance_id: [u8; 16],
+) -> Result<StartupConnection, ClientError> {
+    let mut deadlines = StartupDeadlines::new(Instant::now())?;
+    deadlines.authorize_recovery(Instant::now())?;
+    loop {
+        match probe_ready_client(paths, client_instance_id)? {
+            ProbeOutcome::Ready(ready) => {
+                return Ok(StartupConnection {
+                    client: ready.client,
+                    owned: None,
+                });
+            }
+            ProbeOutcome::Recovering => wait_before_startup_probe(deadlines)?,
+            ProbeOutcome::Unavailable => return Err(ClientError::DaemonUnavailable),
+        }
+    }
+}
+
+fn wait_before_startup_probe(deadlines: StartupDeadlines) -> Result<(), ClientError> {
+    let now = Instant::now();
+    if deadlines.expired(now) {
         return Err(ClientError::DaemonStartTimedOut);
     }
-    std::thread::sleep(START_POLL_INTERVAL);
+    let remaining = deadlines
+        .recovery
+        .unwrap_or(deadlines.initial)
+        .saturating_duration_since(now);
+    std::thread::sleep(deadlines.poll_interval().min(remaining));
     Ok(())
 }
 
@@ -16085,6 +16155,7 @@ mod tests {
             STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
             Duration::from_secs(60 * 60)
         );
+        assert_eq!(START_RECOVERY_POLL_INTERVAL, Duration::from_secs(1));
         assert_eq!(COORDINATED_SHUTDOWN_TIMEOUT, Duration::from_secs(30));
     }
 
@@ -18602,7 +18673,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_probe_connects_while_generation_recovery_is_explicit() {
+    fn readiness_probe_waits_for_active_generation_recovery() {
         let client = Client::new(test_endpoint("recovery"), [1; 16], [2; 16]);
         let identity = ReadyDaemonIdentity {
             pid: 1,
@@ -18616,8 +18687,8 @@ mod tests {
                 active_operations: 0,
                 admitted_operations: 0,
                 protocol_version: "1.8".to_owned(),
-                lifecycle: DaemonLifecycle::Ready,
-                accepting_operations: true,
+                lifecycle: DaemonLifecycle::Starting,
+                accepting_operations: false,
                 active_connections: 0,
                 connection_limit: 16,
                 queued_operations: 0,
@@ -18634,7 +18705,23 @@ mod tests {
                 endpoint_schema_version: 2,
             }),
         )
-        .expect("published endpoint is connectable during generation recovery");
+        .expect("published recovering endpoint remains observable");
+
+        assert!(matches!(probe, ProbeOutcome::Recovering));
+    }
+
+    #[test]
+    fn readiness_probe_accepts_degraded_last_good_generation() {
+        let client = Client::new(test_endpoint("degraded"), [1; 16], [2; 16]);
+        let identity = ReadyDaemonIdentity {
+            pid: 1,
+            instance_nonce: [1; 16],
+        };
+        let mut health = diagnostic_health(HealthStatus::Healthy);
+        health.generation_status = HealthStatus::Degraded;
+
+        let probe = classify_health_probe(client, identity, Ok(health))
+            .expect("degraded last-good generation remains ready");
 
         assert!(matches!(probe, ProbeOutcome::Ready(_)));
     }
