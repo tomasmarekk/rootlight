@@ -199,6 +199,7 @@ fn body_change_invalidates_only_declared_dependent_closure() {
         plan.reanalyze().collect::<Vec<_>>(),
         vec![changed, dependent]
     );
+    assert_eq!(plan.closure_work(), 2);
     assert!(plan.fallback().is_none());
     assert!(
         plan.trace()
@@ -567,6 +568,7 @@ fn exhausted_closure_budget_selects_repository_rebuild() {
         plan.invalidated_nodes().collect::<Vec<_>>(),
         vec![first, second]
     );
+    assert_eq!(plan.closure_work(), 2);
 }
 
 #[test]

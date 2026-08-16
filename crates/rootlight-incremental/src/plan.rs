@@ -225,6 +225,7 @@ pub struct InvalidationPlan {
     rerun_domains: FactDomainSet,
     artifact_decisions: Vec<ArtifactDecision>,
     fallback: Option<ConservativeFallback>,
+    closure_work: usize,
     trace: InvalidationTrace,
 }
 
@@ -269,6 +270,12 @@ impl InvalidationPlan {
     #[must_use]
     pub const fn fallback(&self) -> Option<ConservativeFallback> {
         self.fallback
+    }
+
+    /// Returns dependency edges visited while selecting the fixed-point closure.
+    #[must_use]
+    pub const fn closure_work(&self) -> usize {
+        self.closure_work
     }
 
     /// Returns the complete source-free explanation.
@@ -443,6 +450,7 @@ pub fn plan_invalidation(
         rerun_domains,
         artifact_decisions,
         fallback,
+        closure_work,
         trace,
     })
 }
