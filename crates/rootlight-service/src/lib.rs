@@ -646,6 +646,15 @@ pub struct FirstSliceRecoveryTarget {
     published_generation_count: u64,
 }
 
+/// Monotonic source observations produced by one verified recovery batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceRecoveryObservation {
+    /// Source snapshots whose identities and payloads were verified.
+    pub files_examined: u64,
+    /// Source payload bytes covered by those identity checks.
+    pub bytes_examined: u64,
+}
+
 impl FirstSliceRecoveryTarget {
     /// Returns the durable repository identity.
     #[must_use]
@@ -789,6 +798,34 @@ impl FirstSliceRestoredState {
             .iter()
             .map(|generation| generation.receipt.generation)
             .collect()
+    }
+
+    /// Returns exact source snapshots and bytes verified while building this batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Limits`] when the bounded aggregate cannot be
+    /// represented as public resource counters.
+    pub fn recovery_observation(&self) -> Result<FirstSliceRecoveryObservation, FirstSliceError> {
+        let mut files_examined = 0_u64;
+        let mut bytes_examined = 0_u64;
+        for generation in &self.generations {
+            files_examined = files_examined
+                .checked_add(
+                    u64::try_from(generation.verified.document().files.len())
+                        .map_err(|_| FirstSliceError::Limits)?,
+                )
+                .ok_or(FirstSliceError::Limits)?;
+            for file in &generation.verified.document().files {
+                bytes_examined = bytes_examined
+                    .checked_add(file.byte_length)
+                    .ok_or(FirstSliceError::Limits)?;
+            }
+        }
+        Ok(FirstSliceRecoveryObservation {
+            files_examined,
+            bytes_examined,
+        })
     }
 }
 
@@ -20102,6 +20139,15 @@ mod tests {
         let restored_state = deferred
             .restore(&cancellation)
             .expect("durable generation verifies");
+        assert_eq!(
+            restored_state
+                .recovery_observation()
+                .expect("verified source observations fit"),
+            FirstSliceRecoveryObservation {
+                files_examined: 1,
+                bytes_examined: 42,
+            }
+        );
         restored
             .install_deferred_restore(restored_state, &cancellation)
             .expect("verified durable generation installs");

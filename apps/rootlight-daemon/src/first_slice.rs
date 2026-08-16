@@ -2275,6 +2275,9 @@ struct RecoveryOperation {
     operation: OperationId,
     cancellation: Cancellation,
     deadline: Instant,
+    peak_rss_bytes: Arc<AtomicU64>,
+    files_examined: u64,
+    bytes_examined: u64,
 }
 
 struct RecoveryOperationGuard<'a> {
@@ -2329,7 +2332,57 @@ impl<'a> RecoveryOperationGuard<'a> {
         &self.recovery.cancellation
     }
 
+    fn start_resource_sampler(&self, state: Option<Arc<DaemonState>>) -> ProcessRssSampler {
+        ProcessRssSampler::start(Arc::clone(&self.recovery.peak_rss_bytes), state)
+    }
+
+    fn persist_resources(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<(), FirstSliceHostError> {
+        sample_current_process_rss(&self.recovery.peak_rss_bytes, None);
+        let deadline = fresh_lifecycle_deadline(self.recovery.deadline)
+            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?;
+        runtime
+            .block_on(self.journal.update_resources_until(
+                self.recovery.operation,
+                self.recovery.peak_rss_bytes.load(Ordering::Relaxed),
+                0,
+                deadline,
+            ))
+            .map_err(FirstSliceHostError::Journal)?;
+        runtime
+            .block_on(self.journal.update_repository_observation_until(
+                self.recovery.operation,
+                self.recovery.files_examined,
+                self.recovery.bytes_examined,
+                deadline,
+            ))
+            .map_err(FirstSliceHostError::Journal)?;
+        Ok(())
+    }
+
+    fn observe_restored_sources(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        files_examined: u64,
+        bytes_examined: u64,
+    ) -> Result<(), FirstSliceHostError> {
+        self.recovery.files_examined = self
+            .recovery
+            .files_examined
+            .checked_add(files_examined)
+            .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+        self.recovery.bytes_examined = self
+            .recovery
+            .bytes_examined
+            .checked_add(bytes_examined)
+            .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+        self.persist_resources(runtime)
+    }
+
     fn complete(&mut self, runtime: &tokio::runtime::Runtime) -> Result<(), FirstSliceHostError> {
+        self.persist_resources(runtime)?;
         complete_recovery_operation(self.journal, runtime, &self.recovery)?;
         self.terminalized = true;
         Ok(())
@@ -2356,6 +2409,7 @@ impl<'a> RecoveryOperationGuard<'a> {
         runtime: &tokio::runtime::Runtime,
         reason: CancellationReason,
     ) -> Result<(), FirstSliceHostError> {
+        self.persist_resources(runtime)?;
         finish_cancelled_recovery_operation(self.journal, runtime, &self.recovery, reason)?;
         self.terminalized = true;
         Ok(())
@@ -2374,6 +2428,7 @@ impl<'a> RecoveryOperationGuard<'a> {
         {
             return self.cancel(runtime, reason);
         }
+        self.persist_resources(runtime)?;
         fail_recovery_operation(self.journal, runtime, &self.recovery, self.target, error)?;
         self.terminalized = true;
         Ok(())
@@ -2439,6 +2494,12 @@ fn start_recovery_operations(
     let deadline = Instant::now()
         .checked_add(DETACHED_INDEX_TIMEOUT)
         .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    let deadline_unix_ms = started_unix_ms
+        .checked_add(
+            u64::try_from(DETACHED_INDEX_TIMEOUT.as_millis())
+                .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?,
+        )
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
     let prepared = targets
         .iter()
         .copied()
@@ -2458,7 +2519,7 @@ fn start_recovery_operations(
                 recovery_plan_hash(target),
                 ClientInstanceId::SYSTEM,
                 true,
-                None,
+                Some(deadline_unix_ms),
                 None,
             )
             .and_then(|submission| submission.with_repository_context(repository_context))
@@ -2540,6 +2601,9 @@ fn start_recovery_operations(
             operation,
             cancellation,
             deadline,
+            peak_rss_bytes: Arc::new(AtomicU64::new(0)),
+            files_examined: 0,
+            bytes_examined: 0,
         });
     }
     Ok(recoveries)
@@ -2936,10 +3000,13 @@ fn durable_recovery_worker(
                 if let Some(reason) = cancellation.reason() {
                     let _ = recovery.cancellation().cancel(reason);
                 }
-                let active = match deferred
+                let resource_sampler =
+                    recovery.start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
+                let active_result = deferred
                     .restore
-                    .restore_active_repository(target.repository(), recovery.cancellation())
-                {
+                    .restore_active_repository(target.repository(), recovery.cancellation());
+                drop(resource_sampler);
+                let active = match active_result {
                     Ok(restored) => restored,
                     Err(FirstSliceError::Cancelled(reason)) => {
                         recovery.cancel(&runtime, reason)?;
@@ -2964,6 +3031,14 @@ fn durable_recovery_worker(
                         continue;
                     }
                 };
+                let observation = active
+                    .recovery_observation()
+                    .map_err(FirstSliceHostError::Service)?;
+                recovery.observe_restored_sources(
+                    &runtime,
+                    observation.files_examined,
+                    observation.bytes_examined,
+                )?;
                 if stopping.load(Ordering::Acquire) {
                     recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                     return Ok(());
@@ -3036,11 +3111,15 @@ fn durable_recovery_worker(
                 recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                 continue;
             }
-            let remaining = match deferred.restore.restore_retained_repository(
+            let resource_sampler =
+                recovery.start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
+            let remaining_result = deferred.restore.restore_retained_repository(
                 target.repository(),
                 &deferred.installed_generations,
                 recovery.cancellation(),
-            ) {
+            );
+            drop(resource_sampler);
+            let remaining = match remaining_result {
                 Ok(restored) => restored,
                 Err(FirstSliceError::Cancelled(reason)) => {
                     recovery.cancel(&runtime, reason)?;
@@ -3061,6 +3140,14 @@ fn durable_recovery_worker(
                     continue;
                 }
             };
+            let observation = remaining
+                .recovery_observation()
+                .map_err(FirstSliceHostError::Service)?;
+            recovery.observe_restored_sources(
+                &runtime,
+                observation.files_examined,
+                observation.bytes_examined,
+            )?;
             if stopping.load(Ordering::Acquire) {
                 recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                 continue;
@@ -18008,7 +18095,6 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
-
         let recovery = RecoveryOperationGuard::start(&handle, &runtime, target, &cancellation)
             .expect("recovery operation starts");
         let operation = recovery.operation();
@@ -18044,6 +18130,16 @@ mod tests {
             .expect("recovery repository context persists");
         assert_eq!(context.repository, target.repository());
         assert_eq!(context.parent_generation, Some(target.generation()));
+        assert_eq!(
+            record
+                .deadline_unix_ms
+                .expect("recovery deadline is durable")
+                .checked_sub(context.started_unix_ms),
+            Some(
+                u64::try_from(DETACHED_INDEX_TIMEOUT.as_millis())
+                    .expect("recovery timeout fits public milliseconds")
+            )
+        );
         drop(recovery);
         let terminal = journal
             .status(operation)
@@ -18272,6 +18368,7 @@ mod tests {
     ) -> (
         Result<(), FirstSliceHostError>,
         Vec<OperationRecord>,
+        Vec<RepositoryOperationContext>,
         bool,
         bool,
         HealthStatus,
@@ -18369,7 +18466,7 @@ mod tests {
             .expect("recovery contexts remain queryable");
         assert_eq!(contexts.len(), repository_count);
         let records = contexts
-            .into_iter()
+            .iter()
             .map(|context| {
                 journal
                     .status(context.operation)
@@ -18388,6 +18485,7 @@ mod tests {
         (
             result,
             records,
+            contexts,
             recovery_ready.load(Ordering::Acquire),
             recovery_complete.load(Ordering::Acquire),
             generation_status,
@@ -18396,7 +18494,7 @@ mod tests {
 
     #[test]
     fn worker_failure_terminalizes_started_recovery() {
-        let (result, records, recovery_ready, recovery_complete, generation_status) =
+        let (result, records, _, recovery_ready, recovery_complete, generation_status) =
             run_recovery_worker_with_start_hook(
                 1,
                 Box::new(|_, _| Err(FirstSliceHostError::ThreadPanicked)),
@@ -18424,15 +18522,23 @@ mod tests {
 
     #[test]
     fn successful_recovery_reports_both_durable_phases_complete() {
-        let (result, records, recovery_ready, recovery_complete, generation_status) =
+        let (result, records, contexts, recovery_ready, recovery_complete, generation_status) =
             run_recovery_worker_with_start_hook(1, Box::new(|_, _| Ok(())), None);
         let [record] = records.as_slice() else {
             panic!("one recovery operation expected");
+        };
+        let [context] = contexts.as_slice() else {
+            panic!("one recovery context expected");
         };
 
         result.expect("recovery completes");
         assert_eq!(record.kind, OperationKind::Recovery);
         assert_eq!(record.state, OperationState::Succeeded);
+        assert!(record.deadline_unix_ms.is_some());
+        assert!(record.peak_rss_bytes > 0);
+        assert_eq!(record.written_bytes, 0);
+        assert_eq!(context.files_examined, 1);
+        assert!(context.bytes_examined > 0);
         assert_eq!(
             record.progress,
             Progress::new(2, 2).expect("terminal recovery progress is valid")
@@ -18444,7 +18550,7 @@ mod tests {
 
     #[test]
     fn shutdown_terminalizes_started_recovery_as_cancelled() {
-        let (result, records, _, _, _) = run_recovery_worker_with_start_hook(
+        let (result, records, _, _, _, _) = run_recovery_worker_with_start_hook(
             2,
             Box::new(|cancellation, stopping| {
                 stopping.store(true, Ordering::Release);
@@ -18464,7 +18570,7 @@ mod tests {
 
     #[test]
     fn retained_restore_interruption_terminalizes_before_recovery_completes() {
-        let (result, records, recovery_ready, recovery_complete, generation_status) =
+        let (result, records, _, recovery_ready, recovery_complete, generation_status) =
             run_recovery_worker_with_start_hook(
                 1,
                 Box::new(|_, _| Ok(())),
@@ -18522,7 +18628,7 @@ mod tests {
 
     #[test]
     fn recovery_failure_after_active_restore_keeps_last_good_generation_available() {
-        let (result, records, recovery_ready, recovery_complete, generation_status) =
+        let (result, records, _, recovery_ready, recovery_complete, generation_status) =
             run_recovery_worker_with_start_hook(
                 1,
                 Box::new(|_, _| Ok(())),

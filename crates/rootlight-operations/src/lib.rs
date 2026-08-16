@@ -2933,7 +2933,10 @@ impl OperationJournal {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if record.kind != OperationKind::RepositoryIndex {
+        if !matches!(
+            record.kind,
+            OperationKind::RepositoryIndex | OperationKind::Recovery
+        ) {
             return Err(OperationError::NotFound);
         }
         let mut context = load_repository_operation_context(&transaction, operation)?
@@ -7772,6 +7775,45 @@ mod tests {
         reopened
             .quick_check()
             .expect("repository metadata validates");
+    }
+
+    #[test]
+    fn recovery_observations_are_monotonic_and_survive_restart() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(35);
+        let repository = RepositoryId::from_bytes([35; 16]);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(recovery_submission(operation, repository, 1_000))
+                .expect("recovery operation submits");
+            journal
+                .start_execution(operation)
+                .expect("recovery operation starts");
+            let observed = journal
+                .update_repository_observation(operation, 7, 8_192)
+                .expect("recovery observations persist");
+            assert_eq!(observed.files_examined, 7);
+            assert_eq!(observed.bytes_examined, 8_192);
+            assert_eq!(
+                journal
+                    .update_repository_observation(operation, 3, 4_096)
+                    .expect("stale recovery observations are idempotent"),
+                observed
+            );
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let restored = reopened
+            .repository_operation_context(operation)
+            .expect("recovery context survives restart");
+        assert_eq!(restored.repository, repository);
+        assert_eq!(restored.files_examined, 7);
+        assert_eq!(restored.bytes_examined, 8_192);
+        reopened
+            .quick_check()
+            .expect("recovery observations validate");
     }
 
     #[test]
