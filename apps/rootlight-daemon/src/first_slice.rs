@@ -6417,9 +6417,7 @@ fn repository_operation_status(
         semantic_operation: semantic_operation.map(operation_to_wire),
         ..Default::default()
     };
-    if record.kind == OperationKind::RepositoryIndex
-        && let Some(evidence) = repository_context.and_then(|context| context.evidence)
-    {
+    if let Some(evidence) = repository_operation_status_evidence(&record, repository_context) {
         let expose_trace = context.selected_protocol_minor >= 16
             || evidence.build_strategy != RepositoryBuildStrategy::CleanRebuild;
         project_repository_operation_evidence(
@@ -6442,6 +6440,17 @@ fn repository_operation_status(
         }
     }
     Ok(response)
+}
+
+fn repository_operation_status_evidence(
+    record: &OperationRecord,
+    repository_context: Option<RepositoryOperationContext>,
+) -> Option<RepositoryOperationEvidence> {
+    if record.kind == OperationKind::RepositoryIndex && record.state == OperationState::Succeeded {
+        repository_context.and_then(|context| context.evidence)
+    } else {
+        None
+    }
 }
 
 fn completed_auto_semantic_operation(
@@ -10869,6 +10878,11 @@ fn build_service_error(
     } = error
     {
         let configuration_key = static_safe_label(configuration.as_str());
+        // Service admission reports committed plus pending registrations and
+        // the rejected next registration as its attempted observation.
+        let current_committed_repositories = observed
+            .saturating_sub(pending_repositories)
+            .saturating_sub(1);
         builder = builder
             .detail(
                 static_detail_key("resource"),
@@ -10881,6 +10895,14 @@ fn build_service_error(
             .detail(
                 static_detail_key("estimated"),
                 PublicValue::Unsigned(observed),
+            )
+            .detail(
+                static_detail_key("attempted_repositories"),
+                PublicValue::Unsigned(observed),
+            )
+            .detail(
+                static_detail_key("current_committed_repositories"),
+                PublicValue::Unsigned(current_committed_repositories),
             )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
             .detail(
@@ -11002,15 +11024,30 @@ fn build_service_error(
         scope,
         required_bytes,
         observed_bytes,
+        projected_bytes,
         limit_bytes,
         minimum_free_bytes,
+        repository_amplification,
     } = error
     {
-        let resource = match scope {
-            rootlight_service::FirstSliceStorageScope::Repository => "repository_storage_bytes",
-            rootlight_service::FirstSliceStorageScope::Catalog => "catalog_storage_bytes",
-            rootlight_service::FirstSliceStorageScope::Filesystem => "filesystem_free_bytes",
-            _ => "storage_bytes",
+        let (resource, configuration_key) = match scope {
+            rootlight_service::FirstSliceStorageScope::Repository => (
+                "repository_storage_bytes",
+                Some("storage.maximum_repository_bytes"),
+            ),
+            rootlight_service::FirstSliceStorageScope::RepositoryAmplification => (
+                "repository_amplification_bytes",
+                Some("storage.oracle_reservation_factor"),
+            ),
+            rootlight_service::FirstSliceStorageScope::Catalog => (
+                "catalog_storage_bytes",
+                Some("storage.maximum_catalog_bytes"),
+            ),
+            rootlight_service::FirstSliceStorageScope::Filesystem => (
+                "filesystem_free_bytes",
+                Some("storage.minimum_free_disk_bytes"),
+            ),
+            _ => ("storage_bytes", None),
         };
         builder = builder
             .detail(
@@ -11026,6 +11063,10 @@ fn build_service_error(
                 PublicValue::Unsigned(observed_bytes),
             )
             .detail(
+                static_detail_key("projected_bytes"),
+                PublicValue::Unsigned(projected_bytes),
+            )
+            .detail(
                 static_detail_key("limit"),
                 PublicValue::Unsigned(limit_bytes),
             )
@@ -11034,6 +11075,36 @@ fn build_service_error(
                 PublicValue::Unsigned(minimum_free_bytes),
             )
             .next_action(NextAction::CollectSupportBundle);
+        if let Some(amplification) = repository_amplification {
+            builder = builder
+                .detail(
+                    static_detail_key("examined_source_bytes"),
+                    PublicValue::Unsigned(amplification.examined_source_bytes),
+                )
+                .detail(
+                    static_detail_key("effective_factor"),
+                    PublicValue::Unsigned(amplification.effective_factor),
+                )
+                .detail(
+                    static_detail_key("absolute_limit_bytes"),
+                    PublicValue::Unsigned(amplification.absolute_limit_bytes),
+                )
+                .detail(
+                    static_detail_key("amplification_limit_bytes"),
+                    PublicValue::Unsigned(amplification.amplification_limit_bytes),
+                );
+        }
+        if let Some(configuration_key) = configuration_key {
+            let configuration_key = static_safe_label(configuration_key);
+            builder = builder
+                .detail(
+                    static_detail_key("configuration_key"),
+                    PublicValue::Label(configuration_key.clone()),
+                )
+                .next_action(NextAction::UpdateConfiguration {
+                    key: configuration_key,
+                });
+        }
     }
     if let FirstSliceError::IdentityVerification(component) = error {
         builder = builder.detail(
@@ -11862,6 +11933,158 @@ mod tests {
                 .expect("normalized collection exists")
                 .complete
         );
+    }
+
+    #[test]
+    fn failed_repository_status_preserves_terminal_error_without_success_evidence() {
+        let operation = OperationId::from_bytes([121; 16]);
+        let repository = RepositoryId::from_bytes([121; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let repository_context = RepositoryOperationSubmission::new(
+            repository,
+            None,
+            1_700_000_000_121,
+            4_096,
+            RepositoryOperationMode::Structural,
+        )
+        .expect("repository context is valid");
+        journal
+            .submit(
+                repository_submission(operation, 121)
+                    .with_repository_context(repository_context)
+                    .expect("repository context attaches"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .record_repository_planning(
+                operation,
+                rootlight_operations::RepositoryOperationPlanning {
+                    build_strategy: RepositoryBuildStrategy::DependencyDirected,
+                    fallback_reason: None,
+                    estimated_analysis_units: 1,
+                    estimated_files: 1,
+                    estimated_facts: 1,
+                    estimated_cost_units: 1,
+                    estimated_durable_bytes: 1,
+                    dependency_keys: rootlight_operations::RepositoryPlanningDependencyKeys {
+                        total: 0,
+                        samples: Vec::new(),
+                        complete: true,
+                    },
+                },
+            )
+            .expect("planning persists");
+        let evidence = RepositoryOperationEvidence {
+            build_strategy: RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 0,
+            changed_inputs: 0,
+            changed_files: 0,
+            reused_files: 0,
+            rebuilt_files: 0,
+            reused_facts: 0,
+            rebuilt_facts: 0,
+            referenced_bytes: 0,
+            newly_written_bytes: 0,
+            reserved_memory_bytes: 0,
+            owned_memory_bytes: 0,
+            retained_durable_bytes: 0,
+            fact_work: None,
+        };
+        let failure = repository_index_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::DiscoveryEntries,
+                observed: 100_001,
+                limit: 100_000,
+            },
+            RepositoryIndexErrorContext {
+                operation,
+                repository,
+                provider: repository_index_provider(FirstSliceIndexMode::Structural),
+            },
+        );
+        runtime
+            .block_on(handle.fail_operation(operation, failure.clone()))
+            .expect("operation fails");
+        let failed_record = journal.status(operation).expect("failed record persists");
+        let mut failed_context = journal
+            .repository_operation_context(operation)
+            .expect("failed repository context persists");
+        assert!(failed_context.planning.is_some());
+        failed_context.evidence = Some(evidence);
+        assert_eq!(
+            repository_operation_status_evidence(&failed_record, Some(failed_context)),
+            None
+        );
+        let service =
+            RwLock::new(FirstSliceService::new(2).expect("ephemeral service initializes"));
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([121; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+
+        let status = repository_operation_status(
+            &service,
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &context,
+        )
+        .expect("failed operation status remains a typed terminal response");
+
+        let visible = status
+            .operation
+            .as_ref()
+            .expect("terminal operation remains visible");
+        assert_eq!(visible.state, daemon::OperationState::Failed as i32);
+        assert_eq!(
+            visible.error.as_ref(),
+            Some(&rootlight_daemon_core::public_error_to_wire(&failure))
+        );
+        assert!(status.published_generation.is_none());
+        assert_eq!(
+            status.build_strategy,
+            daemon::RepositoryBuildStrategy::Unspecified as i32
+        );
+        assert!(status.fallback_reason.is_none());
+        assert!(status.fact_work.is_none());
+        assert!(status.invalidation_trace_json.is_none());
+        assert_eq!(status.invalidated_units, 0);
+        assert_eq!(status.changed_inputs, 0);
+        assert_eq!(status.changed_files, 0);
+        assert_eq!(status.reused_files, 0);
+        assert_eq!(status.rebuilt_files, 0);
+        assert_eq!(status.reused_facts, 0);
+        assert_eq!(status.rebuilt_facts, 0);
+        assert_eq!(status.referenced_bytes, 0);
+        assert_eq!(status.newly_written_bytes, 0);
+        assert_eq!(status.reserved_memory_bytes, 0);
+        assert_eq!(status.owned_memory_bytes, 0);
+        assert_eq!(status.retained_durable_bytes, 0);
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
@@ -13027,8 +13250,10 @@ mod tests {
                 scope: rootlight_service::FirstSliceStorageScope::Repository,
                 required_bytes: 4096,
                 observed_bytes: 8192,
+                projected_bytes: 12_288,
                 limit_bytes: 10_000,
                 minimum_free_bytes: 1024,
+                repository_amplification: None,
             },
             RepositoryIndexErrorContext {
                 operation,
@@ -13141,6 +13366,361 @@ mod tests {
                 .details()
                 .get(&static_detail_key("pending_repositories")),
             Some(&PublicValue::Unsigned(2))
+        );
+    }
+
+    #[test]
+    fn repository_capacity_public_errors_serialize_committed_and_attempted_counts() {
+        let committed_capacity = build_service_error(
+            FirstSliceError::RepositoryCapacityLimit {
+                observed: 177,
+                limit: 176,
+                configuration:
+                    rootlight_service::FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 0,
+                reclaimable_repositories: 176,
+            },
+            None,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&committed_capacity).expect("public capacity error serializes"),
+            serde_json::json!({
+                "code": "RESOURCE_EXHAUSTED",
+                "message": "repository registration capacity was reached",
+                "retryable": false,
+                "retry_after_ms": null,
+                "repository": null,
+                "operation": null,
+                "generation": null,
+                "details": {
+                    "attempted_repositories": {
+                        "type": "unsigned",
+                        "value": 177
+                    },
+                    "configuration_key": {
+                        "type": "label",
+                        "value": "storage.maximum_repositories"
+                    },
+                    "current_committed_repositories": {
+                        "type": "unsigned",
+                        "value": 176
+                    },
+                    "estimated": {
+                        "type": "unsigned",
+                        "value": 177
+                    },
+                    "failure_family": {
+                        "type": "label",
+                        "value": "resource_limit"
+                    },
+                    "failure_stage": {
+                        "type": "label",
+                        "value": "admission"
+                    },
+                    "limit": {
+                        "type": "unsigned",
+                        "value": 176
+                    },
+                    "observed": {
+                        "type": "unsigned",
+                        "value": 177
+                    },
+                    "pending_repositories": {
+                        "type": "unsigned",
+                        "value": 0
+                    },
+                    "reclaimable_repositories": {
+                        "type": "unsigned",
+                        "value": 176
+                    },
+                    "resource": {
+                        "type": "label",
+                        "value": "repositories"
+                    }
+                },
+                "next_actions": [
+                    {
+                        "action": "collect_support_bundle"
+                    },
+                    {
+                        "action": "update_configuration",
+                        "key": "storage.maximum_repositories"
+                    },
+                    {
+                        "action": "delete_repository"
+                    }
+                ]
+            })
+        );
+
+        let pending_capacity = build_service_error(
+            FirstSliceError::RepositoryCapacityLimit {
+                observed: 3,
+                limit: 2,
+                configuration:
+                    rootlight_service::FirstSliceRepositoryCapacityConfiguration::MaximumRepositories,
+                pending_repositories: 2,
+                reclaimable_repositories: 0,
+            },
+            None,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&pending_capacity).expect("pending capacity error serializes"),
+            serde_json::json!({
+                "code": "BUSY",
+                "message": "repository registration capacity is reserved by pending operations",
+                "retryable": true,
+                "retry_after_ms": null,
+                "repository": null,
+                "operation": null,
+                "generation": null,
+                "details": {
+                    "attempted_repositories": {
+                        "type": "unsigned",
+                        "value": 3
+                    },
+                    "configuration_key": {
+                        "type": "label",
+                        "value": "storage.maximum_repositories"
+                    },
+                    "current_committed_repositories": {
+                        "type": "unsigned",
+                        "value": 0
+                    },
+                    "estimated": {
+                        "type": "unsigned",
+                        "value": 3
+                    },
+                    "failure_family": {
+                        "type": "label",
+                        "value": "capacity_pending"
+                    },
+                    "failure_stage": {
+                        "type": "label",
+                        "value": "admission"
+                    },
+                    "limit": {
+                        "type": "unsigned",
+                        "value": 2
+                    },
+                    "observed": {
+                        "type": "unsigned",
+                        "value": 3
+                    },
+                    "pending_repositories": {
+                        "type": "unsigned",
+                        "value": 2
+                    },
+                    "reclaimable_repositories": {
+                        "type": "unsigned",
+                        "value": 0
+                    },
+                    "resource": {
+                        "type": "label",
+                        "value": "repositories"
+                    }
+                },
+                "next_actions": [
+                    {
+                        "action": "retry"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn storage_capacity_public_errors_serialize_supported_configuration_actions() {
+        for (scope, resource, configuration_key) in [
+            (
+                rootlight_service::FirstSliceStorageScope::Repository,
+                "repository_storage_bytes",
+                "storage.maximum_repository_bytes",
+            ),
+            (
+                rootlight_service::FirstSliceStorageScope::Catalog,
+                "catalog_storage_bytes",
+                "storage.maximum_catalog_bytes",
+            ),
+            (
+                rootlight_service::FirstSliceStorageScope::Filesystem,
+                "filesystem_free_bytes",
+                "storage.minimum_free_disk_bytes",
+            ),
+        ] {
+            let error = build_service_error(
+                FirstSliceError::StorageResourceExhausted {
+                    scope,
+                    required_bytes: 4_096,
+                    observed_bytes: 8_192,
+                    projected_bytes: 12_288,
+                    limit_bytes: 10_000,
+                    minimum_free_bytes: 1_024,
+                    repository_amplification: None,
+                },
+                None,
+            );
+
+            assert_eq!(
+                serde_json::to_value(&error).expect("public storage error serializes"),
+                serde_json::json!({
+                    "code": "RESOURCE_EXHAUSTED",
+                    "message": "durable storage policy rejected publication",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "repository": null,
+                    "operation": null,
+                    "generation": null,
+                    "details": {
+                        "configuration_key": {
+                            "type": "label",
+                            "value": configuration_key
+                        },
+                        "failure_family": {
+                            "type": "label",
+                            "value": "storage_limit"
+                        },
+                        "failure_stage": {
+                            "type": "label",
+                            "value": "admission"
+                        },
+                        "limit": {
+                            "type": "unsigned",
+                            "value": 10_000
+                        },
+                        "minimum_free_bytes": {
+                            "type": "unsigned",
+                            "value": 1_024
+                        },
+                        "observed": {
+                            "type": "unsigned",
+                            "value": 8_192
+                        },
+                        "projected_bytes": {
+                            "type": "unsigned",
+                            "value": 12_288
+                        },
+                        "required_bytes": {
+                            "type": "unsigned",
+                            "value": 4_096
+                        },
+                        "resource": {
+                            "type": "label",
+                            "value": resource
+                        }
+                    },
+                    "next_actions": [
+                        {
+                            "action": "collect_support_bundle"
+                        },
+                        {
+                            "action": "update_configuration",
+                            "key": configuration_key
+                        }
+                    ]
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn repository_amplification_error_serializes_exact_retained_state_evidence() {
+        let error = build_service_error(
+            FirstSliceError::StorageResourceExhausted {
+                scope: rootlight_service::FirstSliceStorageScope::RepositoryAmplification,
+                required_bytes: 600,
+                observed_bytes: 3_000,
+                projected_bytes: 3_600,
+                limit_bytes: 3_500,
+                minimum_free_bytes: 1_024,
+                repository_amplification: Some(
+                    rootlight_service::FirstSliceRepositoryAmplification {
+                        examined_source_bytes: 100,
+                        effective_factor: 34,
+                        absolute_limit_bytes: 10_000,
+                        amplification_limit_bytes: 3_500,
+                    },
+                ),
+            },
+            None,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&error).expect("public amplification error serializes"),
+            serde_json::json!({
+                "code": "RESOURCE_EXHAUSTED",
+                "message": "durable storage policy rejected publication",
+                "retryable": false,
+                "retry_after_ms": null,
+                "repository": null,
+                "operation": null,
+                "generation": null,
+                "details": {
+                    "absolute_limit_bytes": {
+                        "type": "unsigned",
+                        "value": 10_000
+                    },
+                    "amplification_limit_bytes": {
+                        "type": "unsigned",
+                        "value": 3_500
+                    },
+                    "configuration_key": {
+                        "type": "label",
+                        "value": "storage.oracle_reservation_factor"
+                    },
+                    "effective_factor": {
+                        "type": "unsigned",
+                        "value": 34
+                    },
+                    "examined_source_bytes": {
+                        "type": "unsigned",
+                        "value": 100
+                    },
+                    "failure_family": {
+                        "type": "label",
+                        "value": "storage_limit"
+                    },
+                    "failure_stage": {
+                        "type": "label",
+                        "value": "admission"
+                    },
+                    "limit": {
+                        "type": "unsigned",
+                        "value": 3_500
+                    },
+                    "minimum_free_bytes": {
+                        "type": "unsigned",
+                        "value": 1_024
+                    },
+                    "observed": {
+                        "type": "unsigned",
+                        "value": 3_000
+                    },
+                    "projected_bytes": {
+                        "type": "unsigned",
+                        "value": 3_600
+                    },
+                    "required_bytes": {
+                        "type": "unsigned",
+                        "value": 600
+                    },
+                    "resource": {
+                        "type": "label",
+                        "value": "repository_amplification_bytes"
+                    }
+                },
+                "next_actions": [
+                    {
+                        "action": "collect_support_bundle"
+                    },
+                    {
+                        "action": "update_configuration",
+                        "key": "storage.oracle_reservation_factor"
+                    }
+                ]
+            })
         );
     }
 

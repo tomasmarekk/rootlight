@@ -23,9 +23,10 @@ use catalog::{
 };
 use durable::{
     DURABLE_PUBLICATION_RESIDUAL_BYTES, DurableCatalog, DurablePublishedGeneration,
-    DurableRepositoryMetadata, DurableStorageAdmissionFailure, DurableStorageAdmissionPolicy,
-    DurableStorageAdmissionScope, DurableStorageAdmittedGeneration, DurableStorageReservation,
-    REPOSITORY_METADATA_VERSION, RestoredGeneration, recovery_snapshot_output_reservation,
+    DurableRepositoryAmplificationPolicy, DurableRepositoryMetadata,
+    DurableStorageAdmissionFailure, DurableStorageAdmissionPolicy, DurableStorageAdmissionScope,
+    DurableStorageAdmittedGeneration, DurableStorageReservation, REPOSITORY_METADATA_VERSION,
+    RestoredGeneration, recovery_snapshot_output_reservation,
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
@@ -779,9 +780,9 @@ pub struct FirstSliceSupportInventory {
     pub minimum_free_disk_bytes: u64,
     /// Effective maximum retained generations per repository.
     pub effective_retention_generations: u32,
-    /// Effective source reservation multiplier.
+    /// Source multiplier used for sizing and v1.2+ retained-state amplification admission.
     pub source_reservation_factor: u64,
-    /// Effective semantic-oracle reservation multiplier.
+    /// Oracle multiplier used for sizing and v1.2+ retained-state amplification admission.
     pub oracle_reservation_factor: u64,
 }
 
@@ -4660,7 +4661,7 @@ impl FirstSliceService {
             .map_err(storage_admission_error)
     }
 
-    const fn durable_storage_admission_policy(
+    fn durable_storage_admission_policy(
         &self,
         required_catalog_bytes: u64,
         required_repository_bytes: u64,
@@ -4671,6 +4672,32 @@ impl FirstSliceService {
             maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
             maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
             minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+            repository_amplification: None,
+        }
+    }
+
+    fn durable_final_storage_admission_policy(
+        &self,
+        required_catalog_bytes: u64,
+        required_repository_bytes: u64,
+        examined_source_bytes: u64,
+    ) -> DurableStorageAdmissionPolicy {
+        let repository_amplification = (self.storage_policy.config.version() >= CONFIG_VERSION_1_2)
+            .then_some(DurableRepositoryAmplificationPolicy {
+                // Preflight bytes count each retained source once; analysis
+                // work can examine the same source through several providers.
+                examined_source_bytes,
+                source_factor: self.storage_policy.source_reservation_factor,
+                oracle_factor: self.storage_policy.oracle_reservation_factor,
+                fixed_headroom_bytes: DURABLE_STAGING_FIXED_OVERHEAD_BYTES,
+            });
+        DurableStorageAdmissionPolicy {
+            required_catalog_bytes,
+            required_repository_bytes,
+            maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
+            maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
+            minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+            repository_amplification,
         }
     }
 
@@ -6188,9 +6215,10 @@ impl FirstSliceService {
                     .finalize_repository_capacity(
                         reservation,
                         sealed,
-                        self.durable_storage_admission_policy(
+                        self.durable_final_storage_admission_policy(
                             estimated_disk_bytes,
                             DURABLE_PUBLICATION_RESIDUAL_BYTES,
+                            source_preflight.source_bytes,
                         ),
                     )?
                     .map_err(storage_admission_error)?;
@@ -7990,6 +8018,7 @@ impl FirstSliceService {
                         maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
                         maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
                         minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+                        repository_amplification: None,
                     },
                 )
                 .repository_bytes
@@ -8054,6 +8083,7 @@ impl FirstSliceService {
             maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
             maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
             minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+            repository_amplification: None,
         };
         let storage_headroom = storage.as_ref().map(|inventory| {
             inventory
@@ -10833,7 +10863,7 @@ pub enum FirstSliceError {
     },
     /// Durable publication crossed one configured physical-storage boundary.
     #[error(
-        "durable storage {scope:?} requires {required_bytes} bytes with {observed_bytes} observed against {limit_bytes}, preserving {minimum_free_bytes} free bytes"
+        "durable storage {scope:?} projects {projected_bytes} bytes from {observed_bytes} observed plus {required_bytes} required against {limit_bytes}, preserving {minimum_free_bytes} free bytes"
     )]
     StorageResourceExhausted {
         /// Closed physical-storage boundary that rejected admission.
@@ -10842,10 +10872,14 @@ pub enum FirstSliceError {
         required_bytes: u64,
         /// Physical or available bytes observed at admission.
         observed_bytes: u64,
+        /// Physical bytes projected after admitting the candidate publication.
+        projected_bytes: u64,
         /// Effective ceiling for the selected scope.
         limit_bytes: u64,
         /// Configured filesystem free-space floor.
         minimum_free_bytes: u64,
+        /// Retained-state amplification inputs when repository finalization evaluated them.
+        repository_amplification: Option<FirstSliceRepositoryAmplification>,
     },
 }
 
@@ -10855,10 +10889,25 @@ pub enum FirstSliceError {
 pub enum FirstSliceStorageScope {
     /// Per-repository physical-byte ceiling.
     Repository,
+    /// Per-repository retained-state amplification ceiling.
+    RepositoryAmplification,
     /// Whole-catalog physical-byte ceiling.
     Catalog,
     /// Filesystem free-space floor.
     Filesystem,
+}
+
+/// Source-derived retained-state ceiling evaluated at sealed publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceRepositoryAmplification {
+    /// Exact supported source bytes examined for the candidate generation.
+    pub examined_source_bytes: u64,
+    /// Combined multiplier: one plus the configured source and oracle factors.
+    pub effective_factor: u64,
+    /// Configured absolute per-repository ceiling.
+    pub absolute_limit_bytes: u64,
+    /// Source-derived ceiling before the absolute cap is applied.
+    pub amplification_limit_bytes: u64,
 }
 
 struct FirstSliceIncrementalPlanningContext<'a> {
@@ -12432,15 +12481,29 @@ fn durable_initial_admission_reservation(source_bytes: u64) -> Result<u64, First
 fn storage_admission_error(failure: DurableStorageAdmissionFailure) -> FirstSliceError {
     let scope = match failure.scope {
         DurableStorageAdmissionScope::RepositoryBudget => FirstSliceStorageScope::Repository,
+        DurableStorageAdmissionScope::RepositoryAmplification => {
+            FirstSliceStorageScope::RepositoryAmplification
+        }
         DurableStorageAdmissionScope::CatalogBudget => FirstSliceStorageScope::Catalog,
         DurableStorageAdmissionScope::FilesystemFreeSpace => FirstSliceStorageScope::Filesystem,
     };
+    let repository_amplification =
+        failure
+            .repository_amplification
+            .map(|amplification| FirstSliceRepositoryAmplification {
+                examined_source_bytes: amplification.examined_source_bytes,
+                effective_factor: amplification.effective_factor,
+                absolute_limit_bytes: amplification.absolute_limit_bytes,
+                amplification_limit_bytes: amplification.amplification_limit_bytes,
+            });
     FirstSliceError::StorageResourceExhausted {
         scope,
         required_bytes: failure.required_bytes,
         observed_bytes: failure.observed_bytes,
+        projected_bytes: failure.projected_bytes,
         limit_bytes: failure.limit_bytes,
         minimum_free_bytes: failure.minimum_free_bytes,
+        repository_amplification,
     }
 }
 
