@@ -1106,24 +1106,24 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".c"],
         aliases: &[],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "cpp",
         suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
         aliases: &["cplusplus"],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "csharp",
         suffixes: &[".cs"],
         aliases: &["cs"],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "css",
@@ -1146,7 +1146,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".go", ".pb.go"],
         aliases: &["golang"],
         detectors: &["content", "extension", "manifest"],
-        maximum_tier: "tier_d",
+        maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
@@ -1170,15 +1170,15 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".java"],
         aliases: &[],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "javascript",
         suffixes: &[".cjs", ".js", ".jsx", ".mjs"],
         aliases: &["js"],
         detectors: &["extension", "manifest", "shebang"],
-        maximum_tier: "tier_d",
+        maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
@@ -1206,6 +1206,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "objective-c",
+        suffixes: &[".m"],
+        aliases: &["objc"],
+        detectors: &["content", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "objective-cpp",
         suffixes: &[".mm"],
         aliases: &["objcxx"],
@@ -1226,8 +1234,8 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".blade.php", ".php"],
         aliases: &[],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "powershell",
@@ -1242,7 +1250,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".py"],
         aliases: &["py"],
         detectors: &["content", "extension", "manifest", "shebang"],
-        maximum_tier: "tier_d",
+        maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
@@ -1306,7 +1314,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".d.ts", ".cts", ".mts", ".ts", ".tsx"],
         aliases: &["ts"],
         detectors: &["extension", "manifest"],
-        maximum_tier: "tier_d",
+        maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
 ];
@@ -1315,14 +1323,17 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
 #[must_use]
 pub fn extension_language(path: &str) -> Option<&'static str> {
     let normalized = path.to_ascii_lowercase();
+    let mut best = None::<(&str, &'static str)>;
     for capability in LANGUAGE_CAPABILITIES {
-        for suffix in capability.suffixes {
-            if normalized.ends_with(suffix) {
-                return Some(capability.language);
+        for &suffix in capability.suffixes {
+            if normalized.ends_with(suffix)
+                && best.is_none_or(|(matched, _)| suffix.len() > matched.len())
+            {
+                best = Some((suffix, capability.language));
             }
         }
     }
-    None
+    best.map(|(_, language)| language)
 }
 
 /// Resolves one installed canonical language label or accepted alias.
@@ -1776,6 +1787,7 @@ max_source_file_bytes = 2097152
         for (path, expected) in [
             ("normalize.css", "css"),
             ("plugin.lua", "lua"),
+            ("client.m", "objective-c"),
             ("client.mm", "objective-cpp"),
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
@@ -1816,6 +1828,7 @@ max_source_file_bytes = 2097152
             ("cplusplus", "cpp"),
             ("cs", "csharp"),
             ("js", "javascript"),
+            ("objc", "objective-c"),
             ("objcxx", "objective-cpp"),
             ("py", "python"),
             ("rs", "rust"),

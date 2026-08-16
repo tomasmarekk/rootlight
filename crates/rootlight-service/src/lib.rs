@@ -9897,6 +9897,15 @@ impl FirstSliceService {
             observe(reason, Some(skipped.source.span().file()));
         }
         for file in &document.files {
+            if file.generated
+                && document.coverage_records.iter().any(|coverage| {
+                    coverage.scope == CoverageScope::File(file.id)
+                        && coverage.domain == IrFactDomain::SourceMappings
+                        && coverage.status != CoverageStatus::Complete
+                })
+            {
+                observe(FirstSliceCoverageGapReason::Generated, Some(file.id));
+            }
             if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64
                 && document.diagnostics.iter().any(|diagnostic| {
                     diagnostic.code == "unsupported-language"
@@ -11999,12 +12008,24 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = source_language_from_path(&input.path) {
         return Some(language);
     }
-    for evidence in [
-        LanguageEvidence::Extension,
-        LanguageEvidence::Shebang,
-        LanguageEvidence::Manifest,
-        LanguageEvidence::Content,
-    ] {
+    // `.m` is shared by Objective-C and MATLAB, so bounded content evidence
+    // resolves that suffix before the fallback extension claim.
+    let evidence_order = if extension_language(&input.path) == Some("objective-c") {
+        [
+            LanguageEvidence::Content,
+            LanguageEvidence::Extension,
+            LanguageEvidence::Shebang,
+            LanguageEvidence::Manifest,
+        ]
+    } else {
+        [
+            LanguageEvidence::Extension,
+            LanguageEvidence::Shebang,
+            LanguageEvidence::Manifest,
+            LanguageEvidence::Content,
+        ]
+    };
+    for evidence in evidence_order {
         let mut matched = input
             .language_signals
             .iter()
@@ -12020,7 +12041,7 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
 }
 
 fn source_language_from_path(path: &str) -> Option<&'static str> {
-    extension_language(path)
+    extension_language(path).filter(|language| *language != "objective-c")
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -17258,6 +17279,18 @@ mod tests {
                 };
                 coverage.id = derive_coverage_record_id(&coverage)
                     .expect("test project coverage identity derives");
+                if input.generated() {
+                    let mut generated_coverage = coverage.clone();
+                    generated_coverage.id = FactId::from_bytes([0; 20]);
+                    generated_coverage.domain = IrFactDomain::SourceMappings;
+                    generated_coverage.status = CoverageStatus::Unknown;
+                    generated_coverage.discovered = 1;
+                    generated_coverage.indexed = 0;
+                    generated_coverage.skipped = 1;
+                    generated_coverage.id = derive_coverage_record_id(&generated_coverage)
+                        .expect("test generated coverage identity derives");
+                    document.coverage_records.push(generated_coverage);
+                }
                 document.coverage_records.push(coverage);
                 if self.syntax_facts_bounded {
                     let mut diagnostic = DiagnosticRecord {
@@ -19209,6 +19242,39 @@ mod tests {
         assert!(gaps.iter().any(|gap| {
             gap.reason == FirstSliceCoverageGapReason::Truncated
                 && gap.language.as_deref() == Some("css")
+                && gap.files == 1
+        }));
+    }
+
+    #[test]
+    fn generated_mapping_policy_reports_an_exact_coverage_gap() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/value.generated.rs"),
+            "// generated file; do not edit\npub fn generated_value() -> u32 { 1 }\n",
+        )
+        .expect("generated Rust source writes");
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"generated-coverage-project-adapter"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            partitioned: false,
+            syntax_facts_bounded: false,
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("deep service initializes");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("generated source publishes with bounded mapping coverage");
+        let gaps = service
+            .coverage_gaps(receipt.repository, receipt.generation)
+            .expect("generated coverage gaps resolve");
+
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Generated
+                && gap.language.as_deref() == Some("rust")
                 && gap.files == 1
         }));
     }
@@ -22368,6 +22434,20 @@ mod tests {
                 "c",
             ]
         );
+        for language in &project.languages {
+            let capability = inventory
+                .languages
+                .iter()
+                .find(|capability| capability.language == *language)
+                .expect("project language has an installed capability row");
+            assert_eq!(capability.maximum_tier, "tier_b");
+            assert!(
+                capability
+                    .analyzers
+                    .iter()
+                    .any(|analyzer| analyzer == "project-adapter")
+            );
+        }
         assert!(
             !project
                 .languages
