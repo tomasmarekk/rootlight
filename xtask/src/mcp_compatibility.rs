@@ -1369,7 +1369,7 @@ mod tests {
                 },
                 {
                     "tool": "operation.status",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
                 {

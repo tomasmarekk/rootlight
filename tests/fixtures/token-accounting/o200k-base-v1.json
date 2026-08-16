@@ -54,9 +54,9 @@
     },
     {
       "profile": "developer",
-      "serialized_bytes": 690659,
-      "sha256": "7e9754a4aff4ffc937ea48ec1cdb2b379387228e1046df6136c338afef341576",
-      "actual_tokens": 148801
+      "serialized_bytes": 696445,
+      "sha256": "d3fedbd3db3699788a7049fe01d9f0c3ced719cd4afa602419853c49e00476e7",
+      "actual_tokens": 150027
     }
   ]
 }
