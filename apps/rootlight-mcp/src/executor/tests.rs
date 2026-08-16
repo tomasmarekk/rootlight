@@ -1709,7 +1709,7 @@ fn operation_status(state: ClientOperationState) -> client::OperationStatus {
         plan_hash: [9; 32],
         detached: true,
         cancellation_requested: false,
-        deadline_unix_ms: None,
+        deadline_unix_ms: Some(1_800_000_000_000),
         lease_expires_unix_ms: None,
         recovery_class: RecoveryClass::NotApplicable,
     }
@@ -3530,6 +3530,10 @@ async fn maps_operation_status_action_time_progress_and_resources() {
     assert_eq!(output.data.operation.kind, "repository_index");
     assert_eq!(output.data.operation.state, OperationState::Running);
     assert_eq!(output.data.operation.started_at, "1970-01-01T00:00:00.001Z");
+    assert_eq!(
+        output.data.operation.deadline_unix_ms.0,
+        Some(1_800_000_000_000)
+    );
     assert_eq!(output.data.operation.progress.completed_units, 4);
     assert_eq!(output.data.operation.progress.total_units.0, Some(10));
     assert_eq!(output.data.retry_after_ms.0, Some(0));
@@ -3708,7 +3712,7 @@ async fn maps_clean_rebuild_strategy_with_planned_user_cause_and_normalized_tech
     .await
     .expect("clean-rebuild operation evidence maps");
 
-    assert_eq!(encoded["schema_version"], "1.5");
+    assert_eq!(encoded["schema_version"], "1.6");
     assert_eq!(
         encoded["data"]["incremental"]["build_strategy"],
         "clean_rebuild"

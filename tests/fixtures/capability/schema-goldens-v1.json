@@ -34,8 +34,8 @@
       "outputSha256": "72667c12a4e656129a89fe18b0868e4c9092412b772d5784dcdf2625fc03bd0b"
     },
     "operation.status": {
-      "inputSha256": "640af3eabd488b0cc99f6cd6c5f7a46beec1fac823f9b3124144edd3497d8872",
-      "outputSha256": "194853960ecd69109c06cb0dae6733df7080836e9c63b200e3046eaa4d43ba07"
+      "inputSha256": "72b951a3550133d63e805abbac4bb802d6b45a8d529827aa20820dd0a2ad8607",
+      "outputSha256": "36730f220dbe18521f70cece0057d16cba0d359a9d8a86a12a0fe54bce5b89fb"
     },
     "plan.change": {
       "inputSha256": "b4177fad85c0ced539dd09af92837b6c609c4083ff4bc0ad439f4d823f933c3b",

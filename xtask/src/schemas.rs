@@ -885,6 +885,8 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "mcp-operation-status-output-1.3.schema.json",
         "mcp-operation-status-input-1.4.schema.json",
         "mcp-operation-status-output-1.4.schema.json",
+        "mcp-operation-status-input-1.5.schema.json",
+        "mcp-operation-status-output-1.5.schema.json",
     ] {
         let retained = workspace_root.join(SCHEMA_ROOT).join("json").join(name);
         write_bytes(&schema_root.join(name), &read_bytes(&retained)?)?;
@@ -906,13 +908,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         &schema_root,
         "operation.status",
         "input",
-        "1.5",
+        "1.6",
     )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::OperationStatusOutput>(
         &schema_root,
         "operation.status",
         "output",
-        "1.5",
+        "1.6",
     )?;
     write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
     write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
@@ -2256,6 +2258,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.5.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),

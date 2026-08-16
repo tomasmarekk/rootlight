@@ -58,7 +58,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "256eabcdc2ed9c32b136e7fdf7eed0555d703d09cf0526d4c3a0aac6ba226d57"
+      "blake3": "3a7a260d3e99c3e3c341d84ce8acf5931cdf598be959a50588f58d73da4b6189"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",
@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "f88382ead67a8c3ea6491f90f9f7038be983fffb99e9b988fcaaadc106024a61"
+      "blake3": "63582740afffd412f2330b63c3df09f476409195b8178984b875288287f88890"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -226,7 +226,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "85dd44dcd7ee07c113feb57f1389b5cf70f77e0812862749e3e4ce6cc0ff3701"
+      "blake3": "0a7e565d068718bf440b043b9f938abb2e44afacb18e9bfeabf4716d6beb96dc"
     }
   ],
   "artifacts": [
@@ -419,6 +419,10 @@
       "blake3": "62553f8b0aee5c52e84cf023fcccb296801e75bd9af1152f8121b0e8ce615f15"
     },
     {
+      "path": "schemas/generated/json/mcp-operation-status-input-1.6.schema.json",
+      "blake3": "916623c2fdf5303028d95d084eca612484fc3a32e51323c4255fdf867b097b33"
+    },
+    {
       "path": "schemas/generated/json/mcp-operation-status-output-1.0.schema.json",
       "blake3": "99a58a55799211581ae45fde6d87eeb864d3cbb2ba391f6bf9463e0d4917491f"
     },
@@ -441,6 +445,10 @@
     {
       "path": "schemas/generated/json/mcp-operation-status-output-1.5.schema.json",
       "blake3": "e03e2ff880d18faf721115d816ce9f27e4bbc33485a4124296778b815e8baab5"
+    },
+    {
+      "path": "schemas/generated/json/mcp-operation-status-output-1.6.schema.json",
+      "blake3": "d1104a733e9572b7a04f2f73e09d33cece74103ad3c37eb43e451b007a417a7b"
     },
     {
       "path": "schemas/generated/json/mcp-plan-change-input-1.0.schema.json",

@@ -97,9 +97,10 @@ use rootlight_mcp_contract::{
         ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
         GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
         LocateReason, LocatedItem, OperationAction, OperationAffectedAnalysisUnitIds,
-        OperationAffectedFileIds, OperationBuildStrategy, OperationDetailV1_2 as OperationDetail,
-        OperationFactWorkCause, OperationFactWorkDisposition, OperationFallbackReason,
-        OperationIncrementalEvidence, OperationIncrementalFactWorkEvidence,
+        OperationAffectedFileIds, OperationBuildStrategy,
+        OperationDetailV1_6 as CurrentOperationDetail, OperationFactWorkCause,
+        OperationFactWorkDisposition, OperationFallbackReason, OperationIncrementalEvidence,
+        OperationIncrementalFactWorkEvidence,
         OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
         OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
         OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
@@ -7378,9 +7379,9 @@ fn map_operation_status(
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: OperationStatusSchemaVersion::V1_5,
+        schema_version: OperationStatusSchemaVersion::V1_6,
         data: OperationStatusData {
-            operation: OperationDetail {
+            operation: CurrentOperationDetail {
                 kind: kind.to_owned(),
                 state: operation_state(operation.state),
                 stage: operation_stage(operation.stage).to_owned(),
@@ -7390,6 +7391,7 @@ fn map_operation_status(
                 },
                 revision: operation.revision,
                 started_at: format_unix_millis(response.started_unix_ms)?,
+                deadline_unix_ms: RequiredNullable(operation.deadline_unix_ms),
                 resources: OperationResources {
                     peak_rss_bytes: response.peak_rss_bytes,
                     written_bytes: response.written_bytes,

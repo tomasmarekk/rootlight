@@ -180,6 +180,7 @@
           "error": null,
           "index_stage": "analysis",
           "operation": {
+            "deadline_unix_ms": null,
             "kind": "repository_index",
             "progress": {
               "completed_units": 1,
@@ -206,7 +207,7 @@
           "retry_after_ms": null,
           "semantic_operation_id": null
         },
-        "schema_version": "1.5"
+        "schema_version": "1.6"
       },
       "tool": "operation.status"
     },

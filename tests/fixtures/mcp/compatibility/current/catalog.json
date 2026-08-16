@@ -4107,7 +4107,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.5",
+            "contractVersion": "1.6",
             "explainSupported": false,
             "fallbackSummary": "bounded operation read and cancel",
             "generation": "none",
@@ -4156,7 +4156,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.5",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `operation.status`.",
@@ -4643,10 +4643,14 @@
                 }
               ]
             },
-            "OperationDetailV1_2": {
+            "OperationDetailV1_6": {
               "additionalProperties": false,
-              "description": "One operation journal view for operation-status schema 1.2.",
+              "description": "One operation journal view for operation-status schema 1.6.",
               "properties": {
+                "deadline_unix_ms": {
+                  "$ref": "#/$defs/RequiredNullable",
+                  "description": "Durable absolute deadline in Unix milliseconds, when one exists."
+                },
                 "kind": {
                   "description": "Operation kind.",
                   "maxLength": 128,
@@ -4692,6 +4696,7 @@
                 "progress",
                 "revision",
                 "started_at",
+                "deadline_unix_ms",
                 "resources"
               ],
               "type": "object"
@@ -6288,7 +6293,7 @@
             },
             "OperationStatusData": {
               "additionalProperties": false,
-              "description": "`operation.status` result data for schema 1.5.",
+              "description": "`operation.status` result data for schema 1.6.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/RequiredNullable4",
@@ -6315,7 +6320,7 @@
                   ]
                 },
                 "operation": {
-                  "$ref": "#/$defs/OperationDetailV1_2",
+                  "$ref": "#/$defs/OperationDetailV1_6",
                   "description": "Current operation view."
                 },
                 "planning": {
@@ -6359,7 +6364,7 @@
             },
             "OperationStatusErrorResponse": {
               "additionalProperties": false,
-              "description": "Checked error response for operation-status schema 1.5.",
+              "description": "Checked error response for operation-status schema 1.6.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/McpPublicError",
@@ -6380,15 +6385,15 @@
               "description": "Version marker carried by additive operation-status responses.",
               "oneOf": [
                 {
-                  "const": "1.5",
-                  "description": "Tool contract version 1.5.",
+                  "const": "1.6",
+                  "description": "Tool contract version 1.6.",
                   "type": "string"
                 }
               ]
             },
             "OperationStatusSuccess": {
               "additionalProperties": false,
-              "description": "Strict output for operation-status schema 1.5.",
+              "description": "Strict output for operation-status schema 1.6.",
               "properties": {
                 "data": {
                   "$ref": "#/$defs/OperationStatusData",
@@ -6604,7 +6609,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.5",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -6616,7 +6621,7 @@
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for operation-status schema 1.5.",
+          "description": "Success-or-error response for operation-status schema 1.6.",
           "title": "OperationStatusToolResponse",
           "type": "object",
           "unevaluatedProperties": false

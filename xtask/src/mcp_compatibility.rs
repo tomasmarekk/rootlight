@@ -302,14 +302,21 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         data.insert("logical_snapshot".to_owned(), Value::Null);
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "operation.status", "1.5", |data| {
+    upgrade_additive_success_example(&mut tools, "operation.status", "1.6", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         data.insert("index_stage".to_owned(), json!("analysis"));
         data.insert("planning".to_owned(), Value::Null);
-        let resources = data
+        let operation = data
             .get_mut("operation")
             .and_then(Value::as_object_mut)
-            .and_then(|operation| operation.get_mut("resources"))
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(
+                    "operation.status success operation must be an object".into(),
+                )
+            })?;
+        operation.insert("deadline_unix_ms".to_owned(), Value::Null);
+        let resources = operation
+            .get_mut("resources")
             .and_then(Value::as_object_mut)
             .ok_or_else(|| {
                 CompatibilityError::FixtureContract(
