@@ -771,6 +771,49 @@ fn code_locate_hard_coverage_limit_suppresses_page_continuation() {
 }
 
 #[test]
+fn architecture_overview_returns_scoped_truncation_when_workspace_is_unfunded() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let plan = service
+        .plan_architecture_overview(
+            Vec::new(),
+            0,
+            50,
+            true,
+            QueryBudget::new().with_max_memory_bytes(1),
+        )
+        .expect("the bounded overview plan is admitted");
+
+    let response = service
+        .execute_architecture_overview(&plan, &Cancellation::new())
+        .expect("workspace exhaustion returns an honest partial result");
+
+    assert_eq!(response.plan.kind, PlanKind::ArchitectureOverview);
+    assert_eq!(
+        response.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
+    assert_eq!(
+        response.data.execution.limiting_resources(),
+        &[QueryResource::MemoryBytes]
+    );
+    assert_eq!(
+        response.data.limiting_resources,
+        vec![QueryResource::MemoryBytes]
+    );
+    assert!(response.data.components.is_empty());
+    assert!(response.data.connections.is_empty());
+    assert!(response.data.hotspots.is_empty());
+    assert!(response.data.communities.is_empty());
+    assert!(response.data.views.is_empty());
+    assert_eq!(response.usage.rows, 0);
+    assert_eq!(response.usage.edges, 0);
+    assert_eq!(response.usage.memory_bytes, 0);
+    assert_exact_response_accounting(&response);
+}
+
+#[test]
 fn plans_and_execution_enforce_all_query_resource_families() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);

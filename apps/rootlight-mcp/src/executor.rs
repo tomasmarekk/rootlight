@@ -5500,6 +5500,26 @@ fn map_architecture_overview(
         request.repository,
         request.generation,
     )?;
+    let mut metadata = response.metadata;
+    if response.result.execution_completeness.state == client::ResultCompletenessState::Truncated
+        && response
+            .result
+            .execution_completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| resource.kind == client::LimitingResourceKind::MemoryBytes)
+        && response
+            .result
+            .execution_completeness
+            .guidance
+            .contains(&client::ContinuationGuidance::NarrowScope)
+    {
+        push_completeness_warning(
+            &mut metadata.warnings,
+            "narrow_architecture_scope",
+            "retry architecture overview with scope paths limited to one repository subtree no derived views and include edges false",
+        )?;
+    }
     let mut components = Vec::new();
     components
         .try_reserve_exact(response.result.components.len())
@@ -5583,11 +5603,9 @@ fn map_architecture_overview(
         views,
         explanation: None,
     };
-    // The requested component cap is an explicit bound honored by the daemon;
-    // this slice does not surface separate budget-truncation through the wire.
     map_read_envelope(
         response.result.context,
-        response.metadata,
+        metadata,
         data,
         response.result.execution_completeness,
         None,

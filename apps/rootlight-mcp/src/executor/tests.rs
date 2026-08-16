@@ -8030,6 +8030,59 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
 }
 
 #[tokio::test]
+async fn architecture_overview_workspace_truncation_returns_actionable_narrowing() {
+    let response = ArchitectureOverviewPortResponse::new(
+        ClientArchitectureOverview {
+            context: context(0, 0),
+            components: Vec::new(),
+            connections: Vec::new(),
+            hotspots: Vec::new(),
+            communities: Vec::new(),
+            views: Vec::new(),
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::MemoryBytes,
+                client::ContinuationGuidance::NarrowScope,
+            ),
+        },
+        metadata("architecture-overview-workspace"),
+    );
+    let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
+
+    let output: ArchitectureOverviewOutput = decode_current_analysis(
+        execute(
+            &harness.executor,
+            VerticalTool::ArchitectureOverview,
+            json!({"repository": {"repository_id": repository()}}),
+        )
+        .await
+        .expect("workspace exhaustion maps to a bounded public result"),
+    );
+    let AnalysisToolResponse::Success(output) = output else {
+        panic!("expected architecture overview success");
+    };
+
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::MemoryBytes);
+    assert!(output.data.components.is_empty());
+    let warning_codes: Vec<_> = output
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect();
+    assert!(warning_codes.contains(&"result_truncated"));
+    assert!(warning_codes.contains(&"limit_memory"));
+    assert!(warning_codes.contains(&"narrow_scope"));
+    let narrowing = output
+        .warnings
+        .iter()
+        .find(|warning| warning.code.as_str() == "narrow_architecture_scope")
+        .expect("architecture truncation includes a concrete retry");
+    assert_eq!(
+        narrowing.message.as_str(),
+        "retry architecture overview with scope paths limited to one repository subtree no derived views and include edges false"
+    );
+}
+
+#[tokio::test]
 async fn architecture_overview_forwards_all_views_scope_and_detail() {
     let harness = Harness::new(FakeOutcome::ArchitectureOverview(Err(
         ClientPortError::Executor,

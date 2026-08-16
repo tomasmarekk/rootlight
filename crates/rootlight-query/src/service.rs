@@ -4832,6 +4832,19 @@ fn architecture_detail_limits(detail: ArchitectureOverviewDetail) -> (usize, usi
     }
 }
 
+fn architecture_entity_matches_path_scope(
+    document: &NormalizedIrDocument,
+    entity: &rootlight_ir::EntityRecord,
+    prefixes: &[String],
+) -> bool {
+    entity
+        .evidence
+        .source
+        .as_ref()
+        .and_then(|source| find_file(document, source.span().file()))
+        .is_some_and(|file| path_matches_scope(&file.path, prefixes))
+}
+
 fn architecture_overview_workspace_bytes(
     document: &NormalizedIrDocument,
     plan: &ArchitectureOverviewPlan,
@@ -4856,24 +4869,51 @@ fn architecture_overview_workspace_bytes(
     } else {
         0
     };
+    // Structural aggregation retains a repository-wide parent projection.
+    // File-granularity requests can make path narrowing a real memory reduction
+    // without undercharging that projection.
+    let path_scope = if plan
+        .views
+        .iter()
+        .all(|view| architecture_view_kinds(*view).is_empty())
+    {
+        match plan.scope.as_ref() {
+            Some(AnalysisScope::Paths(prefixes)) => Some(prefixes.as_slice()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let file_count = document
+        .files
+        .iter()
+        .filter(|file| path_scope.is_none_or(|prefixes| path_matches_scope(&file.path, prefixes)))
+        .count();
+    let entity_count = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            path_scope.is_none_or(|prefixes| {
+                architecture_entity_matches_path_scope(document, entity, prefixes)
+            })
+        })
+        .count();
     let mut bytes = ARCHITECTURE_OVERVIEW_FIXED_WORKSPACE_BYTES
-        .saturating_add(
-            document
-                .files
-                .len()
-                .saturating_mul(ARCHITECTURE_OVERVIEW_FILE_WORKSPACE_BYTES),
-        )
-        .saturating_add(
-            document
-                .entities
-                .len()
-                .saturating_mul(ARCHITECTURE_OVERVIEW_ENTITY_WORKSPACE_BYTES),
-        )
+        .saturating_add(file_count.saturating_mul(ARCHITECTURE_OVERVIEW_FILE_WORKSPACE_BYTES))
+        .saturating_add(entity_count.saturating_mul(ARCHITECTURE_OVERVIEW_ENTITY_WORKSPACE_BYTES))
         .saturating_add(document.relations.len().saturating_mul(relation_bytes));
-    for file in &document.files {
+    for file in document
+        .files
+        .iter()
+        .filter(|file| path_scope.is_none_or(|prefixes| path_matches_scope(&file.path, prefixes)))
+    {
         bytes = bytes.saturating_add(file.path.len().saturating_mul(2));
     }
-    for entity in &document.entities {
+    for entity in document.entities.iter().filter(|entity| {
+        path_scope.is_none_or(|prefixes| {
+            architecture_entity_matches_path_scope(document, entity, prefixes)
+        })
+    }) {
         bytes = bytes.saturating_add(entity.qualified_name.len().saturating_mul(2));
     }
     checked_usize_to_u64(bytes)
@@ -4892,7 +4932,18 @@ fn build_architecture_overview(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ArchitectureOverviewAnalysis, QueryError> {
     control.check()?;
-    tracker.add_memory(architecture_overview_workspace_bytes(document, plan)?)?;
+    let workspace_bytes = architecture_overview_workspace_bytes(document, plan)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(ArchitectureOverviewAnalysis {
+            components: Vec::new(),
+            connections: Vec::new(),
+            hotspots: Vec::new(),
+            communities: Vec::new(),
+            views: Vec::new(),
+        });
+    }
+    tracker.add_memory(workspace_bytes)?;
 
     let scoped_entities = analysis_scope_entities(document, plan.scope.as_ref());
     let structural_views: Vec<ArchitectureOverviewView> = plan
@@ -4995,7 +5046,11 @@ fn build_architecture_overview(
         entity_file.insert(symbol, file);
     }
 
-    let parents = entity_parent_map(document);
+    let parents = if file_granularity {
+        BTreeMap::new()
+    } else {
+        entity_parent_map(document)
+    };
     let mut entity_component: BTreeMap<SymbolId, String> = BTreeMap::new();
     let mut component_members: BTreeMap<String, BTreeSet<SymbolId>> = BTreeMap::new();
     let mut component_kind: BTreeMap<String, String> = BTreeMap::new();
@@ -11543,7 +11598,7 @@ mod tests {
     // architecture.overview synthetic-document proofs
     // -----------------------------------------------------------------
 
-    use crate::model::{ArchitectureOverviewPlan, ArchitectureOverviewView};
+    use crate::model::{AnalysisScope, ArchitectureOverviewPlan, ArchitectureOverviewView};
     use rootlight_ids::{ContentHash, FactId, FileId};
     use rootlight_ir::{
         AnalysisTier, Confidence, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
@@ -12044,7 +12099,7 @@ mod tests {
     }
 
     #[test]
-    fn architecture_overview_rejects_unfunded_workspace_before_scanning() {
+    fn architecture_overview_reports_unfunded_workspace_before_scanning() {
         let mut document = overview_document();
         for byte in 1..=3 {
             add_file(&mut document, byte, &format!("src/f{byte}.rs"));
@@ -12068,23 +12123,53 @@ mod tests {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            build_architecture_overview(
-                &document,
-                &plan,
-                &control,
-                &mut tracker,
-                &mut limiting_resources,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit,
-            }) if limit == workspace - 1
-        ));
+        let overview = build_architecture_overview(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("unfunded workspace returns a bounded partial result");
+
+        assert!(overview.components.is_empty());
+        assert!(overview.connections.is_empty());
+        assert!(overview.hotspots.is_empty());
+        assert!(overview.communities.is_empty());
+        assert!(overview.views.is_empty());
         assert_eq!(tracker.memory_bytes, 0);
         assert_eq!(tracker.rows, 0);
         assert_eq!(tracker.edges, 0);
-        assert!(limiting_resources.is_empty());
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
+        assert!(authoritative_execution(&limiting_resources).is_truncated());
+    }
+
+    #[test]
+    fn architecture_overview_path_scope_reduces_workspace_for_retry() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/api/handler.rs");
+        add_entity(&mut document, 1, 1, EntityKind::Function);
+        for byte in 2..=80 {
+            add_file(&mut document, byte, &format!("vendor/package_{byte}.rs"));
+            add_entity(&mut document, byte, byte, EntityKind::Function);
+        }
+
+        let unscoped = overview_plan(50, false, 0, Vec::new());
+        let unscoped_workspace = architecture_overview_workspace_bytes(&document, &unscoped)
+            .expect("unscoped workspace is representable");
+        let mut scoped = unscoped.clone();
+        scoped.scope = Some(AnalysisScope::Paths(vec!["src/api".to_owned()]));
+        let scoped_workspace = architecture_overview_workspace_bytes(&document, &scoped)
+            .expect("scoped workspace is representable");
+        let retry_budget = scoped_workspace.saturating_add(4 * 1024);
+        assert!(retry_budget < unscoped_workspace);
+        scoped.budget = QueryBudget::new().with_max_memory_bytes(retry_budget);
+
+        let (overview, execution) = run_overview_with_execution(&document, &scoped);
+
+        assert!(execution.is_complete());
+        assert_eq!(overview.components.len(), 1);
+        assert_eq!(overview.components[0].name, "src/api/handler.rs");
     }
 
     #[test]
