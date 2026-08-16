@@ -713,6 +713,9 @@ fn map_project_adapter_error(error: AdapterHostError) -> FirstSliceProjectAnalys
         AdapterHostError::Process
         | AdapterHostError::ProcessIo
         | AdapterHostError::IsolationEvidence => FirstSliceProjectAnalysisError::Isolation,
+        AdapterHostError::ProcessResourceUnavailable => {
+            FirstSliceProjectAnalysisError::ResourceUnavailable
+        }
         AdapterHostError::ProcessTimeout => FirstSliceProjectAnalysisError::WallTimeLimit,
         AdapterHostError::ProjectInputLimit => FirstSliceProjectAnalysisError::InputLimit,
         AdapterHostError::ProjectOutputLimit => FirstSliceProjectAnalysisError::OutputLimit,
@@ -10534,13 +10537,22 @@ fn build_service_error(
             "retention_limit",
             "executing",
         ),
-        FirstSliceError::ResourceUnavailable { .. } => (
-            ErrorCode::ResourceExhausted,
-            "first-slice resource is temporarily unavailable",
-            true,
-            "resource_unavailable",
-            "executing",
-        ),
+        FirstSliceError::ResourceUnavailable { .. } => {
+            let failure_stage = if context
+                .is_some_and(|context| context.provider == "rootlight-project-analyzer")
+            {
+                "analysis"
+            } else {
+                "executing"
+            };
+            (
+                ErrorCode::ResourceExhausted,
+                "first-slice resource is temporarily unavailable",
+                true,
+                "resource_unavailable",
+                failure_stage,
+            )
+        }
         FirstSliceError::ResourceLimit { resource, .. } => {
             let failure_stage = if resource == rootlight_service::FirstSliceResource::Repositories {
                 "admission"
@@ -10880,6 +10892,9 @@ fn build_service_error(
             static_detail_key("resource"),
             PublicValue::Label(static_safe_label(resource.as_str())),
         );
+        if resource == rootlight_service::FirstSliceResource::ProcessResources {
+            builder = builder.next_action(NextAction::CollectSupportBundle);
+        }
     }
     if let FirstSliceError::GenerationMemoryLimit {
         breakdown,
@@ -11092,7 +11107,13 @@ fn build_service_error(
         builder = builder.next_action(NextAction::RebuildRepository);
     }
     if retryable {
-        builder = if error == FirstSliceError::AdapterProcessFailure {
+        builder = if error == FirstSliceError::AdapterProcessFailure
+            || matches!(
+                error,
+                FirstSliceError::ResourceUnavailable {
+                    resource: rootlight_service::FirstSliceResource::ProcessResources,
+                }
+            ) {
             builder.retry_after(retry_after())
         } else {
             builder.retryable()
@@ -12642,6 +12663,10 @@ mod tests {
             map_project_adapter_error(AdapterHostError::ProcessFailed),
             FirstSliceProjectAnalysisError::ProcessFailure
         );
+        assert_eq!(
+            map_project_adapter_error(AdapterHostError::ProcessResourceUnavailable),
+            FirstSliceProjectAnalysisError::ResourceUnavailable
+        );
 
         let operation = OperationId::from_bytes([17; 16]);
         let repository = RepositoryId::from_bytes([18; 16]);
@@ -12717,6 +12742,37 @@ mod tests {
             assert_eq!(error.retry_after_ms(), None);
             assert!(!error.next_actions().contains(&NextAction::Retry));
         }
+
+        let unavailable = repository_index_error(
+            FirstSliceError::ResourceUnavailable {
+                resource: rootlight_service::FirstSliceResource::ProcessResources,
+            },
+            context,
+        );
+        assert_eq!(unavailable.code(), ErrorCode::ResourceExhausted);
+        assert!(unavailable.retryable());
+        assert_eq!(
+            unavailable
+                .details()
+                .get(&static_detail_key("failure_stage")),
+            Some(&PublicValue::Label(static_safe_label("analysis")))
+        );
+        assert_eq!(
+            unavailable.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("process_resources")))
+        );
+        assert_eq!(
+            unavailable.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+                NextAction::Retry,
+            ]
+        );
+        assert_eq!(
+            unavailable.retry_after_ms(),
+            Some(u64::from(RETRY_AFTER_MS))
+        );
 
         let process = repository_index_error(FirstSliceError::AdapterProcessFailure, context);
         assert_eq!(process.code(), ErrorCode::AdapterFailed);

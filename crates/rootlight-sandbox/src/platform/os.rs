@@ -21,10 +21,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     ptr,
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
-    },
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -97,9 +94,107 @@ const IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON: u64 = 1_u64 << 60;
 const ADAPTER_IMAGE_LOAD_POLICY: u64 = IMAGE_LOAD_NO_REMOTE_ALWAYS_ON
     | IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON
     | IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+const APPCONTAINER_PROFILE_POOL_SIZE: usize = 32;
+const HRESULT_APP_CONTAINER_PROFILE_NOT_FOUND: u32 = 0x8007_0490;
 
 static SPAWN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static APPCONTAINER_PROFILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static APPCONTAINER_PROFILE_POOL: OnceLock<Mutex<AppContainerProfilePool>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppContainerProfileSlot {
+    Available,
+    Leased,
+    Poisoned,
+}
+
+struct AppContainerProfilePool {
+    slots: [AppContainerProfileSlot; APPCONTAINER_PROFILE_POOL_SIZE],
+    cursor: usize,
+}
+
+impl AppContainerProfilePool {
+    const fn new() -> Self {
+        Self {
+            slots: [AppContainerProfileSlot::Available; APPCONTAINER_PROFILE_POOL_SIZE],
+            cursor: 0,
+        }
+    }
+
+    fn reserve(&mut self) -> Option<usize> {
+        for offset in 0..APPCONTAINER_PROFILE_POOL_SIZE {
+            let slot = (self.cursor + offset) % APPCONTAINER_PROFILE_POOL_SIZE;
+            if self.slots[slot] == AppContainerProfileSlot::Available {
+                self.slots[slot] = AppContainerProfileSlot::Leased;
+                self.cursor = (slot + 1) % APPCONTAINER_PROFILE_POOL_SIZE;
+                return Some(slot);
+            }
+        }
+        None
+    }
+
+    fn release(&mut self, slot: usize, reusable: bool) {
+        if self.slots.get(slot) != Some(&AppContainerProfileSlot::Leased) {
+            return;
+        }
+        self.slots[slot] = if reusable {
+            AppContainerProfileSlot::Available
+        } else {
+            AppContainerProfileSlot::Poisoned
+        };
+    }
+}
+
+#[derive(Debug)]
+struct AppContainerProfileLease {
+    slot: usize,
+    profile_name: Vec<u16>,
+    reusable: bool,
+}
+
+impl AppContainerProfileLease {
+    fn acquire() -> Result<Self, ProcessError> {
+        let pool =
+            APPCONTAINER_PROFILE_POOL.get_or_init(|| Mutex::new(AppContainerProfilePool::new()));
+        let mut pool = pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slot = pool.reserve().ok_or(ProcessError::ResourceUnavailable {
+            resource: "adapter_appcontainer_profiles",
+        })?;
+        Ok(Self {
+            slot,
+            profile_name: app_container_profile_name(slot),
+            reusable: false,
+        })
+    }
+
+    fn profile_name(&self) -> PCWSTR {
+        PCWSTR(self.profile_name.as_ptr())
+    }
+
+    fn mark_reusable(&mut self) {
+        self.reusable = true;
+    }
+}
+
+fn app_container_profile_name(slot: usize) -> Vec<u16> {
+    let mut profile_name = format!("rootlight.deep-adapter.{}.slot-{slot}", std::process::id())
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    profile_name.push(0);
+    profile_name
+}
+
+impl Drop for AppContainerProfileLease {
+    fn drop(&mut self) {
+        let pool =
+            APPCONTAINER_PROFILE_POOL.get_or_init(|| Mutex::new(AppContainerProfilePool::new()));
+        let mut pool = pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pool.release(self.slot, self.reusable);
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -123,6 +218,7 @@ pub(crate) struct IsolatedAdapterProcess {
     job: KillOnCloseJob,
     child: ChildProcess,
     workspace: Option<PrivateAdapterWorkspace>,
+    app_container_lease: AppContainerProfileLease,
     input_limit: usize,
     output_limit: usize,
     diagnostic_limit: usize,
@@ -271,6 +367,7 @@ impl IsolatedAdapterProcess {
         if let Some(workspace) = self.workspace.take() {
             workspace.remove()?;
         }
+        self.app_container_lease.mark_reusable();
         self.cleaned = true;
         Ok(())
     }
@@ -466,7 +563,8 @@ pub(crate) fn probe_windows_adapter_isolation(
     let streams = PreparedStreams::new(command.stdin, command.stdout, command.stderr)?;
     let handles = streams.child_handles();
     verify_inheritable_handles(&handles)?;
-    let mut app_container = AppContainerSid::create_ephemeral()?;
+    let mut app_container_lease = AppContainerProfileLease::acquire()?;
+    let mut app_container = create_leased_app_container(&mut app_container_lease)?;
     let security_capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: app_container.sid,
         Capabilities: ptr::null_mut(),
@@ -514,6 +612,7 @@ pub(crate) fn probe_windows_adapter_isolation(
     };
     if let Err(source) = creation {
         app_container.delete()?;
+        app_container_lease.mark_reusable();
         return Err(ProcessError::windows(
             "create suspended adapter probe",
             source,
@@ -531,6 +630,8 @@ pub(crate) fn probe_windows_adapter_isolation(
             std::mem::forget(thread_handle);
             return Err(cleanup);
         }
+        app_container.delete()?;
+        app_container_lease.mark_reusable();
         return Err(ProcessError::windows(
             "assign suspended adapter probe to Job Object",
             source,
@@ -548,6 +649,7 @@ pub(crate) fn probe_windows_adapter_isolation(
     drop(process);
     drop(attributes);
     app_container.delete()?;
+    app_container_lease.mark_reusable();
     Ok(AdapterIsolationReport::windows_suspended_probe())
 }
 
@@ -559,7 +661,8 @@ pub(crate) fn spawn_windows_isolated_adapter(
     let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut app_container = AppContainerSid::create_ephemeral()?;
+    let mut app_container_lease = AppContainerProfileLease::acquire()?;
+    let mut app_container = create_leased_app_container(&mut app_container_lease)?;
     let current_user = CurrentUserSid::load()?;
     let workspace = PrivateAdapterWorkspace::create(
         &command.program,
@@ -646,6 +749,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
     if let Err(source) = creation {
         app_container.delete()?;
         workspace.remove()?;
+        app_container_lease.mark_reusable();
         return Err(ProcessError::windows(
             "create suspended isolated adapter",
             source,
@@ -665,6 +769,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
         }
         app_container.delete()?;
         workspace.remove()?;
+        app_container_lease.mark_reusable();
         return Err(ProcessError::windows(
             "assign isolated adapter to Job Object",
             source,
@@ -674,6 +779,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
         terminate_assigned_suspended(&job, &process)?;
         app_container.delete()?;
         workspace.remove()?;
+        app_container_lease.mark_reusable();
         return Err(source);
     }
     // Removing the profile before resumption denies the AppContainer its
@@ -686,6 +792,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
     if let Err(source) = workspace.clear_current_directory() {
         terminate_assigned_suspended(&job, &process)?;
         workspace.remove()?;
+        app_container_lease.mark_reusable();
         return Err(source);
     }
 
@@ -696,6 +803,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
         job.terminate(PROCESS_TERMINATION_EXIT_CODE)?;
         job.wait_empty(Instant::now() + Duration::from_secs(5))?;
         workspace.remove()?;
+        app_container_lease.mark_reusable();
         return Err(ProcessError::windows("resume isolated adapter", source));
     }
     drop(thread_handle);
@@ -714,6 +822,7 @@ pub(crate) fn spawn_windows_isolated_adapter(
             job,
             child,
             workspace: Some(workspace),
+            app_container_lease,
             input_limit: command.input_limit,
             output_limit: command.output_limit,
             diagnostic_limit: command.diagnostic_limit,
@@ -1186,16 +1295,13 @@ struct AppContainerSid {
 }
 
 impl AppContainerSid {
-    fn create_ephemeral() -> Result<Self, ProcessError> {
-        let sequence = APPCONTAINER_PROFILE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
-        let mut profile_name =
-            format!("rootlight.deep-adapter.{}.{}", std::process::id(), sequence)
-                .encode_utf16()
-                .collect::<Vec<_>>();
-        profile_name.push(0);
+    fn create_ephemeral(lease: &AppContainerProfileLease) -> Result<Self, ProcessError> {
+        delete_app_container_profile_if_present(lease.profile_name())?;
+        let profile_name = lease.profile_name.clone();
         let name = PCWSTR(profile_name.as_ptr());
-        // SAFETY: the unique name is NUL-terminated and alive for the complete
-        // call. No capabilities are granted. The returned SID has one owner.
+        // SAFETY: the leased name is NUL-terminated, cannot be used by another
+        // live adapter, and remains alive for the complete call. No
+        // capabilities are granted. The returned SID has one owner.
         let sid =
             unsafe { CreateAppContainerProfile(name, name, name, None) }.map_err(|source| {
                 ProcessError::windows("create adapter AppContainer profile", source)
@@ -1218,6 +1324,37 @@ impl AppContainerSid {
         )?;
         self.deleted = true;
         Ok(())
+    }
+}
+
+fn create_leased_app_container(
+    lease: &mut AppContainerProfileLease,
+) -> Result<AppContainerSid, ProcessError> {
+    match AppContainerSid::create_ephemeral(lease) {
+        Ok(profile) => Ok(profile),
+        Err(error) => {
+            if delete_app_container_profile_if_present(lease.profile_name()).is_ok() {
+                lease.mark_reusable();
+            }
+            Err(error)
+        }
+    }
+}
+
+fn delete_app_container_profile_if_present(profile_name: PCWSTR) -> Result<(), ProcessError> {
+    // SAFETY: the leased profile name is NUL-terminated and remains alive for
+    // the complete synchronous call.
+    match unsafe { DeleteAppContainerProfile(profile_name) } {
+        Ok(()) => Ok(()),
+        Err(source)
+            if source.code().0.cast_unsigned() == HRESULT_APP_CONTAINER_PROFILE_NOT_FOUND =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(ProcessError::windows(
+            "delete stale adapter AppContainer profile",
+            source,
+        )),
     }
 }
 
@@ -1909,8 +2046,10 @@ mod tests {
         fs::write(&source, b"unexpected executable").expect("fixture executable writes");
         let expected =
             AdapterExecutableDigest::from_bytes(*blake3::hash(b"negotiated executable").as_bytes());
-        let mut app_container =
-            AppContainerSid::create_ephemeral().expect("fixture AppContainer opens");
+        let mut app_container_lease =
+            AppContainerProfileLease::acquire().expect("fixture AppContainer slot leases");
+        let mut app_container = create_leased_app_container(&mut app_container_lease)
+            .expect("fixture AppContainer opens");
         let owner = CurrentUserSid::load().expect("current user SID reads");
 
         let result =
@@ -1918,6 +2057,7 @@ mod tests {
         app_container
             .delete()
             .expect("fixture AppContainer deletes");
+        app_container_lease.mark_reusable();
         assert!(matches!(result, Err(ProcessError::InvalidInput(_))));
     }
 
@@ -2119,8 +2259,10 @@ mod tests {
 
     #[test]
     fn isolated_adapter_denies_user_files_and_all_writes() {
-        let mut foreign_profile =
-            AppContainerSid::create_ephemeral().expect("foreign AppContainer profile opens");
+        let mut foreign_profile_lease =
+            AppContainerProfileLease::acquire().expect("foreign AppContainer slot leases");
+        let mut foreign_profile = create_leased_app_container(&mut foreign_profile_lease)
+            .expect("foreign AppContainer profile opens");
         let owner = CurrentUserSid::load().expect("current user SID reads");
         let workspace = PrivateAdapterWorkspace::create(
             &env::current_exe().expect("test executable path resolves"),
@@ -2159,6 +2301,7 @@ mod tests {
         let succeeded = status.success();
         fs::remove_file(&home_sentinel).expect("user-home sentinel removes");
         workspace.remove().expect("foreign workspace removes");
+        foreign_profile_lease.mark_reusable();
         assert!(
             succeeded,
             "filesystem helper failed: stdout={} stderr={}",
@@ -2323,12 +2466,51 @@ mod tests {
 
     #[test]
     fn ephemeral_appcontainer_profile_cleanup_is_idempotent() {
-        let mut profile = AppContainerSid::create_ephemeral().expect("AppContainer profile opens");
+        let mut profile_lease =
+            AppContainerProfileLease::acquire().expect("AppContainer slot leases");
+        let mut profile =
+            create_leased_app_container(&mut profile_lease).expect("AppContainer profile opens");
         profile.delete().expect("AppContainer profile deletes");
         assert!(profile.deleted);
         profile
             .delete()
             .expect("repeated profile cleanup remains successful");
+        profile_lease.mark_reusable();
+    }
+
+    #[test]
+    fn appcontainer_profile_pool_reuses_a_bounded_identity_set() {
+        let mut pool = AppContainerProfilePool::new();
+        for expected in (0..APPCONTAINER_PROFILE_POOL_SIZE).cycle().take(
+            APPCONTAINER_PROFILE_POOL_SIZE
+                .checked_mul(4)
+                .expect("fixture iteration count fits"),
+        ) {
+            let slot = pool.reserve().expect("one profile slot remains available");
+            assert_eq!(slot, expected);
+            pool.release(slot, true);
+        }
+
+        assert_eq!(app_container_profile_name(7), app_container_profile_name(7));
+        assert_ne!(app_container_profile_name(7), app_container_profile_name(8));
+    }
+
+    #[test]
+    fn appcontainer_profile_pool_never_reuses_live_or_poisoned_slots() {
+        let mut pool = AppContainerProfilePool::new();
+        let leased = (0..APPCONTAINER_PROFILE_POOL_SIZE)
+            .map(|_| pool.reserve().expect("profile slot leases"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            leased,
+            (0..APPCONTAINER_PROFILE_POOL_SIZE).collect::<Vec<_>>()
+        );
+        assert_eq!(pool.reserve(), None);
+
+        pool.release(leased[3], false);
+        pool.release(leased[4], true);
+        assert_eq!(pool.reserve(), Some(leased[4]));
+        assert_ne!(pool.reserve(), Some(leased[3]));
     }
 
     #[test]

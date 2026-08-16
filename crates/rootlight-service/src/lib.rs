@@ -3588,6 +3588,9 @@ pub enum FirstSliceProjectAnalysisError {
     /// The native isolation boundary could not be established.
     #[error("project adapter isolation failed")]
     Isolation,
+    /// The operating system could not reserve resources for the isolated process.
+    #[error("project adapter process resources are temporarily unavailable")]
+    ResourceUnavailable,
     /// The isolated adapter crossed its configured wall-time ceiling.
     #[error("project adapter wall-time limit was reached")]
     WallTimeLimit,
@@ -3627,6 +3630,7 @@ impl FirstSliceProjectAnalysisError {
             Self::Identity => "project-adapter-identity-fallback",
             Self::Protocol => "project-adapter-protocol-fallback",
             Self::Isolation => "project-adapter-isolation-fallback",
+            Self::ResourceUnavailable => "project-adapter-resource-unavailable-fallback",
             Self::WallTimeLimit => "project-adapter-wall-time-fallback",
             Self::InputLimit => "project-adapter-input-limit-fallback",
             Self::OutputLimit => "project-adapter-output-limit-fallback",
@@ -6526,6 +6530,11 @@ impl FirstSliceService {
                     }
                     Err(FirstSliceProjectAnalysisError::Cancelled(reason)) => {
                         return Err(FirstSliceError::Cancelled(reason));
+                    }
+                    Err(FirstSliceProjectAnalysisError::ResourceUnavailable) => {
+                        return Err(FirstSliceError::ResourceUnavailable {
+                            resource: FirstSliceResource::ProcessResources,
+                        });
                     }
                     Err(error) => fallback_error = Some(error),
                 }
@@ -10288,6 +10297,8 @@ pub enum FirstSliceResource {
     PathComponents,
     /// Process memory needed by one bounded repository operation.
     MemoryBytes,
+    /// Operating-system resources needed to create an isolated process.
+    ProcessResources,
     /// Files in one incremental metadata baseline or authoritative scan.
     IncrementalFiles,
     /// Typed fingerprints in one incremental generation snapshot.
@@ -10390,6 +10401,7 @@ impl FirstSliceResource {
             Self::PathBytes => "path_bytes",
             Self::PathComponents => "path_components",
             Self::MemoryBytes => "memory_bytes",
+            Self::ProcessResources => "process_resources",
             Self::IncrementalFiles => "incremental_files",
             Self::IncrementalInputs => "incremental_inputs",
             Self::IncrementalArtifacts => "incremental_artifacts",
@@ -13163,6 +13175,11 @@ fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
         "project-adapter-output-limit-fallback" => Some(FirstSliceError::AdapterOutputLimit),
         "project-adapter-memory-limit-fallback" => Some(FirstSliceError::AdapterMemoryLimit),
         "project-adapter-process-fallback" => Some(FirstSliceError::AdapterProcessFailure),
+        "project-adapter-resource-unavailable-fallback" => {
+            Some(FirstSliceError::ResourceUnavailable {
+                resource: FirstSliceResource::ProcessResources,
+            })
+        }
         "project-adapter-capacity-fallback"
         | "project-adapter-facts-truncated-fallback"
         | "project-adapter-declaration-loss-fallback" => Some(FirstSliceError::IncompleteCoverage),
@@ -17800,6 +17817,12 @@ mod tests {
             Some(FirstSliceError::AdapterProcessFailure)
         );
         assert_eq!(
+            project_fallback_error("project-adapter-resource-unavailable-fallback"),
+            Some(FirstSliceError::ResourceUnavailable {
+                resource: FirstSliceResource::ProcessResources,
+            })
+        );
+        assert_eq!(
             project_fallback_error("project-adapter-analysis-fallback"),
             Some(FirstSliceError::Adapter)
         );
@@ -18324,6 +18347,37 @@ mod tests {
             Err(FirstSliceError::Cancelled(
                 CancellationReason::ClientRequest
             ))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(service.active_generation().is_none());
+    }
+
+    #[test]
+    fn project_adapter_resource_pressure_never_degrades_to_fallback() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"resource-limited-project-adapter"),
+            error: FirstSliceProjectAnalysisError::ResourceUnavailable,
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        assert_eq!(
+            service.index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Deep,
+                &deadline(),
+            ),
+            Err(FirstSliceError::ResourceUnavailable {
+                resource: FirstSliceResource::ProcessResources,
+            })
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(service.active_generation().is_none());

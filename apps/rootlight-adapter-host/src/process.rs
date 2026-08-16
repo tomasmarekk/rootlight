@@ -28,7 +28,7 @@ use rootlight_protocol::{
 };
 use rootlight_sandbox::{
     AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr,
-    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, spawn_isolated_adapter,
+    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, ProcessError, spawn_isolated_adapter,
 };
 
 use crate::project::{
@@ -139,7 +139,7 @@ pub fn execute_isolated_project_adapter(
     let sandbox_limits =
         AdapterSandboxLimits::new(memory_bytes, cpu_time).map_err(|_| AdapterHostError::Process)?;
     let mut process =
-        spawn_isolated_adapter(command, sandbox_limits).map_err(|_| AdapterHostError::Process)?;
+        spawn_isolated_adapter(command, sandbox_limits).map_err(map_process_spawn_error)?;
     let isolation = IsolationReport::from_process(process.report());
 
     let stdin = process.take_stdin().ok_or(AdapterHostError::ProcessIo)?;
@@ -216,6 +216,14 @@ fn classify_process_failure(diagnostic: &[u8]) -> AdapterHostError {
         b"error: adapter project output limit exceeded" => AdapterHostError::ProjectOutputLimit,
         b"error: adapter project memory limit exceeded" => AdapterHostError::ProjectMemoryLimit,
         _ => AdapterHostError::ProcessFailed,
+    }
+}
+
+fn map_process_spawn_error(error: ProcessError) -> AdapterHostError {
+    if error.is_resource_unavailable() {
+        AdapterHostError::ProcessResourceUnavailable
+    } else {
+        AdapterHostError::Process
     }
 }
 
@@ -577,6 +585,24 @@ mod tests {
         assert!(matches!(
             classify_process_failure(b"error: unrecognized adapter failure\n"),
             AdapterHostError::ProcessFailed
+        ));
+    }
+
+    #[test]
+    fn process_spawn_resource_pressure_remains_retryable() {
+        let unavailable = ProcessError::Io {
+            operation: "create isolated adapter",
+            source: std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        };
+        assert!(matches!(
+            map_process_spawn_error(unavailable),
+            AdapterHostError::ProcessResourceUnavailable
+        ));
+
+        let invalid = ProcessError::InvalidInput("fixture".to_owned());
+        assert!(matches!(
+            map_process_spawn_error(invalid),
+            AdapterHostError::Process
         ));
     }
 

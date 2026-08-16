@@ -1001,6 +1001,9 @@ pub enum AdapterHostError {
     /// The native isolated process could not be created or controlled.
     #[error("adapter process isolation failed")]
     Process,
+    /// The operating system could not reserve resources for the isolated process.
+    #[error("adapter process resources are temporarily unavailable")]
+    ProcessResourceUnavailable,
     /// A bounded adapter pipe or worker thread failed.
     #[error("adapter process I/O failed")]
     ProcessIo,

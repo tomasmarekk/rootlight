@@ -94,6 +94,7 @@ fn macos_launcher_failure_code(error: &ProcessError) -> &'static str {
         ProcessError::InvalidInput(_) => "launcher-contract",
         ProcessError::UnsupportedPlatform => "unsupported-platform",
         ProcessError::Deadline { .. } => "launcher-deadline",
+        ProcessError::ResourceUnavailable { .. } => "launcher-resource-unavailable",
     }
 }
 
