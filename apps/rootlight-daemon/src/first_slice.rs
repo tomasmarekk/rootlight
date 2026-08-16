@@ -11433,8 +11433,16 @@ fn build_service_error(
                     PublicValue::Unsigned(amplification.examined_source_bytes),
                 )
                 .detail(
+                    static_detail_key("emitted_fact_bytes"),
+                    PublicValue::Unsigned(amplification.emitted_fact_bytes),
+                )
+                .detail(
                     static_detail_key("effective_factor"),
                     PublicValue::Unsigned(amplification.effective_factor),
+                )
+                .detail(
+                    static_detail_key("retained_generations"),
+                    PublicValue::Unsigned(amplification.retained_generations),
                 )
                 .detail(
                     static_detail_key("absolute_limit_bytes"),
@@ -14055,16 +14063,18 @@ mod tests {
             FirstSliceError::StorageResourceExhausted {
                 scope: rootlight_service::FirstSliceStorageScope::RepositoryAmplification,
                 required_bytes: 600,
-                observed_bytes: 3_000,
-                projected_bytes: 3_600,
-                limit_bytes: 3_500,
+                observed_bytes: 10_200,
+                projected_bytes: 10_800,
+                limit_bytes: 10_664,
                 minimum_free_bytes: 1_024,
                 repository_amplification: Some(
                     rootlight_service::FirstSliceRepositoryAmplification {
                         examined_source_bytes: 100,
+                        emitted_fact_bytes: 500,
                         effective_factor: 34,
-                        absolute_limit_bytes: 10_000,
-                        amplification_limit_bytes: 3_500,
+                        retained_generations: 2,
+                        absolute_limit_bytes: 20_000,
+                        amplification_limit_bytes: 10_664,
                     },
                 ),
             },
@@ -14084,11 +14094,11 @@ mod tests {
                 "details": {
                     "absolute_limit_bytes": {
                         "type": "unsigned",
-                        "value": 10_000
+                        "value": 20_000
                     },
                     "amplification_limit_bytes": {
                         "type": "unsigned",
-                        "value": 3_500
+                        "value": 10_664
                     },
                     "configuration_key": {
                         "type": "label",
@@ -14097,6 +14107,10 @@ mod tests {
                     "effective_factor": {
                         "type": "unsigned",
                         "value": 34
+                    },
+                    "emitted_fact_bytes": {
+                        "type": "unsigned",
+                        "value": 500
                     },
                     "examined_source_bytes": {
                         "type": "unsigned",
@@ -14112,7 +14126,7 @@ mod tests {
                     },
                     "limit": {
                         "type": "unsigned",
-                        "value": 3_500
+                        "value": 10_664
                     },
                     "minimum_free_bytes": {
                         "type": "unsigned",
@@ -14120,11 +14134,15 @@ mod tests {
                     },
                     "observed": {
                         "type": "unsigned",
-                        "value": 3_000
+                        "value": 10_200
                     },
                     "projected_bytes": {
                         "type": "unsigned",
-                        "value": 3_600
+                        "value": 10_800
+                    },
+                    "retained_generations": {
+                        "type": "unsigned",
+                        "value": 2
                     },
                     "required_bytes": {
                         "type": "unsigned",

@@ -365,8 +365,10 @@ pub(super) struct DurableStorageAdmissionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableRepositoryAmplificationPolicy {
     pub(super) examined_source_bytes: u64,
+    pub(super) emitted_fact_bytes: u64,
     pub(super) source_factor: u64,
     pub(super) oracle_factor: u64,
+    pub(super) retained_generations: u64,
     pub(super) fixed_headroom_bytes: u64,
 }
 
@@ -379,13 +381,23 @@ impl DurableRepositoryAmplificationPolicy {
 
     fn limit(self, absolute_limit_bytes: u64) -> DurableRepositoryAmplification {
         let effective_factor = self.effective_factor();
+        // Source retention and normalized generation output have independent
+        // physical representations. Charging oracle growth only against
+        // source bytes rejects repositories that legitimately emit dense IR.
         let amplification_limit_bytes = self
             .examined_source_bytes
-            .saturating_mul(effective_factor)
+            .saturating_mul(1_u64.saturating_add(self.source_factor))
+            .saturating_add(
+                self.emitted_fact_bytes
+                    .saturating_mul(self.oracle_factor)
+                    .saturating_mul(self.retained_generations),
+            )
             .saturating_add(self.fixed_headroom_bytes);
         DurableRepositoryAmplification {
             examined_source_bytes: self.examined_source_bytes,
+            emitted_fact_bytes: self.emitted_fact_bytes,
             effective_factor,
+            retained_generations: self.retained_generations,
             absolute_limit_bytes,
             amplification_limit_bytes,
         }
@@ -478,7 +490,9 @@ pub(super) struct DurableStorageAdmissionFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableRepositoryAmplification {
     pub(super) examined_source_bytes: u64,
+    pub(super) emitted_fact_bytes: u64,
     pub(super) effective_factor: u64,
+    pub(super) retained_generations: u64,
     pub(super) absolute_limit_bytes: u64,
     pub(super) amplification_limit_bytes: u64,
 }
@@ -5703,6 +5717,36 @@ mod tests {
     }
 
     #[test]
+    fn amplification_envelope_accounts_for_emitted_facts_and_retention() {
+        let policy = DurableRepositoryAmplificationPolicy {
+            examined_source_bytes: 2_631_973,
+            emitted_fact_bytes: 30_000_000,
+            source_factor: 25,
+            oracle_factor: 8,
+            retained_generations: 2,
+            fixed_headroom_bytes: 64 * 1024 * 1024,
+        };
+
+        let amplification = policy.limit(8 * 1024 * 1024 * 1024);
+        let source_only_limit = policy
+            .examined_source_bytes
+            .checked_mul(policy.effective_factor())
+            .and_then(|bytes| bytes.checked_add(policy.fixed_headroom_bytes))
+            .expect("source-only comparison is representable");
+
+        assert_eq!(source_only_limit, 156_595_946);
+        assert_eq!(amplification.amplification_limit_bytes, 615_540_162);
+        assert!(
+            source_only_limit < 311_890_202,
+            "the former source-only envelope rejects a valid dense fact set"
+        );
+        assert!(
+            amplification.amplification_limit_bytes >= 311_890_202,
+            "the emitted-fact envelope admits the bounded retained set"
+        );
+    }
+
+    #[test]
     fn sealed_amplification_gate_counts_predecessor_and_shared_source_storage_once() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -5807,8 +5851,10 @@ mod tests {
                     minimum_free_bytes: 0,
                     repository_amplification: Some(DurableRepositoryAmplificationPolicy {
                         examined_source_bytes: 0,
+                        emitted_fact_bytes: 0,
                         source_factor: 0,
                         oracle_factor: 0,
+                        retained_generations: 1,
                         fixed_headroom_bytes: amplification_limit_bytes,
                     }),
                 },
@@ -5830,7 +5876,9 @@ mod tests {
                 minimum_free_bytes: 0,
                 repository_amplification: Some(DurableRepositoryAmplification {
                     examined_source_bytes: 0,
+                    emitted_fact_bytes: 0,
                     effective_factor: 1,
+                    retained_generations: 1,
                     absolute_limit_bytes: u64::MAX,
                     amplification_limit_bytes,
                 }),
@@ -5899,8 +5947,10 @@ mod tests {
                     minimum_free_bytes: 0,
                     repository_amplification: Some(DurableRepositoryAmplificationPolicy {
                         examined_source_bytes: 0,
+                        emitted_fact_bytes: 0,
                         source_factor: 0,
                         oracle_factor: 0,
+                        retained_generations: 1,
                         fixed_headroom_bytes: 1024,
                     }),
                 },
@@ -6478,8 +6528,10 @@ mod tests {
                     minimum_free_bytes: 0,
                     repository_amplification: Some(DurableRepositoryAmplificationPolicy {
                         examined_source_bytes: 1024,
+                        emitted_fact_bytes: 0,
                         source_factor: 1,
                         oracle_factor: 1,
+                        retained_generations: 1,
                         fixed_headroom_bytes: 16 * 1024,
                     }),
                 },
@@ -6498,9 +6550,11 @@ mod tests {
             failure.repository_amplification,
             Some(DurableRepositoryAmplification {
                 examined_source_bytes: 1024,
+                emitted_fact_bytes: 0,
                 effective_factor: 3,
+                retained_generations: 1,
                 absolute_limit_bytes: 1024,
-                amplification_limit_bytes: 19 * 1024,
+                amplification_limit_bytes: 18 * 1024,
             })
         );
         let rejected = durable

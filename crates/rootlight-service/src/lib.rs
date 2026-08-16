@@ -4905,24 +4905,27 @@ impl FirstSliceService {
         required_catalog_bytes: u64,
         required_repository_bytes: u64,
         examined_source_bytes: u64,
-    ) -> DurableStorageAdmissionPolicy {
+        emitted_fact_bytes: u64,
+    ) -> Result<DurableStorageAdmissionPolicy, FirstSliceError> {
+        let retained_generations = u64::try_from(self.storage_policy.retained_generations)
+            .map_err(|_| FirstSliceError::Limits)?;
         let repository_amplification = (self.storage_policy.config.version() >= CONFIG_VERSION_1_2)
             .then_some(DurableRepositoryAmplificationPolicy {
-                // Preflight bytes count each retained source once; analysis
-                // work can examine the same source through several providers.
                 examined_source_bytes,
+                emitted_fact_bytes,
                 source_factor: self.storage_policy.source_reservation_factor,
                 oracle_factor: self.storage_policy.oracle_reservation_factor,
+                retained_generations,
                 fixed_headroom_bytes: DURABLE_STAGING_FIXED_OVERHEAD_BYTES,
             });
-        DurableStorageAdmissionPolicy {
+        Ok(DurableStorageAdmissionPolicy {
             required_catalog_bytes,
             required_repository_bytes,
             maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
             maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
             minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
             repository_amplification,
-        }
+        })
     }
 
     fn durable_staging_reservation(&self, source_bytes: u64) -> Result<u64, FirstSliceError> {
@@ -6540,7 +6543,8 @@ impl FirstSliceService {
                             estimated_disk_bytes,
                             DURABLE_PUBLICATION_RESIDUAL_BYTES,
                             source_preflight.source_bytes,
-                        ),
+                            serialized_document_bytes,
+                        )?,
                     )?
                     .map_err(storage_admission_error)?;
                 Some(admitted)
@@ -11223,11 +11227,15 @@ pub enum FirstSliceStorageScope {
 pub struct FirstSliceRepositoryAmplification {
     /// Exact supported source bytes examined for the candidate generation.
     pub examined_source_bytes: u64,
-    /// Combined multiplier: one plus the configured source and oracle factors.
+    /// Canonical serialized bytes for the candidate's emitted normalized facts.
+    pub emitted_fact_bytes: u64,
+    /// Combined configured factors retained as a concise diagnostic summary.
     pub effective_factor: u64,
+    /// Configured complete-generation retention count.
+    pub retained_generations: u64,
     /// Configured absolute per-repository ceiling.
     pub absolute_limit_bytes: u64,
-    /// Source-derived ceiling before the absolute cap is applied.
+    /// Source- and fact-derived ceiling before the absolute cap is applied.
     pub amplification_limit_bytes: u64,
 }
 
@@ -12921,7 +12929,9 @@ fn storage_admission_error(failure: DurableStorageAdmissionFailure) -> FirstSlic
             .repository_amplification
             .map(|amplification| FirstSliceRepositoryAmplification {
                 examined_source_bytes: amplification.examined_source_bytes,
+                emitted_fact_bytes: amplification.emitted_fact_bytes,
                 effective_factor: amplification.effective_factor,
+                retained_generations: amplification.retained_generations,
                 absolute_limit_bytes: amplification.absolute_limit_bytes,
                 amplification_limit_bytes: amplification.amplification_limit_bytes,
             });
