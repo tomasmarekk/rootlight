@@ -1045,12 +1045,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                     let rust_impl_scope = (self.analyzer.language == SemanticProjectLanguage::Rust)
                         .then(|| {
-                            enclosing_syntax_fact(
-                                declaration,
-                                &facts_by_id,
-                                SyntaxFactKind::Scope,
-                                "rust.impl.scope",
-                            )
+                            enclosing_rust_impl_scope_before_declaration(declaration, &facts_by_id)
                         })
                         .flatten();
                     let scope_identity = if let Some(scope) = rust_impl_scope {
@@ -3085,28 +3080,6 @@ fn enclosing_scope(
             return Some(*symbol);
         }
         parent = facts_by_id.get(&parent_id).and_then(|fact| fact.parent());
-    }
-    None
-}
-
-fn enclosing_syntax_fact<'fact>(
-    fact: &SyntaxFact,
-    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
-    kind: SyntaxFactKind,
-    syntax_kind: &str,
-) -> Option<&'fact SyntaxFact> {
-    let mut parent = fact.parent();
-    let mut remaining = facts_by_id.len();
-    while let Some(parent_id) = parent {
-        if remaining == 0 {
-            return None;
-        }
-        remaining -= 1;
-        let candidate = facts_by_id.get(&parent_id).copied()?;
-        if candidate.kind() == kind && candidate.syntax_kind().as_str() == syntax_kind {
-            return Some(candidate);
-        }
-        parent = candidate.parent();
     }
     None
 }

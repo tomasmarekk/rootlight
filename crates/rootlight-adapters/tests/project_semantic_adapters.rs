@@ -311,6 +311,27 @@ fn rust_impl_method_identity_matches_structural_and_project_analysis() {
 }
 
 #[test]
+fn rust_local_function_inside_method_matches_structural_identity() {
+    let fixture = ProjectFixture::new(
+        ["src/lib.rs", "src/other.rs"],
+        [
+            "pub struct Demo;\nimpl Demo {\n    pub fn answer(&self) -> u32 {\n        fn local() -> u32 { 42 }\n        local()\n    }\n}\n",
+            "pub fn other() {}\n",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    assert_real_parser_symbol_identity(
+        &fixture,
+        "rust",
+        &[
+            (EntityKind::Struct, "Demo"),
+            (EntityKind::Method, "answer"),
+            (EntityKind::Function, "local"),
+        ],
+    );
+}
+
+#[test]
 fn nested_rust_impl_identity_matches_structural_and_project_analysis() {
     let fixture = ProjectFixture::new(
         ["src/lib.rs", "src/other.rs"],
