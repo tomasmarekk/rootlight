@@ -13,7 +13,7 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot,
     IncludedRange, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, ParseRequest,
-    RequestError, StreamLimits, execute_parse,
+    RequestError, ResourceKind, SinkError, StreamLimits, execute_parse,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit, TreeSitterProvider,
@@ -612,7 +612,7 @@ fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
 }
 
 #[test]
-fn syntax_extraction_honors_tiny_output_budgets_before_materialization() {
+fn syntax_extraction_rejects_tiny_output_before_partial_identity_materialization() {
     let mut source = b"fn first() {}\n".to_vec();
     source.extend(std::iter::repeat_n(b"fn repeated() {}\n".as_slice(), 5000).flatten());
     let fixture = Fixture::new("output-budget.rs", &source);
@@ -652,22 +652,22 @@ fn syntax_extraction_honors_tiny_output_budgets_before_materialization() {
         Vec::new(),
     );
 
-    let output = execute_parse(
+    let error = execute_parse(
         &provider,
         &request,
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
-    .expect("byte-limited extraction commits bounded output");
+    .expect_err("byte-limited extraction must not commit partial identity");
 
-    assert!(output.facts().len() <= 1);
-    assert!(
-        output
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| { diagnostic.code().as_str() == "syntax-extraction-limit" })
+    assert_eq!(
+        error,
+        AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: 2,
+            limit: 1,
+        })
     );
-    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
 }
 
 #[test]

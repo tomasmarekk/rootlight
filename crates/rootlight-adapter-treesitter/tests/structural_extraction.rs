@@ -12,9 +12,9 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot, IncludedRange,
-    LanguageId, MemoryAdmissionPolicy, ParseOutput, ParseRequest, StreamLimits, SyntaxFact,
-    SyntaxFactKind, execute_parse,
+    AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot,
+    IncludedRange, LanguageId, MemoryAdmissionPolicy, ParseOutput, ParseRequest, ResourceKind,
+    SinkError, StreamLimits, SyntaxFact, SyntaxFactKind, execute_parse,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, ReuseStatus, RuntimeConfig, SourceEdit, TreeSitterProvider,
@@ -341,7 +341,7 @@ fn disjoint_included_ranges_never_emit_gap_facts() {
 }
 
 #[test]
-fn sink_fact_pressure_is_explicit_and_bounded() {
+fn sink_fact_pressure_fails_before_partial_identity_commit() {
     let bytes = crlf_bytes(CASES[0].source);
     let fixture = Fixture::new("limited.rs", &bytes);
     let limits = fact_limited_limits();
@@ -353,22 +353,22 @@ fn sink_fact_pressure_is_explicit_and_bounded() {
         "rust",
         Vec::new(),
     );
-    let output = execute_parse(
+    let error = execute_parse(
         &provider,
         &request,
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
-    .expect("fact-limited extraction commits a diagnostic");
+    .expect_err("a partial declaration identity must not commit");
 
-    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
-    assert!(
-        output
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+    assert_eq!(
+        error,
+        AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: 5,
+            limit: 4,
+        })
     );
-    assert!(output.facts().len() <= 4);
 }
 
 #[test]
@@ -445,6 +445,88 @@ fn fact_pressure_retains_late_entity_evidence_across_a_file() {
         );
         assert!(output.facts().len() <= 12);
     }
+}
+
+#[test]
+fn fact_pressure_retains_declaration_identity_closure() {
+    let mut rust = String::new();
+    for index in 0..10 {
+        rust.push_str(&format!(
+            "fn early_{index}(value: usize) -> usize {{ value }}\n"
+        ));
+    }
+    rust.push_str(
+        "struct LateType;\n\
+         impl LateType {\n\
+             fn late_method(&self, value: usize) -> usize { value }\n\
+         }\n",
+    );
+    let fixture = Fixture::new("identity-closure.rs", rust.as_bytes());
+    let limits = identity_closure_fact_limits(40);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("fact-limited extraction commits identity closure");
+
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(
+        output
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+    );
+    assert!(output.facts().len() <= 40);
+
+    let facts_by_id = output
+        .facts()
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let method = output
+        .facts()
+        .iter()
+        .find(|fact| {
+            fact.syntax_kind().as_str() == "rust.function.declaration"
+                && source_text(rust.as_bytes(), fact).contains("fn late_method")
+        })
+        .expect("the late method declaration remains queryable");
+    let mut ancestor = method
+        .parent()
+        .and_then(|parent| facts_by_id.get(&parent).copied());
+    let impl_scope = loop {
+        let fact = ancestor.expect("the late method retains its enclosing impl scope");
+        if fact.syntax_kind().as_str() == "rust.impl.scope" {
+            break fact;
+        }
+        ancestor = fact
+            .parent()
+            .and_then(|parent| facts_by_id.get(&parent).copied());
+    };
+    assert!(output.facts().iter().any(|fact| {
+        fact.parent() == Some(impl_scope.local_id())
+            && fact.syntax_kind().as_str() == "rust.impl_type.scope_type"
+            && source_text(rust.as_bytes(), fact) == "LateType"
+    }));
+    assert!(output.facts().iter().any(|fact| {
+        fact.parent() == Some(method.local_id())
+            && fact.syntax_kind().as_str() == "rust.identifier.definition"
+            && source_text(rust.as_bytes(), fact) == "late_method"
+    }));
+    assert!(output.facts().iter().any(|fact| {
+        fact.parent() == Some(method.local_id())
+            && fact.syntax_kind().as_str() == "rust.parameters.signature"
+    }));
 }
 
 #[test]
@@ -1002,6 +1084,44 @@ fn prioritized_fact_limits() -> AnalysisLimits {
     let ir_batch = BatchThresholds::new(16, 16 * 1024, 2, 1024).expect("IR batch limits are valid");
     let ir = StreamLimits::new(8, 128, 256 * 1024, 8, 8192, 8192, ir_batch)
         .expect("IR stream limits are valid");
+    AnalysisLimits::new(
+        MAX_SOURCE_BYTES,
+        4096,
+        128,
+        32,
+        8 * 1024 * 1024,
+        syntax,
+        ir,
+        IrLimits::default(),
+    )
+    .expect("analysis limits are valid")
+}
+
+fn identity_closure_fact_limits(maximum_syntax_records: usize) -> AnalysisLimits {
+    let syntax_batch = BatchThresholds::new(maximum_syntax_records.min(128), 128 * 1024, 4, 4096)
+        .expect("syntax batch limits are valid");
+    let syntax = StreamLimits::new(
+        64,
+        maximum_syntax_records,
+        4 * 1024 * 1024,
+        16,
+        64 * 1024,
+        128 * 1024,
+        syntax_batch,
+    )
+    .expect("syntax stream limits are valid");
+    let ir_batch =
+        BatchThresholds::new(128, 1024 * 1024, 16, 64 * 1024).expect("IR batch limits are valid");
+    let ir = StreamLimits::new(
+        8192,
+        4096,
+        16 * 1024 * 1024,
+        128,
+        1024 * 1024,
+        4 * 1024 * 1024,
+        ir_batch,
+    )
+    .expect("IR stream limits are valid");
     AnalysisLimits::new(
         MAX_SOURCE_BYTES,
         4096,

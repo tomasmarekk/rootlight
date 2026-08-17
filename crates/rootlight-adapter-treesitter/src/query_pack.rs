@@ -3,11 +3,19 @@
 //! Native queries and capture indices stay private; runtime extraction sees
 //! only the closed, parser-independent role mapping defined here.
 
-use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashSet},
+    ops::ControlFlow,
+};
 
-use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFactKind};
+use rootlight_adapter_sdk::{
+    AdapterError, DiagnosticCode, ResourceKind, SinkError, SyntaxFactKind,
+};
 use rootlight_cancel::Cancellation;
-use tree_sitter::{Query, QueryCursor, QueryCursorOptions, StreamingIterator};
+use tree_sitter::{
+    CaptureQuantifier, Query, QueryCapture, QueryCursor, QueryCursorOptions, StreamingIterator,
+};
 
 use crate::{GrammarFamily, registry::language_for};
 
@@ -15,8 +23,8 @@ const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
 const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
 const HARD_MAX_QUERY_CAPTURES: usize = 2_097_152;
 const HARD_MAX_QUERY_FACTS: usize = 1_048_576;
-// Preserve a bounded window for late high-value declarations without letting
-// tiny emission budgets authorize a full-tree query scan.
+// Optional query work stays proportional to the caller's emission budget;
+// identity patterns have their own hard-bounded scan below.
 const QUERY_MATCHES_PER_RETAINED_FACT: usize = 64;
 const QUERY_CAPTURES_PER_RETAINED_FACT: usize = 128;
 
@@ -38,7 +46,7 @@ const RUST_SPECIAL_CAPTURES: [&str; 4] =
     ["scope_trait", "scope_type", "scoped_call", "test_attribute"];
 const TERMINAL_CALL_NAME_CAPTURE: &str = "call_name";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum StructuralRole {
     Root,
     Module,
@@ -150,6 +158,21 @@ impl StructuralRole {
             Self::StringLiteral => 10,
         }
     }
+
+    const fn belongs_to_identity_closure(self) -> bool {
+        matches!(
+            self,
+            Self::Root
+                | Self::Module
+                | Self::Declaration
+                | Self::Signature
+                | Self::Scope
+                | Self::ScopeTrait
+                | Self::ScopeType
+                | Self::Definition
+                | Self::TestAttribute
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +189,7 @@ pub(crate) struct QueryCandidate {
     pub(crate) end: usize,
     pub(crate) role: StructuralRole,
     pub(crate) syntax: &'static str,
+    pub(crate) required: bool,
 }
 
 impl QueryCandidate {
@@ -177,6 +201,29 @@ impl QueryCandidate {
             self.role,
             self.syntax,
         )
+    }
+
+    pub(crate) fn selection_rank(self) -> (u8, u8, usize, usize, StructuralRole, &'static str) {
+        let (role, start, end, structural_role, syntax) = self.retention_rank();
+        (
+            u8::from(!self.required),
+            role,
+            start,
+            end,
+            structural_role,
+            syntax,
+        )
+    }
+
+    pub(crate) fn same_fact(self, other: Self) -> bool {
+        self.start == other.start
+            && self.end == other.end
+            && self.role == other.role
+            && self.syntax == other.syntax
+    }
+
+    fn fact_key(self) -> (usize, usize, StructuralRole, &'static str) {
+        (self.start, self.end, self.role, self.syntax)
     }
 }
 
@@ -207,14 +254,34 @@ pub(crate) struct QueryExtraction {
     pub(crate) fact_limit: usize,
 }
 
+#[derive(Clone, Copy)]
+struct QueryInput<'a> {
+    family: GrammarFamily,
+    tree: &'a tree_sitter::Tree,
+    source: &'a [u8],
+    cancellation: &'a Cancellation,
+}
+
+#[derive(Clone, Copy)]
+struct QueryScanLimits {
+    matches: usize,
+    captures: usize,
+}
+
 pub(crate) struct QueryPack {
-    query: Query,
+    // Optional query work may stop proportionally to the caller's output
+    // budget. Identity patterns stay separate so that stopping optional work
+    // can never strand a retained declaration without its defining evidence.
+    identity_query: Query,
+    optional_query: Query,
     roles_by_capture: Vec<StructuralRole>,
 }
 
 impl QueryPack {
     fn compile(family: GrammarFamily, source: &str) -> Result<Self, GrammarFamily> {
-        let query = Query::new(&language_for(family), source).map_err(|_| family)?;
+        let language = language_for(family);
+        let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
+        let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
@@ -228,18 +295,33 @@ impl QueryPack {
             }
             expected.sort_unstable();
         }
-        let mut observed = query.capture_names().to_vec();
+        let mut observed = identity_query.capture_names().to_vec();
         observed.sort_unstable();
         if observed != expected {
             return Err(family);
         }
-        let roles_by_capture = query
+        let roles_by_capture = identity_query
             .capture_names()
             .iter()
             .map(|name| StructuralRole::from_capture_name(name).ok_or(family))
             .collect::<Result<Vec<_>, _>>()?;
+        for pattern in 0..identity_query.pattern_count() {
+            let has_identity_capture = identity_query
+                .capture_quantifiers(pattern)
+                .iter()
+                .zip(&roles_by_capture)
+                .any(|(quantifier, role)| {
+                    *quantifier != CaptureQuantifier::Zero && role.belongs_to_identity_closure()
+                });
+            if has_identity_capture {
+                optional_query.disable_pattern(pattern);
+            } else {
+                identity_query.disable_pattern(pattern);
+            }
+        }
         let pack = Self {
-            query,
+            identity_query,
+            optional_query,
             roles_by_capture,
         };
         if (0..u32::try_from(pack.roles_by_capture.len()).map_err(|_| family)?)
@@ -268,35 +350,143 @@ impl QueryPack {
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
         let max_facts = max_facts.min(HARD_MAX_QUERY_FACTS);
+        let identity_max_matches = max_nodes
+            .checked_mul(8)
+            .ok_or_else(|| query_failure("query-match-accounting"))?
+            .min(HARD_MAX_QUERY_MATCHES);
+        let identity_max_captures = max_nodes
+            .checked_mul(8)
+            .ok_or_else(|| query_failure("query-capture-accounting"))?
+            .min(HARD_MAX_QUERY_CAPTURES);
+        let mut identity_candidates = Vec::new();
+        let mut required_facts = HashSet::new();
+        let identity_limit = self.scan_query(
+            &self.identity_query,
+            QueryInput {
+                family,
+                tree,
+                source,
+                cancellation,
+            },
+            QueryScanLimits {
+                matches: identity_max_matches,
+                captures: identity_max_captures,
+            },
+            |mut candidate| {
+                if candidate.role.belongs_to_identity_closure() {
+                    // Only scopes that contain a declaration are mandatory.
+                    // Runtime marks that subset after canonical deduplication.
+                    candidate.required = candidate.role != StructuralRole::Scope;
+                    if candidate.required {
+                        required_facts
+                            .try_reserve(1)
+                            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+                        if required_facts.insert(candidate.fact_key())
+                            && required_facts.len() > max_facts
+                        {
+                            return Err(AdapterError::Sink(SinkError::StreamLimit {
+                                resource: ResourceKind::Records,
+                                observed: required_facts.len(),
+                                limit: max_facts,
+                            }));
+                        }
+                    }
+                    push_candidate_fallible(
+                        &mut identity_candidates,
+                        candidate,
+                        identity_max_captures,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(limit) = identity_limit {
+            return Err(identity_scan_limit(
+                limit,
+                identity_max_matches,
+                identity_max_captures,
+            ));
+        }
+
         let budgeted_matches = max_facts
             .checked_mul(QUERY_MATCHES_PER_RETAINED_FACT)
             .ok_or_else(|| query_failure("query-match-accounting"))?;
         let budgeted_captures = max_facts
             .checked_mul(QUERY_CAPTURES_PER_RETAINED_FACT)
             .ok_or_else(|| query_failure("query-capture-accounting"))?;
-        let max_matches = max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-match-accounting"))?
-            .min(HARD_MAX_QUERY_MATCHES)
-            .min(budgeted_matches);
-        let max_captures = max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-capture-accounting"))?
-            .min(HARD_MAX_QUERY_CAPTURES)
-            .min(budgeted_captures);
-        if max_matches == 0 || max_captures == 0 || max_facts == 0 {
+        let optional_max_matches = identity_max_matches.min(budgeted_matches);
+        let optional_max_captures = identity_max_captures.min(budgeted_captures);
+        if optional_max_matches == 0 || optional_max_captures == 0 || max_facts == 0 {
             return Ok(QueryExtraction {
-                candidates: Vec::new(),
+                candidates: identity_candidates,
                 limit: Some(QueryLimit::Fact),
                 fact_limit: max_facts,
             });
         }
 
+        let mut candidates = BinaryHeap::new();
+        candidates
+            .try_reserve(max_facts.min(4096))
+            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+        let mut fact_limit_reached = false;
+        let mut limit = self.scan_query(
+            &self.optional_query,
+            QueryInput {
+                family,
+                tree,
+                source,
+                cancellation,
+            },
+            QueryScanLimits {
+                matches: optional_max_matches,
+                captures: optional_max_captures,
+            },
+            |candidate| {
+                let candidate = RetainedCandidate(candidate);
+                if candidates.len() < max_facts {
+                    candidates.push(candidate);
+                    return Ok(());
+                }
+
+                fact_limit_reached = true;
+                // Continue the bounded optional query after capacity is reached
+                // so late imports or documentation can replace lower-value
+                // calls and references.
+                let mut worst = candidates
+                    .peek_mut()
+                    .expect("a nonzero full fact heap has a worst candidate");
+                if candidate < *worst {
+                    *worst = candidate;
+                }
+                Ok(())
+            },
+        )?;
+        if limit.is_none() && fact_limit_reached {
+            limit = Some(QueryLimit::Fact);
+        }
+        identity_candidates
+            .try_reserve(candidates.len())
+            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+        identity_candidates.extend(candidates.into_iter().map(|candidate| candidate.0));
+        Ok(QueryExtraction {
+            candidates: identity_candidates,
+            limit,
+            fact_limit: max_facts,
+        })
+    }
+
+    fn scan_query(
+        &self,
+        query: &Query,
+        input: QueryInput<'_>,
+        limits: QueryScanLimits,
+        mut retain: impl FnMut(QueryCandidate) -> Result<(), AdapterError>,
+    ) -> Result<Option<QueryLimit>, AdapterError> {
         let mut cursor = QueryCursor::new();
         cursor.set_match_limit(QUERY_CURSOR_MATCH_LIMIT);
         let mut callback_cancelled = false;
         let mut progress = |_: &tree_sitter::QueryCursorState| {
-            if cancellation.check().is_ok() {
+            if input.cancellation.check().is_ok() {
                 ControlFlow::Continue(())
             } else {
                 callback_cancelled = true;
@@ -305,15 +495,13 @@ impl QueryPack {
         };
         let options = QueryCursorOptions::new().progress_callback(&mut progress);
         let mut matches =
-            cursor.matches_with_options(&self.query, tree.root_node(), source, options);
-        let mut candidates = BinaryHeap::with_capacity(max_facts.min(4096));
+            cursor.matches_with_options(query, input.tree.root_node(), input.source, options);
         let mut match_count = 0usize;
         let mut capture_count = 0usize;
         let mut limit = None;
-        let mut fact_limit_reached = false;
 
         'query: while let Some(query_match) = matches.next() {
-            if match_count >= max_matches {
+            if match_count >= limits.matches {
                 limit = Some(QueryLimit::Match);
                 break;
             }
@@ -321,7 +509,7 @@ impl QueryPack {
                 .checked_add(1)
                 .ok_or_else(|| query_failure("query-match-accounting"))?;
             for capture in query_match.captures {
-                if capture_count >= max_captures {
+                if capture_count >= limits.captures {
                     limit = Some(QueryLimit::Capture);
                     break 'query;
                 }
@@ -331,83 +519,19 @@ impl QueryPack {
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
-                // These roles identify reviewed Rust grammar fields rather than
-                // the many concrete node kinds accepted by the `_type` rule.
-                let syntax = match role {
-                    StructuralRole::ScopeTrait => "rust.impl_trait",
-                    StructuralRole::ScopeType => "rust.impl_type",
-                    StructuralRole::TestAttribute => match family {
-                        GrammarFamily::Rust => "rust.test_attribute",
-                        GrammarFamily::Java => "java.test_attribute",
-                        GrammarFamily::Cpp => "cpp.test_attribute",
-                        _ => return Err(query_failure("query-test-attribute-family")),
-                    },
-                    StructuralRole::ScopedCall => "rust.scoped_call",
-                    StructuralRole::CallName => match family {
-                        GrammarFamily::C => "c.call_name",
-                        GrammarFamily::Cpp => "cpp.call_name",
-                        GrammarFamily::CSharp => "csharp.call_name",
-                        GrammarFamily::Go => "go.call_name",
-                        GrammarFamily::Java => "java.call_name",
-                        GrammarFamily::Php => "php.call_name",
-                        _ => return Err(query_failure("query-call-name-family")),
-                    },
-                    StructuralRole::Call => match family {
-                        GrammarFamily::Rust => "rust.call",
-                        GrammarFamily::Python => "python.call",
-                        GrammarFamily::JavaScript => "javascript.call",
-                        GrammarFamily::Java => "java.call",
-                        GrammarFamily::Go => "go.call",
-                        GrammarFamily::TypeScript => "typescript.call",
-                        GrammarFamily::C => "c.call",
-                        GrammarFamily::Cpp => "cpp.call",
-                        GrammarFamily::CSharp => "csharp.call",
-                        GrammarFamily::Kotlin => "kotlin.call",
-                        GrammarFamily::Php => "php.call",
-                    },
-                    _ => canonical_syntax(family, capture.node.kind())
-                        .ok_or_else(|| query_failure("query-node-kind"))?,
-                };
-                let candidate = RetainedCandidate(QueryCandidate {
-                    start: capture.node.start_byte(),
-                    end: capture.node.end_byte(),
-                    role,
-                    syntax,
-                });
-                if candidates.len() < max_facts {
-                    candidates.push(candidate);
-                    continue;
-                }
-
-                fact_limit_reached = true;
-                // Continue the bounded query after capacity is reached so late
-                // declarations can replace lower-value calls and references.
-                let mut worst = candidates
-                    .peek_mut()
-                    .expect("a nonzero full fact heap has a worst candidate");
-                if candidate < *worst {
-                    *worst = candidate;
-                }
+                retain(candidate_for_capture(input.family, *capture, role)?)?;
             }
         }
         drop(matches);
         if callback_cancelled {
-            cancellation.check()?;
+            input.cancellation.check()?;
         }
-        cancellation.check()?;
+        input.cancellation.check()?;
         if cursor.did_exceed_match_limit() {
-            limit = Some(QueryLimit::CursorMatch);
-        } else if limit.is_none() && fact_limit_reached {
-            limit = Some(QueryLimit::Fact);
+            Ok(Some(QueryLimit::CursorMatch))
+        } else {
+            Ok(limit)
         }
-        Ok(QueryExtraction {
-            candidates: candidates
-                .into_iter()
-                .map(|candidate| candidate.0)
-                .collect(),
-            limit,
-            fact_limit: max_facts,
-        })
     }
 }
 
@@ -419,6 +543,97 @@ fn query_failure(code: &'static str) -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new(code).expect("built-in query failure code is valid"),
     }
+}
+
+fn identity_scan_limit(
+    limit: QueryLimit,
+    maximum_matches: usize,
+    maximum_captures: usize,
+) -> AdapterError {
+    let maximum = match limit {
+        QueryLimit::Match => maximum_matches,
+        QueryLimit::Capture => maximum_captures,
+        QueryLimit::CursorMatch => usize::try_from(QUERY_CURSOR_MATCH_LIMIT).unwrap_or(usize::MAX),
+        QueryLimit::Fact => 0,
+    };
+    AdapterError::Sink(SinkError::StreamLimit {
+        resource: ResourceKind::Records,
+        observed: maximum.saturating_add(1),
+        limit: maximum,
+    })
+}
+
+fn push_candidate_fallible(
+    candidates: &mut Vec<QueryCandidate>,
+    candidate: QueryCandidate,
+    maximum: usize,
+) -> Result<(), AdapterError> {
+    if candidates.len() >= maximum {
+        return Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: candidates.len().saturating_add(1),
+            limit: maximum,
+        }));
+    }
+    if candidates.len() == candidates.capacity() {
+        let remaining = maximum.saturating_sub(candidates.len());
+        candidates
+            .try_reserve_exact(remaining.min(4096))
+            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+    }
+    candidates.push(candidate);
+    Ok(())
+}
+
+fn candidate_for_capture(
+    family: GrammarFamily,
+    capture: QueryCapture<'_>,
+    role: StructuralRole,
+) -> Result<QueryCandidate, AdapterError> {
+    // These roles identify reviewed grammar fields rather than the many
+    // concrete node kinds accepted by a grammar's shared node rules.
+    let syntax = match role {
+        StructuralRole::ScopeTrait => "rust.impl_trait",
+        StructuralRole::ScopeType => "rust.impl_type",
+        StructuralRole::TestAttribute => match family {
+            GrammarFamily::Rust => "rust.test_attribute",
+            GrammarFamily::Java => "java.test_attribute",
+            GrammarFamily::Cpp => "cpp.test_attribute",
+            _ => return Err(query_failure("query-test-attribute-family")),
+        },
+        StructuralRole::ScopedCall => "rust.scoped_call",
+        StructuralRole::CallName => match family {
+            GrammarFamily::C => "c.call_name",
+            GrammarFamily::Cpp => "cpp.call_name",
+            GrammarFamily::CSharp => "csharp.call_name",
+            GrammarFamily::Go => "go.call_name",
+            GrammarFamily::Java => "java.call_name",
+            GrammarFamily::Php => "php.call_name",
+            _ => return Err(query_failure("query-call-name-family")),
+        },
+        StructuralRole::Call => match family {
+            GrammarFamily::Rust => "rust.call",
+            GrammarFamily::Python => "python.call",
+            GrammarFamily::JavaScript => "javascript.call",
+            GrammarFamily::Java => "java.call",
+            GrammarFamily::Go => "go.call",
+            GrammarFamily::TypeScript => "typescript.call",
+            GrammarFamily::C => "c.call",
+            GrammarFamily::Cpp => "cpp.call",
+            GrammarFamily::CSharp => "csharp.call",
+            GrammarFamily::Kotlin => "kotlin.call",
+            GrammarFamily::Php => "php.call",
+        },
+        _ => canonical_syntax(family, capture.node.kind())
+            .ok_or_else(|| query_failure("query-node-kind"))?,
+    };
+    Ok(QueryCandidate {
+        start: capture.node.start_byte(),
+        end: capture.node.end_byte(),
+        role,
+        syntax,
+        required: false,
+    })
 }
 
 const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
@@ -709,7 +924,7 @@ impl QueryPackRegistry {
     pub(crate) fn pattern_count(&self) -> usize {
         self.packs
             .iter()
-            .map(|(_, pack)| pack.query.pattern_count())
+            .map(|(_, pack)| pack.identity_query.pattern_count())
             .sum()
     }
 }
@@ -736,7 +951,7 @@ mod tests {
             GrammarFamily::Php,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
-            let mut names = pack.query.capture_names().to_vec();
+            let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if family == GrammarFamily::Rust {
@@ -757,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_fact_limit_also_bounds_query_scan_work() {
+    fn mandatory_identity_scan_fails_as_soon_as_unique_facts_exceed_budget() {
         let mut source = b"fn first() {}\n".to_vec();
         source.extend(std::iter::repeat_n(b"fn repeated() {}\n".as_slice(), 256).flatten());
         let mut parser = tree_sitter::Parser::new();
@@ -770,18 +985,25 @@ mod tests {
             .get(GrammarFamily::Rust)
             .expect("Rust query pack exists");
 
-        let extraction = pack
-            .extract(
-                GrammarFamily::Rust,
-                &tree,
-                &source,
-                10_000,
-                1,
-                &Cancellation::new(),
-            )
-            .expect("bounded query extraction succeeds");
+        let error = match pack.extract(
+            GrammarFamily::Rust,
+            &tree,
+            &source,
+            10_000,
+            1,
+            &Cancellation::new(),
+        ) {
+            Ok(_) => panic!("a partial mandatory identity scan must not commit"),
+            Err(error) => error,
+        };
 
-        assert_eq!(extraction.candidates.len(), 1);
-        assert_eq!(extraction.limit, Some(QueryLimit::Match));
+        assert_eq!(
+            error,
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::Records,
+                observed: 2,
+                limit: 1,
+            })
+        );
     }
 }

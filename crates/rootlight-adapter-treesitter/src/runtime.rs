@@ -18,7 +18,7 @@ use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId, IncludedRange,
     LanguageId, MemoryAdmissionPolicy, MemoryEnforcement, ParseCapabilities, ParseProvider,
     ParseReport, ParseRequest, RemainingBudget, RequestError, ResourceKind, ResourceUsage,
-    StreamEnd, SyntaxFact, SyntaxFactBatch, SyntaxFactSink, SyntaxKindLabel, WorkReport,
+    SinkError, StreamEnd, SyntaxFact, SyntaxFactBatch, SyntaxFactSink, SyntaxKindLabel, WorkReport,
     execute_parse_transaction,
 };
 use rootlight_cancel::Cancellation;
@@ -1299,13 +1299,6 @@ fn normalize_query_candidates(
     max_facts: usize,
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
-    let mut limited = candidates.len() > max_facts;
-    if limited {
-        sort_cancellable_by(&mut candidates, cancellation, |left, right| {
-            left.retention_rank().cmp(&right.retention_rank())
-        })?;
-        candidates.truncate(max_facts);
-    }
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
@@ -1315,6 +1308,17 @@ fn normalize_query_candidates(
         ))
     })?;
     dedup_query_candidates(&mut candidates, cancellation)?;
+    mark_required_scope_closure(&mut candidates, cancellation)?;
+    let mut limited =
+        retain_required_candidates_within_limit(&mut candidates, max_facts, cancellation)?;
+    sort_cancellable_by(&mut candidates, cancellation, |left, right| {
+        (left.start, left.end, left.role, left.syntax).cmp(&(
+            right.start,
+            right.end,
+            right.role,
+            right.syntax,
+        ))
+    })?;
     let mut root_count = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
@@ -1338,19 +1342,16 @@ fn normalize_query_candidates(
     let mut restricted = Vec::new();
     try_reserve_exact_cancellable(
         &mut restricted,
-        maximum_expansion.min(max_facts),
+        maximum_expansion,
         cancellation,
         "query-fact-allocation",
     )?;
-    'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
+    for (index, candidate) in candidates.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
         }
         if request.included_ranges().is_empty() {
-            if !push_candidate_bounded(&mut restricted, candidate, max_facts) {
-                limited = true;
-                break;
-            }
+            restricted.push(candidate);
             continue;
         }
         if candidate.role == StructuralRole::Root {
@@ -1366,16 +1367,10 @@ fn normalize_query_candidates(
                         .map_err(|_| provider_failure("query-span"))?,
                     ..candidate
                 };
-                if !push_candidate_bounded(&mut restricted, expanded, max_facts) {
-                    limited = true;
-                    break 'candidate;
-                }
+                restricted.push(expanded);
             }
-        } else if candidate_within_included_range(&candidate, request)?
-            && !push_candidate_bounded(&mut restricted, candidate, max_facts)
-        {
-            limited = true;
-            break;
+        } else if candidate_within_included_range(&candidate, request)? {
+            restricted.push(candidate);
         }
     }
     sort_cancellable_by(&mut restricted, cancellation, |left, right| {
@@ -1387,6 +1382,16 @@ fn normalize_query_candidates(
         ))
     })?;
     dedup_query_candidates(&mut restricted, cancellation)?;
+    mark_required_scope_closure(&mut restricted, cancellation)?;
+    limited |= retain_required_candidates_within_limit(&mut restricted, max_facts, cancellation)?;
+    sort_cancellable_by(&mut restricted, cancellation, |left, right| {
+        (left.start, left.end, left.role, left.syntax).cmp(&(
+            right.start,
+            right.end,
+            right.role,
+            right.syntax,
+        ))
+    })?;
 
     let mut selected = Vec::new();
     try_reserve_exact_cancellable(
@@ -1620,8 +1625,13 @@ fn dedup_query_candidates(
             .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
         let duplicate = candidates
             .get(write - 1)
-            .is_some_and(|previous| *previous == candidate);
-        if !duplicate {
+            .is_some_and(|previous| previous.same_fact(candidate));
+        if duplicate {
+            let previous = candidates
+                .get_mut(write - 1)
+                .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
+            previous.required |= candidate.required;
+        } else {
             let slot = candidates
                 .get_mut(write)
                 .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
@@ -1636,17 +1646,162 @@ fn dedup_query_candidates(
     Ok(())
 }
 
-fn push_candidate_bounded(
-    candidates: &mut Vec<QueryCandidate>,
-    candidate: QueryCandidate,
-    maximum: usize,
-) -> bool {
-    if candidates.len() >= maximum {
-        false
-    } else {
-        candidates.push(candidate);
-        true
+fn mark_required_scope_closure(
+    candidates: &mut [QueryCandidate],
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let declaration_count = candidates
+        .iter()
+        .filter(|candidate| candidate.required && candidate.role == StructuralRole::Declaration)
+        .count();
+    if declaration_count == 0 {
+        cancellation.check()?;
+        return Ok(());
     }
+
+    let mut declarations = Vec::new();
+    try_reserve_exact_cancellable(
+        &mut declarations,
+        declaration_count,
+        cancellation,
+        "query-identity-closure-allocation",
+    )?;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate.required && candidate.role == StructuralRole::Declaration {
+            declarations.push((candidate.start, candidate.end));
+        }
+    }
+    sort_cancellable_by(&mut declarations, cancellation, Ord::cmp)?;
+
+    let leaf_count = declarations
+        .len()
+        .checked_next_power_of_two()
+        .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+    let tree_len = leaf_count
+        .checked_mul(2)
+        .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+    let mut minimum_ends = Vec::new();
+    try_reserve_exact_cancellable(
+        &mut minimum_ends,
+        tree_len,
+        cancellation,
+        "query-identity-closure-allocation",
+    )?;
+    minimum_ends.resize(tree_len, usize::MAX);
+    for (index, (_, end)) in declarations.iter().copied().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let slot = leaf_count
+            .checked_add(index)
+            .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+        *minimum_ends
+            .get_mut(slot)
+            .ok_or_else(|| provider_failure("query-identity-closure-invariant"))? = end;
+    }
+    for index in (1..leaf_count).rev() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let left = *minimum_ends
+            .get(index * 2)
+            .ok_or_else(|| provider_failure("query-identity-closure-invariant"))?;
+        let right = *minimum_ends
+            .get(index * 2 + 1)
+            .ok_or_else(|| provider_failure("query-identity-closure-invariant"))?;
+        *minimum_ends
+            .get_mut(index)
+            .ok_or_else(|| provider_failure("query-identity-closure-invariant"))? = left.min(right);
+    }
+
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate.role != StructuralRole::Scope {
+            continue;
+        }
+        let first = declarations.partition_point(|(start, _)| *start < candidate.start);
+        let after_last = declarations.partition_point(|(start, _)| *start <= candidate.end);
+        candidate.required = first < after_last
+            && minimum_in_range(&minimum_ends, leaf_count, first, after_last)? <= candidate.end;
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn minimum_in_range(
+    tree: &[usize],
+    leaf_count: usize,
+    mut start: usize,
+    mut end: usize,
+) -> Result<usize, AdapterError> {
+    start = start
+        .checked_add(leaf_count)
+        .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+    end = end
+        .checked_add(leaf_count)
+        .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+    let mut minimum = usize::MAX;
+    while start < end {
+        if !start.is_multiple_of(2) {
+            minimum = minimum.min(
+                *tree
+                    .get(start)
+                    .ok_or_else(|| provider_failure("query-identity-closure-invariant"))?,
+            );
+            start += 1;
+        }
+        if !end.is_multiple_of(2) {
+            end -= 1;
+            minimum = minimum.min(
+                *tree
+                    .get(end)
+                    .ok_or_else(|| provider_failure("query-identity-closure-invariant"))?,
+            );
+        }
+        start /= 2;
+        end /= 2;
+    }
+    Ok(minimum)
+}
+
+fn retain_required_candidates_within_limit(
+    candidates: &mut Vec<QueryCandidate>,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let mut required = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate.required {
+            required = required
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
+        }
+    }
+    if required > maximum {
+        return Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: required,
+            limit: maximum,
+        }));
+    }
+    if candidates.len() <= maximum {
+        cancellation.check()?;
+        return Ok(false);
+    }
+    sort_cancellable_by(candidates, cancellation, |left, right| {
+        left.selection_rank().cmp(&right.selection_rank())
+    })?;
+    candidates.truncate(maximum);
+    cancellation.check()?;
+    Ok(true)
 }
 
 fn candidate_within_included_range(
