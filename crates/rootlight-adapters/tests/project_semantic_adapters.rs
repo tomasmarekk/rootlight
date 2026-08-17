@@ -222,6 +222,51 @@ fn repeated_declarations_retain_each_resolved_definition_site() {
 }
 
 #[test]
+fn nested_same_name_declarations_bind_their_own_definition_sites() {
+    let fixture = ProjectFixture::new(
+        ["src/shared.rs"],
+        ["mod shared {\n    pub fn shared() {}\n}\n"],
+        SemanticProjectLanguage::Rust,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let declarations = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.display_name == "shared"
+                && matches!(entity.kind, EntityKind::Module | EntityKind::Function)
+        })
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declarations.len(),
+        2,
+        "the module and nested function are distinct declarations"
+    );
+
+    let definition_targets = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition
+                && occurrence.syntactic_text_hash == content_hash(b"shared")
+        })
+        .map(|occurrence| {
+            let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                panic!("a definition must bind directly to its own declaration");
+            };
+            symbol
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        definition_targets, declarations,
+        "an enclosing same-name module cannot contaminate the function definition"
+    );
+}
+
+#[test]
 fn python_symbol_identity_matches_structural_and_project_analysis() {
     let fixture = ProjectFixture::new(
         ["Lib/asyncio/helpers.py", "Lib/asyncio/base_events.py"],

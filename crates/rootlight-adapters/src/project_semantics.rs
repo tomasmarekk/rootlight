@@ -2226,15 +2226,17 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
     ) -> ResolutionCandidates {
         if occurrence.role == OccurrenceRole::Definition {
             return ResolutionCandidates {
-                symbols: definitions
-                    .get(&occurrence.name)
-                    .into_iter()
-                    .flatten()
-                    .filter(|entity| {
-                        entity.file == occurrence.file
-                            && contains_span(entity.span, occurrence.source.span())
+                // Definition captures are already bound to their nearest
+                // materialized declaration. Re-resolving by name would let an
+                // enclosing same-name declaration contaminate the exact site.
+                symbols: occurrence
+                    .enclosing_declaration
+                    .and_then(|declaration| {
+                        self.symbol_by_declaration
+                            .get(&(occurrence.file, declaration))
                     })
-                    .map(|entity| entity.symbol)
+                    .copied()
+                    .into_iter()
                     .collect(),
                 kind: ResolutionKind::Binding,
             };
