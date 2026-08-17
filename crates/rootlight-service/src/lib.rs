@@ -187,7 +187,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/6";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/7";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -5850,6 +5850,13 @@ impl FirstSliceService {
                 return Err(FirstSliceError::Identity.into());
             }
         }
+        let mut structural_fact_ledger = StructuralFactLedger::new(
+            MAX_FIRST_SLICE_STRUCTURAL_FACTS
+                .min(self.analysis_limits.syntax_stream().max_records()),
+            source_analysis_limits
+                .values()
+                .map(|limits| limits.syntax_stream().max_records()),
+        )?;
         attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
         observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Snapshot,
@@ -5919,15 +5926,7 @@ impl FirstSliceService {
             cancellation,
         )?;
         let parent_structural_artifacts = if reuse_policy == FirstSliceReusePolicy::Incremental {
-            active
-                .and_then(|generation| self.structural_artifacts.generation(generation))
-                .filter(|artifacts| {
-                    artifacts.iter().all(|(_, entry)| {
-                        source_analysis_limits
-                            .get(&entry.artifact.file())
-                            .is_some_and(|limits| entry.artifact.is_compatible_with_limits(limits))
-                    })
-                })
+            active.and_then(|generation| self.structural_artifacts.generation(generation))
         } else {
             None
         };
@@ -5995,9 +5994,23 @@ impl FirstSliceService {
                 .analyzers
                 .get(language)
                 .ok_or(FirstSliceError::Adapter)?;
-            let analysis_limits = source_analysis_limits
+            let partitioned_limits = source_analysis_limits
                 .get(&snapshot.file())
                 .ok_or(FirstSliceError::Adapter)?;
+            let analysis_limits = structural_fact_ledger.admit(partitioned_limits)?;
+            let artifact_id = parser_artifact_id(snapshot.file());
+            let reusable_entry = incremental_plan
+                .reusable_parser_artifacts
+                .contains(&artifact_id)
+                .then(|| {
+                    parent_structural_artifacts
+                        .and_then(|artifacts| artifacts.get(snapshot.file()))
+                        .filter(|entry| {
+                            entry.id == artifact_id
+                                && entry.artifact.is_compatible_with_limits(&analysis_limits)
+                        })
+                })
+                .flatten();
             let source = SourceRef::new(
                 repository,
                 generation,
@@ -6014,38 +6027,31 @@ impl FirstSliceService {
                 Vec::new(),
                 analysis_tier_for_language(language),
                 BuildContextIdentity::new(first_slice_build_context()),
-                analysis_limits,
+                &analysis_limits,
             )
             .map_err(|_| FirstSliceError::Adapter)?
             .with_generated_status(input.generated);
-            let artifact_id = parser_artifact_id(snapshot.file());
-            let (file_document, artifact, normalized, normalized_reused) = if incremental_plan
-                .reusable_parser_artifacts
-                .contains(&artifact_id)
-            {
-                let entry = parent_structural_artifacts
-                    .and_then(|artifacts| artifacts.get(snapshot.file()))
-                    .filter(|entry| entry.id == artifact_id)
-                    .ok_or(FirstSliceError::Incremental)?;
-                // Normalized reuse is optional. Any policy, limit, extension,
-                // or identity rejection returns to the verified lowering path.
-                let rebound = entry.normalized.as_ref().and_then(|chunk| {
-                    chunk
-                        .rebind(generation, self.analysis_limits.ir(), &self.extensions)
-                        .ok()
-                        .map(|document| (document, Arc::clone(chunk)))
-                });
-                let (document, artifact, normalized, normalized_reused, parser_reused) =
-                    if let Some((document, normalized)) = rebound {
-                        (
-                            document,
-                            Some(Arc::clone(&entry.artifact)),
-                            Some(normalized),
-                            true,
-                            true,
-                        )
-                    } else {
-                        match analyzer.analyze_from_artifact(
+            let (file_document, artifact, normalized, normalized_reused) =
+                if let Some(entry) = reusable_entry {
+                    // Normalized reuse is optional. Any policy, limit, extension,
+                    // or identity rejection returns to the verified lowering path.
+                    let rebound = entry.normalized.as_ref().and_then(|chunk| {
+                        chunk
+                            .rebind(generation, self.analysis_limits.ir(), &self.extensions)
+                            .ok()
+                            .map(|document| (document, Arc::clone(chunk)))
+                    });
+                    let (document, artifact, normalized, normalized_reused, parser_reused) =
+                        if let Some((document, normalized)) = rebound {
+                            (
+                                document,
+                                Some(Arc::clone(&entry.artifact)),
+                                Some(normalized),
+                                true,
+                                true,
+                            )
+                        } else {
+                            match analyzer.analyze_from_artifact(
                             &request,
                             &entry.artifact,
                             self.extensions.clone(),
@@ -6079,51 +6085,58 @@ impl FirstSliceService {
                                 return Err(map_adapter_error(error, cancellation).into());
                             }
                         }
-                    };
-                if parser_reused {
-                    reused_parser_artifacts = reused_parser_artifacts
-                        .checked_add(1)
-                        .ok_or(FirstSliceError::Limits)?;
-                    reused_parser_artifact_bytes = reused_parser_artifact_bytes
-                        .checked_add(entry.artifact.accounted_bytes())
-                        .ok_or(FirstSliceError::Limits)?;
-                }
-                (document, artifact, normalized, normalized_reused)
-            } else {
-                match analyzer.analyze_and_capture(
-                    &request,
-                    self.extensions.clone(),
-                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                    cancellation,
-                ) {
-                    Ok((output, artifact)) => {
-                        parsed_files =
-                            parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
-                        (
-                            output.document().clone(),
-                            Some(Arc::new(artifact)),
+                        };
+                    if parser_reused {
+                        reused_parser_artifacts = reused_parser_artifacts
+                            .checked_add(1)
+                            .ok_or(FirstSliceError::Limits)?;
+                        reused_parser_artifact_bytes = reused_parser_artifact_bytes
+                            .checked_add(entry.artifact.accounted_bytes())
+                            .ok_or(FirstSliceError::Limits)?;
+                    }
+                    (document, artifact, normalized, normalized_reused)
+                } else {
+                    match analyzer.analyze_and_capture(
+                        &request,
+                        self.extensions.clone(),
+                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                        cancellation,
+                    ) {
+                        Ok((output, artifact)) => {
+                            parsed_files =
+                                parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
+                            (
+                                output.document().clone(),
+                                Some(Arc::new(artifact)),
+                                None,
+                                false,
+                            )
+                        }
+                        Err(error) if is_invalid_utf8_adapter_failure(&error) => (
+                            analyzer
+                                .analyze_unsupported_encoding(
+                                    &request,
+                                    self.extensions.clone(),
+                                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                    cancellation,
+                                )
+                                .map_err(|error| map_adapter_error(error, cancellation))?
+                                .document()
+                                .clone(),
+                            None,
                             None,
                             false,
-                        )
+                        ),
+                        Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                     }
-                    Err(error) if is_invalid_utf8_adapter_failure(&error) => (
-                        analyzer
-                            .analyze_unsupported_encoding(
-                                &request,
-                                self.extensions.clone(),
-                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                                cancellation,
-                            )
-                            .map_err(|error| map_adapter_error(error, cancellation))?
-                            .document()
-                            .clone(),
-                        None,
-                        None,
-                        false,
-                    ),
-                    Err(error) => return Err(map_adapter_error(error, cancellation).into()),
-                }
-            };
+                };
+            let retained_syntax_facts = artifact
+                .as_ref()
+                .map_or(0, |artifact| artifact.syntax_fact_count());
+            structural_fact_ledger.settle(
+                analysis_limits.syntax_stream().max_records(),
+                retained_syntax_facts,
+            )?;
             if !normalized_reused {
                 lowered_files = lowered_files
                     .checked_add(1)
@@ -15803,6 +15816,61 @@ fn analysis_partition_weight(source_bytes: usize) -> Result<usize, FirstSliceErr
         .ok_or(FirstSliceError::Limits)
 }
 
+#[derive(Debug)]
+struct StructuralFactLedger {
+    maximum_records: usize,
+    available_records: usize,
+}
+
+impl StructuralFactLedger {
+    fn new(
+        maximum_records: usize,
+        partitions: impl IntoIterator<Item = usize>,
+    ) -> Result<Self, FirstSliceError> {
+        let reserved_records = partitions
+            .into_iter()
+            .try_fold(0_usize, |total, partition| {
+                total.checked_add(partition).ok_or(FirstSliceError::Limits)
+            })?;
+        let available_records = maximum_records
+            .checked_sub(reserved_records)
+            .ok_or(FirstSliceError::Limits)?;
+        Ok(Self {
+            maximum_records,
+            available_records,
+        })
+    }
+
+    fn admit(&self, partition: &AnalysisLimits) -> Result<AnalysisLimits, FirstSliceError> {
+        let admitted_records = partition
+            .syntax_stream()
+            .max_records()
+            .checked_add(self.available_records)
+            .ok_or(FirstSliceError::Limits)?;
+        if admitted_records > self.maximum_records {
+            return Err(FirstSliceError::Limits);
+        }
+        analysis_limits_with_syntax_records(partition, admitted_records)
+    }
+
+    fn settle(
+        &mut self,
+        admitted_records: usize,
+        retained_records: usize,
+    ) -> Result<(), FirstSliceError> {
+        if admitted_records > self.maximum_records || retained_records > admitted_records {
+            return Err(FirstSliceError::Limits);
+        }
+        // Only unused capacity from completed files becomes available. Static
+        // partitions for every future file remain reserved, so borrowing can
+        // never overcommit the repository-wide syntax-fact ceiling.
+        self.available_records = admitted_records
+            .checked_sub(retained_records)
+            .ok_or(FirstSliceError::Limits)?;
+        Ok(())
+    }
+}
+
 fn partitioned_analysis_limits(
     limits: &AnalysisLimits,
     source_files: usize,
@@ -15841,6 +15909,14 @@ fn partitioned_analysis_limits(
     }
     .max(1)
     .min(syntax.max_records());
+    analysis_limits_with_syntax_records(limits, maximum_records)
+}
+
+fn analysis_limits_with_syntax_records(
+    limits: &AnalysisLimits,
+    maximum_records: usize,
+) -> Result<AnalysisLimits, FirstSliceError> {
+    let syntax = limits.syntax_stream();
     if maximum_records == syntax.max_records() {
         return Ok(limits.clone());
     }
@@ -21923,6 +21999,67 @@ mod tests {
             partitioned_analysis_limits(&limits, 2, 1, 2),
             Err(FirstSliceError::Limits)
         ));
+    }
+
+    #[test]
+    fn repository_analysis_reuses_prior_unused_fact_capacity_for_identity_closure() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let sparse = "struct A;\n";
+        let dense = concat!(
+            "fn alpha() {}\n",
+            "fn beta() {}\n",
+            "fn gamma() {}\n",
+            "fn delta() {}\n",
+            "fn epsilon() {}\n",
+        );
+        fs::write(fixture.path().join("a.rs"), sparse).expect("sparse source writes");
+        fs::write(fixture.path().join("z.rs"), dense).expect("dense source writes");
+
+        let base = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
+        let limits =
+            analysis_limits_with_syntax_records(&base, 20).expect("test syntax budget is valid");
+        let sparse_weight =
+            analysis_partition_weight(sparse.len()).expect("sparse weight is valid");
+        let dense_weight = analysis_partition_weight(dense.len()).expect("dense weight is valid");
+        let total_weight = sparse_weight
+            .checked_add(dense_weight)
+            .expect("combined weight is valid");
+        let dense_partition = partitioned_analysis_limits(&limits, 2, total_weight, dense_weight)
+            .expect("dense partition is valid");
+        assert!(
+            dense_partition.syntax_stream().max_records() < 16,
+            "the static partition alone must be too small for five declaration closures"
+        );
+
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        service.analysis_limits = limits;
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("unused prior capacity admits the dense identity closure");
+        let document = service
+            .generations
+            .generation(receipt.generation)
+            .expect("generation remains queryable")
+            .document();
+        let names = document
+            .entities
+            .iter()
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in ["A", "alpha", "beta", "gamma", "delta", "epsilon"] {
+            assert!(names.contains(expected), "{expected} remains queryable");
+        }
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "syntax-extraction-limit"),
+            "optional fact truncation remains explicit"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

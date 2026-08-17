@@ -290,6 +290,76 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
 }
 
 #[test]
+fn complete_structural_artifact_replays_under_a_smaller_fact_partition() {
+    let case = CASES[0];
+    let primary_provider = Arc::new(provider());
+    let primary_analyzer = analyzer(&primary_provider, case);
+    let initial_limits = limits();
+    let extensions = ExtensionSupport::default();
+    let fixture = Fixture::new(case, b"fn stable() {}\n");
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &initial_limits);
+    let (_, artifact) = primary_analyzer
+        .analyze_and_capture(
+            &initial_request,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("complete structural artifact is captured");
+    let bounded_limits = limits_with_syntax_records(artifact.syntax_fact_count().max(1));
+    let bounded_request = request(&fixture.snapshot, &fixture.source, case, &bounded_limits);
+    let (bounded, bounded_artifact) = primary_analyzer
+        .analyze_and_capture(
+            &bounded_request,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("bounded structural artifact is captured");
+    assert!(
+        bounded
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+    );
+    assert!(
+        !bounded_artifact.is_compatible_with_limits(&initial_limits),
+        "an explicitly truncated artifact must not be reused under a larger partition"
+    );
+
+    let reduced_records = artifact
+        .syntax_fact_count()
+        .checked_add(1)
+        .expect("test fact capacity remains bounded");
+    let reduced_limits = limits_with_syntax_records(reduced_records);
+    assert!(
+        reduced_limits.syntax_stream().max_records() < initial_limits.syntax_stream().max_records()
+    );
+    let successor = fixture.next_generation();
+    let successor_request = request(
+        &successor.snapshot,
+        &successor.source,
+        case,
+        &reduced_limits,
+    );
+
+    assert!(artifact.is_compatible_with_limits(&reduced_limits));
+    let reused = primary_analyzer
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("complete output remains reusable under the reduced partition");
+    let clean = analyze(&primary_analyzer, &successor_request, &extensions);
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(reused.report(), clean.report());
+}
+
+#[test]
 fn reviewed_queries_preserve_explicit_call_sites() {
     let provider = Arc::new(provider());
     let limits = limits();
@@ -1122,11 +1192,15 @@ fn provider() -> TreeSitterProvider {
 }
 
 fn limits() -> AnalysisLimits {
-    let batch =
-        BatchThresholds::new(128, 1024 * 1024, 32, 128 * 1024).expect("batch limits are valid");
-    let stream = StreamLimits::new(
+    limits_with_syntax_records(16_384)
+}
+
+fn limits_with_syntax_records(max_records: usize) -> AnalysisLimits {
+    let batch = BatchThresholds::new(128.min(max_records), 1024 * 1024, 32, 128 * 1024)
+        .expect("batch limits are valid");
+    let syntax_stream = StreamLimits::new(
         128,
-        16_384,
+        max_records,
         16 * 1024 * 1024,
         128,
         128 * 1024,
@@ -1134,14 +1208,24 @@ fn limits() -> AnalysisLimits {
         batch,
     )
     .expect("stream limits are valid");
+    let ir_stream = StreamLimits::new(
+        128,
+        16_384,
+        16 * 1024 * 1024,
+        128,
+        128 * 1024,
+        4 * 1024 * 1024,
+        BatchThresholds::new(128, 1024 * 1024, 32, 128 * 1024).expect("IR batch limits are valid"),
+    )
+    .expect("IR stream limits are valid");
     AnalysisLimits::new(
         MAX_SOURCE_BYTES,
         MAX_SYNTAX_NODES,
         MAX_SYNTAX_DEPTH,
         32,
         16 * 1024 * 1024,
-        stream.clone(),
-        stream,
+        syntax_stream,
+        ir_stream,
         IrLimits::default(),
     )
     .expect("analysis limits are valid")

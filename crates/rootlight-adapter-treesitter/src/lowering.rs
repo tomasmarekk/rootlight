@@ -96,13 +96,27 @@ impl TreeSitterStructuralArtifact {
         self.accounted_bytes
     }
 
-    /// Returns whether this artifact was captured under the supplied limits.
+    /// Returns the exact parser-local syntax facts retained by this artifact.
+    #[must_use]
+    pub fn syntax_fact_count(&self) -> usize {
+        self.parse_output.facts().len()
+    }
+
+    /// Returns whether this artifact can be replayed under the supplied limits.
     ///
-    /// Parse artifacts must be rebuilt when a repository-wide budget
-    /// partition changes, even if their source content is unchanged.
+    /// An exact limit match is always compatible. A changed syntax-record
+    /// partition is also compatible when the retained parse was complete,
+    /// still fits, and every other parser and lowering limit is unchanged.
     #[must_use]
     pub fn is_compatible_with_limits(&self, limits: &AnalysisLimits) -> bool {
         self.limits == *limits
+            || (self.parse_output.facts().len() < limits.syntax_stream().max_records()
+                && self
+                    .parse_output
+                    .diagnostics()
+                    .iter()
+                    .all(|diagnostic| diagnostic.code().as_str() != "syntax-extraction-limit")
+                && analysis_limit_shape_matches(&self.limits, limits))
     }
 }
 
@@ -426,8 +440,31 @@ impl TreeSitterStructuralArtifact {
             && self.file == source.span().file()
             && self.content_hash == source.content_hash()
             && context_matches
-            && self.limits == *request.limits())
+            && self.is_compatible_with_limits(request.limits()))
     }
+}
+
+fn analysis_limit_shape_matches(left: &AnalysisLimits, right: &AnalysisLimits) -> bool {
+    let left_syntax = left.syntax_stream();
+    let right_syntax = right.syntax_stream();
+    let left_batch = left_syntax.batch();
+    let right_batch = right_syntax.batch();
+    left.max_source_bytes() == right.max_source_bytes()
+        && left.max_syntax_nodes() == right.max_syntax_nodes()
+        && left.max_syntax_depth() == right.max_syntax_depth()
+        && left.max_embedded_ranges() == right.max_embedded_ranges()
+        && left.max_reported_memory_bytes() == right.max_reported_memory_bytes()
+        && left_syntax.max_batches() == right_syntax.max_batches()
+        && left_syntax.max_output_bytes() == right_syntax.max_output_bytes()
+        && left_syntax.max_diagnostics() == right_syntax.max_diagnostics()
+        && left_syntax.max_diagnostic_bytes() == right_syntax.max_diagnostic_bytes()
+        && left_syntax.max_string_bytes() == right_syntax.max_string_bytes()
+        && left_batch.max_output_bytes() == right_batch.max_output_bytes()
+        && left_batch.max_diagnostics() == right_batch.max_diagnostics()
+        && left_batch.max_diagnostic_bytes() == right_batch.max_diagnostic_bytes()
+        && left.ir_stream() == right.ir_stream()
+        && left.ir() == right.ir()
+        && left.project() == right.project()
 }
 
 struct PreparsedTreeSitterAnalyzer<'a> {
