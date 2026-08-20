@@ -272,6 +272,8 @@ pub enum ResourceKind {
     Batches,
     /// Top-level facts or records.
     Records,
+    /// Parser syntax facts required to preserve declaration identity.
+    RequiredSyntaxFacts,
     /// Deterministically accounted logical output bytes.
     OutputBytes,
     /// Diagnostic records.

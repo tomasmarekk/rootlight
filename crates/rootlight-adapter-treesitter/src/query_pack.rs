@@ -3,11 +3,7 @@
 //! Native queries and capture indices stay private; runtime extraction sees
 //! only the closed, parser-independent role mapping defined here.
 
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, HashSet},
-    ops::ControlFlow,
-};
+use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow};
 
 use rootlight_adapter_sdk::{
     AdapterError, DiagnosticCode, ResourceKind, SinkError, SyntaxFactKind,
@@ -221,10 +217,6 @@ impl QueryCandidate {
             && self.role == other.role
             && self.syntax == other.syntax
     }
-
-    fn fact_key(self) -> (usize, usize, StructuralRole, &'static str) {
-        (self.start, self.end, self.role, self.syntax)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,63 +342,9 @@ impl QueryPack {
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
         let max_facts = max_facts.min(HARD_MAX_QUERY_FACTS);
-        let identity_max_matches = max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-match-accounting"))?
-            .min(HARD_MAX_QUERY_MATCHES);
-        let identity_max_captures = max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-capture-accounting"))?
-            .min(HARD_MAX_QUERY_CAPTURES);
-        let mut identity_candidates = Vec::new();
-        let mut required_facts = HashSet::new();
-        let identity_limit = self.scan_query(
-            &self.identity_query,
-            QueryInput {
-                family,
-                tree,
-                source,
-                cancellation,
-            },
-            QueryScanLimits {
-                matches: identity_max_matches,
-                captures: identity_max_captures,
-            },
-            |mut candidate| {
-                if candidate.role.belongs_to_identity_closure() {
-                    // Only scopes that contain a declaration are mandatory.
-                    // Runtime marks that subset after canonical deduplication.
-                    candidate.required = candidate.role != StructuralRole::Scope;
-                    if candidate.required {
-                        required_facts
-                            .try_reserve(1)
-                            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
-                        if required_facts.insert(candidate.fact_key())
-                            && required_facts.len() > max_facts
-                        {
-                            return Err(AdapterError::Sink(SinkError::StreamLimit {
-                                resource: ResourceKind::Records,
-                                observed: required_facts.len(),
-                                limit: max_facts,
-                            }));
-                        }
-                    }
-                    push_candidate_fallible(
-                        &mut identity_candidates,
-                        candidate,
-                        identity_max_captures,
-                    )?;
-                }
-                Ok(())
-            },
-        )?;
-        if let Some(limit) = identity_limit {
-            return Err(identity_scan_limit(
-                limit,
-                identity_max_matches,
-                identity_max_captures,
-            ));
-        }
+        let identity_limits = identity_scan_limits(max_nodes)?;
+        let mut identity_candidates =
+            self.extract_identity(family, tree, source, max_nodes, cancellation)?;
 
         let budgeted_matches = max_facts
             .checked_mul(QUERY_MATCHES_PER_RETAINED_FACT)
@@ -414,8 +352,8 @@ impl QueryPack {
         let budgeted_captures = max_facts
             .checked_mul(QUERY_CAPTURES_PER_RETAINED_FACT)
             .ok_or_else(|| query_failure("query-capture-accounting"))?;
-        let optional_max_matches = identity_max_matches.min(budgeted_matches);
-        let optional_max_captures = identity_max_captures.min(budgeted_captures);
+        let optional_max_matches = identity_limits.matches.min(budgeted_matches);
+        let optional_max_captures = identity_limits.captures.min(budgeted_captures);
         if optional_max_matches == 0 || optional_max_captures == 0 || max_facts == 0 {
             return Ok(QueryExtraction {
                 candidates: identity_candidates,
@@ -473,6 +411,42 @@ impl QueryPack {
             limit,
             fact_limit: max_facts,
         })
+    }
+
+    pub(crate) fn extract_identity(
+        &self,
+        family: GrammarFamily,
+        tree: &tree_sitter::Tree,
+        source: &[u8],
+        max_nodes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<QueryCandidate>, AdapterError> {
+        cancellation.check()?;
+        let limits = identity_scan_limits(max_nodes)?;
+        let mut candidates = Vec::new();
+        let limit = self.scan_query(
+            &self.identity_query,
+            QueryInput {
+                family,
+                tree,
+                source,
+                cancellation,
+            },
+            limits,
+            |mut candidate| {
+                if candidate.role.belongs_to_identity_closure() {
+                    // Only scopes that contain a declaration are mandatory.
+                    // Runtime marks that subset after canonical deduplication.
+                    candidate.required = candidate.role != StructuralRole::Scope;
+                    push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(limit) = limit {
+            return Err(identity_scan_limit(limit, limits.matches, limits.captures));
+        }
+        Ok(candidates)
     }
 
     fn scan_query(
@@ -533,6 +507,19 @@ impl QueryPack {
             Ok(limit)
         }
     }
+}
+
+fn identity_scan_limits(max_nodes: usize) -> Result<QueryScanLimits, AdapterError> {
+    Ok(QueryScanLimits {
+        matches: max_nodes
+            .checked_mul(8)
+            .ok_or_else(|| query_failure("query-match-accounting"))?
+            .min(HARD_MAX_QUERY_MATCHES),
+        captures: max_nodes
+            .checked_mul(8)
+            .ok_or_else(|| query_failure("query-capture-accounting"))?
+            .min(HARD_MAX_QUERY_CAPTURES),
+    })
 }
 
 pub(crate) struct QueryPackRegistry {
@@ -972,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_identity_scan_fails_as_soon_as_unique_facts_exceed_budget() {
+    fn mandatory_identity_scan_preserves_demand_beyond_the_optional_budget() {
         let mut source = b"fn first() {}\n".to_vec();
         source.extend(std::iter::repeat_n(b"fn repeated() {}\n".as_slice(), 256).flatten());
         let mut parser = tree_sitter::Parser::new();
@@ -985,25 +972,24 @@ mod tests {
             .get(GrammarFamily::Rust)
             .expect("Rust query pack exists");
 
-        let error = match pack.extract(
-            GrammarFamily::Rust,
-            &tree,
-            &source,
-            10_000,
-            1,
-            &Cancellation::new(),
-        ) {
-            Ok(_) => panic!("a partial mandatory identity scan must not commit"),
-            Err(error) => error,
-        };
+        let extraction = pack
+            .extract(
+                GrammarFamily::Rust,
+                &tree,
+                &source,
+                10_000,
+                1,
+                &Cancellation::new(),
+            )
+            .expect("identity demand remains available for exact normalization");
 
-        assert_eq!(
-            error,
-            AdapterError::Sink(SinkError::StreamLimit {
-                resource: ResourceKind::Records,
-                observed: 2,
-                limit: 1,
-            })
+        assert!(
+            extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.required)
+                .count()
+                > 1
         );
     }
 }

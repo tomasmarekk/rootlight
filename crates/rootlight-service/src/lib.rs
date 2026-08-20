@@ -187,7 +187,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/7";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/8";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -3950,6 +3950,7 @@ pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
     extensions: ExtensionSupport,
+    structural_parser: Arc<TreeSitterProvider>,
     analyzers: BTreeMap<String, TreeSitterAnalyzer>,
     project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     // The canonical-root digest remains an internal lookup key. Durable mode
@@ -4773,6 +4774,7 @@ impl FirstSliceService {
             config,
             analysis_limits,
             extensions: ExtensionSupport::default(),
+            structural_parser: parser,
             analyzers,
             project_analyzer,
             repositories: BTreeMap::new(),
@@ -5777,7 +5779,6 @@ impl FirstSliceService {
             .try_reserve_exact(manifest.inputs.len().saturating_sub(source_count))
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
-        let mut source_analysis_limits = BTreeMap::new();
         for input in &manifest.inputs {
             check_cancellation(cancellation)?;
             let relative = RelativePath::parse(Path::new(&input.path))
@@ -5832,31 +5833,6 @@ impl FirstSliceService {
                 origins: Vec::new(),
             });
         }
-        let total_analysis_weight = sources.iter().try_fold(0_usize, |total, source| {
-            analysis_partition_weight(source.snapshot.content().len())
-                .and_then(|weight| total.checked_add(weight).ok_or(FirstSliceError::Limits))
-        })?;
-        for source in &sources {
-            let analysis_limits = partitioned_analysis_limits(
-                &self.analysis_limits,
-                source_count,
-                total_analysis_weight,
-                analysis_partition_weight(source.snapshot.content().len())?,
-            )?;
-            if source_analysis_limits
-                .insert(source.snapshot.file(), analysis_limits)
-                .is_some()
-            {
-                return Err(FirstSliceError::Identity.into());
-            }
-        }
-        let mut structural_fact_ledger = StructuralFactLedger::new(
-            MAX_FIRST_SLICE_STRUCTURAL_FACTS
-                .min(self.analysis_limits.syntax_stream().max_records()),
-            source_analysis_limits
-                .values()
-                .map(|limits| limits.syntax_stream().max_records()),
-        )?;
         attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
         observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Snapshot,
@@ -5953,6 +5929,97 @@ impl FirstSliceService {
         )?;
         observe_planning(&incremental_plan.planning)
             .map_err(FirstSlicePreparationError::PlanningObserver)?;
+        observe_progress(FirstSliceIndexProgress::observed(
+            FirstSliceIndexStage::Analysis,
+            2,
+            files_examined,
+            bytes_examined,
+            0,
+        ));
+        let mut structural_requirements = BTreeMap::new();
+        let mut preflight_files = 0_u64;
+        let mut preflight_bytes = 0_u64;
+        let mut last_reported_preflight_files = 0_u64;
+        for input in &sources {
+            check_cancellation(cancellation)?;
+            let snapshot = &input.snapshot;
+            let language = source_languages
+                .get(&snapshot.file())
+                .ok_or(FirstSliceError::Adapter)?;
+            let artifact_id = parser_artifact_id(snapshot.file());
+            let reusable_entry = incremental_plan
+                .reusable_parser_artifacts
+                .contains(&artifact_id)
+                .then(|| {
+                    parent_structural_artifacts
+                        .and_then(|artifacts| artifacts.get(snapshot.file()))
+                        .filter(|entry| entry.id == artifact_id)
+                })
+                .flatten();
+            let (required, parsed_source_bytes) = if let Some(entry) = reusable_entry {
+                (
+                    entry
+                        .artifact
+                        .required_syntax_fact_count(cancellation)
+                        .map_err(|error| map_adapter_error(error, cancellation))?,
+                    0_u64,
+                )
+            } else {
+                let request = structural_analysis_request(
+                    repository,
+                    generation,
+                    snapshot,
+                    input.generated,
+                    language,
+                    &self.analysis_limits,
+                )?;
+                let parse_request = request.to_parse_request();
+                let required = match self
+                    .structural_parser
+                    .required_syntax_fact_count(&parse_request, cancellation)
+                {
+                    Ok(required) => required,
+                    Err(error) if is_invalid_utf8_adapter_failure(&error) => 0,
+                    Err(error) => return Err(map_adapter_error(error, cancellation).into()),
+                };
+                (
+                    required,
+                    u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
+                )
+            };
+            let weight = analysis_partition_weight(snapshot.content().len())?;
+            if structural_requirements
+                .insert(snapshot.file(), (weight, required))
+                .is_some()
+            {
+                return Err(FirstSliceError::Identity.into());
+            }
+            preflight_files = preflight_files
+                .checked_add(1)
+                .ok_or(FirstSliceError::Limits)?;
+            preflight_bytes = preflight_bytes
+                .checked_add(parsed_source_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            if preflight_files == 1
+                || preflight_files.saturating_sub(last_reported_preflight_files)
+                    >= DISCOVERY_PROGRESS_INTERVAL_FILES
+            {
+                last_reported_preflight_files = preflight_files;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Analysis,
+                    2,
+                    files_examined
+                        .checked_add(preflight_files)
+                        .ok_or(FirstSliceError::Limits)?,
+                    bytes_examined
+                        .checked_add(preflight_bytes)
+                        .ok_or(FirstSliceError::Limits)?,
+                    0,
+                ));
+            }
+        }
+        let source_analysis_limits =
+            required_structural_analysis_limits(&self.analysis_limits, &structural_requirements)?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
         let mut disposition_append_state = DocumentAppendState::from_document(&document)?;
         for input in &unsupported_sources {
@@ -5977,13 +6044,6 @@ impl FirstSliceService {
         let mut analyzed_files = 0_u64;
         let mut analyzed_bytes = 0_u64;
         let mut last_reported_analyzed_files = 0_u64;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Analysis,
-            2,
-            files_examined,
-            bytes_examined,
-            0,
-        ));
         for input in &sources {
             check_cancellation(cancellation)?;
             let snapshot = &input.snapshot;
@@ -5994,10 +6054,9 @@ impl FirstSliceService {
                 .analyzers
                 .get(language)
                 .ok_or(FirstSliceError::Adapter)?;
-            let partitioned_limits = source_analysis_limits
+            let analysis_limits = source_analysis_limits
                 .get(&snapshot.file())
                 .ok_or(FirstSliceError::Adapter)?;
-            let analysis_limits = structural_fact_ledger.admit(partitioned_limits)?;
             let artifact_id = parser_artifact_id(snapshot.file());
             let reusable_entry = incremental_plan
                 .reusable_parser_artifacts
@@ -6007,30 +6066,18 @@ impl FirstSliceService {
                         .and_then(|artifacts| artifacts.get(snapshot.file()))
                         .filter(|entry| {
                             entry.id == artifact_id
-                                && entry.artifact.is_compatible_with_limits(&analysis_limits)
+                                && entry.artifact.is_compatible_with_limits(analysis_limits)
                         })
                 })
                 .flatten();
-            let source = SourceRef::new(
+            let request = structural_analysis_request(
                 repository,
                 generation,
-                SourceSpan::new(snapshot.file(), 0, snapshot.metadata().length)
-                    .map_err(|_| FirstSliceError::Identity)?,
-                snapshot.content_hash(),
-                None,
-            );
-            let request = AnalysisRequest::new_with_parse_context(
-                GenerationBoundSnapshot::new(snapshot, &source)
-                    .map_err(|_| FirstSliceError::Adapter)?,
-                LanguageId::new(language).map_err(|_| FirstSliceError::Adapter)?,
-                EncodingId::utf8(),
-                Vec::new(),
-                analysis_tier_for_language(language),
-                BuildContextIdentity::new(first_slice_build_context()),
-                &analysis_limits,
-            )
-            .map_err(|_| FirstSliceError::Adapter)?
-            .with_generated_status(input.generated);
+                snapshot,
+                input.generated,
+                language,
+                analysis_limits,
+            )?;
             let (file_document, artifact, normalized, normalized_reused) =
                 if let Some(entry) = reusable_entry {
                     // Normalized reuse is optional. Any policy, limit, extension,
@@ -6130,13 +6177,6 @@ impl FirstSliceService {
                         Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                     }
                 };
-            let retained_syntax_facts = artifact
-                .as_ref()
-                .map_or(0, |artifact| artifact.syntax_fact_count());
-            structural_fact_ledger.settle(
-                analysis_limits.syntax_stream().max_records(),
-                retained_syntax_facts,
-            )?;
             if !normalized_reused {
                 lowered_files = lowered_files
                     .checked_add(1)
@@ -6197,9 +6237,13 @@ impl FirstSliceService {
                     FirstSliceIndexStage::Analysis,
                     2,
                     files_examined
+                        .checked_add(preflight_files)
+                        .ok_or(FirstSliceError::Limits)?
                         .checked_add(analyzed_files)
                         .ok_or(FirstSliceError::Limits)?,
                     bytes_examined
+                        .checked_add(preflight_bytes)
+                        .ok_or(FirstSliceError::Limits)?
                         .checked_add(analyzed_bytes)
                         .ok_or(FirstSliceError::Limits)?,
                     0,
@@ -6207,9 +6251,13 @@ impl FirstSliceService {
             }
         }
         let structurally_examined_files = files_examined
+            .checked_add(preflight_files)
+            .ok_or(FirstSliceError::Limits)?
             .checked_add(analyzed_files)
             .ok_or(FirstSliceError::Limits)?;
         let structurally_examined_bytes = bytes_examined
+            .checked_add(preflight_bytes)
+            .ok_or(FirstSliceError::Limits)?
             .checked_add(analyzed_bytes)
             .ok_or(FirstSliceError::Limits)?;
         let (provider_files, provider_bytes) = self.append_best_available_documents(
@@ -10727,6 +10775,8 @@ pub enum FirstSliceResource {
     IncrementalLogicalBytes,
     /// Top-level normalized IR records.
     Records,
+    /// Parser syntax facts required to preserve declaration identity.
+    RequiredSyntaxFacts,
     /// Normalized file records.
     Files,
     /// Normalized entity records.
@@ -10819,6 +10869,7 @@ impl FirstSliceResource {
             Self::IncrementalTraceEntries => "incremental_trace_entries",
             Self::IncrementalLogicalBytes => "incremental_logical_bytes",
             Self::Records => "records",
+            Self::RequiredSyntaxFacts => "required_syntax_facts",
             Self::Files => "files",
             Self::Entities => "entities",
             Self::Occurrences => "occurrences",
@@ -15454,6 +15505,7 @@ const fn adapter_resource(resource: ResourceKind) -> Option<FirstSliceResource> 
     match resource {
         ResourceKind::Batches => Some(FirstSliceResource::Batches),
         ResourceKind::Records => Some(FirstSliceResource::Records),
+        ResourceKind::RequiredSyntaxFacts => Some(FirstSliceResource::RequiredSyntaxFacts),
         ResourceKind::OutputBytes => Some(FirstSliceResource::OutputBytes),
         ResourceKind::Diagnostics => Some(FirstSliceResource::Diagnostics),
         ResourceKind::DiagnosticBytes => Some(FirstSliceResource::DiagnosticBytes),
@@ -15816,61 +15868,140 @@ fn analysis_partition_weight(source_bytes: usize) -> Result<usize, FirstSliceErr
         .ok_or(FirstSliceError::Limits)
 }
 
-#[derive(Debug)]
-struct StructuralFactLedger {
-    maximum_records: usize,
-    available_records: usize,
+fn structural_analysis_request<'a>(
+    repository: RepositoryId,
+    generation: GenerationId,
+    snapshot: &'a SourceSnapshot,
+    generated: bool,
+    language: &str,
+    limits: &'a AnalysisLimits,
+) -> Result<AnalysisRequest<'a>, FirstSliceError> {
+    let source = SourceRef::new(
+        repository,
+        generation,
+        SourceSpan::new(snapshot.file(), 0, snapshot.metadata().length)
+            .map_err(|_| FirstSliceError::Identity)?,
+        snapshot.content_hash(),
+        None,
+    );
+    AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(snapshot, &source).map_err(|_| FirstSliceError::Adapter)?,
+        LanguageId::new(language).map_err(|_| FirstSliceError::Adapter)?,
+        EncodingId::utf8(),
+        Vec::new(),
+        analysis_tier_for_language(language),
+        BuildContextIdentity::new(first_slice_build_context()),
+        limits,
+    )
+    .map_err(|_| FirstSliceError::Adapter)
+    .map(|request| request.with_generated_status(generated))
 }
 
-impl StructuralFactLedger {
-    fn new(
-        maximum_records: usize,
-        partitions: impl IntoIterator<Item = usize>,
-    ) -> Result<Self, FirstSliceError> {
-        let reserved_records = partitions
-            .into_iter()
-            .try_fold(0_usize, |total, partition| {
-                total.checked_add(partition).ok_or(FirstSliceError::Limits)
-            })?;
-        let available_records = maximum_records
-            .checked_sub(reserved_records)
-            .ok_or(FirstSliceError::Limits)?;
-        Ok(Self {
-            maximum_records,
-            available_records,
-        })
+fn required_structural_analysis_limits(
+    limits: &AnalysisLimits,
+    requirements: &BTreeMap<FileId, (usize, usize)>,
+) -> Result<BTreeMap<FileId, AnalysisLimits>, FirstSliceError> {
+    if requirements.is_empty() {
+        return Ok(BTreeMap::new());
     }
-
-    fn admit(&self, partition: &AnalysisLimits) -> Result<AnalysisLimits, FirstSliceError> {
-        let admitted_records = partition
-            .syntax_stream()
-            .max_records()
-            .checked_add(self.available_records)
+    let record_budget = MAX_FIRST_SLICE_STRUCTURAL_FACTS.min(limits.syntax_stream().max_records());
+    let required_records = requirements
+        .values()
+        .try_fold(0_usize, |total, (_, required)| {
+            total.checked_add(*required).ok_or(FirstSliceError::Limits)
+        })?;
+    if required_records > record_budget {
+        return Err(resource_limit(
+            FirstSliceResource::RequiredSyntaxFacts,
+            required_records,
+            record_budget,
+        ));
+    }
+    let minimum_records = requirements
+        .values()
+        .try_fold(0_usize, |total, (_, required)| {
+            total
+                .checked_add((*required).max(1))
+                .ok_or(FirstSliceError::Limits)
+        })?;
+    if minimum_records > record_budget {
+        return Err(resource_limit(
+            FirstSliceResource::Records,
+            minimum_records,
+            record_budget,
+        ));
+    }
+    let total_weight = requirements
+        .values()
+        .try_fold(0_usize, |total, (weight, _)| {
+            total.checked_add(*weight).ok_or(FirstSliceError::Limits)
+        })?;
+    let optional_budget = record_budget
+        .checked_sub(minimum_records)
+        .ok_or(FirstSliceError::Limits)?;
+    let source_files = requirements.len();
+    let mut partitions = BTreeMap::new();
+    let mut partitioned_records = 0_usize;
+    for (file, (weight, required)) in requirements {
+        let optional_records =
+            partitioned_record_budget(optional_budget, source_files, total_weight, *weight)?;
+        let maximum_records = (*required)
+            .max(1)
+            .checked_add(optional_records)
             .ok_or(FirstSliceError::Limits)?;
-        if admitted_records > self.maximum_records {
-            return Err(FirstSliceError::Limits);
+        partitioned_records = partitioned_records
+            .checked_add(maximum_records)
+            .ok_or(FirstSliceError::Limits)?;
+        if partitions
+            .insert(
+                *file,
+                analysis_limits_with_syntax_records(limits, maximum_records)?,
+            )
+            .is_some()
+        {
+            return Err(FirstSliceError::Identity);
         }
-        analysis_limits_with_syntax_records(partition, admitted_records)
     }
-
-    fn settle(
-        &mut self,
-        admitted_records: usize,
-        retained_records: usize,
-    ) -> Result<(), FirstSliceError> {
-        if admitted_records > self.maximum_records || retained_records > admitted_records {
-            return Err(FirstSliceError::Limits);
-        }
-        // Only unused capacity from completed files becomes available. Static
-        // partitions for every future file remain reserved, so borrowing can
-        // never overcommit the repository-wide syntax-fact ceiling.
-        self.available_records = admitted_records
-            .checked_sub(retained_records)
-            .ok_or(FirstSliceError::Limits)?;
-        Ok(())
+    if partitioned_records > record_budget {
+        return Err(FirstSliceError::Limits);
     }
+    Ok(partitions)
 }
 
+fn partitioned_record_budget(
+    record_budget: usize,
+    source_files: usize,
+    total_source_weight: usize,
+    file_source_weight: usize,
+) -> Result<usize, FirstSliceError> {
+    if source_files == 0 {
+        return Ok(record_budget);
+    }
+    if total_source_weight == 0 {
+        return record_budget
+            .checked_div(source_files)
+            .ok_or(FirstSliceError::Limits);
+    }
+    if file_source_weight > total_source_weight {
+        return Err(FirstSliceError::Limits);
+    }
+    let proportional_budget = record_budget / 2;
+    let even_budget = record_budget
+        .checked_sub(proportional_budget)
+        .ok_or(FirstSliceError::Limits)?;
+    let even_records = even_budget
+        .checked_div(source_files)
+        .ok_or(FirstSliceError::Limits)?;
+    let proportional_records = proportional_budget
+        .checked_mul(file_source_weight)
+        .and_then(|value| value.checked_div(total_source_weight))
+        .ok_or(FirstSliceError::Limits)?;
+    even_records
+        .checked_add(proportional_records)
+        .ok_or(FirstSliceError::Limits)
+}
+
+#[cfg(test)]
 fn partitioned_analysis_limits(
     limits: &AnalysisLimits,
     source_files: usize,
@@ -15882,31 +16013,12 @@ fn partitioned_analysis_limits(
     }
     let syntax = limits.syntax_stream();
     let record_budget = MAX_FIRST_SLICE_STRUCTURAL_FACTS.min(syntax.max_records());
-    let maximum_records = if total_source_weight == 0 {
-        record_budget
-            .checked_div(source_files)
-            .ok_or(FirstSliceError::Limits)?
-    } else {
-        if file_source_weight > total_source_weight {
-            return Err(FirstSliceError::Limits);
-        }
-        // Keep small files queryable while giving large source units enough facts to
-        // retain symbols that occur late in the parse stream.
-        let proportional_budget = record_budget / 2;
-        let even_budget = record_budget
-            .checked_sub(proportional_budget)
-            .ok_or(FirstSliceError::Limits)?;
-        let even_records = even_budget
-            .checked_div(source_files)
-            .ok_or(FirstSliceError::Limits)?;
-        let proportional_records = proportional_budget
-            .checked_mul(file_source_weight)
-            .and_then(|value| value.checked_div(total_source_weight))
-            .ok_or(FirstSliceError::Limits)?;
-        even_records
-            .checked_add(proportional_records)
-            .ok_or(FirstSliceError::Limits)?
-    }
+    let maximum_records = partitioned_record_budget(
+        record_budget,
+        source_files,
+        total_source_weight,
+        file_source_weight,
+    )?
     .max(1)
     .min(syntax.max_records());
     analysis_limits_with_syntax_records(limits, maximum_records)
@@ -22002,7 +22114,57 @@ mod tests {
     }
 
     #[test]
-    fn repository_analysis_reuses_prior_unused_fact_capacity_for_identity_closure() {
+    fn structural_fact_preflight_preserves_required_minima_within_the_global_budget() {
+        let base = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
+        let limits =
+            analysis_limits_with_syntax_records(&base, 20).expect("test syntax budget is valid");
+        let requirements = BTreeMap::from([
+            (FileId::from_bytes([1; 20]), (1, 2)),
+            (FileId::from_bytes([2; 20]), (16, 12)),
+        ]);
+
+        let partitions = required_structural_analysis_limits(&limits, &requirements)
+            .expect("mandatory minima fit the global budget");
+        let total = partitions
+            .values()
+            .map(|limits| limits.syntax_stream().max_records())
+            .sum::<usize>();
+
+        assert!(total <= 20);
+        for (file, (_, required)) in requirements {
+            assert!(
+                partitions
+                    .get(&file)
+                    .expect("every source receives a partition")
+                    .syntax_stream()
+                    .max_records()
+                    >= required
+            );
+        }
+    }
+
+    #[test]
+    fn structural_fact_preflight_reports_exact_required_overflow() {
+        let base = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
+        let limits =
+            analysis_limits_with_syntax_records(&base, 20).expect("test syntax budget is valid");
+        let requirements = BTreeMap::from([
+            (FileId::from_bytes([1; 20]), (1, 11)),
+            (FileId::from_bytes([2; 20]), (1, 10)),
+        ]);
+
+        assert_eq!(
+            required_structural_analysis_limits(&limits, &requirements),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::RequiredSyntaxFacts,
+                observed: 21,
+                limit: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn repository_analysis_reserves_identity_demand_before_optional_facts() {
         let fixture = TempDir::new().expect("fixture root exists");
         let sparse = "struct A;\n";
         let dense = concat!(
@@ -22012,8 +22174,8 @@ mod tests {
             "fn delta() {}\n",
             "fn epsilon() {}\n",
         );
-        fs::write(fixture.path().join("a.rs"), sparse).expect("sparse source writes");
-        fs::write(fixture.path().join("z.rs"), dense).expect("dense source writes");
+        fs::write(fixture.path().join("a.rs"), dense).expect("dense source writes");
+        fs::write(fixture.path().join("z.rs"), sparse).expect("sparse source writes");
 
         let base = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
         let limits =
@@ -22039,7 +22201,7 @@ mod tests {
                 FirstSliceIndexMode::Structural,
                 &deadline(),
             )
-            .expect("unused prior capacity admits the dense identity closure");
+            .expect("mandatory demand is reserved before optional facts");
         let document = service
             .generations
             .generation(receipt.generation)
@@ -22646,6 +22808,21 @@ mod tests {
             ),
             FirstSliceError::ResourceLimit {
                 resource: FirstSliceResource::Records,
+                observed: 41,
+                limit: 40,
+            }
+        );
+        assert_eq!(
+            map_adapter_error(
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: 41,
+                    limit: 40,
+                }),
+                &cancellation,
+            ),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::RequiredSyntaxFacts,
                 observed: 41,
                 limit: 40,
             }

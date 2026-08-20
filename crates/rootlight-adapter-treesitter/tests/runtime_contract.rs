@@ -651,6 +651,10 @@ fn syntax_extraction_rejects_tiny_output_before_partial_identity_materialization
         "rust",
         Vec::new(),
     );
+    let required = provider
+        .required_syntax_fact_count(&request, &deadline(Duration::from_secs(30)))
+        .expect("identity demand preflight completes");
+    assert!(required > 1);
 
     let error = execute_parse(
         &provider,
@@ -663,9 +667,9 @@ fn syntax_extraction_rejects_tiny_output_before_partial_identity_materialization
     assert_eq!(
         error,
         AdapterError::Sink(SinkError::StreamLimit {
-            resource: ResourceKind::Records,
-            observed: 2,
-            limit: 1,
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed: required,
+            limit: 0,
         })
     );
 }

@@ -4,6 +4,7 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::Arc,
@@ -100,6 +101,23 @@ impl TreeSitterStructuralArtifact {
     #[must_use]
     pub fn syntax_fact_count(&self) -> usize {
         self.parse_output.facts().len()
+    }
+
+    /// Returns the exact retained declaration-identity syntax-fact demand.
+    ///
+    /// Complete identity facts are retained even when optional extraction is
+    /// bounded, so an exact-match incremental successor can reuse this count
+    /// without reparsing unchanged source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for cancellation, invalid retained parent
+    /// identity, accounting overflow, or bounded allocation failure.
+    pub fn required_syntax_fact_count(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        required_syntax_fact_count_from_output(&self.parse_output, cancellation)
     }
 
     /// Returns whether this artifact can be replayed under the supplied limits.
@@ -442,6 +460,78 @@ impl TreeSitterStructuralArtifact {
             && context_matches
             && self.is_compatible_with_limits(request.limits()))
     }
+}
+
+fn required_syntax_fact_count_from_output(
+    output: &ParseOutput,
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    cancellation.check()?;
+    let facts = output.facts();
+    let mut contains_declaration = Vec::new();
+    contains_declaration
+        .try_reserve_exact(facts.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    contains_declaration.resize(facts.len(), false);
+    for (index, fact) in facts.iter().enumerate() {
+        check_periodically(index, cancellation)?;
+        contains_declaration[index] = fact.kind() == SyntaxFactKind::Declaration;
+    }
+    let mut propagation_order = Vec::new();
+    propagation_order
+        .try_reserve_exact(facts.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    propagation_order.extend(0..facts.len());
+    cancellation.check()?;
+    // Parent-local IDs are canonical but not ordered before their children in
+    // every grammar. Descending depth makes one propagation pass sufficient;
+    // the atomic sort is bounded by the retained syntax-fact ceiling.
+    propagation_order
+        .sort_unstable_by_key(|index| Reverse((facts[*index].depth(), facts[*index].local_id())));
+    cancellation.check()?;
+    for (visit, index) in propagation_order.into_iter().enumerate() {
+        check_periodically(visit, cancellation)?;
+        if !contains_declaration[index] {
+            continue;
+        }
+        let Some(parent_local_id) = facts[index].parent() else {
+            continue;
+        };
+        let parent = usize::try_from(parent_local_id)
+            .ok()
+            .and_then(|parent| parent.checked_sub(1))
+            .ok_or_else(|| provider_failure("treesitter-structural-artifact-parent"))?;
+        facts
+            .get(parent)
+            .filter(|parent_fact| {
+                parent_fact.local_id() == parent_local_id
+                    && parent_fact.depth() < facts[index].depth()
+            })
+            .ok_or_else(|| provider_failure("treesitter-structural-artifact-parent"))?;
+        contains_declaration[parent] = true;
+    }
+
+    let mut required = 0usize;
+    for (index, fact) in facts.iter().enumerate() {
+        check_periodically(index, cancellation)?;
+        let identity_fact = matches!(
+            fact.kind(),
+            SyntaxFactKind::Root
+                | SyntaxFactKind::Module
+                | SyntaxFactKind::Declaration
+                | SyntaxFactKind::Signature
+        ) || (fact.kind() == SyntaxFactKind::Scope
+            && contains_declaration[index])
+            || (fact.kind() == SyntaxFactKind::Occurrence
+                && fact.syntax_kind().as_str().ends_with(".definition"));
+        if identity_fact {
+            required = required
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("treesitter-structural-artifact-accounting"))?;
+        }
+    }
+    cancellation.check()?;
+    Ok(required)
 }
 
 fn analysis_limit_shape_matches(left: &AnalysisLimits, right: &AnalysisLimits) -> bool {

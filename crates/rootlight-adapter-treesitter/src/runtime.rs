@@ -113,6 +113,47 @@ impl TreeSitterProvider {
         })
     }
 
+    /// Measures the exact declaration-identity syntax facts required by one source.
+    ///
+    /// The preflight performs the same bounded parse, canonical query
+    /// deduplication, included-range restriction, and declaration-scope closure
+    /// as [`ParseProvider::parse`], but does not scan or retain optional facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for unsupported or invalid input, cancellation,
+    /// parser work limits, query hard limits, or bounded allocation failure.
+    pub fn required_syntax_fact_count(
+        &self,
+        request: &ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        let prepared = self.prepare_tree(
+            request,
+            None,
+            &[],
+            self.config.default_settings(),
+            cancellation,
+        )?;
+        if !prepared.traversal.fully_traversed {
+            cancellation.check()?;
+            return Ok(0);
+        }
+        let pack = self
+            .query_packs
+            .get(prepared.family)
+            .ok_or_else(|| provider_failure("query-pack-missing"))?;
+        let candidates = pack.extract_identity(
+            prepared.family,
+            &prepared.tree,
+            request.source().bytes(),
+            request.limits().max_syntax_nodes(),
+            cancellation,
+        )?;
+        normalize_query_candidates(candidates, request, usize::MAX, cancellation)
+            .map(|normalized| normalized.required)
+    }
+
     /// Executes an admitted incremental parse and commits bounded output.
     ///
     /// Invalid or stale reuse input falls back to a clean parse and returns an
@@ -173,6 +214,80 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<RawParseWithPrevious, AdapterError> {
+        let PreparedParse {
+            family,
+            identity,
+            tree,
+            traversal,
+            reuse_status,
+            reuse_key,
+        } = self.prepare_tree(request, previous, edits, settings, cancellation)?;
+        let source_bytes = request.source().bytes();
+        emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
+        let extraction = if traversal.fully_traversed {
+            self.extract_syntax_facts(family, &tree, request, sink, cancellation)?
+        } else {
+            ExtractionReport { limited: false }
+        };
+        let usage = sink.staged_usage();
+        let coverage_status = if extraction.limited && traversal.coverage != CoverageStatus::Unknown
+        {
+            CoverageStatus::Bounded
+        } else {
+            traversal.coverage
+        };
+        let coverage = CoverageReport::new(
+            AnalysisTier::TierD,
+            coverage_status,
+            source_bytes.len(),
+            traversal.covered_source_bytes,
+            traversal
+                .skipped_regions
+                .checked_add(usize::from(extraction.limited))
+                .ok_or_else(|| provider_failure("coverage-accounting"))?,
+            Vec::new(),
+        )
+        .map_err(AdapterError::InvalidReport)?;
+        let resources = ResourceUsage::new(
+            source_bytes.len(),
+            usage.records(),
+            traversal.processed_nodes,
+            traversal.max_depth,
+            None,
+            usage,
+        );
+        let report = WorkReport::new(
+            coverage,
+            resources,
+            StreamEnd::new(sink.next_sequence(), usage),
+        )
+        .map_err(AdapterError::InvalidReport)?;
+        let pending = if traversal.fully_traversed {
+            Some(PendingParse {
+                identity,
+                tree,
+                nodes: traversal.processed_nodes,
+            })
+        } else {
+            None
+        };
+        Ok(RawParseWithPrevious {
+            report,
+            pending,
+            reuse_status,
+            reuse_key,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_tree(
+        &self,
+        request: &ParseRequest<'_>,
+        previous: Option<&PreviousParse>,
+        edits: &[SourceEdit],
+        settings: ParserSettings,
+        cancellation: &Cancellation,
+    ) -> Result<PreparedParse, AdapterError> {
         cancellation.check()?;
         if settings.input_chunk_bytes() > self.config.max_source_bytes() {
             return Err(provider_failure("treesitter-settings"));
@@ -316,57 +431,11 @@ impl TreeSitterProvider {
             cancellation,
         )?;
         cancellation.check()?;
-        emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
-        let extraction = if traversal.fully_traversed {
-            self.extract_syntax_facts(family, &tree, request, sink, cancellation)?
-        } else {
-            ExtractionReport { limited: false }
-        };
-        let usage = sink.staged_usage();
-        let coverage_status = if extraction.limited && traversal.coverage != CoverageStatus::Unknown
-        {
-            CoverageStatus::Bounded
-        } else {
-            traversal.coverage
-        };
-        let coverage = CoverageReport::new(
-            AnalysisTier::TierD,
-            coverage_status,
-            source_bytes.len(),
-            traversal.covered_source_bytes,
-            traversal
-                .skipped_regions
-                .checked_add(usize::from(extraction.limited))
-                .ok_or_else(|| provider_failure("coverage-accounting"))?,
-            Vec::new(),
-        )
-        .map_err(AdapterError::InvalidReport)?;
-        let resources = ResourceUsage::new(
-            source_bytes.len(),
-            usage.records(),
-            traversal.processed_nodes,
-            traversal.max_depth,
-            None,
-            usage,
-        );
-        let report = WorkReport::new(
-            coverage,
-            resources,
-            StreamEnd::new(sink.next_sequence(), usage),
-        )
-        .map_err(AdapterError::InvalidReport)?;
-        let pending = if traversal.fully_traversed {
-            Some(PendingParse {
-                identity,
-                tree,
-                nodes: traversal.processed_nodes,
-            })
-        } else {
-            None
-        };
-        Ok(RawParseWithPrevious {
-            report,
-            pending,
+        Ok(PreparedParse {
+            family,
+            identity,
+            tree,
+            traversal,
             reuse_status,
             reuse_key,
         })
@@ -521,6 +590,15 @@ impl RawParseWithPrevious {
 
 struct RawContinuation {
     pending: Option<PendingParse>,
+    reuse_status: ReuseStatus,
+    reuse_key: ParseReuseKey,
+}
+
+struct PreparedParse {
+    family: GrammarFamily,
+    identity: ParseIdentity,
+    tree: Tree,
+    traversal: TraversalReport,
     reuse_status: ReuseStatus,
     reuse_key: ParseReuseKey,
 }
@@ -1274,6 +1352,13 @@ struct ExtractionReport {
 #[derive(Debug)]
 struct NormalizedFacts {
     facts: Vec<SyntaxFact>,
+    required: usize,
+    limited: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandidateRetention {
+    required: usize,
     limited: bool,
 }
 
@@ -1309,8 +1394,11 @@ fn normalize_query_candidates(
     })?;
     dedup_query_candidates(&mut candidates, cancellation)?;
     mark_required_scope_closure(&mut candidates, cancellation)?;
+    // Included ranges can remove declarations and their enclosing scopes. Keep
+    // every mandatory candidate until that restriction establishes the exact
+    // demand, while pruning optional work to the caller's bounded capacity.
     let mut limited =
-        retain_required_candidates_within_limit(&mut candidates, max_facts, cancellation)?;
+        prune_optional_candidates_within_limit(&mut candidates, max_facts, cancellation)?.limited;
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
@@ -1383,7 +1471,9 @@ fn normalize_query_candidates(
     })?;
     dedup_query_candidates(&mut restricted, cancellation)?;
     mark_required_scope_closure(&mut restricted, cancellation)?;
-    limited |= retain_required_candidates_within_limit(&mut restricted, max_facts, cancellation)?;
+    let retention =
+        retain_required_candidates_within_limit(&mut restricted, max_facts, cancellation)?;
+    limited |= retention.limited;
     sort_cancellable_by(&mut restricted, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
@@ -1507,7 +1597,11 @@ fn normalize_query_candidates(
         ));
     }
     cancellation.check()?;
-    Ok(NormalizedFacts { facts, limited })
+    Ok(NormalizedFacts {
+        facts,
+        required: retention.required,
+        limited,
+    })
 }
 
 fn sort_cancellable_by<T: Copy>(
@@ -1773,7 +1867,23 @@ fn retain_required_candidates_within_limit(
     candidates: &mut Vec<QueryCandidate>,
     maximum: usize,
     cancellation: &Cancellation,
-) -> Result<bool, AdapterError> {
+) -> Result<CandidateRetention, AdapterError> {
+    let retention = prune_optional_candidates_within_limit(candidates, maximum, cancellation)?;
+    if retention.required > maximum {
+        return Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed: retention.required,
+            limit: maximum,
+        }));
+    }
+    Ok(retention)
+}
+
+fn prune_optional_candidates_within_limit(
+    candidates: &mut Vec<QueryCandidate>,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<CandidateRetention, AdapterError> {
     let mut required = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
@@ -1785,23 +1895,23 @@ fn retain_required_candidates_within_limit(
                 .ok_or_else(|| provider_failure("query-identity-closure-accounting"))?;
         }
     }
-    if required > maximum {
-        return Err(AdapterError::Sink(SinkError::StreamLimit {
-            resource: ResourceKind::Records,
-            observed: required,
-            limit: maximum,
-        }));
-    }
-    if candidates.len() <= maximum {
+    let retained = maximum.max(required);
+    if candidates.len() <= retained {
         cancellation.check()?;
-        return Ok(false);
+        return Ok(CandidateRetention {
+            required,
+            limited: false,
+        });
     }
     sort_cancellable_by(candidates, cancellation, |left, right| {
         left.selection_rank().cmp(&right.selection_rank())
     })?;
-    candidates.truncate(maximum);
+    candidates.truncate(retained);
     cancellation.check()?;
-    Ok(true)
+    Ok(CandidateRetention {
+        required,
+        limited: true,
+    })
 }
 
 fn candidate_within_included_range(

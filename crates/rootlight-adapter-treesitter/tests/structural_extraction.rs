@@ -353,6 +353,9 @@ fn sink_fact_pressure_fails_before_partial_identity_commit() {
         "rust",
         Vec::new(),
     );
+    let required = provider
+        .required_syntax_fact_count(&request, &deadline())
+        .expect("identity demand preflight completes");
     let error = execute_parse(
         &provider,
         &request,
@@ -364,8 +367,8 @@ fn sink_fact_pressure_fails_before_partial_identity_commit() {
     assert_eq!(
         error,
         AdapterError::Sink(SinkError::StreamLimit {
-            resource: ResourceKind::Records,
-            observed: 5,
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed: required,
             limit: 4,
         })
     );
@@ -527,6 +530,54 @@ fn fact_pressure_retains_declaration_identity_closure() {
         fact.parent() == Some(method.local_id())
             && fact.syntax_kind().as_str() == "rust.parameters.signature"
     }));
+}
+
+#[test]
+fn required_fact_preflight_matches_the_transactional_identity_limit() {
+    let mut rust = String::new();
+    for index in 0..12 {
+        rust.push_str(&format!(
+            "fn required_{index}(value: usize) -> usize {{ value }}\n"
+        ));
+    }
+    let fixture = Fixture::new("required-preflight.rs", rust.as_bytes());
+    let provider = provider();
+    let full_limits = limits(4096, 128);
+    let full_request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &full_limits,
+        "rust",
+        Vec::new(),
+    );
+    let required = provider
+        .required_syntax_fact_count(&full_request, &deadline())
+        .expect("identity preflight completes");
+    assert!(required > 1);
+
+    let bounded_limits = identity_closure_fact_limits(required - 1);
+    let bounded_request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &bounded_limits,
+        "rust",
+        Vec::new(),
+    );
+    let error = execute_parse(
+        &provider,
+        &bounded_request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect_err("one fewer record cannot preserve the identity closure");
+    assert_eq!(
+        error,
+        AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed: required,
+            limit: required - 1,
+        })
+    );
 }
 
 #[test]

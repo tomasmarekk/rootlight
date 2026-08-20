@@ -242,6 +242,16 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
             &deadline(),
         )
         .expect("initial structural artifact is captured");
+    let parse_request = initial_request.to_parse_request();
+    let required = primary_provider
+        .required_syntax_fact_count(&parse_request, &deadline())
+        .expect("identity preflight completes");
+    assert_eq!(
+        artifact
+            .required_syntax_fact_count(&deadline())
+            .expect("retained identity demand is recoverable"),
+        required
+    );
     let successor = fixture.next_generation();
     let successor_request = request(&successor.snapshot, &successor.source, case, &limits);
 
@@ -326,6 +336,16 @@ fn complete_structural_artifact_replays_under_a_smaller_fact_partition() {
     assert!(
         !bounded_artifact.is_compatible_with_limits(&initial_limits),
         "an explicitly truncated artifact must not be reused under a larger partition"
+    );
+    let bounded_parse_request = bounded_request.to_parse_request();
+    let required = primary_provider
+        .required_syntax_fact_count(&bounded_parse_request, &deadline())
+        .expect("identity preflight completes independently of optional truncation");
+    assert_eq!(
+        bounded_artifact
+            .required_syntax_fact_count(&deadline())
+            .expect("bounded artifact retains complete identity demand"),
+        required
     );
 
     let reduced_records = artifact
