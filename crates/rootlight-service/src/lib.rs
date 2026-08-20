@@ -2753,6 +2753,38 @@ struct SourceSnapshotAdmission {
     additional_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceSnapshotRetentionRequirement {
+    Required,
+    DurableCache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceSnapshotAdmissionPlan {
+    RetainAll {
+        generation: GenerationId,
+        additional_bytes: usize,
+    },
+    MetadataOnly {
+        generation: GenerationId,
+        additional_bytes: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceSnapshotCacheEntry {
+    Committed(GenerationId),
+    Staged(GenerationId),
+}
+
+impl SourceSnapshotCacheEntry {
+    const fn generation(self) -> GenerationId {
+        match self {
+            Self::Committed(generation) | Self::Staged(generation) => generation,
+        }
+    }
+}
+
 struct SourceSnapshotRelease {
     generation: GenerationId,
     snapshots: Vec<Arc<SourceSnapshot>>,
@@ -2799,7 +2831,9 @@ fn source_generation_reference_bytes(snapshot_count: usize) -> Result<usize, Fir
 ///
 /// Source bodies remain outside normalized IR. Durable services persist
 /// identity-verified bytes beside each immutable oracle and reconstruct this
-/// deduplicated, memory-bounded runtime view during startup.
+/// deduplicated, memory-bounded runtime view during startup. An empty committed
+/// entry preserves generation correlation when durable bytes must be hydrated
+/// on demand instead of retained in this process cache.
 struct SourceSnapshotRetention {
     maximum_generations: usize,
     maximum_bytes: usize,
@@ -2824,15 +2858,48 @@ impl SourceSnapshotRetention {
         })
     }
 
+    #[cfg(test)]
     fn admit(
         &self,
         generation: GenerationId,
+        sources: Vec<RustSourceInput>,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshotAdmission, FirstSliceError> {
+        let plan = self
+            .plan_admission(
+                generation,
+                &sources,
+                SourceSnapshotRetentionRequirement::Required,
+                cancellation,
+            )?
+            .ok_or(FirstSliceError::Retention)?;
+        self.admit_planned(plan, sources, cancellation)
+    }
+
+    fn admit_planned(
+        &self,
+        plan: SourceSnapshotAdmissionPlan,
         mut sources: Vec<RustSourceInput>,
         cancellation: &Cancellation,
     ) -> Result<SourceSnapshotAdmission, FirstSliceError> {
-        let additional_bytes =
-            self.preflight_admission(generation, sources.as_slice(), cancellation)?;
         check_cancellation(cancellation)?;
+        let (generation, additional_bytes, retain_sources) = match plan {
+            SourceSnapshotAdmissionPlan::RetainAll {
+                generation,
+                additional_bytes,
+            } => (generation, additional_bytes, true),
+            SourceSnapshotAdmissionPlan::MetadataOnly {
+                generation,
+                additional_bytes,
+            } => (generation, additional_bytes, false),
+        };
+        if !retain_sources {
+            return Ok(SourceSnapshotAdmission {
+                generation,
+                retained: Vec::new(),
+                additional_bytes,
+            });
+        }
         sources.sort_unstable_by_key(|source| SourceSnapshotIdentity::from(&source.snapshot));
         let mut retained = Vec::new();
         retained
@@ -2857,7 +2924,7 @@ impl SourceSnapshotRetention {
         })
     }
 
-    fn preflight_admission(
+    fn admission_demand(
         &self,
         generation: GenerationId,
         sources: &[RustSourceInput],
@@ -2876,29 +2943,70 @@ impl SourceSnapshotRetention {
             return Err(FirstSliceError::Retention);
         }
 
-        let mut files = BTreeSet::new();
+        self.standalone_source_bytes(sources, cancellation)?;
         let mut additional_bytes = source_generation_reference_bytes(sources.len())?;
         for source in sources {
             check_cancellation(cancellation)?;
             let identity = SourceSnapshotIdentity::from(&source.snapshot);
-            if !files.insert(identity.file) {
-                return Err(FirstSliceError::Retention);
-            }
             if !self.shared.contains_key(&identity) {
                 additional_bytes = additional_bytes
                     .checked_add(unique_source_snapshot_bytes(&source.snapshot)?)
                     .ok_or(FirstSliceError::Retention)?;
             }
         }
-        let admitted_bytes = self
-            .retained_bytes
-            .checked_add(additional_bytes)
-            .ok_or(FirstSliceError::Retention)?;
-        if admitted_bytes > self.maximum_bytes {
-            return Err(FirstSliceError::Retention);
-        }
         check_cancellation(cancellation)?;
         Ok(additional_bytes)
+    }
+
+    fn standalone_source_bytes(
+        &self,
+        sources: &[RustSourceInput],
+        cancellation: &Cancellation,
+    ) -> Result<usize, FirstSliceError> {
+        let mut files = BTreeSet::new();
+        let mut bytes = source_generation_reference_bytes(sources.len())?;
+        for source in sources {
+            check_cancellation(cancellation)?;
+            if !files.insert(source.snapshot.file()) {
+                return Err(FirstSliceError::Retention);
+            }
+            bytes = bytes
+                .checked_add(unique_source_snapshot_bytes(&source.snapshot)?)
+                .ok_or(FirstSliceError::Retention)?;
+        }
+        Ok(bytes)
+    }
+
+    fn plan_admission(
+        &self,
+        generation: GenerationId,
+        sources: &[RustSourceInput],
+        requirement: SourceSnapshotRetentionRequirement,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SourceSnapshotAdmissionPlan>, FirstSliceError> {
+        let additional_bytes = self.admission_demand(generation, sources, cancellation)?;
+        if self
+            .retained_bytes
+            .checked_add(additional_bytes)
+            .is_some_and(|admitted| admitted <= self.maximum_bytes)
+        {
+            return Ok(Some(SourceSnapshotAdmissionPlan::RetainAll {
+                generation,
+                additional_bytes,
+            }));
+        }
+        if requirement == SourceSnapshotRetentionRequirement::Required {
+            return Ok(None);
+        }
+        let additional_bytes = source_generation_reference_bytes(0)?;
+        Ok(self
+            .retained_bytes
+            .checked_add(additional_bytes)
+            .is_some_and(|admitted| admitted <= self.maximum_bytes)
+            .then_some(SourceSnapshotAdmissionPlan::MetadataOnly {
+                generation,
+                additional_bytes,
+            }))
     }
 
     fn preflight_admission_after_reclaim(
@@ -2906,6 +3014,7 @@ impl SourceSnapshotRetention {
         generation: GenerationId,
         sources: &[RustSourceInput],
         reclaimable: &BTreeSet<GenerationId>,
+        requirement: SourceSnapshotRetentionRequirement,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
         check_cancellation(cancellation)?;
@@ -2921,6 +3030,12 @@ impl SourceSnapshotRetention {
             .ok_or(FirstSliceError::Retention)?;
         if retained_generations >= self.maximum_generations {
             return Err(FirstSliceError::Retention);
+        }
+
+        self.standalone_source_bytes(sources, cancellation)?;
+        if requirement == SourceSnapshotRetentionRequirement::DurableCache {
+            check_cancellation(cancellation)?;
+            return Ok(());
         }
 
         let mut retained = BTreeMap::<SourceSnapshotIdentity, usize>::new();
@@ -2948,14 +3063,10 @@ impl SourceSnapshotRetention {
                 }
             }
         }
-        let mut files = BTreeSet::new();
         let mut additional_bytes = source_generation_reference_bytes(sources.len())?;
         for source in sources {
             check_cancellation(cancellation)?;
             let identity = SourceSnapshotIdentity::from(&source.snapshot);
-            if !files.insert(identity.file) {
-                return Err(FirstSliceError::Retention);
-            }
             if !retained.contains_key(&identity) {
                 additional_bytes = additional_bytes
                     .checked_add(unique_source_snapshot_bytes(&source.snapshot)?)
@@ -3171,6 +3282,94 @@ impl SourceSnapshotRetention {
 
     fn contains_committed(&self, generation: GenerationId) -> bool {
         self.committed.contains_key(&generation)
+    }
+
+    fn cache_entry_for_shedding(&self) -> Option<SourceSnapshotCacheEntry> {
+        // Staged entries have no activation order yet. Generation-ID order
+        // gives every equivalent durable cache copy one deterministic victim
+        // order without coupling cache pressure to publication metadata.
+        let committed = self.committed.iter().find_map(|(generation, snapshots)| {
+            (!snapshots.is_empty()).then_some(SourceSnapshotCacheEntry::Committed(*generation))
+        });
+        let staged = self.staged.iter().find_map(|(generation, snapshots)| {
+            (!snapshots.is_empty()).then_some(SourceSnapshotCacheEntry::Staged(*generation))
+        });
+        match (committed, staged) {
+            (Some(committed), Some(staged)) => {
+                Some(if committed.generation() <= staged.generation() {
+                    committed
+                } else {
+                    staged
+                })
+            }
+            (None, Some(staged)) => Some(staged),
+            (Some(committed), None) => Some(committed),
+            (None, None) => None,
+        }
+    }
+
+    fn shed_cached_sources(
+        &mut self,
+        entry: SourceSnapshotCacheEntry,
+    ) -> Result<(), FirstSliceError> {
+        let snapshots = match entry {
+            SourceSnapshotCacheEntry::Committed(generation) => self.committed.get(&generation),
+            SourceSnapshotCacheEntry::Staged(generation) => self.staged.get(&generation),
+        }
+        .ok_or(FirstSliceError::Retention)?;
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let mut updates = Vec::new();
+        updates
+            .try_reserve_exact(snapshots.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        let mut released_bytes = source_generation_reference_bytes(snapshots.len())?;
+        for snapshot in snapshots {
+            let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
+            let shared = self
+                .shared
+                .get(&identity)
+                .ok_or(FirstSliceError::Retention)?;
+            let remaining = shared
+                .generation_references
+                .checked_sub(1)
+                .ok_or(FirstSliceError::Retention)?;
+            if remaining == 0 {
+                released_bytes = released_bytes
+                    .checked_add(unique_source_snapshot_bytes(shared.snapshot.as_ref())?)
+                    .ok_or(FirstSliceError::Retention)?;
+            }
+            updates.push((identity, remaining));
+        }
+        let empty_generation_bytes = source_generation_reference_bytes(0)?;
+        let retained_bytes = self
+            .retained_bytes
+            .checked_sub(released_bytes)
+            .and_then(|bytes| bytes.checked_add(empty_generation_bytes))
+            .ok_or(FirstSliceError::Retention)?;
+        let snapshots = std::mem::take(
+            match entry {
+                SourceSnapshotCacheEntry::Committed(generation) => {
+                    self.committed.get_mut(&generation)
+                }
+                SourceSnapshotCacheEntry::Staged(generation) => self.staged.get_mut(&generation),
+            }
+            .ok_or(FirstSliceError::Retention)?,
+        );
+        for (identity, remaining) in updates {
+            if remaining == 0 {
+                self.shared.remove(&identity);
+            } else {
+                self.shared
+                    .get_mut(&identity)
+                    .ok_or(FirstSliceError::Retention)?
+                    .generation_references = remaining;
+            }
+        }
+        self.retained_bytes = retained_bytes;
+        drop(snapshots);
+        Ok(())
     }
 
     fn remove_committed(&mut self, generation: GenerationId) -> Result<(), FirstSliceError> {
@@ -3942,10 +4141,12 @@ fn smoke_query_restored_generation(
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
-/// count, 64 MiB of deduplicated source content, and 64 MiB of logically
-/// accounted parser artifacts. The default constructor is process-local;
-/// [`Self::new_durable`] publishes normalized SQLite, source, and activation
-/// state beneath an already prepared account-private state root.
+/// count and fixed-size process caches for deduplicated source content and
+/// parser artifacts. Durable generations may omit cached source bodies because
+/// [`Self::source_read`] rehydrates them from verified immutable storage. The
+/// default constructor is process-local; [`Self::new_durable`] publishes
+/// normalized SQLite, source, and activation state beneath an already prepared
+/// account-private state root.
 pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
@@ -5061,9 +5262,11 @@ impl FirstSliceService {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
             self.make_room_for_generation(receipt.repository, memory_bytes)?;
+            let source_plan =
+                self.plan_source_admission(receipt.generation, &restored.sources, cancellation)?;
             let source_admission =
                 self.source_snapshots
-                    .admit(receipt.generation, restored.sources, cancellation)?;
+                    .admit_planned(source_plan, restored.sources, cancellation)?;
             self.generations
                 .publish(restored.verified, restored.search, false)
                 .map_err(|_| FirstSliceError::Retention)?;
@@ -5899,6 +6102,11 @@ impl FirstSliceService {
             generation,
             &retained_sources,
             &reclaimable_generations,
+            if self.durable.is_some() {
+                SourceSnapshotRetentionRequirement::DurableCache
+            } else {
+                SourceSnapshotRetentionRequirement::Required
+            },
             cancellation,
         )?;
         let parent_structural_artifacts = if reuse_policy == FirstSliceReusePolicy::Incremental {
@@ -7195,25 +7403,39 @@ impl FirstSliceService {
         Ok(())
     }
 
-    fn make_room_for_source_admission(
+    fn plan_source_admission(
         &mut self,
         generation: GenerationId,
         sources: &[RustSourceInput],
         cancellation: &Cancellation,
-    ) -> Result<(), FirstSliceError> {
+    ) -> Result<SourceSnapshotAdmissionPlan, FirstSliceError> {
+        let requirement = if self.durable.is_some() {
+            SourceSnapshotRetentionRequirement::DurableCache
+        } else {
+            SourceSnapshotRetentionRequirement::Required
+        };
         loop {
-            match self
-                .source_snapshots
-                .preflight_admission(generation, sources, cancellation)
-            {
-                Ok(_) => return Ok(()),
-                Err(FirstSliceError::Retention) => {
+            if let Some(plan) = self.source_snapshots.plan_admission(
+                generation,
+                sources,
+                requirement,
+                cancellation,
+            )? {
+                return Ok(plan);
+            }
+            match requirement {
+                SourceSnapshotRetentionRequirement::Required => {
                     let Some(reclaimable) = self.oldest_inactive_generation_global() else {
                         return Err(FirstSliceError::Retention);
                     };
                     self.evict_generation(reclaimable)?;
                 }
-                Err(error) => return Err(error),
+                SourceSnapshotRetentionRequirement::DurableCache => {
+                    let Some(reclaimable) = self.source_snapshots.cache_entry_for_shedding() else {
+                        return Err(FirstSliceError::Retention);
+                    };
+                    self.source_snapshots.shed_cached_sources(reclaimable)?;
+                }
             }
         }
     }
@@ -7337,11 +7559,12 @@ impl FirstSliceService {
                     storage_reservation,
                 } = prepared;
                 self.make_room_for_generation(receipt.repository, memory_bytes)?;
-                self.make_room_for_source_admission(receipt.generation, &sources, cancellation)?;
+                let source_plan =
+                    self.plan_source_admission(receipt.generation, &sources, cancellation)?;
                 let language_coverage = language_coverage(verified.document());
                 let source_admission =
                     self.source_snapshots
-                        .admit(receipt.generation, sources, cancellation)?;
+                        .admit_planned(source_plan, sources, cancellation)?;
                 self.generations
                     .stage(verified, search)
                     .map_err(|_| FirstSliceError::Retention)?;
@@ -24985,6 +25208,105 @@ mod tests {
     }
 
     #[test]
+    fn durable_cache_shedding_includes_staged_generations() {
+        const SOURCE: &str = "pub fn staged_answer() -> u32 { 42 }\n";
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(fixture.path().join("lib.rs"), SOURCE).expect("source fixture writes");
+        let root = RepositoryRoot::open(
+            derive_repository(b"staged-source-cache").id(),
+            fixture.path(),
+        )
+        .expect("source-cache fixture root opens");
+        let snapshot = root
+            .snapshot(
+                &RelativePath::parse(Path::new("lib.rs")).expect("fixture relative path is valid"),
+                u64::try_from(SOURCE.len()).expect("fixture length is representable"),
+            )
+            .expect("source-cache fixture snapshot captures");
+        let cached_generation_bytes = source_generation_reference_bytes(1)
+            .and_then(|bytes| {
+                bytes
+                    .checked_add(unique_source_snapshot_bytes(&snapshot)?)
+                    .ok_or(FirstSliceError::Retention)
+            })
+            .expect("cached generation charge fits");
+        let first_generation = GenerationId::from_bytes([0x41; 20]);
+        let second_generation = GenerationId::from_bytes([0x42; 20]);
+        let source = || RustSourceInput {
+            snapshot: snapshot.clone(),
+            generated: false,
+            origins: Vec::new(),
+        };
+        let cancellation = Cancellation::new();
+        let mut retention = SourceSnapshotRetention::new(2, cached_generation_bytes)
+            .expect("bounded source cache initializes");
+
+        let first = retention
+            .admit(first_generation, vec![source()], &cancellation)
+            .expect("first source generation fills the cache");
+        retention.stage(first).expect("first generation stages");
+        assert_eq!(
+            retention.cache_entry_for_shedding(),
+            Some(SourceSnapshotCacheEntry::Staged(first_generation))
+        );
+        assert!(
+            retention
+                .plan_admission(
+                    second_generation,
+                    &[source()],
+                    SourceSnapshotRetentionRequirement::DurableCache,
+                    &cancellation,
+                )
+                .expect("second source admission validates")
+                .is_none()
+        );
+
+        retention
+            .shed_cached_sources(SourceSnapshotCacheEntry::Staged(first_generation))
+            .expect("staged source cache sheds without discarding generation correlation");
+        let second_plan = retention
+            .plan_admission(
+                second_generation,
+                &[source()],
+                SourceSnapshotRetentionRequirement::DurableCache,
+                &cancellation,
+            )
+            .expect("metadata-only second admission validates")
+            .expect("metadata-only second admission fits");
+        assert!(matches!(
+            second_plan,
+            SourceSnapshotAdmissionPlan::MetadataOnly { .. }
+        ));
+        let second = retention
+            .admit_planned(second_plan, vec![source()], &cancellation)
+            .expect("metadata-only second admission materializes");
+        retention.stage(second).expect("second generation stages");
+
+        assert!(
+            retention
+                .staged
+                .get(&first_generation)
+                .expect("first generation remains staged")
+                .is_empty()
+        );
+        assert!(
+            retention
+                .staged
+                .get(&second_generation)
+                .expect("second generation stages")
+                .is_empty()
+        );
+        assert_eq!(
+            retention.retained_bytes(),
+            source_generation_reference_bytes(0)
+                .expect("metadata-only generation charge fits")
+                .checked_mul(2)
+                .expect("two metadata-only generations fit")
+        );
+    }
+
+    #[test]
     fn source_retention_is_byte_bounded_deduplicated_and_cleanup_aware() {
         const FIRST: &str = "pub fn answer() -> u32 {\n    42\n}\n";
         const SECOND: &str = "pub fn answer() -> u32 {\n    43\n}\n";
@@ -25140,6 +25462,121 @@ mod tests {
             second_source.data.chunks[0].content_hash,
             second_reference.content_hash()
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_publication_uses_lazy_source_cache_when_retention_is_full() {
+        const SOURCE: &str = "pub fn retained_answer() -> u32 {\n    42\n}\n";
+
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let first_fixture = durable_test_tempdir();
+        let second_fixture = durable_test_tempdir();
+        fs::write(first_fixture.path().join("lib.rs"), SOURCE)
+            .expect("first source fixture writes");
+        fs::write(second_fixture.path().join("lib.rs"), SOURCE)
+            .expect("second source fixture writes");
+
+        let charge_root = RepositoryRoot::open(
+            derive_repository(b"durable-source-cache-charge").id(),
+            first_fixture.path(),
+        )
+        .expect("source-cache charge root opens");
+        let relative =
+            RelativePath::parse(Path::new("lib.rs")).expect("fixture relative path is valid");
+        let snapshot = charge_root
+            .snapshot(
+                &relative,
+                u64::try_from(SOURCE.len()).expect("fixture length is representable"),
+            )
+            .expect("source-cache charge snapshot captures");
+        let first_generation_bytes = source_generation_reference_bytes(1)
+            .and_then(|bytes| {
+                bytes
+                    .checked_add(unique_source_snapshot_bytes(&snapshot)?)
+                    .ok_or(FirstSliceError::Retention)
+            })
+            .expect("first cached generation charge fits");
+        let maximum_retained_source_bytes = first_generation_bytes;
+
+        let policy = FirstSliceStoragePolicy::legacy(2);
+        let maximum_repositories = policy
+            .effective_maximum_repositories(2)
+            .expect("legacy repository capacity resolves");
+        let durable = Arc::new(
+            DurableCatalog::open(paths.state_dir(), 2, maximum_repositories)
+                .expect("durable catalog opens"),
+        );
+        let mut service = FirstSliceService::new_with_storage_policy(
+            2,
+            maximum_retained_source_bytes,
+            Some(durable),
+            None,
+            policy,
+        )
+        .expect("bounded durable service initializes");
+        let cancellation = deadline();
+
+        let first = service
+            .index_rust_fixture(first_fixture.path(), &cancellation)
+            .expect("first active repository publishes with cached source");
+        let second = service
+            .index_rust_fixture(second_fixture.path(), &cancellation)
+            .expect("second active repository publishes without cached source");
+
+        assert!(
+            service
+                .source_snapshots
+                .snapshots(first.generation)
+                .expect("first source generation remains correlated")
+                .is_empty()
+        );
+        assert!(
+            service
+                .source_snapshots
+                .snapshots(second.generation)
+                .expect("second source generation remains correlated")
+                .is_empty()
+        );
+        assert_eq!(
+            service.source_snapshots.retained_bytes(),
+            source_generation_reference_bytes(0)
+                .expect("metadata-only generation charge fits")
+                .checked_mul(2)
+                .expect("two metadata-only generations fit")
+        );
+        assert_eq!(
+            service.active_generation_for(first.repository),
+            Some(first.generation)
+        );
+        assert_eq!(
+            service.active_generation_for(second.repository),
+            Some(second.generation)
+        );
+
+        let located = service
+            .code_locate(
+                second.generation,
+                "retained_answer".to_owned(),
+                LocateMode::Exact,
+                1,
+                0,
+                &cancellation,
+            )
+            .expect("second generation remains queryable");
+        let source = located.data.hits[0]
+            .source
+            .clone()
+            .expect("second-generation hit carries source evidence");
+        let read = service
+            .source_read(second.generation, vec![source], &cancellation)
+            .expect("second-generation source hydrates from durable storage");
+        assert_eq!(read.data.chunks[0].bytes, SOURCE.as_bytes());
     }
 
     #[test]
