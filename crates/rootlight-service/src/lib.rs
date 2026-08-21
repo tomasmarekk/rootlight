@@ -4624,8 +4624,7 @@ impl FirstSliceService {
     ) -> Result<Self, FirstSliceError> {
         let (mut service, deferred) =
             Self::open_durable_deferred_with_optional_project_analyzer(policy, state_root, None)?;
-        let restored = deferred.restore(cancellation)?;
-        service.install_deferred_restore(restored, cancellation)?;
+        service.install_complete_deferred_restore_progressively(&deferred, cancellation)?;
         Ok(service)
     }
 
@@ -4651,8 +4650,7 @@ impl FirstSliceService {
             state_root,
             Some(project_analyzer),
         )?;
-        let restored = deferred.restore(cancellation)?;
-        service.install_deferred_restore(restored, cancellation)?;
+        service.install_complete_deferred_restore_progressively(&deferred, cancellation)?;
         Ok(service)
     }
 
@@ -4766,6 +4764,28 @@ impl FirstSliceService {
                 .max(target.global_activation_sequence);
         }
         Ok(())
+    }
+
+    fn install_complete_deferred_restore_progressively(
+        &mut self,
+        deferred: &FirstSliceDeferredRestore,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        if !self.receipts.is_empty()
+            || !self
+                .generation_cache
+                .lock()
+                .map_err(|_| FirstSliceError::Retention)?
+                .generations
+                .is_empty()
+        {
+            return Err(FirstSliceError::Retention);
+        }
+        deferred
+            .durable
+            .restore_progressively(cancellation, |generations| {
+                self.install_restored(generations, true, cancellation)
+            })
     }
 
     /// Installs fully verified durable state into an otherwise empty service.
@@ -21344,6 +21364,83 @@ mod tests {
             .source_read(receipt.generation, vec![source], &cancellation)
             .expect("restored source bytes remain readable");
         assert_eq!(read.data.generation, receipt.generation);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn synchronous_durable_restore_releases_each_repository_batch() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repositories = [durable_test_tempdir(), durable_test_tempdir()];
+        let cancellation = deadline();
+        let mut expected = BTreeSet::new();
+        let mut active = BTreeMap::new();
+        {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            for (ordinal, repository) in repositories.iter().enumerate() {
+                let source = repository.path().join("lib.rs");
+                fs::write(
+                    &source,
+                    format!("pub fn value_{ordinal}() -> u32 {{ 1 }}\n"),
+                )
+                .expect("initial fixture source writes");
+                let first = service
+                    .index_rust_fixture(repository.path(), &cancellation)
+                    .expect("initial generation publishes");
+                fs::write(
+                    &source,
+                    format!("pub fn value_{ordinal}() -> u32 {{ 2 }}\n"),
+                )
+                .expect("successor fixture source writes");
+                let second = service
+                    .index_rust_fixture(repository.path(), &cancellation)
+                    .expect("successor generation publishes");
+                expected.extend([first.generation, second.generation]);
+                active.insert(second.repository, second.generation);
+            }
+        }
+
+        let (_, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred durable service opens");
+        let mut observed = BTreeSet::new();
+        let mut nonempty_batches = 0_usize;
+        deferred
+            .durable
+            .restore_progressively(&cancellation, |generations| {
+                if generations.is_empty() {
+                    return Ok(());
+                }
+                nonempty_batches = nonempty_batches
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                assert!(generations.len() <= 2);
+                let repository = generations[0].receipt.repository;
+                assert!(
+                    generations
+                        .iter()
+                        .all(|generation| generation.receipt.repository == repository)
+                );
+                observed.extend(
+                    generations
+                        .iter()
+                        .map(|generation| generation.receipt.generation),
+                );
+                Ok(())
+            })
+            .expect("durable restore visits one repository-sized batch at a time");
+        assert_eq!(nonempty_batches, repositories.len());
+        assert_eq!(observed, expected);
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("synchronous durable service restores progressively");
+        for (repository, generation) in active {
+            assert_eq!(restored.active_generation_for(repository), Some(generation));
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

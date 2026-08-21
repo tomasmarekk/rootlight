@@ -1831,6 +1831,21 @@ impl DurableCatalog {
         )
     }
 
+    pub(super) fn restore_progressively(
+        &self,
+        cancellation: &Cancellation,
+        install: impl FnMut(Vec<RestoredGeneration>) -> Result<(), FirstSliceError>,
+    ) -> Result<(), FirstSliceError> {
+        self.restore_each_repository_with_policy(
+            self.maximum_generations_per_repository,
+            &BTreeSet::new(),
+            true,
+            true,
+            cancellation,
+            install,
+        )
+    }
+
     fn restore_with_policy(
         &self,
         maximum_generations_per_repository: usize,
@@ -1839,41 +1854,21 @@ impl DurableCatalog {
         repair: bool,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
-        let policy = RestorePolicy {
-            maximum_generations: maximum_generations_per_repository,
+        let mut restored = Vec::new();
+        self.restore_each_repository_with_policy(
+            maximum_generations_per_repository,
             excluded,
             compact,
             repair,
-        };
-        check_cancellation(cancellation)?;
-        let repository_names = private_entry_names(&self.repositories)?;
-        if repository_names.len() > self.maximum_repositories {
-            return Err(FirstSliceError::Retention);
-        }
-        let mut restored = Vec::new();
-        for repository_name in repository_names {
-            check_cancellation(cancellation)?;
-            let repository_text = repository_name
-                .to_str()
-                .ok_or(FirstSliceError::CatalogCorrupt)?;
-            let repository_id = RepositoryId::from_str(repository_text)
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            let repository =
-                PrivateDirectory::open(self.repositories.capability(), &repository_name)
-                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            let repository_path = self.repositories_path.join(&repository_name);
-            let mut repository_generations = self.restore_repository(
-                repository_id,
-                &repository,
-                &repository_path,
-                &policy,
-                cancellation,
-            )?;
-            restored
-                .try_reserve(repository_generations.len())
-                .map_err(|_| FirstSliceError::Retention)?;
-            restored.append(&mut repository_generations);
-        }
+            cancellation,
+            |mut repository_generations| {
+                restored
+                    .try_reserve(repository_generations.len())
+                    .map_err(|_| FirstSliceError::Retention)?;
+                restored.append(&mut repository_generations);
+                Ok(())
+            },
+        )?;
         let mut operation_order: Vec<_> = restored
             .iter()
             .flat_map(|generation| generation.operations.iter().copied())
@@ -1894,6 +1889,50 @@ impl DurableCatalog {
         }
         check_cancellation(cancellation)?;
         Ok(restored)
+    }
+
+    fn restore_each_repository_with_policy(
+        &self,
+        maximum_generations_per_repository: usize,
+        excluded: &BTreeSet<GenerationId>,
+        compact: bool,
+        repair: bool,
+        cancellation: &Cancellation,
+        mut visit: impl FnMut(Vec<RestoredGeneration>) -> Result<(), FirstSliceError>,
+    ) -> Result<(), FirstSliceError> {
+        let policy = RestorePolicy {
+            maximum_generations: maximum_generations_per_repository,
+            excluded,
+            compact,
+            repair,
+        };
+        check_cancellation(cancellation)?;
+        let repository_names = private_entry_names(&self.repositories)?;
+        if repository_names.len() > self.maximum_repositories {
+            return Err(FirstSliceError::Retention);
+        }
+        for repository_name in repository_names {
+            check_cancellation(cancellation)?;
+            let repository_text = repository_name
+                .to_str()
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            let repository_id = RepositoryId::from_str(repository_text)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository =
+                PrivateDirectory::open(self.repositories.capability(), &repository_name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository_path = self.repositories_path.join(&repository_name);
+            let repository_generations = self.restore_repository(
+                repository_id,
+                &repository,
+                &repository_path,
+                &policy,
+                cancellation,
+            )?;
+            visit(repository_generations)?;
+        }
+        check_cancellation(cancellation)?;
+        Ok(())
     }
 
     pub(super) fn activate_existing(
