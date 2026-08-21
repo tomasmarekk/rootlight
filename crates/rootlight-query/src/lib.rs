@@ -45,4 +45,4 @@ pub use projection::{
     SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents, project_lexical_documents_with_sources,
 };
 pub use service::QueryService;
-pub use store::GenerationSet;
+pub use store::{GenerationLease, GenerationSet};

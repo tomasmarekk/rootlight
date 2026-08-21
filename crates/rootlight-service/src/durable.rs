@@ -1731,6 +1731,66 @@ impl DurableCatalog {
         )
     }
 
+    pub(super) fn restore_exact_generation(
+        &self,
+        repository_id: RepositoryId,
+        generation: GenerationId,
+        cancellation: &Cancellation,
+    ) -> Result<RestoredGeneration, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let repository_name = repository_id.to_string();
+        let repository =
+            PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let repository_path = self.repositories_path.join(&repository_name);
+        let mut selected = None;
+        let mut metadata_names = BTreeMap::new();
+        for entry_name in private_entry_names(&repository)? {
+            check_cancellation(cancellation)?;
+            let entry_text = entry_name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+            if let Some((sequence, candidate)) = parse_activation_name(entry_text) {
+                let marker = read_activation_marker(&repository, entry_name, sequence, candidate)?;
+                if candidate == generation
+                    && selected
+                        .as_ref()
+                        .is_none_or(|current: &ActivationMarker| current.sequence < sequence)
+                {
+                    selected = Some(marker);
+                }
+            } else if let Some(sequence) = parse_metadata_name(entry_text)
+                && metadata_names.insert(sequence, entry_name).is_some()
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        let marker = selected.ok_or(FirstSliceError::GenerationNotFound)?;
+        let mut restored = restore_generation(
+            GenerationRestoreRequest {
+                repository: repository_id,
+                generation,
+                activation_sequence: marker.sequence,
+                global_activation_sequence: marker.manifest.global_activation_sequence,
+                published_generation_count: marker.manifest.published_generation_count,
+                repository_directory: &repository,
+                repository_path: &repository_path,
+            },
+            cancellation,
+        )?;
+        if let Some((sequence, name)) = metadata_names.last_key_value() {
+            let metadata = read_repository_metadata(repository_id, &repository, name, *sequence)?;
+            restored.root_path = metadata.root_path;
+            restored.alias = metadata.alias;
+            restored.metadata_sequence = metadata.sequence;
+        }
+        restored.operations = marker
+            .manifest
+            .operation
+            .map(FirstSliceOperationContext::from)
+            .into_iter()
+            .collect();
+        Ok(restored)
+    }
+
     pub(super) fn restore_retained_repository(
         &self,
         repository_id: RepositoryId,
@@ -5226,13 +5286,12 @@ mod tests {
         )
         .expect("generation directory opens");
         let snapshot = service
-            .generations
-            .generation(receipt.generation)
+            .loaded_generation_snapshot(receipt.generation)
             .expect("published generation resolves");
         let sidecar_path = generation_path.join(LOGICAL_SNAPSHOT_FILENAME);
         let original = fs::read(&sidecar_path).expect("logical sidecar reads");
         assert_eq!(
-            restore_logical_snapshot_identity(&generation, snapshot)
+            restore_logical_snapshot_identity(&generation, &snapshot)
                 .expect("logical sidecar restores"),
             Some(expected)
         );
@@ -5241,7 +5300,7 @@ mod tests {
             .create_directory(OsStr::new("missing-logical"))
             .expect("missing-sidecar fixture directory creates");
         assert_eq!(
-            restore_logical_snapshot_identity(&missing, snapshot)
+            restore_logical_snapshot_identity(&missing, &snapshot)
                 .expect("missing sidecar is an observability gap"),
             None
         );
@@ -5261,7 +5320,7 @@ mod tests {
         corrupt_file.sync_all().expect("corrupt sidecar syncs");
         drop(corrupt_file);
         assert_eq!(
-            restore_logical_snapshot_identity(&corrupt_directory, snapshot),
+            restore_logical_snapshot_identity(&corrupt_directory, &snapshot),
             Err(FirstSliceError::CatalogCorrupt)
         );
 
@@ -5284,7 +5343,7 @@ mod tests {
         mismatch_file.sync_all().expect("mismatched sidecar syncs");
         drop(mismatch_file);
         assert_eq!(
-            restore_logical_snapshot_identity(&mismatch_directory, snapshot),
+            restore_logical_snapshot_identity(&mismatch_directory, &snapshot),
             Err(FirstSliceError::CatalogCorrupt)
         );
 
@@ -5308,7 +5367,7 @@ mod tests {
         future_file.sync_all().expect("future sidecar syncs");
         drop(future_file);
         assert_eq!(
-            restore_logical_snapshot_identity(&future_directory, snapshot)
+            restore_logical_snapshot_identity(&future_directory, &snapshot)
                 .expect("future observability descriptor does not strand generation"),
             None
         );

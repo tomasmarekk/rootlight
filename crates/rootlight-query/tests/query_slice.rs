@@ -1293,6 +1293,80 @@ fn retained_old_generation_remains_addressable_after_activation() {
 }
 
 #[test]
+fn unloaded_generation_retains_identity_and_reloads_after_query_lease_releases() {
+    let first = verified_empty_generation(31);
+    let first_id = first.metadata().generation();
+    let mut generations = GenerationSet::new(1).expect("retention bound is valid");
+    generations
+        .publish(
+            first,
+            FakeSearch {
+                generation: first_id,
+                hits: Vec::new(),
+            },
+            true,
+        )
+        .expect("generation publishes");
+
+    let lease = generations
+        .lease(first_id)
+        .expect("loaded generation leases");
+    assert!(
+        !generations
+            .unload(first_id)
+            .expect("pinned unload is checked"),
+        "a live query lease must pin its immutable payload"
+    );
+    assert_eq!(lease.generation().metadata().generation(), first_id);
+    drop(lease);
+
+    assert!(
+        generations
+            .unload(first_id)
+            .expect("unpinned payload unloads")
+    );
+    assert!(generations.contains(first_id));
+    assert!(!generations.is_loaded(first_id));
+    assert_eq!(
+        generations
+            .metadata(first_id)
+            .expect("metadata remains retained")
+            .generation(),
+        first_id
+    );
+    assert!(matches!(
+        generations.query(first_id),
+        Err(QueryError::GenerationNotFound)
+    ));
+
+    let wrong_search_generation = verified_empty_generation(32).metadata().generation();
+    assert!(matches!(
+        generations.reload(
+            verified_empty_generation(31),
+            FakeSearch {
+                generation: wrong_search_generation,
+                hits: Vec::new(),
+            },
+        ),
+        Err(QueryError::GenerationMismatch)
+    ));
+    assert!(!generations.is_loaded(first_id));
+
+    generations
+        .reload(
+            verified_empty_generation(31),
+            FakeSearch {
+                generation: first_id,
+                hits: Vec::new(),
+            },
+        )
+        .expect("matching payload reloads");
+    assert_eq!(generations.active_generation(), Some(first_id));
+    assert!(generations.is_loaded(first_id));
+    assert!(generations.lease(first_id).is_ok());
+}
+
+#[test]
 fn staged_generation_is_hidden_until_commit_and_can_be_discarded() {
     let staged = verified_empty_generation(21);
     let staged_id = staged.metadata().generation();

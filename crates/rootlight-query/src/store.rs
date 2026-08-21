@@ -1,23 +1,57 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use rootlight_ids::GenerationId;
 use rootlight_search::LexicalSearch;
-use rootlight_storage::{GenerationSnapshot, IdentityVerifiedGeneration};
+use rootlight_storage::{GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration};
 
 use crate::{QueryError, QueryService};
 
 const HARD_MAX_RETAINED_GENERATIONS: usize = 8_193;
 
-/// Bounded in-memory first-slice registry for immutable query generations.
+/// Bounded registry for immutable query-generation identities and payloads.
 ///
-/// The registry retains identity-verified immutable generations for pinned
-/// reads. Durable publication and recovery are coordinated by the service
-/// layer; this type owns only bounded in-memory query state.
+/// A committed entry may retain a loaded identity-verified snapshot and search
+/// reader or only immutable metadata. Durable publication, cache admission, and
+/// exact reload are coordinated by the service layer; logical retention does
+/// not depend on payload residency.
 pub struct GenerationSet<Search> {
     maximum: usize,
     active: Option<GenerationId>,
     generations: BTreeMap<GenerationId, RetainedGeneration<Search>>,
     staged: BTreeMap<GenerationId, RetainedGeneration<Search>>,
+}
+
+/// Query-scoped ownership of one loaded immutable generation.
+///
+/// A live lease pins the normalized snapshot and lexical reader, so cache
+/// eviction refuses to unload that entry. Callers may release the cache lock
+/// before executing a bounded query.
+pub struct GenerationLease<Search> {
+    retained: Arc<LoadedGeneration<Search>>,
+}
+
+impl<Search> GenerationLease<Search>
+where
+    Search: LexicalSearch,
+{
+    /// Returns a typed query service over the leased immutable generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationMismatch`] if retained query state no
+    /// longer agrees on one generation identity.
+    pub fn query(&self) -> Result<QueryService<'_, Search>, QueryError> {
+        QueryService::new(&self.retained.snapshot, &self.retained.search)
+    }
+
+    /// Returns the leased canonical generation snapshot.
+    #[must_use]
+    pub fn generation(&self) -> &GenerationSnapshot {
+        &self.retained.snapshot
+    }
 }
 
 impl<Search> GenerationSet<Search>
@@ -70,7 +104,7 @@ where
             return Err(QueryError::RetentionLimit);
         }
         self.generations
-            .insert(id, RetainedGeneration { snapshot, search });
+            .insert(id, RetainedGeneration::loaded(snapshot, search));
         if make_active {
             self.active = Some(id);
         }
@@ -105,7 +139,7 @@ where
             return Err(QueryError::RetentionLimit);
         }
         self.staged
-            .insert(id, RetainedGeneration { snapshot, search });
+            .insert(id, RetainedGeneration::loaded(snapshot, search));
         Ok(id)
     }
 
@@ -187,7 +221,33 @@ where
             .generations
             .get(&generation)
             .ok_or(QueryError::GenerationNotFound)?;
+        let RetainedGeneration::Loaded(retained) = retained else {
+            return Err(QueryError::GenerationNotFound);
+        };
         QueryService::new(&retained.snapshot, &retained.search)
+    }
+
+    /// Leases one loaded immutable generation independently of this set.
+    ///
+    /// The returned lease pins the loaded payload until it is dropped. An
+    /// unloaded durable generation remains retained but returns
+    /// [`QueryError::GenerationNotFound`] until a caller reloads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the identity is absent
+    /// or currently unloaded.
+    pub fn lease(&self, generation: GenerationId) -> Result<GenerationLease<Search>, QueryError> {
+        let retained = self
+            .generations
+            .get(&generation)
+            .ok_or(QueryError::GenerationNotFound)?;
+        let RetainedGeneration::Loaded(retained) = retained else {
+            return Err(QueryError::GenerationNotFound);
+        };
+        Ok(GenerationLease {
+            retained: Arc::clone(retained),
+        })
     }
 
     /// Returns the active immutable generation identity.
@@ -282,8 +342,91 @@ where
     pub fn generation(&self, generation: GenerationId) -> Result<&GenerationSnapshot, QueryError> {
         self.generations
             .get(&generation)
+            .and_then(RetainedGeneration::loaded_entry)
             .map(|retained| &retained.snapshot)
             .ok_or(QueryError::GenerationNotFound)
+    }
+
+    /// Returns retained generation metadata without loading its payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the generation identity
+    /// is not retained.
+    pub fn metadata(&self, generation: GenerationId) -> Result<GenerationMetadata, QueryError> {
+        self.generations
+            .get(&generation)
+            .map(RetainedGeneration::metadata)
+            .ok_or(QueryError::GenerationNotFound)
+    }
+
+    /// Returns whether a retained generation currently has a loaded payload.
+    #[must_use]
+    pub fn is_loaded(&self, generation: GenerationId) -> bool {
+        self.generations
+            .get(&generation)
+            .is_some_and(RetainedGeneration::is_loaded)
+    }
+
+    /// Unloads one unpinned committed payload while retaining its metadata.
+    ///
+    /// Returns `false` when a live [`GenerationLease`] pins the payload. An
+    /// already unloaded generation is an idempotent success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the generation identity
+    /// is not retained.
+    pub fn unload(&mut self, generation: GenerationId) -> Result<bool, QueryError> {
+        let retained = self
+            .generations
+            .get_mut(&generation)
+            .ok_or(QueryError::GenerationNotFound)?;
+        let RetainedGeneration::Loaded(loaded) = retained else {
+            return Ok(true);
+        };
+        if Arc::strong_count(loaded) != 1 {
+            return Ok(false);
+        }
+        let metadata = loaded.snapshot.metadata();
+        *retained = RetainedGeneration::Unloaded(metadata);
+        Ok(true)
+    }
+
+    /// Reloads one metadata-only committed generation.
+    ///
+    /// The identity-verified snapshot and lexical reader must exactly match the
+    /// retained metadata. Reloading a payload that is already present is
+    /// rejected instead of replacing a possibly pinned generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an absent or already loaded identity,
+    /// generation mismatch, or metadata mismatch.
+    pub fn reload(
+        &mut self,
+        generation: IdentityVerifiedGeneration,
+        search: Search,
+    ) -> Result<GenerationId, QueryError> {
+        let snapshot = generation.into_snapshot();
+        let id = snapshot.metadata().generation();
+        if search.generation() != id {
+            return Err(QueryError::GenerationMismatch);
+        }
+        let retained = self
+            .generations
+            .get_mut(&id)
+            .ok_or(QueryError::GenerationNotFound)?;
+        match retained {
+            RetainedGeneration::Loaded(_) => Err(QueryError::DuplicateGeneration),
+            RetainedGeneration::Unloaded(metadata) => {
+                if *metadata != snapshot.metadata() {
+                    return Err(QueryError::GenerationMismatch);
+                }
+                *retained = RetainedGeneration::loaded(snapshot, search);
+                Ok(id)
+            }
+        }
     }
 
     /// Returns the number of retained immutable generations.
@@ -314,7 +457,36 @@ where
     }
 }
 
-struct RetainedGeneration<Search> {
+enum RetainedGeneration<Search> {
+    Loaded(Arc<LoadedGeneration<Search>>),
+    Unloaded(GenerationMetadata),
+}
+
+impl<Search> RetainedGeneration<Search> {
+    fn loaded(snapshot: GenerationSnapshot, search: Search) -> Self {
+        Self::Loaded(Arc::new(LoadedGeneration { snapshot, search }))
+    }
+
+    fn metadata(&self) -> GenerationMetadata {
+        match self {
+            Self::Loaded(retained) => retained.snapshot.metadata(),
+            Self::Unloaded(metadata) => *metadata,
+        }
+    }
+
+    fn loaded_entry(&self) -> Option<&LoadedGeneration<Search>> {
+        match self {
+            Self::Loaded(retained) => Some(retained),
+            Self::Unloaded(_) => None,
+        }
+    }
+
+    const fn is_loaded(&self) -> bool {
+        matches!(self, Self::Loaded(_))
+    }
+}
+
+struct LoadedGeneration<Search> {
     snapshot: GenerationSnapshot,
     search: Search,
 }

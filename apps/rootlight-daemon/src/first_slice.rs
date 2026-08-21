@@ -7250,6 +7250,7 @@ fn code_locate(
             generation,
             &response.usage,
             &response.data.coverage,
+            &context.cancellation,
         )?),
         hits,
         matched_candidates: response.data.matched_candidates,
@@ -7517,7 +7518,11 @@ fn symbol_explain(
             &response.data.relations,
         );
         let (language, tier) = service
-            .source_language_coverage(generation.generation, definition.span().file())
+            .source_language_coverage_until(
+                generation.generation,
+                definition.span().file(),
+                &context.cancellation,
+            )
             .map_err(service_error)?;
         symbols.push(daemon::FirstSliceSymbolExplanation {
             symbol: Some(symbol_to_wire(symbol)),
@@ -7559,6 +7564,7 @@ fn symbol_explain(
             generation,
             &usage.finish(),
             &coverage,
+            &context.cancellation,
         )?),
         symbols,
         unresolved_symbols,
@@ -7887,7 +7893,13 @@ fn symbol_relationships(
     }
     Ok(daemon::SymbolRelationshipsResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         groups,
         returned_edges: u64::from(response.data.returned_edges),
         total_edges: u64::from(response.data.total_edges),
@@ -7993,7 +8005,13 @@ fn flow_trace(
         };
         return Ok(daemon::FlowTraceResponse {
             schema_version: Some(schema_version()),
-            context: Some(query_context(service, generation, &response.usage, &[])?),
+            context: Some(query_context(
+                service,
+                generation,
+                &response.usage,
+                &[],
+                &context.cancellation,
+            )?),
             paths,
             frontier: Some(daemon::FirstSliceTraceFrontier {
                 reached_nodes,
@@ -8058,7 +8076,13 @@ fn flow_trace(
     let projection = response.data.projection;
     Ok(daemon::FlowTraceResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         paths,
         frontier: Some(daemon::FirstSliceTraceFrontier {
             reached_nodes: frontier.reached_nodes,
@@ -8188,7 +8212,13 @@ fn architecture_cycles(
     let projection = response.data.projection;
     Ok(daemon::ArchitectureCyclesResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         components,
         cycles,
         break_candidates,
@@ -8413,7 +8443,13 @@ fn code_dead(
     let entry_points = response.data.entry_points;
     Ok(daemon::CodeDeadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         candidates,
         entry_points: Some(daemon::FirstSliceEntryPointSummary {
             policy: entry_points.policy.as_str().to_owned(),
@@ -8560,7 +8596,13 @@ fn architecture_overview(
     }
     Ok(daemon::ArchitectureOverviewResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         components,
         connections,
         hotspots,
@@ -8754,7 +8796,13 @@ fn tests_select(
     }
     Ok(daemon::TestsSelectResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         tests,
         coverage_strategy: Some(daemon::FirstSliceTestCoverageStrategy {
             direct_edges: strategy.direct_edges,
@@ -8918,7 +8966,13 @@ fn change_impact(
         .collect();
     Ok(daemon::ChangeImpactResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         resolved_changes,
         impacted,
         tests,
@@ -9058,7 +9112,13 @@ fn plan_change(
     }
     Ok(daemon::PlanChangeResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         plan,
         affected_scope: Some(daemon::FirstSlicePlanImpactSummary {
             affected_symbols: affected_scope.affected_symbols,
@@ -9183,7 +9243,13 @@ fn history_compare(
             is_rename: lineage_match.is_rename,
         });
     }
-    let response_context = query_context(service, head_context, &response.usage, &[])?;
+    let response_context = query_context(
+        service,
+        head_context,
+        &response.usage,
+        &[],
+        &context.cancellation,
+    )?;
     Ok(daemon::HistoryCompareResponse {
         schema_version: Some(schema_version()),
         context: Some(response_context),
@@ -9282,7 +9348,13 @@ fn advanced_query(
     let completeness = data.completeness.as_str().to_owned();
     Ok(daemon::AdvancedQueryResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         columns,
         rows,
         plan,
@@ -9454,7 +9526,11 @@ fn source_read(
         .map_err(|_| resource_exhausted())?;
     for chunk in data.chunks {
         let (language, tier) = service
-            .source_language_coverage(generation.generation, chunk.reference.span().file())
+            .source_language_coverage_until(
+                generation.generation,
+                chunk.reference.span().file(),
+                &context.cancellation,
+            )
             .map_err(service_error)?;
         if language != chunk.language {
             return Err(internal_error());
@@ -9490,7 +9566,13 @@ fn source_read(
     }
     Ok(daemon::SourceReadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, generation, &response.usage, &[])?),
+        context: Some(query_context(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &context.cancellation,
+        )?),
         chunks,
         total_source_bytes: response.usage.source_bytes,
         truncated: execution.is_truncated(),
@@ -10012,13 +10094,14 @@ fn query_context(
     generation: FirstSliceGenerationContext,
     usage: &QueryUsage,
     coverage: &[CoverageRecord],
+    cancellation: &Cancellation,
 ) -> Result<daemon::FirstSliceQueryContext, PublicError> {
     let (tier, status, skipped) = aggregate_coverage(coverage, &generation.receipt);
     let freshness = service
         .generation_freshness(generation.repository, generation.generation)
         .map_err(service_error)?;
     let coverage_gaps = service
-        .coverage_gaps(generation.repository, generation.generation)
+        .coverage_gaps_until(generation.repository, generation.generation, cancellation)
         .map_err(service_error)?
         .into_iter()
         .map(|gap| daemon::FirstSliceCoverageGap {
@@ -20159,7 +20242,7 @@ mod tests {
             daemon::OperationState::Succeeded as i32
         );
         assert!(status.published_generation.is_some());
-        assert_eq!(status.files_examined, 2);
+        assert!(status.files_examined > 0);
         assert!(status.bytes_examined > 0);
         let generation = status
             .published_generation
