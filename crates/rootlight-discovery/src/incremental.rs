@@ -138,6 +138,20 @@ impl IncrementalDiscoveryOptions {
             maximum_retained_source_bytes: MAX_RETAINED_SOURCE_BYTES,
         }
     }
+
+    /// Tightens the aggregate source-byte ceiling for this reconciliation.
+    ///
+    /// Values above the process hard ceiling are clamped, so callers cannot
+    /// use this option to relax the bounded-memory contract.
+    #[must_use]
+    pub const fn with_maximum_retained_source_bytes(mut self, maximum: u64) -> Self {
+        self.maximum_retained_source_bytes = if maximum < MAX_RETAINED_SOURCE_BYTES {
+            maximum
+        } else {
+            MAX_RETAINED_SOURCE_BYTES
+        };
+        self
+    }
 }
 
 impl IncrementalDiscovery {
@@ -245,7 +259,14 @@ pub fn discover_incremental_with_progress(
     let reconcile_limits =
         ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
     let planning_limits = planning_limits(limits)?;
-    let candidate_scan = scan_candidates(root, policy, limits, reconcile_limits, cancellation)?;
+    let candidate_scan = scan_candidates(
+        root,
+        policy,
+        limits,
+        reconcile_limits,
+        maximum_retained_source_bytes,
+        cancellation,
+    )?;
     let empty_metadata =
         MetadataBaseline::new([], reconcile_limits, cancellation).map_err(map_incremental_error)?;
     let empty_inputs =
@@ -366,7 +387,7 @@ pub fn correlate_incremental_manifest(
     cancellation.check()?;
     if manifest.repository != observed.repository()
         || manifest.configuration_hash != context.configuration_revision()
-        || manifest.coverage.complete != observed.is_complete()
+        || (manifest.coverage.complete && !observed.is_complete())
         || u64::try_from(manifest.inputs.len()).ok() != Some(manifest.coverage.included)
     {
         return Err(DiscoveryError::IncrementalDrift);
@@ -472,7 +493,7 @@ pub fn correlate_incremental_manifest(
 
     Ok(IncrementalDiscovery {
         repository: observed.repository(),
-        complete: observed.is_complete(),
+        complete: observed.is_complete() && manifest.coverage.complete,
         baseline,
         changes,
         file_changes,
@@ -493,6 +514,7 @@ fn scan_candidates(
     policy: &DiscoveryPolicy,
     limits: DiscoveryLimits,
     reconcile_limits: ReconcileLimits,
+    maximum_retained_source_bytes: u64,
     cancellation: &Cancellation,
 ) -> Result<CandidateScan, DiscoveryError> {
     let mut queue = VecDeque::from([(None, 0_usize)]);
@@ -501,9 +523,10 @@ fn scan_candidates(
     let mut descriptors = BTreeMap::new();
     let mut scoped_ignores = ScopedIgnores::default();
     let mut visited = 0_usize;
+    let mut retained_source_bytes = 0_u64;
     let mut complete = true;
 
-    while let Some((directory, depth)) = queue.pop_front() {
+    'directories: while let Some((directory, depth)) = queue.pop_front() {
         cancellation.check()?;
         let bounded = read_directory_with_entry_budget(
             root,
@@ -549,6 +572,21 @@ fn scan_candidates(
                         && entry.metadata.volume.is_some()
                         && entry.metadata.file_index.is_some() =>
                 {
+                    let Some(observed_source_bytes) =
+                        retained_source_bytes.checked_add(entry.metadata.length)
+                    else {
+                        complete = false;
+                        queue.clear();
+                        break 'directories;
+                    };
+                    if observed_source_bytes > maximum_retained_source_bytes {
+                        // Preserve the deterministic traversal prefix instead
+                        // of selecting later files by their relative size.
+                        complete = false;
+                        queue.clear();
+                        break 'directories;
+                    }
+                    retained_source_bytes = observed_source_bytes;
                     let file = root.file_id(&path);
                     let descriptor = FileDescriptor::new(
                         file,
@@ -706,6 +744,23 @@ mod tests {
     use tempfile::tempdir_in;
 
     #[test]
+    fn reconciliation_options_can_only_tighten_the_hard_source_ceiling() {
+        let limits =
+            DiscoveryLimits::new(2, 4, 1024, 10).expect("test limits are within hard ceilings");
+
+        let tightened = IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits)
+            .with_maximum_retained_source_bytes(4);
+        assert_eq!(tightened.maximum_retained_source_bytes, 4);
+
+        let attempted_relaxation = IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits)
+            .with_maximum_retained_source_bytes(MAX_RETAINED_SOURCE_BYTES.saturating_add(1));
+        assert_eq!(
+            attempted_relaxation.maximum_retained_source_bytes,
+            MAX_RETAINED_SOURCE_BYTES
+        );
+    }
+
+    #[test]
     fn incremental_and_clean_discovery_share_the_incomplete_prefix() {
         let current = std::env::current_dir().expect("current directory is available");
         let temporary = tempdir_in(current).expect("local temporary directory is available");
@@ -769,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_hashing_preflights_aggregate_snapshot_bytes() {
+    fn incremental_hashing_truncates_at_the_aggregate_snapshot_budget() {
         let current = std::env::current_dir().expect("current directory is available");
         let temporary = tempdir_in(current).expect("local temporary directory is available");
         fs::write(temporary.path().join("first.rs"), b"aa").expect("first fixture is written");
@@ -811,25 +866,30 @@ mod tests {
             5
         );
 
-        assert!(matches!(
-            discover_incremental_with_progress(
-                &root,
-                None,
-                context,
-                &policy,
-                IncrementalDiscoveryOptions {
-                    mode: ReconcileMode::Normal,
-                    limits,
-                    maximum_retained_source_bytes: 4,
-                },
-                &Cancellation::new(),
-                |_| {},
-            ),
-            Err(DiscoveryError::RetainedSnapshotByteLimit {
-                observed: 5,
-                maximum: 4
-            })
-        ));
+        let partial = discover_incremental_with_progress(
+            &root,
+            None,
+            context,
+            &policy,
+            IncrementalDiscoveryOptions {
+                mode: ReconcileMode::Normal,
+                limits,
+                maximum_retained_source_bytes: 4,
+            },
+            &Cancellation::new(),
+            |_| {},
+        )
+        .expect("aggregate source exhaustion publishes a partial prefix");
+        assert!(!partial.is_complete());
+        assert_eq!(partial.hashed_snapshots.len(), 1);
+        assert_eq!(
+            partial
+                .hashed_snapshots
+                .values()
+                .map(|snapshot| snapshot.content().len())
+                .sum::<usize>(),
+            2
+        );
     }
 
     #[test]

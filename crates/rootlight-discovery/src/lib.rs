@@ -34,9 +34,11 @@ pub use incremental::{
 };
 
 /// Current deterministic discovery-manifest version.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.1";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.2";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
+/// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
+pub const DISCOVERY_SOURCE_BYTE_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_SOURCE_BYTE_LIMIT";
 /// Hard entry ceiling independent of caller configuration.
 pub const MAX_DISCOVERY_ENTRIES: usize = 1_000_000;
 /// Hard traversal-depth ceiling independent of caller configuration.
@@ -506,6 +508,31 @@ pub struct DiscoveryCoverage {
     /// Whether traversal reached the end of the repository namespace.
     #[serde(default = "complete_discovery_coverage")]
     pub complete: bool,
+    /// Exact bound that selected a deterministic prefix, when traversal was truncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<DiscoveryTruncation>,
+}
+
+/// Closed resource labels for deterministic discovery truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryTruncationResource {
+    /// Filesystem entry traversal.
+    Entries,
+    /// Aggregate source snapshots retained for one generation.
+    RetainedSourceBytes,
+}
+
+/// Exact bounded condition that selected an incomplete discovery prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryTruncation {
+    /// Resource that selected the prefix.
+    pub resource: DiscoveryTruncationResource,
+    /// Safe observed or lower-bound demand.
+    pub observed: u64,
+    /// Effective resource limit.
+    pub limit: u64,
 }
 
 impl Default for DiscoveryCoverage {
@@ -515,6 +542,7 @@ impl Default for DiscoveryCoverage {
             included: 0,
             excluded: BTreeMap::new(),
             complete: true,
+            truncation: None,
         }
     }
 }
@@ -626,7 +654,16 @@ pub fn discover_with_snapshots(
     )
 }
 
-fn discover_with_snapshots_at_limit(
+/// Discovers inputs while tightening the process-wide retained-source ceiling.
+///
+/// A caller-provided ceiling above [`MAX_RETAINED_SOURCE_BYTES`] is clamped to
+/// that hard bound. This variant lets an orchestrator apply a stricter local
+/// budget without creating a path that can relax the process limit.
+///
+/// # Errors
+///
+/// Returns the same errors as [`discover_with_snapshots`].
+pub fn discover_with_snapshots_at_limit(
     root: &RepositoryRoot,
     config: &ConfigSnapshot,
     policy: &DiscoveryPolicy,
@@ -635,6 +672,8 @@ fn discover_with_snapshots_at_limit(
     maximum_retained_source_bytes: u64,
     cancellation: &Cancellation,
 ) -> Result<DiscoveryResult, DiscoveryError> {
+    let maximum_retained_source_bytes =
+        maximum_retained_source_bytes.min(MAX_RETAINED_SOURCE_BYTES);
     let mut state = DiscoveryState::new(
         root,
         config,
@@ -715,7 +754,13 @@ impl<'a> DiscoveryState<'a> {
             self.ensure_entry_capacity(entries.len())?;
             // Ignore files become readable only after ancestor policy admits this
             // directory, so descendant negations cannot force traversal into it.
-            let mut ignore_snapshot = self.load_scoped_ignore(directory.as_ref(), &entries)?;
+            let mut ignore_snapshot = match self.load_scoped_ignore(directory.as_ref(), &entries) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.finish_at_source_byte_limit(error)?;
+                    return Ok(());
+                }
+            };
             for entry in entries {
                 self.cancellation.check()?;
                 let cached_snapshot = if entry.name == OsStr::new(".gitignore") {
@@ -723,15 +768,45 @@ impl<'a> DiscoveryState<'a> {
                 } else {
                     None
                 };
-                self.visit_entry(directory.as_ref(), depth, entry, cached_snapshot)?;
+                if let Err(error) =
+                    self.visit_entry(directory.as_ref(), depth, entry, cached_snapshot)
+                {
+                    self.finish_at_source_byte_limit(error)?;
+                    return Ok(());
+                }
             }
             if !complete {
                 self.coverage.complete = false;
+                let limit = u64::try_from(self.limits.max_entries).unwrap_or(u64::MAX);
+                self.coverage.truncation = Some(DiscoveryTruncation {
+                    resource: DiscoveryTruncationResource::Entries,
+                    observed: limit.saturating_add(1),
+                    limit,
+                });
                 self.diagnostic(None, DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE);
                 self.queue.clear();
             }
         }
         Ok(())
+    }
+
+    fn finish_at_source_byte_limit(&mut self, error: DiscoveryError) -> Result<(), DiscoveryError> {
+        match error {
+            DiscoveryError::RetainedSnapshotByteLimit { observed, maximum } => {
+                // Later paths must not displace this deterministic traversal
+                // prefix merely because their sources happen to be smaller.
+                self.coverage.complete = false;
+                self.coverage.truncation = Some(DiscoveryTruncation {
+                    resource: DiscoveryTruncationResource::RetainedSourceBytes,
+                    observed,
+                    limit: maximum,
+                });
+                self.diagnostic(None, DISCOVERY_SOURCE_BYTE_LIMIT_DIAGNOSTIC_CODE);
+                self.queue.clear();
+                Ok(())
+            }
+            error => Err(error),
+        }
     }
 
     fn ensure_entry_capacity(&self, entry_count: usize) -> Result<(), DiscoveryError> {
@@ -1621,21 +1696,26 @@ mod tests {
             5
         );
 
-        assert!(matches!(
-            discover_with_snapshots_at_limit(
-                &root,
-                &config(),
-                &policy,
-                limits(),
-                BTreeMap::new(),
-                4,
-                &Cancellation::new(),
-            ),
-            Err(DiscoveryError::RetainedSnapshotByteLimit {
+        let bounded = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            4,
+            &Cancellation::new(),
+        )
+        .expect("source exhaustion publishes a partial prefix");
+        let (manifest, snapshots) = bounded.into_parts();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            manifest.coverage.truncation,
+            Some(DiscoveryTruncation {
+                resource: DiscoveryTruncationResource::RetainedSourceBytes,
                 observed: 5,
-                maximum: 4
+                limit: 4,
             })
-        ));
+        );
     }
 
     #[test]
@@ -1754,8 +1834,65 @@ max_source_file_bytes = 2097152
         assert_eq!(manifest.coverage.visited, 2);
         assert_eq!(manifest.coverage.included, 2);
         assert!(!manifest.coverage.complete);
+        assert_eq!(
+            manifest.coverage.truncation,
+            Some(DiscoveryTruncation {
+                resource: DiscoveryTruncationResource::Entries,
+                observed: 3,
+                limit: 2,
+            })
+        );
         assert!(manifest.diagnostics.iter().any(|diagnostic| {
             diagnostic.path.is_none() && diagnostic.code == DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE
+        }));
+    }
+
+    #[test]
+    fn retained_source_budget_publishes_a_deterministic_incomplete_prefix() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "zeta.rs", b"zz");
+        write_fixture(&temporary, "alpha.rs", b"aa");
+        write_fixture(&temporary, "middle.rs", b"mmm");
+        let root = fixture_root(&temporary, b"bounded-source-prefix");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let limits =
+            DiscoveryLimits::new(10, 4, 1024, 10).expect("test limits are within hard ceilings");
+
+        let result = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits,
+            BTreeMap::new(),
+            4,
+            &Cancellation::new(),
+        )
+        .expect("source exhaustion publishes a partial manifest");
+        let (manifest, snapshots) = result.into_parts();
+
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.rs"]
+        );
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(manifest.coverage.visited, 2);
+        assert_eq!(manifest.coverage.included, 1);
+        assert!(!manifest.coverage.complete);
+        assert_eq!(
+            manifest.coverage.truncation,
+            Some(DiscoveryTruncation {
+                resource: DiscoveryTruncationResource::RetainedSourceBytes,
+                observed: 5,
+                limit: 4,
+            })
+        );
+        assert!(manifest.diagnostics.iter().any(|diagnostic| {
+            diagnostic.path.is_none()
+                && diagnostic.code == DISCOVERY_SOURCE_BYTE_LIMIT_DIAGNOSTIC_CODE
         }));
     }
 

@@ -53,11 +53,12 @@ use rootlight_config::{
     CONFIG_VERSION_1_2, ConfigLayer, ConfigSnapshot, ConfigSource, MAXIMUM_REPOSITORIES,
 };
 use rootlight_discovery::{
-    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
-    IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
-    InputClass, LanguageEvidence, ManifestInput, canonical_language,
-    correlate_incremental_manifest, discover_incremental_with_progress, discover_with_snapshots,
-    extension_language, language_capabilities,
+    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, DiscoveryTruncation,
+    DiscoveryTruncationResource, IncrementalDiscovery, IncrementalDiscoveryBaseline,
+    IncrementalDiscoveryContext, IncrementalDiscoveryOptions, InputClass, LanguageEvidence,
+    ManifestInput, canonical_language, correlate_incremental_manifest,
+    discover_incremental_with_progress, discover_with_snapshots_at_limit, extension_language,
+    language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -4564,6 +4565,7 @@ pub struct FirstSliceService {
     fact_count_by_generation: BTreeMap<GenerationId, u64>,
     source_snapshots: SourceSnapshotRetention,
     structural_artifacts: StructuralArtifactRetention,
+    discovery_source_byte_limit: u64,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
     incremental_baselines: BTreeMap<GenerationId, IncrementalDiscoveryBaseline>,
     incremental_inputs: BTreeMap<GenerationId, InputSnapshot>,
@@ -5392,6 +5394,8 @@ impl FirstSliceService {
             total_generation_capacity,
             MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
         )?;
+        let discovery_source_byte_limit =
+            u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
         let mut catalog_instance_nonce = [0_u8; 32];
         getrandom::fill(&mut catalog_instance_nonce)
             .map_err(|_| FirstSliceError::RandomUnavailable)?;
@@ -5416,6 +5420,7 @@ impl FirstSliceService {
             fact_count_by_generation: BTreeMap::new(),
             source_snapshots,
             structural_artifacts,
+            discovery_source_byte_limit,
             receipts: BTreeMap::new(),
             incremental_baselines: BTreeMap::new(),
             incremental_inputs: BTreeMap::new(),
@@ -6450,7 +6455,8 @@ impl FirstSliceService {
             parent_baseline,
             incremental_context,
             &policy,
-            IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits),
+            IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
+                .with_maximum_retained_source_bytes(self.discovery_source_byte_limit),
             cancellation,
             |progress| {
                 discovery_files_examined = progress.files_examined;
@@ -6496,12 +6502,13 @@ impl FirstSliceService {
         } else {
             Default::default()
         };
-        let (manifest, mut discovered_snapshots) = discover_with_snapshots(
+        let (manifest, mut discovered_snapshots) = discover_with_snapshots_at_limit(
             &root,
             &self.config,
             &policy,
             discovery_limits,
             cached_snapshots,
+            self.discovery_source_byte_limit,
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?
@@ -6522,9 +6529,11 @@ impl FirstSliceService {
                 .get(&active)
                 .is_some_and(|receipt| receipt.discovery_complete)
         {
-            let limit = u64::from(self.config.max_discovery_entries());
+            let (resource, estimated, limit) =
+                discovery_incomplete_resource(manifest.coverage.truncation, &self.config);
             return Err(FirstSliceError::DiscoveryIncomplete {
-                estimated: limit.saturating_add(1),
+                resource,
+                estimated,
                 limit,
             }
             .into());
@@ -7381,6 +7390,7 @@ impl FirstSliceService {
             diagnostics: index_diagnostic_summaries(
                 verified.document(),
                 manifest.coverage.complete,
+                manifest.coverage.truncation,
             )?,
             logical_snapshot: Some(logical_snapshot),
             elapsed_micros: elapsed_micros(started),
@@ -12050,13 +12060,13 @@ pub enum FirstSliceError {
     #[error("first-slice discovery failed")]
     Discovery,
     /// Bounded discovery could not replace an existing complete generation.
-    #[error(
-        "first-slice discovery observed at least {estimated} repository entries with limit {limit}"
-    )]
+    #[error("first-slice discovery observed at least {estimated} {resource:?} with limit {limit}")]
     DiscoveryIncomplete {
-        /// Safe lower-bound estimate for the repository entry count.
+        /// Resource that selected the incomplete deterministic prefix.
+        resource: FirstSliceResource,
+        /// Safe observed or lower-bound demand.
         estimated: u64,
-        /// Configured discovery entry ceiling.
+        /// Effective resource ceiling.
         limit: u64,
     },
     /// Incremental baseline or invalidation planning failed.
@@ -13935,6 +13945,25 @@ fn preflight_source_inputs(
         supported_file_count,
         source_bytes: u64::try_from(source_bytes).map_err(|_| FirstSliceError::Limits)?,
     })
+}
+
+fn discovery_incomplete_resource(
+    truncation: Option<DiscoveryTruncation>,
+    config: &ConfigSnapshot,
+) -> (FirstSliceResource, u64, u64) {
+    let Some(truncation) = truncation else {
+        let limit = u64::from(config.max_discovery_entries());
+        return (
+            FirstSliceResource::DiscoveryEntries,
+            limit.saturating_add(1),
+            limit,
+        );
+    };
+    let resource = match truncation.resource {
+        DiscoveryTruncationResource::Entries => FirstSliceResource::DiscoveryEntries,
+        DiscoveryTruncationResource::RetainedSourceBytes => FirstSliceResource::SourceBytes,
+    };
+    (resource, truncation.observed, truncation.limit)
 }
 
 #[cfg(test)]
@@ -16081,6 +16110,7 @@ fn normalized_provider_work(producer: &str) -> (&str, FirstSliceFactWorkCause) {
 fn index_diagnostic_summaries(
     document: &NormalizedIrDocument,
     discovery_complete: bool,
+    discovery_truncation: Option<DiscoveryTruncation>,
 ) -> Result<Vec<FirstSliceIndexDiagnostic>, FirstSliceError> {
     const REDACTED_CODE: &str = "diagnostic-redacted";
     const REDACTED_MESSAGE: &str = "an index diagnostic was omitted because it was not source free";
@@ -16105,10 +16135,25 @@ fn index_diagnostic_summaries(
         };
         summaries.insert(summary);
     }
-    if !discovery_complete {
+    if let Some(truncation) = discovery_truncation {
+        let diagnostic = match truncation.resource {
+            DiscoveryTruncationResource::Entries => FirstSliceIndexDiagnostic {
+                code: "discovery-entries-truncated".to_owned(),
+                message: "repository discovery stopped at the configured entry limit".to_owned(),
+            },
+            DiscoveryTruncationResource::RetainedSourceBytes => FirstSliceIndexDiagnostic {
+                code: "discovery-source-bytes-truncated".to_owned(),
+                message: format!(
+                    "repository discovery retained a deterministic prefix of at most {} source bytes after observing at least {} bytes",
+                    truncation.limit, truncation.observed
+                ),
+            },
+        };
+        summaries.insert(diagnostic);
+    } else if !discovery_complete {
         summaries.insert(FirstSliceIndexDiagnostic {
-            code: "discovery-entries-truncated".to_owned(),
-            message: "repository discovery stopped at the configured entry limit".to_owned(),
+            code: "discovery-incomplete".to_owned(),
+            message: "repository discovery retained an incomplete deterministic prefix".to_owned(),
         });
     }
 
@@ -24755,6 +24800,7 @@ mod tests {
                 .index_repository(complete_fixture.path(), &cancellation)
                 .expect_err("incomplete discovery cannot replace a complete generation"),
             FirstSliceError::DiscoveryIncomplete {
+                resource: FirstSliceResource::DiscoveryEntries,
                 estimated: 3,
                 limit: 2,
             }
@@ -24809,6 +24855,84 @@ mod tests {
         let complete = partial_service
             .index_repository(partial_fixture.path(), &cancellation)
             .expect("complete successor replaces an initial partial generation");
+        assert!(complete.discovery_complete);
+        assert_eq!(complete.parent, Some(partial.generation));
+        assert_ne!(complete.generation, partial.generation);
+    }
+
+    #[test]
+    fn discovery_source_budget_publishes_initial_partial_and_preserves_last_good() {
+        const FILE_BYTES: &[u8] = b"aaaaaaaaaaaaa";
+        const TWO_FILES: usize = FILE_BYTES.len() * 2;
+
+        let new_service = || {
+            let mut service =
+                FirstSliceService::new_with_storage(4, MAX_RETAINED_SOURCE_BYTES, None, None)
+                    .expect("source-bounded discovery service initializes");
+            service.discovery_source_byte_limit =
+                u64::try_from(TWO_FILES).expect("fixture limit fits u64");
+            service
+        };
+        let write_sources = |root: &Path, names: &[&str]| {
+            for name in names {
+                fs::write(root.join(name), FILE_BYTES)
+                    .expect("source-bounded discovery fixture writes");
+            }
+        };
+
+        let complete_fixture = TempDir::new().expect("complete fixture root exists");
+        write_sources(complete_fixture.path(), &["alpha.txt", "middle.txt"]);
+        let cancellation = deadline();
+        let mut complete_service = new_service();
+        let last_good = complete_service
+            .index_repository(complete_fixture.path(), &cancellation)
+            .expect("complete generation publishes");
+        assert!(last_good.discovery_complete);
+
+        fs::write(complete_fixture.path().join("zeta.txt"), FILE_BYTES)
+            .expect("source beyond the aggregate budget writes");
+        assert_eq!(
+            complete_service
+                .index_repository(complete_fixture.path(), &cancellation)
+                .expect_err("source truncation cannot replace a complete generation"),
+            FirstSliceError::DiscoveryIncomplete {
+                resource: FirstSliceResource::SourceBytes,
+                estimated: u64::try_from(FILE_BYTES.len() * 3)
+                    .expect("fixture byte count fits u64"),
+                limit: u64::try_from(TWO_FILES).expect("fixture limit fits u64"),
+            }
+        );
+        let retained = complete_service
+            .resolve_generation(last_good.repository, None)
+            .expect("last-good generation remains active");
+        assert_eq!(retained.generation, last_good.generation);
+
+        let partial_fixture = TempDir::new().expect("partial fixture root exists");
+        write_sources(
+            partial_fixture.path(),
+            &["zeta.txt", "alpha.txt", "middle.txt"],
+        );
+        let mut partial_service = new_service();
+        let partial = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("initial source-bounded generation publishes");
+        assert!(!partial.discovery_complete);
+        assert_eq!(partial.discovered_inputs, 2);
+        assert!(partial.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "discovery-source-bytes-truncated"
+                && diagnostic.message
+                    == "repository discovery retained a deterministic prefix of at most 26 source bytes after observing at least 39 bytes"
+        }));
+        let repeated = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("unchanged source-bounded generation remains reusable");
+        assert_eq!(repeated, partial);
+
+        fs::remove_file(partial_fixture.path().join("zeta.txt"))
+            .expect("omitted tail source removes");
+        let complete = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("complete successor replaces an initial source-bounded generation");
         assert!(complete.discovery_complete);
         assert_eq!(complete.parent, Some(partial.generation));
         assert_ne!(complete.generation, partial.generation);

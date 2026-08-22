@@ -11373,12 +11373,16 @@ fn build_service_error(
             }
         }
     }
-    if let FirstSliceError::DiscoveryIncomplete { estimated, limit } = error {
-        let configuration_key = static_safe_label("analysis.max_discovery_entries");
+    if let FirstSliceError::DiscoveryIncomplete {
+        resource,
+        estimated,
+        limit,
+    } = error
+    {
         builder = builder
             .detail(
                 static_detail_key("resource"),
-                PublicValue::Label(static_safe_label("discovery_entries")),
+                PublicValue::Label(static_safe_label(resource.as_str())),
             )
             .detail(
                 static_detail_key("estimated"),
@@ -11386,16 +11390,22 @@ fn build_service_error(
             )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
             .detail(
-                static_detail_key("configuration_key"),
-                PublicValue::Label(configuration_key.clone()),
-            )
-            .detail(
                 static_detail_key("active_generation_preserved"),
                 PublicValue::Boolean(true),
-            )
-            .next_action(NextAction::UpdateConfiguration {
-                key: configuration_key,
-            });
+            );
+        if resource == rootlight_service::FirstSliceResource::DiscoveryEntries {
+            let configuration_key = static_safe_label("analysis.max_discovery_entries");
+            builder = builder
+                .detail(
+                    static_detail_key("configuration_key"),
+                    PublicValue::Label(configuration_key.clone()),
+                )
+                .next_action(NextAction::UpdateConfiguration {
+                    key: configuration_key,
+                });
+        } else {
+            builder = builder.next_action(NextAction::CollectSupportBundle);
+        }
     }
     if let FirstSliceError::EstimatedResourceLimit {
         resource,
@@ -13613,6 +13623,7 @@ mod tests {
 
         let discovery_incomplete = repository_index_error(
             FirstSliceError::DiscoveryIncomplete {
+                resource: rootlight_service::FirstSliceResource::DiscoveryEntries,
                 estimated: 100_001,
                 limit: 100_000,
             },
@@ -13645,6 +13656,35 @@ mod tests {
                 NextAction::UpdateConfiguration {
                     key: static_safe_label("analysis.max_discovery_entries"),
                 },
+            ]
+        );
+
+        let source_incomplete = repository_index_error(
+            FirstSliceError::DiscoveryIncomplete {
+                resource: rootlight_service::FirstSliceResource::SourceBytes,
+                estimated: 537_000_000,
+                limit: 536_870_912,
+            },
+            context,
+        );
+        assert_eq!(source_incomplete.code(), ErrorCode::IncompleteCoverage);
+        assert_eq!(
+            source_incomplete
+                .details()
+                .get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("source_bytes")))
+        );
+        assert_eq!(
+            source_incomplete
+                .details()
+                .get(&static_detail_key("active_generation_preserved")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            source_incomplete.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
             ]
         );
 
