@@ -10148,6 +10148,7 @@ const fn coverage_gap_label(reason: FirstSliceCoverageGapReason) -> &'static str
         FirstSliceCoverageGapReason::ParseError => "parse-error",
         FirstSliceCoverageGapReason::AdapterFailed => "adapter-failed",
         FirstSliceCoverageGapReason::Truncated => "truncated",
+        FirstSliceCoverageGapReason::DiscoveryIncomplete => "discovery-incomplete",
         FirstSliceCoverageGapReason::Generated => "generated",
         FirstSliceCoverageGapReason::Stale => "stale",
         _ => "truncated",
@@ -10273,6 +10274,9 @@ fn aggregate_coverage(
     if receipt.oversized_inputs > 0 {
         status = weaker_coverage(status, CoverageStatus::Bounded);
         skipped = skipped.saturating_add(receipt.oversized_inputs);
+    }
+    if !receipt.discovery_complete {
+        status = weaker_coverage(status, CoverageStatus::Bounded);
     }
     (tier, status, skipped)
 }
@@ -10996,6 +11000,13 @@ fn build_service_error(
             "discovery",
             "discovery",
         ),
+        FirstSliceError::DiscoveryIncomplete { .. } => (
+            ErrorCode::IncompleteCoverage,
+            "repository discovery is incomplete",
+            false,
+            "discovery_incomplete",
+            "discovery",
+        ),
         FirstSliceError::Incremental => (
             ErrorCode::Internal,
             "incremental planning failed",
@@ -11361,6 +11372,30 @@ fn build_service_error(
                 builder = builder.next_action(NextAction::DeleteRepository);
             }
         }
+    }
+    if let FirstSliceError::DiscoveryIncomplete { estimated, limit } = error {
+        let configuration_key = static_safe_label("analysis.max_discovery_entries");
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("discovery_entries")),
+            )
+            .detail(
+                static_detail_key("estimated"),
+                PublicValue::Unsigned(estimated),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .detail(
+                static_detail_key("configuration_key"),
+                PublicValue::Label(configuration_key.clone()),
+            )
+            .detail(
+                static_detail_key("active_generation_preserved"),
+                PublicValue::Boolean(true),
+            )
+            .next_action(NextAction::UpdateConfiguration {
+                key: configuration_key,
+            });
     }
     if let FirstSliceError::EstimatedResourceLimit {
         resource,
@@ -13576,6 +13611,43 @@ mod tests {
         );
         assert!(!semantic_refinement_degrades_adapter(&incomplete));
 
+        let discovery_incomplete = repository_index_error(
+            FirstSliceError::DiscoveryIncomplete {
+                estimated: 100_001,
+                limit: 100_000,
+            },
+            context,
+        );
+        assert_eq!(discovery_incomplete.code(), ErrorCode::IncompleteCoverage);
+        assert!(!discovery_incomplete.retryable());
+        assert_eq!(
+            discovery_incomplete
+                .details()
+                .get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("discovery_entries")))
+        );
+        assert_eq!(
+            discovery_incomplete
+                .details()
+                .get(&static_detail_key("estimated")),
+            Some(&PublicValue::Unsigned(100_001))
+        );
+        assert_eq!(
+            discovery_incomplete
+                .details()
+                .get(&static_detail_key("active_generation_preserved")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            discovery_incomplete.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::UpdateConfiguration {
+                    key: static_safe_label("analysis.max_discovery_entries"),
+                },
+            ]
+        );
+
         let declaration_loss = repository_index_error(
             FirstSliceError::ProjectCoverageIncomplete {
                 language: FirstSliceProjectCoverageLanguage::Java,
@@ -15372,6 +15444,7 @@ mod tests {
             parent: None,
             discovered_inputs: 2,
             visited_entries: 2,
+            discovery_complete: true,
             excluded_inputs: 0,
             oversized_inputs: 0,
             binary_inputs: 0,
@@ -17651,6 +17724,7 @@ mod tests {
             parent: Some(lineage_parent),
             discovered_inputs: 3,
             visited_entries: 4,
+            discovery_complete: true,
             excluded_inputs: 1,
             oversized_inputs: 0,
             binary_inputs: 0,

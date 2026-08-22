@@ -8,6 +8,8 @@
 #![deny(unsafe_code)]
 
 use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
     ffi::{OsStr, OsString},
     fmt,
     io::{self, Read},
@@ -874,6 +876,35 @@ impl RepositoryRoot {
         maximum_entries: usize,
         cancellation: &Cancellation,
     ) -> Result<Vec<DirectoryEntry>, VfsError> {
+        self.read_directory_bounded(directory, maximum_entries, false, cancellation)
+            .map(BoundedDirectoryEntries::into_entries)
+    }
+
+    /// Enumerates the deterministic prefix of one directory within an entry budget.
+    ///
+    /// The returned prefix is independent of filesystem enumeration order. The
+    /// result reports whether additional entries were omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::Cancelled`] when cancellation wins, or another
+    /// [`VfsError`] for invalid paths, memory pressure, or IO failures.
+    pub fn read_directory_prefix(
+        &self,
+        directory: Option<&RelativePath>,
+        maximum_entries: usize,
+        cancellation: &Cancellation,
+    ) -> Result<BoundedDirectoryEntries, VfsError> {
+        self.read_directory_bounded(directory, maximum_entries, true, cancellation)
+    }
+
+    fn read_directory_bounded(
+        &self,
+        directory: Option<&RelativePath>,
+        maximum_entries: usize,
+        allow_prefix: bool,
+        cancellation: &Cancellation,
+    ) -> Result<BoundedDirectoryEntries, VfsError> {
         let check = || {
             cancellation
                 .check()
@@ -892,7 +923,10 @@ impl RepositoryRoot {
             .entries()
             .map_err(|source| VfsError::ReadDirectory { source })?;
         check()?;
-        let mut entries = Vec::new();
+        // A max-heap retains the stable smallest names without trusting the
+        // filesystem's enumeration order or allocating for the omitted tail.
+        let mut entries = BinaryHeap::<OrderedDirectoryEntry>::new();
+        let mut truncated = false;
         for result in directory_entries {
             check()?;
             let entry = result.map_err(|source| VfsError::ReadDirectory { source })?;
@@ -901,13 +935,19 @@ impl RepositoryRoot {
                 continue;
             }
             if entries.len() >= maximum_entries {
-                return Err(VfsError::DirectoryEntryLimit {
-                    maximum: maximum_entries,
-                });
+                if !allow_prefix {
+                    return Err(VfsError::DirectoryEntryLimit {
+                        maximum: maximum_entries,
+                    });
+                }
+                truncated = true;
+                let Some(greatest) = entries.peek() else {
+                    continue;
+                };
+                if compare_platform_paths(&name, &greatest.0.name) != Ordering::Less {
+                    continue;
+                }
             }
-            entries
-                .try_reserve(1)
-                .map_err(|_| VfsError::MemoryUnavailable)?;
             check()?;
             let file_type = entry
                 .file_type()
@@ -942,17 +982,34 @@ impl RepositoryRoot {
                 directory_entry_metadata(&metadata)
             };
             check()?;
-            entries.push(DirectoryEntry {
+            let retained = OrderedDirectoryEntry(DirectoryEntry {
                 name,
                 kind,
                 length: source_metadata.length,
                 metadata: source_metadata,
             });
+            if entries.len() < maximum_entries {
+                entries
+                    .try_reserve(1)
+                    .map_err(|_| VfsError::MemoryUnavailable)?;
+                entries.push(retained);
+            } else {
+                let _ = entries.pop();
+                entries.push(retained);
+            }
         }
         check()?;
+        let retained = entries.into_vec();
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(retained.len())
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        for entry in retained {
+            entries.push(entry.0);
+        }
         entries.sort_unstable_by(|left, right| compare_platform_paths(&left.name, &right.name));
         check()?;
-        Ok(entries)
+        Ok(BoundedDirectoryEntries { entries, truncated })
     }
 
     /// Captures one stable regular file without following links.
@@ -1226,6 +1283,50 @@ pub struct DirectoryEntry {
     pub length: u64,
     /// Source-free metadata used by authoritative incremental reconciliation.
     pub metadata: SnapshotMetadata,
+}
+
+/// A deterministic bounded directory prefix and its completeness state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedDirectoryEntries {
+    entries: Vec<DirectoryEntry>,
+    truncated: bool,
+}
+
+impl BoundedDirectoryEntries {
+    /// Reports whether the directory was fully enumerated within the caller budget.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        !self.truncated
+    }
+
+    /// Moves the retained entries in deterministic platform path order.
+    #[must_use]
+    pub fn into_entries(self) -> Vec<DirectoryEntry> {
+        self.entries
+    }
+}
+
+#[derive(Debug)]
+struct OrderedDirectoryEntry(DirectoryEntry);
+
+impl PartialEq for OrderedDirectoryEntry {
+    fn eq(&self, other: &Self) -> bool {
+        compare_platform_paths(&self.0.name, &other.0.name) == Ordering::Equal
+    }
+}
+
+impl Eq for OrderedDirectoryEntry {}
+
+impl PartialOrd for OrderedDirectoryEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedDirectoryEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_platform_paths(&self.0.name, &other.0.name)
+    }
 }
 
 /// Closed entry classification at the VFS boundary.
@@ -2185,6 +2286,21 @@ mod tests {
                 .map(|entry| entry.name)
                 .collect::<Vec<_>>(),
             ["one.rs", "three.rs", "two.rs"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let prefix = root
+            .read_directory_prefix(None, 2, &cancellation)
+            .expect("bounded prefix enumeration succeeds");
+        assert!(!prefix.is_complete());
+        assert_eq!(
+            prefix
+                .into_entries()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            ["one.rs", "three.rs"]
                 .into_iter()
                 .map(OsString::from)
                 .collect::<Vec<_>>()

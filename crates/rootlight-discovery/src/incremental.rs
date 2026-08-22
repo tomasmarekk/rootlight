@@ -103,6 +103,7 @@ impl IncrementalDiscoveryBaseline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalDiscovery {
     repository: RepositoryId,
+    complete: bool,
     baseline: IncrementalDiscoveryBaseline,
     changes: ChangeSet,
     file_changes: Vec<FileChange>,
@@ -144,6 +145,12 @@ impl IncrementalDiscovery {
     #[must_use]
     pub const fn repository(&self) -> RepositoryId {
         self.repository
+    }
+
+    /// Reports whether authoritative traversal covered the complete repository.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
     }
 
     /// Returns state suitable as the parent of the next reconcile.
@@ -326,6 +333,7 @@ pub fn discover_incremental_with_progress(
 
     Ok(IncrementalDiscovery {
         repository: root.repository(),
+        complete: candidate_scan.complete,
         baseline,
         changes,
         file_changes,
@@ -358,6 +366,7 @@ pub fn correlate_incremental_manifest(
     cancellation.check()?;
     if manifest.repository != observed.repository()
         || manifest.configuration_hash != context.configuration_revision()
+        || manifest.coverage.complete != observed.is_complete()
         || u64::try_from(manifest.inputs.len()).ok() != Some(manifest.coverage.included)
     {
         return Err(DiscoveryError::IncrementalDrift);
@@ -463,6 +472,7 @@ pub fn correlate_incremental_manifest(
 
     Ok(IncrementalDiscovery {
         repository: observed.repository(),
+        complete: observed.is_complete(),
         baseline,
         changes,
         file_changes,
@@ -472,6 +482,7 @@ pub fn correlate_incremental_manifest(
 }
 
 struct CandidateScan {
+    complete: bool,
     scan: AuthoritativeScan,
     paths: BTreeMap<FileId, RelativePath>,
     descriptors: BTreeMap<FileId, FileDescriptor>,
@@ -490,16 +501,18 @@ fn scan_candidates(
     let mut descriptors = BTreeMap::new();
     let mut scoped_ignores = ScopedIgnores::default();
     let mut visited = 0_usize;
+    let mut complete = true;
 
     while let Some((directory, depth)) = queue.pop_front() {
         cancellation.check()?;
-        let entries = read_directory_with_entry_budget(
+        let bounded = read_directory_with_entry_budget(
             root,
             directory.as_ref(),
             limits.max_entries.saturating_sub(visited),
-            limits.max_entries,
             cancellation,
         )?;
+        let directory_complete = bounded.is_complete();
+        let entries = bounded.into_entries();
         cancellation.check()?;
         if entries.len() > limits.max_entries.saturating_sub(visited) {
             return Err(DiscoveryError::EntryLimit {
@@ -528,7 +541,7 @@ fn scan_candidates(
                 EntryKind::Directory if depth < limits.max_depth => {
                     queue.push_back((Some(path), depth + 1));
                 }
-                // `read_directory` leaves platform identity absent when its
+                // VFS enumeration leaves platform identity absent when its
                 // no-follow file open fails. Clean discovery excludes the same
                 // entry as unreadable, so it must not enter reconcile or hashing.
                 EntryKind::File
@@ -554,10 +567,15 @@ fn scan_candidates(
                 EntryKind::File | EntryKind::Directory | EntryKind::Link | EntryKind::Special => {}
             }
         }
+        if !directory_complete {
+            complete = false;
+            queue.clear();
+        }
     }
     let scan = AuthoritativeScan::new(scanned, reconcile_limits, cancellation)
         .map_err(map_incremental_error)?;
     Ok(CandidateScan {
+        complete,
         scan,
         paths,
         descriptors,
@@ -679,12 +697,76 @@ fn map_incremental_error(error: IncrementalError) -> DiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
     use rootlight_ids::derive_repository;
     use rootlight_incremental::{
         BaselineFile, HashDecisionReason, MetadataReliability, ReconcileMode,
     };
     use std::fs;
     use tempfile::tempdir_in;
+
+    #[test]
+    fn incremental_and_clean_discovery_share_the_incomplete_prefix() {
+        let current = std::env::current_dir().expect("current directory is available");
+        let temporary = tempdir_in(current).expect("local temporary directory is available");
+        for name in ["zeta.rs", "alpha.rs", "middle.rs"] {
+            fs::write(temporary.path().join(name), b"pub fn item() {}\n")
+                .expect("fixture file is written");
+        }
+        let root = RepositoryRoot::open(
+            derive_repository(b"incremental-bounded-prefix").id(),
+            temporary.path(),
+        )
+        .expect("fixture repository opens");
+        let config = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::Defaults,
+            contents: "version = \"1.0\"",
+        }])
+        .expect("minimal configuration resolves");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let limits =
+            DiscoveryLimits::new(2, 4, 1024, 10).expect("test limits are within hard ceilings");
+        let context = IncrementalDiscoveryContext::new(
+            config.hash(),
+            FactId::from_bytes([7; 20]),
+            content_hash(b"provider"),
+        );
+        let cancellation = Cancellation::new();
+
+        let observed = discover_incremental(
+            &root,
+            None,
+            context,
+            &policy,
+            ReconcileMode::Normal,
+            limits,
+            &cancellation,
+        )
+        .expect("incremental discovery publishes a partial prefix");
+        let manifest = crate::discover(&root, &config, &policy, limits, &cancellation)
+            .expect("clean discovery publishes the same partial prefix");
+        let correlated = correlate_incremental_manifest(
+            &observed,
+            None,
+            context,
+            &manifest,
+            limits,
+            &cancellation,
+        )
+        .expect("matching partial scans correlate");
+
+        assert!(!observed.is_complete());
+        assert!(!manifest.coverage.complete);
+        assert!(!correlated.is_complete());
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.rs", "middle.rs"]
+        );
+    }
 
     #[test]
     fn incremental_hashing_preflights_aggregate_snapshot_bytes() {

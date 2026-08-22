@@ -20,7 +20,8 @@ use rootlight_config::{CONFIG_VERSION_1_0, ConfigSnapshot};
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
 use rootlight_incremental::IncrementalError;
 use rootlight_vfs::{
-    DirectoryEntry, EntryKind, RelativePath, RepositoryRoot, SourceSnapshot, VfsError,
+    BoundedDirectoryEntries, DirectoryEntry, EntryKind, RelativePath, RepositoryRoot,
+    SourceSnapshot, VfsError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,8 +33,10 @@ pub use incremental::{
     discover_incremental, discover_incremental_with_progress,
 };
 
-/// Initial deterministic discovery-manifest version.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.0";
+/// Current deterministic discovery-manifest version.
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.1";
+/// Stable source-free diagnostic emitted when the entry budget truncates discovery.
+pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Hard entry ceiling independent of caller configuration.
 pub const MAX_DISCOVERY_ENTRIES: usize = 1_000_000;
 /// Hard traversal-depth ceiling independent of caller configuration.
@@ -491,7 +494,7 @@ pub struct DiscoveryDiagnostic {
 }
 
 /// Coverage counts for one bounded discovery run.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryCoverage {
     /// Total filesystem entries observed.
@@ -500,6 +503,24 @@ pub struct DiscoveryCoverage {
     pub included: u64,
     /// Exclusions grouped by stable reason name.
     pub excluded: BTreeMap<String, u64>,
+    /// Whether traversal reached the end of the repository namespace.
+    #[serde(default = "complete_discovery_coverage")]
+    pub complete: bool,
+}
+
+impl Default for DiscoveryCoverage {
+    fn default() -> Self {
+        Self {
+            visited: 0,
+            included: 0,
+            excluded: BTreeMap::new(),
+            complete: true,
+        }
+    }
+}
+
+const fn complete_discovery_coverage() -> bool {
+    true
 }
 
 /// Canonical, versioned result of deterministic repository discovery.
@@ -682,13 +703,14 @@ impl<'a> DiscoveryState<'a> {
         while let Some((directory, depth)) = self.queue.pop_front() {
             self.cancellation.check()?;
             let visited = usize::try_from(self.coverage.visited).unwrap_or(usize::MAX);
-            let entries = read_directory_with_entry_budget(
+            let bounded = read_directory_with_entry_budget(
                 self.root,
                 directory.as_ref(),
                 self.limits.max_entries.saturating_sub(visited),
-                self.limits.max_entries,
                 self.cancellation,
             )?;
+            let complete = bounded.is_complete();
+            let entries = bounded.into_entries();
             self.cancellation.check()?;
             self.ensure_entry_capacity(entries.len())?;
             // Ignore files become readable only after ancestor policy admits this
@@ -702,6 +724,11 @@ impl<'a> DiscoveryState<'a> {
                     None
                 };
                 self.visit_entry(directory.as_ref(), depth, entry, cached_snapshot)?;
+            }
+            if !complete {
+                self.coverage.complete = false;
+                self.diagnostic(None, DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE);
+                self.queue.clear();
             }
         }
         Ok(())
@@ -985,13 +1012,10 @@ fn read_directory_with_entry_budget(
     root: &RepositoryRoot,
     directory: Option<&RelativePath>,
     remaining: usize,
-    maximum: usize,
     cancellation: &Cancellation,
-) -> Result<Vec<DirectoryEntry>, DiscoveryError> {
-    match root.read_directory(directory, remaining, cancellation) {
-        Err(VfsError::DirectoryEntryLimit { .. }) => Err(DiscoveryError::EntryLimit { maximum }),
-        result => result.map_err(DiscoveryError::Vfs),
-    }
+) -> Result<BoundedDirectoryEntries, DiscoveryError> {
+    root.read_directory_prefix(directory, remaining, cancellation)
+        .map_err(DiscoveryError::Vfs)
 }
 
 fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSignal>) {
@@ -1703,6 +1727,36 @@ max_source_file_bytes = 2097152
             DiscoveryLimits::from_config(&maximum).max_entries,
             MAX_DISCOVERY_ENTRIES
         );
+    }
+
+    #[test]
+    fn entry_budget_publishes_a_deterministic_incomplete_prefix() {
+        let temporary = local_tempdir();
+        for name in ["zeta.rs", "alpha.rs", "middle.rs"] {
+            write_fixture(&temporary, name, b"pub fn item() {}\n");
+        }
+        let root = fixture_root(&temporary, b"bounded-discovery-prefix");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let limits =
+            DiscoveryLimits::new(2, 4, 1024, 10).expect("test limits are within hard ceilings");
+
+        let manifest = discover(&root, &config(), &policy, limits, &Cancellation::new())
+            .expect("entry exhaustion publishes a partial manifest");
+
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.rs", "middle.rs"]
+        );
+        assert_eq!(manifest.coverage.visited, 2);
+        assert_eq!(manifest.coverage.included, 2);
+        assert!(!manifest.coverage.complete);
+        assert!(manifest.diagnostics.iter().any(|diagnostic| {
+            diagnostic.path.is_none() && diagnostic.code == DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE
+        }));
     }
 
     #[test]

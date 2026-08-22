@@ -455,7 +455,7 @@ fn vcs_negations_cannot_reopen_default_exclusions() {
 }
 
 #[test]
-fn entry_limit_bounds_clean_and_incremental_directory_enumeration() {
+fn entry_limit_bounds_clean_and_incremental_discovery_with_the_same_prefix() {
     let temporary = local_tempdir();
     for name in ["one.rs", "two.rs", "three.rs"] {
         fs::write(temporary.path().join(name), b"fn fixture() {}\n")
@@ -465,24 +465,32 @@ fn entry_limit_bounds_clean_and_incremental_directory_enumeration() {
     let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
     let limits = DiscoveryLimits::new(1, 16, 1024 * 1024, 100).expect("test limits are valid");
 
-    for result in [
-        discover(&root, &config, &policy(), limits, &Cancellation::new()).map(|_| ()),
-        discover_incremental(
-            &root,
-            None,
-            context(b"config-v1", b"provider-v1"),
-            &policy(),
-            ReconcileMode::Normal,
-            limits,
-            &Cancellation::new(),
-        )
-        .map(|_| ()),
-    ] {
-        assert!(matches!(
-            result,
-            Err(DiscoveryError::EntryLimit { maximum: 1 })
-        ));
-    }
+    let manifest = discover(&root, &config, &policy(), limits, &Cancellation::new())
+        .expect("clean discovery publishes a bounded prefix");
+    let incremental = discover_incremental(
+        &root,
+        None,
+        context(b"config-v1", b"provider-v1"),
+        &policy(),
+        ReconcileMode::Normal,
+        limits,
+        &Cancellation::new(),
+    )
+    .expect("incremental discovery publishes the same bounded prefix");
+    let one = RelativePath::parse(std::path::Path::new("one.rs"))
+        .expect("retained fixture path is valid");
+
+    assert!(!manifest.coverage.complete);
+    assert!(!incremental.is_complete());
+    assert_eq!(
+        manifest
+            .inputs
+            .iter()
+            .map(|input| input.path.as_str())
+            .collect::<Vec<_>>(),
+        ["one.rs"]
+    );
+    assert_eq!(incremental.hashed_files(), &[root.file_id(&one)]);
 }
 
 #[test]

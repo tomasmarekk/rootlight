@@ -320,6 +320,9 @@ pub struct FirstSliceIndexReceipt {
     /// Files and directories visited by bounded discovery.
     #[serde(default)]
     pub visited_entries: u64,
+    /// Whether deterministic discovery reached the end of the repository namespace.
+    #[serde(default = "complete_discovery_by_default")]
+    pub discovery_complete: bool,
     /// Inputs omitted by stable discovery policy or resource classification.
     #[serde(default)]
     pub excluded_inputs: u64,
@@ -354,6 +357,10 @@ pub struct FirstSliceIndexReceipt {
     pub logical_snapshot: Option<FirstSliceLogicalSnapshotIdentity>,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
+}
+
+const fn complete_discovery_by_default() -> bool {
+    true
 }
 
 /// One committed generation plus confirmed durable bytes written by its operation.
@@ -2304,6 +2311,8 @@ pub enum FirstSliceCoverageGapReason {
     AdapterFailed,
     /// A bounded publication or retrieval limit omitted facts or source text.
     Truncated,
+    /// Repository discovery stopped before the omitted file count was known.
+    DiscoveryIncomplete,
     /// Generated-source policy prevented a complete production claim.
     Generated,
     /// The selected immutable generation is not current.
@@ -2317,7 +2326,7 @@ pub struct FirstSliceCoverageGap {
     pub reason: FirstSliceCoverageGapReason,
     /// Canonical language when the gap is language-scoped.
     pub language: Option<String>,
-    /// Files affected by the gap.
+    /// Files affected by the gap; zero means the omitted file count is unknown.
     pub files: u64,
 }
 
@@ -6474,6 +6483,7 @@ impl FirstSliceService {
             && metadata.configuration_hash() == self.config.hash()
             && metadata.provider_set_hash() == provider_set_hash
             && let Some(receipt) = self.receipts.get(&active).cloned()
+            && receipt.discovery_complete == incremental.is_complete()
         {
             check_cancellation(cancellation)?;
             let planning =
@@ -6505,6 +6515,20 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
+        if !manifest.coverage.complete
+            && let Some(active) = active
+            && self
+                .receipts
+                .get(&active)
+                .is_some_and(|receipt| receipt.discovery_complete)
+        {
+            let limit = u64::from(self.config.max_discovery_entries());
+            return Err(FirstSliceError::DiscoveryIncomplete {
+                estimated: limit.saturating_add(1),
+                limit,
+            }
+            .into());
+        }
         let manifest_bytes_examined = manifest.inputs.iter().try_fold(0_u64, |total, input| {
             total
                 .checked_add(input.bytes)
@@ -6630,6 +6654,7 @@ impl FirstSliceService {
             && metadata.configuration_hash() == self.config.hash()
             && metadata.provider_set_hash() == provider_set_hash
             && let Some(receipt) = self.receipts.get(&active).cloned()
+            && receipt.discovery_complete == manifest.coverage.complete
         {
             check_cancellation(cancellation)?;
             let planning =
@@ -7324,6 +7349,7 @@ impl FirstSliceService {
             parent,
             discovered_inputs: manifest.coverage.included,
             visited_entries: manifest.coverage.visited,
+            discovery_complete: manifest.coverage.complete,
             excluded_inputs: manifest
                 .coverage
                 .excluded
@@ -7352,7 +7378,10 @@ impl FirstSliceService {
             oracle_allocated_bytes,
             estimated_disk_bytes,
             retained_durable_bytes: 0,
-            diagnostics: index_diagnostic_summaries(verified.document())?,
+            diagnostics: index_diagnostic_summaries(
+                verified.document(),
+                manifest.coverage.complete,
+            )?,
             logical_snapshot: Some(logical_snapshot),
             elapsed_micros: elapsed_micros(started),
         };
@@ -11273,6 +11302,13 @@ impl FirstSliceService {
                 });
             }
         }
+        if !receipt.discovery_complete {
+            gaps.push(FirstSliceCoverageGap {
+                reason: FirstSliceCoverageGapReason::DiscoveryIncomplete,
+                language: None,
+                files: 0,
+            });
+        }
         let freshness = self.generation_freshness(repository, generation)?;
         if !matches!(
             freshness.structural,
@@ -12013,6 +12049,16 @@ pub enum FirstSliceError {
     /// Deterministic discovery failed.
     #[error("first-slice discovery failed")]
     Discovery,
+    /// Bounded discovery could not replace an existing complete generation.
+    #[error(
+        "first-slice discovery observed at least {estimated} repository entries with limit {limit}"
+    )]
+    DiscoveryIncomplete {
+        /// Safe lower-bound estimate for the repository entry count.
+        estimated: u64,
+        /// Configured discovery entry ceiling.
+        limit: u64,
+    },
     /// Incremental baseline or invalidation planning failed.
     #[error("first-slice incremental planning failed")]
     Incremental,
@@ -16034,6 +16080,7 @@ fn normalized_provider_work(producer: &str) -> (&str, FirstSliceFactWorkCause) {
 
 fn index_diagnostic_summaries(
     document: &NormalizedIrDocument,
+    discovery_complete: bool,
 ) -> Result<Vec<FirstSliceIndexDiagnostic>, FirstSliceError> {
     const REDACTED_CODE: &str = "diagnostic-redacted";
     const REDACTED_MESSAGE: &str = "an index diagnostic was omitted because it was not source free";
@@ -16057,6 +16104,12 @@ fn index_diagnostic_summaries(
             }
         };
         summaries.insert(summary);
+    }
+    if !discovery_complete {
+        summaries.insert(FirstSliceIndexDiagnostic {
+            code: "discovery-entries-truncated".to_owned(),
+            message: "repository discovery stopped at the configured entry limit".to_owned(),
+        });
     }
 
     let truncated = summaries.len() > MAX_FIRST_SLICE_INDEX_DIAGNOSTICS;
@@ -24654,6 +24707,111 @@ mod tests {
                 && diagnostic.message
                     == "oversized repository input count 1 omitted by configured source file limit"
         }));
+    }
+
+    #[test]
+    fn discovery_entry_budget_publishes_initial_partial_and_preserves_last_good() {
+        let new_service = || {
+            let policy = FirstSliceStoragePolicy::resolve_user_config(
+                Some("version = \"1.3\"\n[analysis]\nmax_discovery_entries = 2\n"),
+                4,
+            )
+            .expect("bounded discovery configuration resolves");
+            FirstSliceService::new_with_storage_policy(
+                4,
+                MAX_RETAINED_SOURCE_BYTES,
+                None,
+                None,
+                policy,
+            )
+            .expect("bounded discovery service initializes")
+        };
+        let write_sources = |root: &Path, names: &[&str]| {
+            for name in names {
+                fs::write(
+                    root.join(name),
+                    format!("pub fn {}() {{}}\n", name.replace('.', "_")),
+                )
+                .expect("bounded discovery fixture writes");
+            }
+        };
+
+        let complete_fixture = TempDir::new().expect("complete fixture root exists");
+        write_sources(complete_fixture.path(), &["alpha.rs", "middle.rs"]);
+        let cancellation = deadline();
+        let mut complete_service = new_service();
+        let last_good = complete_service
+            .index_repository(complete_fixture.path(), &cancellation)
+            .expect("complete generation publishes");
+        assert!(last_good.discovery_complete);
+
+        fs::write(
+            complete_fixture.path().join("zeta.rs"),
+            "pub fn zeta() {}\n",
+        )
+        .expect("entry beyond the discovery budget writes");
+        assert_eq!(
+            complete_service
+                .index_repository(complete_fixture.path(), &cancellation)
+                .expect_err("incomplete discovery cannot replace a complete generation"),
+            FirstSliceError::DiscoveryIncomplete {
+                estimated: 3,
+                limit: 2,
+            }
+        );
+        let retained = complete_service
+            .resolve_generation(last_good.repository, None)
+            .expect("last-good generation remains active");
+        assert_eq!(retained.generation, last_good.generation);
+        assert_eq!(retained.receipt, last_good);
+
+        let mut legacy_receipt =
+            serde_json::to_value(&last_good).expect("receipt serializes for compatibility");
+        legacy_receipt
+            .as_object_mut()
+            .expect("receipt is a JSON object")
+            .remove("discovery_complete");
+        let legacy_receipt: FirstSliceIndexReceipt =
+            serde_json::from_value(legacy_receipt).expect("legacy receipt remains readable");
+        assert!(legacy_receipt.discovery_complete);
+
+        let partial_fixture = TempDir::new().expect("partial fixture root exists");
+        write_sources(
+            partial_fixture.path(),
+            &["zeta.rs", "alpha.rs", "middle.rs"],
+        );
+        let mut partial_service = new_service();
+        let partial = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("initial incomplete generation publishes");
+        assert!(!partial.discovery_complete);
+        assert_eq!(partial.discovered_inputs, 2);
+        assert!(partial.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "discovery-entries-truncated"
+                && diagnostic.message
+                    == "repository discovery stopped at the configured entry limit"
+        }));
+        let gaps = partial_service
+            .coverage_gaps_until(partial.repository, partial.generation, &cancellation)
+            .expect("partial coverage gaps resolve");
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::DiscoveryIncomplete
+                && gap.language.is_none()
+                && gap.files == 0
+        }));
+        let repeated = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("unchanged partial generation remains reusable");
+        assert_eq!(repeated, partial);
+
+        fs::remove_file(partial_fixture.path().join("zeta.rs"))
+            .expect("omitted tail entry removes");
+        let complete = partial_service
+            .index_repository(partial_fixture.path(), &cancellation)
+            .expect("complete successor replaces an initial partial generation");
+        assert!(complete.discovery_complete);
+        assert_eq!(complete.parent, Some(partial.generation));
+        assert_ne!(complete.generation, partial.generation);
     }
 
     #[test]
