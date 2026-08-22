@@ -5394,8 +5394,13 @@ impl FirstSliceService {
             total_generation_capacity,
             MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
         )?;
-        let discovery_source_byte_limit =
+        let retained_source_byte_limit =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
+        // Discovery must select a publishable prefix before snapshots are
+        // retained; rejecting the same inputs during later memory admission
+        // would discard otherwise valid bounded coverage.
+        let discovery_source_byte_limit =
+            retained_source_byte_limit.min(maximum_generation_preflight_source_bytes()?);
         let mut catalog_instance_nonce = [0_u8; 32];
         getrandom::fill(&mut catalog_instance_nonce)
             .map_err(|_| FirstSliceError::RandomUnavailable)?;
@@ -14087,6 +14092,13 @@ fn ensure_generation_memory_preflight(source_bytes: u64) -> Result<u64, FirstSli
         ));
     }
     Ok(observed)
+}
+
+fn maximum_generation_preflight_source_bytes() -> Result<u64, FirstSliceError> {
+    MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        .checked_sub(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES)
+        .and_then(|bytes| bytes.checked_div(GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR))
+        .ok_or(FirstSliceError::Limits)
 }
 
 fn ensure_generation_memory_admission(
@@ -23236,10 +23248,17 @@ mod tests {
         );
         assert_eq!(GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR, 48);
         assert!(reservation > 2_895_064_417);
-        let over_limit_source = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
-            .checked_sub(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES)
-            .and_then(|bytes| bytes.checked_div(GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR))
-            .and_then(|bytes| bytes.checked_add(1))
+        let maximum_source = maximum_generation_preflight_source_bytes()
+            .expect("maximum preflight source size is representable");
+        let service = FirstSliceService::new(2).expect("service initializes");
+        assert_eq!(service.discovery_source_byte_limit, maximum_source);
+        assert_eq!(
+            ensure_generation_memory_preflight(maximum_source)
+                .expect("exact generation-memory ceiling is admitted"),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        );
+        let over_limit_source = maximum_source
+            .checked_add(1)
             .expect("over-limit source size is representable");
         assert!(matches!(
             ensure_generation_memory_preflight(over_limit_source),
