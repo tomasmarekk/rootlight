@@ -508,6 +508,42 @@ fn test_and_route_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId, SymbolI
     (snapshot, production, test, handler, route)
 }
 
+fn selective_relationship_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {
+    let (base, production, test, _handler, _route) = test_and_route_snapshot();
+    let metadata = base.metadata();
+    let mut document = base.document().clone();
+    let mut desired = document
+        .relations
+        .iter()
+        .find(|relation| relation.predicate == RelationPredicate::Tests)
+        .cloned()
+        .expect("fixture has one test relationship");
+    let mut unrelated = document
+        .relations
+        .iter()
+        .find(|relation| relation.predicate == RelationPredicate::ServesRoute)
+        .cloned()
+        .expect("fixture has one unrelated route relationship");
+    let first = derive_fact("rootlight.query-test.selective-relation/v1", b"first").id();
+    let second = derive_fact("rootlight.query-test.selective-relation/v1", b"second").id();
+    let (unrelated_id, desired_id) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    unrelated.id = unrelated_id;
+    desired.id = desired_id;
+    document.relations = vec![unrelated, desired];
+    let snapshot = GenerationSnapshot::new(
+        metadata,
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("selective relationship fixture is canonical");
+    (snapshot, production, test)
+}
+
 fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
     let entity = &snapshot.document().entities[0];
     let source = entity
@@ -1206,6 +1242,43 @@ fn symbol_relationships_preserves_test_and_route_direction_counterparts_and_sour
         assert_eq!(group.items[0].symbol, expected);
         assert_eq!(group.items[0].source_refs.len(), 1);
     }
+}
+
+#[test]
+fn seed_scoped_queries_do_not_spend_edge_budget_on_unrelated_relations() {
+    let (snapshot, production, test) = selective_relationship_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+
+    let relationships = service
+        .plan_symbol_relationships(
+            BTreeSet::from([production]),
+            vec![RelationFamily::Tests],
+            Some(RelationDirection::Inbound),
+            0,
+            1,
+            0,
+            QueryBudget::new().with_max_edges(1),
+        )
+        .and_then(|plan| service.execute_symbol_relationships(&plan, &Cancellation::new()))
+        .expect("the relevant edge fits the exact edge budget");
+    assert!(!relationships.data.truncated);
+    assert_eq!(relationships.usage.edges, 1);
+    assert_eq!(relationships.data.returned_edges, 1);
+    assert_eq!(relationships.data.total_edges, 1);
+    assert_eq!(relationships.data.groups[0].items[0].symbol, test);
+
+    let explanation = service
+        .plan_symbol_explain(production, QueryBudget::new().with_max_edges(1))
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .expect("symbol explanation ignores unrelated edges");
+    assert!(!explanation.data.truncated);
+    assert_eq!(explanation.usage.edges, 1);
+    assert_eq!(explanation.data.relations.len(), 1);
+    assert_eq!(
+        explanation.data.relations[0].predicate,
+        RelationPredicate::Tests
+    );
 }
 
 #[test]

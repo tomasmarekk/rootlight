@@ -491,15 +491,15 @@ where
                 record_limit(&mut limiting_resources, QueryResource::Rows)?;
                 break;
             }
-            if !tracker.can_add(QueryResource::Edges, 1) {
-                record_limit(&mut limiting_resources, QueryResource::Edges)?;
-                break;
-            }
             tracker.add_rows(1)?;
-            tracker.add_edges(1)?;
             if endpoint_matches(relation.subject, plan.symbol)
                 || endpoint_matches(relation.object, plan.symbol)
             {
+                if !tracker.can_add(QueryResource::Edges, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                    break;
+                }
+                tracker.add_edges(1)?;
                 if !tracker.can_add(QueryResource::Results, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Results)?;
                     break;
@@ -711,13 +711,7 @@ where
                     scan_truncated = true;
                     break 'scan;
                 }
-                if !tracker.can_add(QueryResource::Edges, 1) {
-                    record_limit(&mut limiting_resources, QueryResource::Edges)?;
-                    scan_truncated = true;
-                    break 'scan;
-                }
                 tracker.add_rows(1)?;
-                tracker.add_edges(1)?;
                 if !predicates.contains(&relation.predicate) {
                     continue;
                 }
@@ -729,6 +723,12 @@ where
                 }
                 let confidence = effective_relation_confidence(document, relation);
                 for (seed, direction, target) in candidates {
+                    if !tracker.can_add(QueryResource::Edges, 1) {
+                        record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                        scan_truncated = true;
+                        break 'scan;
+                    }
+                    tracker.add_edges(1)?;
                     if confidence < plan.min_confidence {
                         continue;
                     }
