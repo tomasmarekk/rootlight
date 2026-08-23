@@ -775,6 +775,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Cpp, "namespace_definition") => Some("cpp.namespace"),
         (GrammarFamily::Cpp, "function_definition") => Some("cpp.function"),
         (GrammarFamily::Cpp, "declaration") => Some("cpp.declaration"),
+        (GrammarFamily::Cpp, "field_declaration") => Some("cpp.function"),
         (GrammarFamily::Cpp, "class_specifier") => Some("cpp.class"),
         (GrammarFamily::Cpp, "struct_specifier") => Some("cpp.struct"),
         (GrammarFamily::Cpp, "union_specifier") => Some("cpp.union"),

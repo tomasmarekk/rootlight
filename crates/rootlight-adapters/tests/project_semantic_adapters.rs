@@ -787,17 +787,22 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
         ["src/parser.h", "src/parser_test.cpp"],
         [
             concat!(
-                "namespace sample {\n",
+                "namespace sample::detail {\n",
                 "class Value {};\n",
                 "class Parser final {\n",
                 "public:\n",
+                "  Parser() = default;\n",
+                "  [[deprecated]] explicit Parser(bool) : Parser() {}\n",
                 "  template <typename Item>\n",
-                "  void prepare() noexcept {}\n",
+                "  void prepare() noexcept { postPrepare(); }\n",
+                "private:\n",
+                "  void postPrepare() noexcept;\n",
+                "  void (*callback)();\n",
                 "};\n",
                 "}\n",
             ),
             concat!(
-                "namespace sample {\n",
+                "namespace sample::detail {\n",
                 "TEST(ParserTest, PreparesValue) {\n",
                 "  auto parser = Parser();\n",
                 "  parser.prepare<Value>();\n",
@@ -816,6 +821,15 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
             entity.display_name == "prepare" && entity.qualified_name.contains("Parser::prepare")
         })
         .expect("templated C++ method is materialized under its declaring type");
+    let declared_method = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "postPrepare"
+                && entity.qualified_name.contains("Parser::postPrepare")
+        })
+        .expect("declared C++ method is materialized under its declaring type");
     let test = output
         .document()
         .entities
@@ -824,6 +838,12 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
         .expect("reviewed TEST macro is classified");
 
     assert_eq!(target.kind, EntityKind::Method);
+    assert_eq!(declared_method.kind, EntityKind::Method);
+    assert!(
+        !output.document().entities.iter().any(|entity| {
+            entity.kind == EntityKind::Method && entity.display_name == "callback"
+        })
+    );
     assert!(output.document().relations.iter().any(|relation| {
         relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
             && relation.predicate == RelationPredicate::Tests

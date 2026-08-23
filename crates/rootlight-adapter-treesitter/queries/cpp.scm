@@ -7,6 +7,9 @@
 [
   (function_definition)
   (declaration)
+  (field_declaration
+    declarator: (function_declarator
+      declarator: [(identifier) (field_identifier)]))
   (class_specifier)
   (struct_specifier)
   (union_specifier)
