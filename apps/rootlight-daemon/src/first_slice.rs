@@ -138,7 +138,10 @@ const RECOVERY_RETRY_RETAINED_MS: u32 = 5_000;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
-const INITIAL_RECOVERY_DEMAND_GRACE: Duration = Duration::from_secs(5);
+// Recovery starts before endpoint discovery and installed MCP initialization.
+// One public request envelope lets the first repository demand arrive before
+// the worker commits to a different non-preemptible restore.
+const INITIAL_RECOVERY_DEMAND_GRACE: Duration = Duration::from_secs(30);
 const INITIAL_RECOVERY_DEMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 // The public client timeout is also 30 seconds. Leave enough time after a
 // maximum long poll for serialization, IPC scheduling, and client decoding.
