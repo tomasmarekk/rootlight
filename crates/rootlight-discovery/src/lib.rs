@@ -34,7 +34,7 @@ pub use incremental::{
 };
 
 /// Current deterministic discovery-manifest version.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.2";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.3";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.

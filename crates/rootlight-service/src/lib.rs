@@ -53,12 +53,12 @@ use rootlight_config::{
     CONFIG_VERSION_1_2, ConfigLayer, ConfigSnapshot, ConfigSource, MAXIMUM_REPOSITORIES,
 };
 use rootlight_discovery::{
-    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, DiscoveryTruncation,
-    DiscoveryTruncationResource, IncrementalDiscovery, IncrementalDiscoveryBaseline,
-    IncrementalDiscoveryContext, IncrementalDiscoveryOptions, InputClass, LanguageEvidence,
-    ManifestInput, canonical_language, correlate_incremental_manifest,
-    discover_incremental_with_progress, discover_with_snapshots_at_limit, extension_language,
-    language_capabilities,
+    DISCOVERY_MANIFEST_VERSION, DiscoveryError, DiscoveryLimits, DiscoveryPolicy,
+    DiscoveryTruncation, DiscoveryTruncationResource, IncrementalDiscovery,
+    IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
+    InputClass, LanguageEvidence, ManifestInput, canonical_language,
+    correlate_incremental_manifest, discover_incremental_with_progress,
+    discover_with_snapshots_at_limit, extension_language, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -13304,6 +13304,7 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
     hash_static_components(&[
         PROVIDER_SET_SEED,
         parser.as_bytes(),
+        DISCOVERY_MANIFEST_VERSION.as_bytes(),
         RESOLVER_PROVIDER_VERSION.as_bytes(),
         RESOLVER_BINARY_SEED,
         SEARCH_REVISION_SEED,
