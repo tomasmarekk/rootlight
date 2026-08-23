@@ -180,9 +180,27 @@ const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // headroom even when the encoded request remains below the hard input limit.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
 const PROJECT_ADAPTER_PARTITION_FILES: usize = 512;
+// Supplemental split bridges spend existing source headroom on direct include
+// pairs without changing the per-request source ceiling.
+const PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES: usize = 64 * 1024;
+const PROJECT_ADAPTER_PARTITION_CONTEXT_FILES: usize = 64;
+const PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES: usize = 256;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
+type ProjectPartition = Vec<adapter::ProjectInput>;
+#[derive(Clone, Copy)]
+enum ProjectPartitionRole {
+    Primary,
+    Supplemental,
+}
+type ProjectPartitionAppender<'a> = dyn FnMut(
+        NormalizedIrDocument,
+        bool,
+        &[adapter::ProjectInput],
+        ProjectPartitionRole,
+    ) -> Result<(), FirstSliceProjectAnalysisError>
+    + 'a;
 
 struct InstalledProjectAnalyzer {
     executable: PathBuf,
@@ -322,25 +340,49 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         let mut analysis: Option<FirstSliceProjectAnalysis> = None;
         let mut completed_files = 0_u64;
         let mut completed_bytes = 0_u64;
-        for input in ordered_inputs {
+        let mut completed_paths = BTreeSet::new();
+        let mut top_level_partitions = BTreeMap::<&str, usize>::new();
+        let mut current_partition_paths = Vec::<&str>::new();
+        let mut top_level_partition = 0_usize;
+        current_partition_paths
+            .try_reserve(PROJECT_ADAPTER_PARTITION_FILES)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        for input in &ordered_inputs {
             let wire_input = project_input_to_wire(&request, input)?;
             if let Some(rejected) = partition.try_push(wire_input)? {
                 let batch = partition.take();
                 if batch.is_empty() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
+                record_top_level_partition(
+                    &current_partition_paths,
+                    top_level_partition,
+                    &mut top_level_partitions,
+                )?;
                 self.execute_adaptive_partition(
                     &request,
                     &session,
                     batch,
                     cancellation,
-                    &mut |document, isolated, partition_files, partition_bytes| {
-                        match &mut analysis {
-                            Some(analysis) => analysis.append_partition(document, isolated)?,
-                            None => {
+                    &mut |document, isolated, partition_inputs, role| {
+                        match (&mut analysis, role) {
+                            (Some(analysis), ProjectPartitionRole::Primary) => {
+                                analysis.append_partition(document, isolated)?;
+                            }
+                            (Some(analysis), ProjectPartitionRole::Supplemental) => {
+                                analysis.append_supplemental_relations(document, isolated)?;
+                            }
+                            (None, ProjectPartitionRole::Primary) => {
                                 analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
                             }
+                            (None, ProjectPartitionRole::Supplemental) => {
+                                return Err(FirstSliceProjectAnalysisError::Analysis);
+                            }
                         }
+                        let (partition_files, partition_bytes) = record_project_partition_progress(
+                            partition_inputs,
+                            &mut completed_paths,
+                        )?;
                         completed_files = completed_files
                             .checked_add(partition_files)
                             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
@@ -359,24 +401,80 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 if partition.try_push(rejected)?.is_some() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
+                top_level_partition = top_level_partition
+                    .checked_add(1)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                current_partition_paths.clear();
             }
+            current_partition_paths.push(input.path());
         }
         let batch = partition.take();
         if batch.is_empty() {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
+        record_top_level_partition(
+            &current_partition_paths,
+            top_level_partition,
+            &mut top_level_partitions,
+        )?;
         self.execute_adaptive_partition(
             &request,
             &session,
             batch,
             cancellation,
-            &mut |document, isolated, partition_files, partition_bytes| {
-                match &mut analysis {
-                    Some(analysis) => analysis.append_partition(document, isolated)?,
-                    None => {
+            &mut |document, isolated, partition_inputs, role| {
+                match (&mut analysis, role) {
+                    (Some(analysis), ProjectPartitionRole::Primary) => {
+                        analysis.append_partition(document, isolated)?;
+                    }
+                    (Some(analysis), ProjectPartitionRole::Supplemental) => {
+                        analysis.append_supplemental_relations(document, isolated)?;
+                    }
+                    (None, ProjectPartitionRole::Primary) => {
                         analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
                     }
+                    (None, ProjectPartitionRole::Supplemental) => {
+                        return Err(FirstSliceProjectAnalysisError::Analysis);
+                    }
                 }
+                let (partition_files, partition_bytes) =
+                    record_project_partition_progress(partition_inputs, &mut completed_paths)?;
+                completed_files = completed_files
+                    .checked_add(partition_files)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                completed_bytes = completed_bytes
+                    .checked_add(partition_bytes)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                observe_progress(FirstSliceProjectAnalysisProgress {
+                    completed_files,
+                    total_files,
+                    completed_bytes,
+                    total_bytes,
+                });
+                Ok(())
+            },
+        )?;
+        let mut bridge_planner =
+            ProjectIncludeBridgePlanner::new(request.context_manifest().len())?;
+        bridge_planner.scan_top_level_partitions(
+            &request,
+            &ordered_inputs,
+            &top_level_partitions,
+        )?;
+        self.execute_supplemental_partitions(
+            &request,
+            &session,
+            bridge_planner.finish()?,
+            cancellation,
+            &mut |document, isolated, partition_inputs, role| {
+                match (&mut analysis, role) {
+                    (Some(analysis), ProjectPartitionRole::Supplemental) => {
+                        analysis.append_supplemental_relations(document, isolated)?;
+                    }
+                    _ => return Err(FirstSliceProjectAnalysisError::Analysis),
+                }
+                let (partition_files, partition_bytes) =
+                    record_project_partition_progress(partition_inputs, &mut completed_paths)?;
                 completed_files = completed_files
                     .checked_add(partition_files)
                     .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
@@ -396,20 +494,68 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
     }
 }
 
-fn project_partition_progress(
+fn record_top_level_partition<'a>(
+    paths: &[&'a str],
+    partition: usize,
+    partitions: &mut BTreeMap<&'a str, usize>,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if paths.is_empty() {
+        return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    for path in paths {
+        if partitions.insert(path, partition).is_some() {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+    }
+    Ok(())
+}
+
+fn record_project_partition_progress(
     inputs: &[adapter::ProjectInput],
+    completed_paths: &mut BTreeSet<String>,
 ) -> Result<(u64, u64), FirstSliceProjectAnalysisError> {
-    let files =
-        u64::try_from(inputs.len()).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-    let bytes = inputs.iter().try_fold(0_u64, |total, input| {
-        total
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    for input in inputs {
+        if !completed_paths.insert(input.path.clone()) {
+            continue;
+        }
+        files = files
+            .checked_add(1)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        bytes = bytes
             .checked_add(
                 u64::try_from(input.source.len())
                     .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
             )
-            .ok_or(FirstSliceProjectAnalysisError::Analysis)
-    })?;
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+    }
     Ok((files, bytes))
+}
+
+fn append_supplemental_project_partition(
+    append: &mut ProjectPartitionAppender<'_>,
+    document: NormalizedIrDocument,
+    isolated: bool,
+    inputs: &[adapter::ProjectInput],
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    match append(
+        document,
+        isolated,
+        inputs,
+        ProjectPartitionRole::Supplemental,
+    ) {
+        Ok(()) => Ok(()),
+        Err(
+            error @ (FirstSliceProjectAnalysisError::Cancelled(_)
+            | FirstSliceProjectAnalysisError::Identity
+            | FirstSliceProjectAnalysisError::Protocol
+            | FirstSliceProjectAnalysisError::Isolation),
+        ) => Err(error),
+        // Primary partitions already retain explicit bounded coverage when a
+        // supplemental document cannot fit the aggregate resource boundary.
+        Err(_) => Ok(()),
+    }
 }
 
 impl InstalledProjectAnalyzer {
@@ -419,14 +565,11 @@ impl InstalledProjectAnalyzer {
         session: &NegotiatedSession,
         inputs: Vec<adapter::ProjectInput>,
         cancellation: &Cancellation,
-        append: &mut dyn FnMut(
-            NormalizedIrDocument,
-            bool,
-            u64,
-            u64,
-        ) -> Result<(), FirstSliceProjectAnalysisError>,
+        append: &mut ProjectPartitionAppender<'_>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         let mut pending = Vec::new();
+        let mut bridge_planner =
+            ProjectIncludeBridgePlanner::new(request.context_manifest().len())?;
         pending
             .try_reserve(1)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
@@ -435,12 +578,12 @@ impl InstalledProjectAnalyzer {
             cancellation.check().map_err(|cancelled| {
                 FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
             })?;
-            let progress = project_partition_progress(&batch)?;
             match self.execute_partition(request, session, batch, cancellation) {
                 Ok((document, isolated, analyzed)) => {
-                    if project_partition_needs_syntax_split(&document, analyzed.len())
-                        && let Some((left, right)) = split_project_partition(analyzed)
-                    {
+                    if project_partition_needs_syntax_split(&document, analyzed.len()) {
+                        let (left, right) = split_project_partition(analyzed)
+                            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                        bridge_planner.scan_partition_pair(&left, &right)?;
                         pending
                             .try_reserve(2)
                             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
@@ -450,12 +593,13 @@ impl InstalledProjectAnalyzer {
                         pending.push(left);
                         continue;
                     }
-                    append(document, isolated, progress.0, progress.1)?;
+                    append(document, isolated, &analyzed, ProjectPartitionRole::Primary)?;
                 }
                 Err(ProjectPartitionError::OutputLimit(oversized)) => {
                     let Some((left, right)) = split_project_partition(oversized) else {
                         return Err(FirstSliceProjectAnalysisError::OutputLimit);
                     };
+                    bridge_planner.scan_partition_pair(&left, &right)?;
                     pending
                         .try_reserve(2)
                         .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
@@ -465,6 +609,44 @@ impl InstalledProjectAnalyzer {
                     pending.push(left);
                 }
                 Err(ProjectPartitionError::Analysis(error)) => return Err(error),
+            }
+        }
+        self.execute_supplemental_partitions(
+            request,
+            session,
+            bridge_planner.finish()?,
+            cancellation,
+            append,
+        )
+    }
+
+    fn execute_supplemental_partitions(
+        &self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        session: &NegotiatedSession,
+        bridges: Vec<ProjectPartition>,
+        cancellation: &Cancellation,
+        append: &mut ProjectPartitionAppender<'_>,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        for bridge in bridges {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+            match self.execute_partition(request, session, bridge, cancellation) {
+                Ok((document, isolated, analyzed)) => {
+                    append_supplemental_project_partition(append, document, isolated, &analyzed)?;
+                }
+                Err(ProjectPartitionError::OutputLimit(_)) => {}
+                Err(ProjectPartitionError::Analysis(
+                    error @ (FirstSliceProjectAnalysisError::Cancelled(_)
+                    | FirstSliceProjectAnalysisError::Identity
+                    | FirstSliceProjectAnalysisError::Protocol
+                    | FirstSliceProjectAnalysisError::Isolation),
+                )) => return Err(error),
+                // Primary partitions already retain an explicit bounded
+                // cross-partition diagnostic when supplemental evidence cannot
+                // be produced inside its own resource boundary.
+                Err(ProjectPartitionError::Analysis(_)) => {}
             }
         }
         Ok(())
@@ -548,6 +730,620 @@ fn split_project_partition<T>(mut items: Vec<T>) -> Option<(Vec<T>, Vec<T>)> {
         let right = items.split_off(items.len() / 2);
         (items, right)
     })
+}
+
+struct ProjectIncludeBridgePlanner {
+    candidates: Vec<ProjectIncludeBridgeCandidate>,
+    max_bytes: usize,
+}
+
+struct ProjectIncludeBridgeCandidate {
+    consumer: adapter::ProjectInput,
+    provider: adapter::ProjectInput,
+    test_context: bool,
+    demand: usize,
+    shared_path_components: usize,
+    source_bytes: usize,
+}
+
+impl ProjectIncludeBridgePlanner {
+    fn new(fixed_source_bytes: usize) -> Result<Self, FirstSliceProjectAnalysisError> {
+        let partition_source_limit = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        Ok(Self {
+            candidates: Vec::new(),
+            max_bytes: partition_source_limit
+                .saturating_sub(fixed_source_bytes)
+                .min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES),
+        })
+    }
+
+    fn scan_partition_pair(
+        &mut self,
+        left: &[adapter::ProjectInput],
+        right: &[adapter::ProjectInput],
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        self.scan(right, left)?;
+        self.scan(left, right)
+    }
+
+    fn scan_top_level_partitions(
+        &mut self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        inputs: &[&rootlight_service::FirstSliceProjectInput<'_>],
+        partitions: &BTreeMap<&str, usize>,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if !matches!(request.language(), "c" | "cpp") {
+            return Ok(());
+        }
+        scan_cross_partition_includes(inputs, partitions, |consumer, provider| {
+            self.consider_request_pair(request, consumer, provider)
+        })
+    }
+
+    fn finish(self) -> Result<Vec<ProjectPartition>, FirstSliceProjectAnalysisError> {
+        let mut candidates = self.candidates;
+        let mut partitions = Vec::new();
+        partitions
+            .try_reserve(candidates.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        // Every request retains the original bridge ceiling. Emitting further
+        // bounded requests preserves retained direct-include evidence instead
+        // of silently discarding candidates that do not fit the first request.
+        while !candidates.is_empty() {
+            let mut selected = BTreeMap::<String, adapter::ProjectInput>::new();
+            let mut selected_bytes = 0_usize;
+            // Recompute marginal cost after every choice so several useful
+            // providers can share one already-selected consumer.
+            loop {
+                let best = candidates
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, candidate)| {
+                        let (additional_bytes, additional_files) =
+                            project_include_candidate_cost(candidate, &selected);
+                        (selected_bytes.saturating_add(additional_bytes) <= self.max_bytes
+                            && selected.len().saturating_add(additional_files)
+                                <= PROJECT_ADAPTER_PARTITION_CONTEXT_FILES)
+                            .then_some((index, candidate, additional_bytes))
+                    })
+                    .max_by(|(_, left, left_bytes), (_, right, right_bytes)| {
+                        project_include_candidate_priority(left, *left_bytes, right, *right_bytes)
+                    })
+                    .map(|(index, _, additional_bytes)| (index, additional_bytes));
+                let Some((index, additional_bytes)) = best else {
+                    break;
+                };
+                let candidate = candidates.swap_remove(index);
+                selected_bytes = selected_bytes.saturating_add(additional_bytes);
+                for input in [candidate.consumer, candidate.provider] {
+                    selected.entry(input.path.clone()).or_insert(input);
+                }
+            }
+            if selected.len() < 2 {
+                return Err(FirstSliceProjectAnalysisError::Analysis);
+            }
+            partitions.push(selected.into_values().collect());
+        }
+        Ok(partitions)
+    }
+
+    fn scan(
+        &mut self,
+        consumers: &[adapter::ProjectInput],
+        providers: &[adapter::ProjectInput],
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let consumer_paths = ProjectInputPathSet::new(consumers);
+        let provider_paths = ProjectInputPathIndex::new(providers);
+        for consumer in consumers {
+            if !matches!(consumer.language.as_str(), "c" | "cpp") {
+                continue;
+            }
+            let Ok(source) = std::str::from_utf8(&consumer.source) else {
+                continue;
+            };
+            for line in source.lines() {
+                let Some((include, relative_first)) = cpp_include_path(line) else {
+                    continue;
+                };
+                let Some(provider) = cross_partition_include_provider(
+                    &consumer.path,
+                    include,
+                    relative_first,
+                    &consumer_paths,
+                    &provider_paths,
+                ) else {
+                    continue;
+                };
+                self.consider_pair(consumer, provider)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn consider_pair(
+        &mut self,
+        consumer: &adapter::ProjectInput,
+        provider: &adapter::ProjectInput,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if self.candidates.iter().any(|candidate| {
+            candidate.consumer.path == consumer.path && candidate.provider.path == provider.path
+        }) {
+            return Ok(());
+        }
+        let source_bytes = consumer
+            .source
+            .len()
+            .checked_add(provider.source.len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if source_bytes > self.max_bytes || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        self.consider_owned_pair(consumer.clone(), provider.clone(), source_bytes)
+    }
+
+    fn consider_request_pair(
+        &mut self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        consumer: &rootlight_service::FirstSliceProjectInput<'_>,
+        provider: &rootlight_service::FirstSliceProjectInput<'_>,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if self.candidates.iter().any(|candidate| {
+            candidate.consumer.path == consumer.path() && candidate.provider.path == provider.path()
+        }) {
+            return Ok(());
+        }
+        let source_bytes = consumer
+            .source()
+            .len()
+            .checked_add(provider.source().len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if source_bytes > self.max_bytes || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        self.consider_owned_pair(
+            project_input_to_wire(request, consumer)?,
+            project_input_to_wire(request, provider)?,
+            source_bytes,
+        )
+    }
+
+    fn consider_owned_pair(
+        &mut self,
+        consumer: adapter::ProjectInput,
+        provider: adapter::ProjectInput,
+        source_bytes: usize,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        self.candidates
+            .try_reserve(1)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        self.candidates.push(ProjectIncludeBridgeCandidate {
+            test_context: cpp_positive_test_context(&consumer.source),
+            demand: cpp_include_provider_demand(&consumer, &provider),
+            shared_path_components: shared_project_path_components(&consumer.path, &provider.path),
+            consumer,
+            provider,
+            source_bytes,
+        });
+        self.candidates.sort_unstable_by(|left, right| {
+            right
+                .test_context
+                .cmp(&left.test_context)
+                .then_with(|| right.demand.cmp(&left.demand))
+                .then_with(|| {
+                    right
+                        .shared_path_components
+                        .cmp(&left.shared_path_components)
+                })
+                .then_with(|| left.source_bytes.cmp(&right.source_bytes))
+                .then_with(|| left.consumer.path.cmp(&right.consumer.path))
+                .then_with(|| left.provider.path.cmp(&right.provider.path))
+        });
+        // Each retained pair is individually bounded by the 64 KiB bridge.
+        // Capping the pool therefore bounds cloned source storage while later
+        // splits can still replace weaker earlier evidence.
+        self.candidates
+            .truncate(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES);
+        Ok(())
+    }
+}
+
+fn project_include_candidate_cost(
+    candidate: &ProjectIncludeBridgeCandidate,
+    selected: &BTreeMap<String, adapter::ProjectInput>,
+) -> (usize, usize) {
+    [&candidate.consumer, &candidate.provider]
+        .into_iter()
+        .filter(|input| !selected.contains_key(&input.path))
+        .fold((0_usize, 0_usize), |(bytes, files), input| {
+            (
+                bytes.saturating_add(input.source.len()),
+                files.saturating_add(1),
+            )
+        })
+}
+
+fn project_include_candidate_priority(
+    left: &ProjectIncludeBridgeCandidate,
+    left_bytes: usize,
+    right: &ProjectIncludeBridgeCandidate,
+    right_bytes: usize,
+) -> std::cmp::Ordering {
+    let left_density = (left.demand as u128).saturating_mul(right_bytes.max(1) as u128);
+    let right_density = (right.demand as u128).saturating_mul(left_bytes.max(1) as u128);
+    left.test_context
+        .cmp(&right.test_context)
+        .then_with(|| left_density.cmp(&right_density))
+        .then_with(|| left.demand.cmp(&right.demand))
+        .then_with(|| {
+            left.shared_path_components
+                .cmp(&right.shared_path_components)
+        })
+        .then_with(|| right_bytes.cmp(&left_bytes))
+        .then_with(|| right.consumer.path.cmp(&left.consumer.path))
+        .then_with(|| right.provider.path.cmp(&left.provider.path))
+}
+
+fn cpp_positive_test_context(source: &[u8]) -> bool {
+    let Ok(source) = std::str::from_utf8(source) else {
+        return false;
+    };
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        ["TEST", "TEST_F", "TEST_P", "TYPED_TEST", "TYPED_TEST_P"]
+            .into_iter()
+            .any(|macro_name| {
+                line.strip_prefix(macro_name)
+                    .is_some_and(|suffix| suffix.trim_start().starts_with('('))
+            })
+    })
+}
+
+fn cpp_include_provider_demand(
+    consumer: &adapter::ProjectInput,
+    provider: &adapter::ProjectInput,
+) -> usize {
+    let Some(file_name) = provider.path.rsplit('/').next() else {
+        return 0;
+    };
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _)| stem);
+    if stem.is_empty()
+        || !stem
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        return 0;
+    }
+    let Ok(source) = std::str::from_utf8(&consumer.source) else {
+        return 0;
+    };
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .try_fold(0_usize, |total, line| {
+            total.checked_add(identifier_occurrences(line, stem))
+        })
+        .unwrap_or(usize::MAX)
+}
+
+fn identifier_occurrences(source: &str, identifier: &str) -> usize {
+    source
+        .match_indices(identifier)
+        .filter(|(start, _)| {
+            let end = start.saturating_add(identifier.len());
+            let left = source
+                .as_bytes()
+                .get(start.saturating_sub(1))
+                .filter(|_| *start > 0)
+                .copied();
+            let right = source.as_bytes().get(end).copied();
+            !left.is_some_and(cpp_identifier_byte) && !right.is_some_and(cpp_identifier_byte)
+        })
+        .count()
+}
+
+trait ProjectIncludeSource {
+    fn include_path(&self) -> &str;
+    fn include_source(&self) -> &[u8];
+}
+
+impl ProjectIncludeSource for adapter::ProjectInput {
+    fn include_path(&self) -> &str {
+        &self.path
+    }
+
+    fn include_source(&self) -> &[u8] {
+        &self.source
+    }
+}
+
+impl ProjectIncludeSource for rootlight_service::FirstSliceProjectInput<'_> {
+    fn include_path(&self) -> &str {
+        self.path()
+    }
+
+    fn include_source(&self) -> &[u8] {
+        self.source()
+    }
+}
+
+fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+    partitions: &BTreeMap<&str, usize>,
+    mut visit: impl FnMut(&'a T, &'a T) -> Result<(), FirstSliceProjectAnalysisError>,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if inputs
+        .windows(2)
+        .any(|pair| pair[0].include_path() >= pair[1].include_path())
+        || inputs
+            .iter()
+            .any(|input| !partitions.contains_key(input.include_path()))
+    {
+        return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    let mut by_file_name = Vec::new();
+    by_file_name
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    by_file_name.extend_from_slice(inputs);
+    by_file_name.sort_unstable_by(|left, right| {
+        project_file_name(left.include_path())
+            .cmp(project_file_name(right.include_path()))
+            .then_with(|| left.include_path().cmp(right.include_path()))
+    });
+
+    for consumer in inputs {
+        let source = match std::str::from_utf8(consumer.include_source()) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        let consumer_partition = partitions
+            .get(consumer.include_path())
+            .copied()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        for line in source.lines() {
+            let Some((include, relative_first)) = cpp_include_path(line) else {
+                continue;
+            };
+            let Some(provider) = project_include_provider(
+                consumer.include_path(),
+                include,
+                relative_first,
+                inputs,
+                &by_file_name,
+            ) else {
+                continue;
+            };
+            let provider_partition = partitions
+                .get(provider.include_path())
+                .copied()
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+            if consumer_partition != provider_partition {
+                visit(consumer, provider)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn project_include_provider<'a, T: ProjectIncludeSource>(
+    consumer_path: &str,
+    include: &str,
+    relative_first: bool,
+    inputs: &[&'a T],
+    by_file_name: &[&'a T],
+) -> Option<&'a T> {
+    let include = if include.contains('\\') {
+        std::borrow::Cow::Owned(include.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(include)
+    };
+    let include = include.as_ref();
+    if let Some(provider) = relative_first
+        .then(|| relative_include_path(consumer_path, include))
+        .flatten()
+        .and_then(|relative| exact_project_include(inputs, &relative))
+    {
+        return Some(provider);
+    }
+    if let Some(provider) = exact_project_include(inputs, include) {
+        return Some(provider);
+    }
+
+    let file_name = project_file_name(include);
+    let start = by_file_name
+        .partition_point(|candidate| project_file_name(candidate.include_path()) < file_name);
+    let end = by_file_name
+        .partition_point(|candidate| project_file_name(candidate.include_path()) <= file_name);
+    let mut resolved = None;
+    for candidate in by_file_name.get(start..end)? {
+        if !project_path_has_suffix(candidate.include_path(), include) {
+            continue;
+        }
+        if resolved.is_some() {
+            return None;
+        }
+        resolved = Some(*candidate);
+    }
+    resolved
+}
+
+fn exact_project_include<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+    path: &str,
+) -> Option<&'a T> {
+    inputs
+        .binary_search_by(|candidate| candidate.include_path().cmp(path))
+        .ok()
+        .and_then(|index| inputs.get(index).copied())
+}
+
+fn project_file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn project_path_has_suffix(path: &str, suffix: &str) -> bool {
+    path == suffix
+        || path
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+}
+
+fn cpp_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn shared_project_path_components(left: &str, right: &str) -> usize {
+    left.split('/')
+        .zip(right.split('/'))
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+struct ProjectInputPathSet<'a> {
+    exact: BTreeSet<&'a str>,
+    suffixes: BTreeSet<&'a str>,
+}
+
+impl<'a> ProjectInputPathSet<'a> {
+    fn new(inputs: &'a [adapter::ProjectInput]) -> Self {
+        let mut exact = BTreeSet::new();
+        let mut suffixes = BTreeSet::new();
+        for input in inputs {
+            exact.insert(input.path.as_str());
+            suffixes.extend(project_path_suffixes(&input.path));
+        }
+        Self { exact, suffixes }
+    }
+
+    fn contains_exact(&self, path: &str) -> bool {
+        self.exact.contains(path)
+    }
+
+    fn contains_suffix(&self, path: &str) -> bool {
+        self.suffixes.contains(path)
+    }
+}
+
+struct ProjectInputPathIndex<'a> {
+    exact: BTreeMap<&'a str, &'a adapter::ProjectInput>,
+    unique_suffixes: BTreeMap<&'a str, Option<&'a adapter::ProjectInput>>,
+}
+
+impl<'a> ProjectInputPathIndex<'a> {
+    fn new(inputs: &'a [adapter::ProjectInput]) -> Self {
+        let mut exact = BTreeMap::new();
+        let mut unique_suffixes = BTreeMap::new();
+        for input in inputs {
+            exact.insert(input.path.as_str(), input);
+            for suffix in project_path_suffixes(&input.path) {
+                match unique_suffixes.entry(suffix) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(input));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry
+                            .get()
+                            .is_some_and(|existing| existing.path != input.path)
+                        {
+                            entry.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            exact,
+            unique_suffixes,
+        }
+    }
+
+    fn exact(&self, path: &str) -> Option<&'a adapter::ProjectInput> {
+        self.exact.get(path).copied()
+    }
+
+    fn unique_suffix(&self, path: &str) -> Option<&'a adapter::ProjectInput> {
+        self.unique_suffixes.get(path).copied().flatten()
+    }
+}
+
+fn project_path_suffixes(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/')
+        .filter_map(move |(index, _)| path.get(index + 1..).filter(|suffix| !suffix.is_empty()))
+}
+
+fn cpp_include_path(line: &str) -> Option<(&str, bool)> {
+    let directive = line.trim_start().strip_prefix('#')?.trim_start();
+    let value = directive.strip_prefix("include")?.trim_start();
+    let (close, relative_first, value) = match value.as_bytes().first()? {
+        b'<' => ('>', false, value.get(1..)?),
+        b'"' => ('"', true, value.get(1..)?),
+        _ => return None,
+    };
+    let end = value.find(close)?;
+    let include = value.get(..end)?;
+    (!include.is_empty()).then_some((include, relative_first))
+}
+
+fn cross_partition_include_provider<'a>(
+    consumer_path: &str,
+    include: &str,
+    relative_first: bool,
+    consumers: &ProjectInputPathSet<'_>,
+    providers: &ProjectInputPathIndex<'a>,
+) -> Option<&'a adapter::ProjectInput> {
+    let include = if include.contains('\\') {
+        std::borrow::Cow::Owned(include.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(include)
+    };
+    let include = include.as_ref();
+    let relative = relative_first
+        .then(|| relative_include_path(consumer_path, include))
+        .flatten();
+    if let Some(relative) = relative {
+        if consumers.contains_exact(&relative) {
+            return None;
+        }
+        if let Some(provider) = providers.exact(&relative) {
+            return Some(provider);
+        }
+    }
+    if consumers.contains_exact(include) {
+        return None;
+    }
+    if let Some(provider) = providers.exact(include) {
+        return Some(provider);
+    }
+    if consumers.contains_suffix(include) {
+        return None;
+    }
+    providers.unique_suffix(include)
+}
+
+fn relative_include_path(consumer_path: &str, include: &str) -> Option<String> {
+    if include.starts_with('/') || include.contains(':') {
+        return None;
+    }
+    let mut components = consumer_path
+        .rsplit_once('/')
+        .map_or("", |(parent, _)| parent)
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for component in include.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            component => components.push(component.to_owned()),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 struct ProjectPartitionBuffer {
@@ -13466,6 +14262,296 @@ mod tests {
         assert_eq!(left, ["a", "b"]);
         assert_eq!(right, ["c", "d", "e"]);
         assert!(split_project_partition(vec!["only"]).is_none());
+    }
+
+    #[test]
+    fn adaptive_cpp_split_emits_bounded_direct_include_bridge() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: vec![file_byte; 32],
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider = input(
+            1,
+            "include/library/parser.hpp",
+            b"class Parser { public: void prepare(); };\n",
+        );
+        let mut consumer_source = (0..PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES)
+            .map(|index| format!("#include <missing_{index}.hpp>\n"))
+            .collect::<String>();
+        consumer_source.push_str(
+            "#include <library/parser.hpp>\nvoid exercise() { Parser parser; parser.prepare(); }\n",
+        );
+        let consumer = input(2, "tests/parser_test.cpp", consumer_source.as_bytes());
+        let expected_bytes = u64::try_from(provider.source.len() + consumer.source.len())
+            .expect("fixture source bytes fit u64");
+        let fixed_source_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .expect("partition source limit fits usize")
+            - consumer.source.len();
+        let left = vec![provider];
+        let right = vec![consumer];
+        let mut fixed_planner = ProjectIncludeBridgePlanner::new(fixed_source_bytes)
+            .expect("fixed source overhead is accounted");
+        fixed_planner
+            .scan_partition_pair(&left, &right)
+            .expect("fixed-overhead bridge planning succeeds");
+        assert!(
+            fixed_planner
+                .finish()
+                .expect("fixed-overhead bridge finalization succeeds")
+                .is_empty()
+        );
+        let mut direct_planner =
+            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+        direct_planner
+            .scan_partition_pair(&left, &right)
+            .expect("bridge planning succeeds");
+        let bridges = direct_planner
+            .finish()
+            .expect("direct bridge finalization succeeds");
+        let [bridge] = bridges.as_slice() else {
+            panic!("direct cross-partition include produces one bridge");
+        };
+
+        assert_eq!(left.len(), 1);
+        assert_eq!(right.len(), 1);
+        assert_eq!(
+            bridge
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["include/library/parser.hpp", "tests/parser_test.cpp"]
+        );
+
+        let mut second_provider_source = b"class SecondParser {};\n".to_vec();
+        second_provider_source.resize(24 * 1024, b' ');
+        let second_value_source = b"struct SecondValue {};\n".to_vec();
+        let mut second_consumer_source =
+            b"#include <SecondParser.hpp>\n#include <SecondValue.hpp>\nTEST(ParserSuite, Resolves) {\n"
+                .to_vec();
+        for index in 0..16 {
+            second_consumer_source
+                .extend_from_slice(format!("SecondParser parser_{index};\n").as_bytes());
+        }
+        for index in 0..8 {
+            second_consumer_source
+                .extend_from_slice(format!("SecondValue value_{index};\n").as_bytes());
+        }
+        second_consumer_source.extend_from_slice(b"}\n");
+        second_consumer_source.resize(36 * 1024, b' ');
+        let second_left = vec![
+            input(
+                3,
+                "include/library/SecondParser.hpp",
+                &second_provider_source,
+            ),
+            input(4, "include/library/SecondValue.hpp", &second_value_source),
+        ];
+        let second_right = vec![input(5, "tests/second_test.cpp", &second_consumer_source)];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+        planner
+            .scan_partition_pair(&left, &right)
+            .expect("first split bridge planning succeeds");
+        planner
+            .scan_partition_pair(&second_left, &second_right)
+            .expect("second split bridge planning succeeds");
+        let bounded_bridges = planner
+            .finish()
+            .expect("bounded bridge finalization succeeds");
+        assert_eq!(bounded_bridges.len(), 2);
+        let bounded_bridge = &bounded_bridges[0];
+        assert_eq!(
+            bounded_bridge
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "include/library/SecondParser.hpp",
+                "include/library/SecondValue.hpp",
+                "tests/second_test.cpp"
+            ]
+        );
+        assert!(
+            bounded_bridge
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>()
+                <= PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES
+        );
+        assert_eq!(
+            bounded_bridges[1]
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["include/library/parser.hpp", "tests/parser_test.cpp"]
+        );
+        assert!(bounded_bridges.iter().all(|partition| {
+            partition
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>()
+                <= PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES
+        }));
+
+        let mut completed_paths = BTreeSet::new();
+        let first = record_project_partition_progress(&left, &mut completed_paths)
+            .expect("first partition progress is valid");
+        let second = record_project_partition_progress(&right, &mut completed_paths)
+            .expect("second partition progress is valid");
+        let supplemental = record_project_partition_progress(bridge, &mut completed_paths)
+            .expect("bridge duplicates are excluded from progress");
+        assert_eq!(first.0 + second.0, 2);
+        assert_eq!(first.1 + second.1, expected_bytes);
+        assert_eq!(supplemental, (0, 0));
+    }
+
+    #[test]
+    fn top_level_cpp_partitions_bridge_only_unique_direct_includes() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: vec![file_byte; 32],
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = [
+            input(1, "include/first/parser.hpp", b"class FirstParser {};\n"),
+            input(2, "include/library/value.hpp", b"struct Value {};\n"),
+            input(3, "include/second/parser.hpp", b"class SecondParser {};\n"),
+            input(
+                4,
+                "src/value.cpp",
+                b"#include <library/value.hpp>\nValue make_value();\n",
+            ),
+            input(
+                5,
+                "tests/parser_test.cpp",
+                b"#include <parser.hpp>\nvoid exercise();\n",
+            ),
+        ];
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let split_partitions = BTreeMap::from([
+            ("include/first/parser.hpp", 0),
+            ("include/library/value.hpp", 0),
+            ("include/second/parser.hpp", 0),
+            ("src/value.cpp", 1),
+            ("tests/parser_test.cpp", 1),
+        ]);
+        let mut pairs = Vec::new();
+        scan_cross_partition_includes(&ordered, &split_partitions, |consumer, provider| {
+            pairs.push((consumer.path.as_str(), provider.path.as_str()));
+            Ok(())
+        })
+        .expect("cross-partition includes scan");
+
+        assert_eq!(
+            pairs,
+            [("src/value.cpp", "include/library/value.hpp")],
+            "the unique include bridges while the ambiguous suffix remains unresolved"
+        );
+
+        let same_partition = inputs
+            .iter()
+            .map(|input| (input.path.as_str(), 0))
+            .collect::<BTreeMap<_, _>>();
+        scan_cross_partition_includes(&ordered, &same_partition, |_, _| {
+            panic!("same-partition includes must not produce supplemental work")
+        })
+        .expect("same-partition includes scan");
+    }
+
+    #[test]
+    fn supplemental_partition_failure_preserves_primary_analysis() {
+        let repository = RepositoryId::from_bytes([41; 16]);
+        let generation = GenerationId::from_bytes([42; 20]);
+        let inputs = Vec::new();
+        let mut local_failure =
+            |_, _, _: &[adapter::ProjectInput], _| Err(FirstSliceProjectAnalysisError::Analysis);
+
+        append_supplemental_project_partition(
+            &mut local_failure,
+            NormalizedIrDocument::empty(repository, generation),
+            true,
+            &inputs,
+        )
+        .expect("supplemental local failure does not reject primary analysis");
+
+        let mut identity_failure =
+            |_, _, _: &[adapter::ProjectInput], _| Err(FirstSliceProjectAnalysisError::Identity);
+        assert!(matches!(
+            append_supplemental_project_partition(
+                &mut identity_failure,
+                NormalizedIrDocument::empty(repository, generation),
+                true,
+                &inputs,
+            ),
+            Err(FirstSliceProjectAnalysisError::Identity)
+        ));
+    }
+
+    #[test]
+    fn adaptive_cpp_split_does_not_guess_ambiguous_includes() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: vec![file_byte; 32],
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let first = input(1, "include/first/parser.hpp", b"class FirstParser {};\n");
+        let second = input(2, "include/second/parser.hpp", b"class SecondParser {};\n");
+        let consumer = input(
+            3,
+            "tests/parser_test.cpp",
+            b"#include <parser.hpp>\nvoid exercise();\n",
+        );
+        let companion = input(4, "tests/support.cpp", b"void support();\n");
+        let (left, right) = split_project_partition(vec![first, second, consumer, companion])
+            .expect("batch is splittable");
+
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 2);
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+        planner
+            .scan_partition_pair(&left, &right)
+            .expect("bridge planning succeeds");
+        assert!(
+            planner
+                .finish()
+                .expect("ambiguous bridge finalization succeeds")
+                .is_empty()
+        );
     }
 
     #[test]

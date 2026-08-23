@@ -3965,6 +3965,48 @@ impl FirstSliceProjectAnalysis {
         Ok(())
     }
 
+    /// Merges novel relations from one overlapping supplemental partition.
+    ///
+    /// Supplemental partitions may repeat primary files and facts to recover
+    /// cross-partition relationships. Only relations whose complete reference
+    /// closure is already retained by primary partitions are admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Analysis`] when the
+    /// supplemental document names a different identity or bounded allocation
+    /// fails.
+    pub fn append_supplemental_relations(
+        &mut self,
+        document: NormalizedIrDocument,
+        isolation_permits_deep_adapter: bool,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let merged = self
+            .documents
+            .first_mut()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let relations = supplemental_project_relations(merged, document)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let mut supplemental = NormalizedIrDocument::empty(merged.repository, merged.generation);
+        supplemental.relations = relations;
+        let diagnostic_capacity = IrLimits::default()
+            .max_diagnostics
+            .saturating_sub(PROJECT_PARTITION_DIAGNOSTIC_RESERVE);
+        let truncation = merge_project_document(
+            merged,
+            supplemental,
+            &mut self.external_symbols,
+            diagnostic_capacity,
+            &IrLimits::default(),
+        )
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        self.diagnostics_truncated |= truncation.diagnostics;
+        self.facts_truncated |= truncation.facts;
+        self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
+        self.partitioned = true;
+        Ok(())
+    }
+
     fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool, bool, bool) {
         (
             self.documents,
@@ -14489,6 +14531,174 @@ fn project_external_symbols(document: &NormalizedIrDocument) -> BTreeSet<SymbolI
         .collect()
 }
 
+fn supplemental_project_relations(
+    merged: &NormalizedIrDocument,
+    document: NormalizedIrDocument,
+) -> Result<Vec<RelationRecord>, FirstSliceError> {
+    if document.version != merged.version
+        || document.repository != merged.repository
+        || document.generation != merged.generation
+    {
+        return Err(FirstSliceError::Identity);
+    }
+
+    let mut candidate_ids = BTreeSet::new();
+    let mut relations = document.relations;
+    relations.retain(|relation| {
+        relation.repository == merged.repository
+            && relation.generation == merged.generation
+            && (relation.evidence.source.is_some() || !relation.evidence.derivation.is_empty())
+            && candidate_ids.insert(relation.id)
+    });
+    if relations.is_empty() {
+        return Ok(relations);
+    }
+
+    let mut required_files = BTreeSet::new();
+    let mut required_entities = BTreeSet::new();
+    let mut required_occurrences = BTreeSet::new();
+    let mut required_facts = BTreeSet::new();
+    let mut required_provenance = BTreeSet::new();
+    for relation in &relations {
+        for endpoint in [relation.subject, relation.object] {
+            match endpoint {
+                RelationEndpoint::Repository(_) => {}
+                RelationEndpoint::File(file) => {
+                    required_files.insert(file);
+                }
+                RelationEndpoint::Entity(entity) => {
+                    required_entities.insert(entity);
+                }
+                RelationEndpoint::Occurrence(occurrence) => {
+                    required_occurrences.insert(occurrence);
+                }
+            }
+        }
+        if let Some(source) = &relation.evidence.source {
+            required_files.insert(source.span().file());
+        }
+        for reference in &relation.evidence.derivation {
+            match reference {
+                FactRef::File(file) => {
+                    required_files.insert(*file);
+                }
+                FactRef::Entity(entity) => {
+                    required_entities.insert(*entity);
+                }
+                FactRef::Fact(fact) => {
+                    required_facts.insert(*fact);
+                }
+            }
+        }
+        required_provenance.insert(relation.provenance);
+    }
+
+    let retained_files = merged
+        .files
+        .iter()
+        .filter(|file| required_files.contains(&file.id))
+        .map(|file| (file.id, (file.content_hash, file.byte_length)))
+        .collect::<BTreeMap<_, _>>();
+    let retained_entities = merged
+        .entities
+        .iter()
+        .filter_map(|entity| required_entities.contains(&entity.id).then_some(entity.id))
+        .collect::<BTreeSet<_>>();
+    let retained_occurrences = merged
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            required_occurrences
+                .contains(&occurrence.id)
+                .then_some(occurrence.id)
+        })
+        .collect::<BTreeSet<_>>();
+    let retained_provenance = merged
+        .provenance
+        .iter()
+        .filter_map(|record| {
+            required_provenance
+                .contains(&record.id)
+                .then_some(record.id)
+        })
+        .collect::<BTreeSet<_>>();
+    let merged_fact_ids = merged
+        .occurrences
+        .iter()
+        .map(|record| record.id)
+        .chain(merged.relations.iter().map(|record| record.id))
+        .chain(merged.provenance.iter().map(|record| record.id))
+        .chain(merged.source_mappings.iter().map(|record| record.id))
+        .chain(merged.coverage_records.iter().map(|record| record.id))
+        .chain(merged.skipped_regions.iter().map(|record| record.id))
+        .chain(merged.diagnostics.iter().map(|record| record.id))
+        .chain(merged.extensions.iter().map(|record| record.id));
+    let mut retained_facts = BTreeSet::new();
+    let mut colliding_relation_ids = BTreeSet::new();
+    for fact in merged_fact_ids {
+        if required_facts.contains(&fact) {
+            retained_facts.insert(fact);
+        }
+        if candidate_ids.contains(&fact) {
+            colliding_relation_ids.insert(fact);
+        }
+    }
+
+    relations.retain(|relation| {
+        !colliding_relation_ids.contains(&relation.id)
+            && retained_provenance.contains(&relation.provenance)
+            && supplemental_relation_endpoint_resolves(
+                relation.subject,
+                merged.repository,
+                &retained_files,
+                &retained_entities,
+                &retained_occurrences,
+            )
+            && supplemental_relation_endpoint_resolves(
+                relation.object,
+                merged.repository,
+                &retained_files,
+                &retained_entities,
+                &retained_occurrences,
+            )
+            && relation.evidence.source.as_ref().is_none_or(|source| {
+                source.repository() == merged.repository
+                    && source.generation() == merged.generation
+                    && retained_files.get(&source.span().file()).is_some_and(
+                        |(content_hash, byte_length)| {
+                            source.content_hash() == *content_hash
+                                && source.span().end_byte() <= *byte_length
+                        },
+                    )
+            })
+            && relation
+                .evidence
+                .derivation
+                .iter()
+                .all(|reference| match reference {
+                    FactRef::File(file) => retained_files.contains_key(file),
+                    FactRef::Entity(entity) => retained_entities.contains(entity),
+                    FactRef::Fact(fact) => retained_facts.contains(fact),
+                })
+    });
+    Ok(relations)
+}
+
+fn supplemental_relation_endpoint_resolves(
+    endpoint: RelationEndpoint,
+    repository: RepositoryId,
+    files: &BTreeMap<FileId, (ContentHash, u64)>,
+    entities: &BTreeSet<SymbolId>,
+    occurrences: &BTreeSet<FactId>,
+) -> bool {
+    match endpoint {
+        RelationEndpoint::Repository(endpoint_repository) => endpoint_repository == repository,
+        RelationEndpoint::File(file) => files.contains_key(&file),
+        RelationEndpoint::Entity(entity) => entities.contains(&entity),
+        RelationEndpoint::Occurrence(occurrence) => occurrences.contains(&occurrence),
+    }
+}
+
 fn merge_project_document(
     merged: &mut NormalizedIrDocument,
     mut document: NormalizedIrDocument,
@@ -18005,6 +18215,236 @@ mod tests {
             1
         );
         assert_eq!(merged.provenance.len(), 2);
+    }
+
+    #[test]
+    fn supplemental_project_relations_reuse_primary_fact_closure() {
+        struct InputFixture<'a> {
+            file: FileId,
+            path: &'a str,
+            source: &'a [u8],
+            symbol: SymbolId,
+            symbol_name: &'a str,
+        }
+
+        fn document(
+            repository: RepositoryId,
+            generation: GenerationId,
+            provider_identity: ContentHash,
+            fixture: &InputFixture<'_>,
+        ) -> (NormalizedIrDocument, SourceRef) {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(
+                    fixture.file,
+                    0,
+                    u64::try_from(fixture.source.len()).expect("fixture source length fits"),
+                )
+                .expect("fixture source span is valid"),
+                content_hash(fixture.source),
+                None,
+            );
+            let producer = ProducerIdentity::new(
+                "rootlight-test-project",
+                "1.0",
+                content_hash(b"supplemental-relation-producer"),
+            )
+            .expect("project producer is valid");
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                producer_kind: ProducerKind::Derivation,
+                producer,
+                binary_digest: provider_identity,
+                frontend_version: Some("test-project-1".to_owned()),
+                language: "cpp".to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context: BuildContextIdentity::new(content_hash(
+                    b"supplemental-relation-context",
+                )),
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .expect("project provenance identity derives");
+            let file_record = FileRecord {
+                id: fixture.file,
+                repository,
+                generation,
+                path: fixture.path.to_owned(),
+                path_locator: None,
+                content_hash: source.content_hash(),
+                byte_length: u64::try_from(fixture.source.len())
+                    .expect("fixture source length fits"),
+                language: "cpp".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: false,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let entity = EntityRecord {
+                id: fixture.symbol,
+                repository,
+                generation,
+                kind: EntityKind::Function,
+                language: "cpp".to_owned(),
+                tier: AnalysisTier::TierB,
+                canonical_name: fixture.symbol_name.to_owned(),
+                display_name: fixture.symbol_name.to_owned(),
+                qualified_name: fixture.symbol_name.to_owned(),
+                container: Some(ContainerRef::File(fixture.file)),
+                visibility: EntityVisibility::Unknown,
+                flags: Vec::new(),
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            document.files.push(file_record);
+            document.entities.push(entity);
+            document.provenance.push(provenance);
+            (document, source)
+        }
+
+        let repository = derive_repository(b"supplemental-relation-repository").id();
+        let generation = GenerationId::from_bytes([31; 20]);
+        let provider_identity = content_hash(b"supplemental-relation-binary");
+        let declaration_bytes = b"void execute();\n";
+        let test_bytes = b"void verifies_execute();\n";
+        let declaration_file = FileId::from_bytes([32; 20]);
+        let test_file = FileId::from_bytes([33; 20]);
+        let declaration_symbol = SymbolId::from_bytes([34; 20]);
+        let test_symbol = SymbolId::from_bytes([35; 20]);
+        let declaration_fixture = InputFixture {
+            file: declaration_file,
+            path: "include/execute.hpp",
+            source: declaration_bytes,
+            symbol: declaration_symbol,
+            symbol_name: "execute",
+        };
+        let test_fixture = InputFixture {
+            file: test_file,
+            path: "tests/execute_case.cpp",
+            source: test_bytes,
+            symbol: test_symbol,
+            symbol_name: "verifies_execute",
+        };
+        let (declaration_document, _) = document(
+            repository,
+            generation,
+            provider_identity,
+            &declaration_fixture,
+        );
+        let (test_document, test_source) =
+            document(repository, generation, provider_identity, &test_fixture);
+        let test_provenance = test_document.provenance[0].id;
+
+        let mut bridge = declaration_document.clone();
+        bridge.files.extend(test_document.files.clone());
+        bridge.entities.extend(test_document.entities.clone());
+        bridge.provenance.extend(test_document.provenance.clone());
+        let mut relation = RelationRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            subject: RelationEndpoint::Entity(test_symbol),
+            predicate: RelationPredicate::Tests,
+            object: RelationEndpoint::Entity(declaration_symbol),
+            confidence: rootlight_ir::Confidence::new(1000).expect("fixture confidence is valid"),
+            evidence_kind: rootlight_ir::EvidenceKind::Derived,
+            provenance: test_provenance,
+            evidence: FactEvidence {
+                source: Some(test_source),
+                derivation: Vec::new(),
+            },
+        };
+        relation.id = rootlight_ir::derive_relation_record_id(&relation)
+            .expect("fixture relation identity derives");
+        bridge.relations.push(relation.clone());
+        rootlight_ir::validate_ir_document(
+            &bridge,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("overlapping supplemental output is valid in isolation");
+
+        let inputs = [
+            FirstSliceProjectInput {
+                file: declaration_file,
+                path: "include/execute.hpp",
+                content_hash: content_hash(declaration_bytes),
+                source: declaration_bytes,
+                generated: false,
+                origins: &[],
+            },
+            FirstSliceProjectInput {
+                file: test_file,
+                path: "tests/execute_case.cpp",
+                content_hash: content_hash(test_bytes),
+                source: test_bytes,
+                generated: false,
+                origins: &[],
+            },
+        ];
+
+        let mut overlapping = FirstSliceProjectAnalysis::new(declaration_document.clone(), true);
+        overlapping
+            .append_partition(test_document.clone(), true)
+            .expect("primary partition merges");
+        overlapping
+            .append_partition(bridge.clone(), true)
+            .expect("an overlapping ordinary partition merges mechanically");
+        let (overlapping_documents, ..) = overlapping.into_parts();
+        assert!(!project_documents_match_inputs(
+            &overlapping_documents,
+            repository,
+            generation,
+            provider_identity,
+            &inputs,
+        ));
+
+        let mut analysis = FirstSliceProjectAnalysis::new(declaration_document, true);
+        analysis
+            .append_partition(test_document, true)
+            .expect("primary partition merges");
+        analysis
+            .append_supplemental_relations(bridge, true)
+            .expect("supplemental relation closure merges");
+        let (documents, isolated, partitioned, diagnostics_truncated, facts_truncated) =
+            analysis.into_parts();
+        assert!(isolated);
+        assert!(partitioned);
+        assert!(!diagnostics_truncated);
+        assert!(!facts_truncated);
+        assert!(project_documents_match_inputs(
+            &documents,
+            repository,
+            generation,
+            provider_identity,
+            &inputs,
+        ));
+        let [merged] = documents.as_slice() else {
+            panic!("one merged project document is expected");
+        };
+        assert_eq!(merged.files.len(), 2);
+        assert_eq!(merged.entities.len(), 2);
+        assert_eq!(merged.provenance.len(), 2);
+        assert_eq!(merged.relations, [relation]);
+        rootlight_ir::validate_ir_document(
+            merged,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("supplemental relation merge remains valid normalized IR");
     }
 
     #[test]
