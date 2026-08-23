@@ -42,7 +42,8 @@ pub use model::{
     TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
 pub use projection::{
-    SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents, project_lexical_documents_with_sources,
+    LexicalProjectionBuilder, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents,
+    project_lexical_documents_with_sources,
 };
 pub use service::QueryService;
 pub use store::{GenerationLease, GenerationSet};

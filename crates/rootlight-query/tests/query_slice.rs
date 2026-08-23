@@ -4,19 +4,20 @@ use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    FactId, GenerationIdentity, RepositoryId, SymbolId, content_hash, derive_fact,
-    derive_generation, derive_repository,
+    FactId, FileIdentity, GenerationIdentity, RepositoryId, SymbolId, content_hash, derive_fact,
+    derive_file, derive_generation, derive_repository,
 };
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, ExtensionSupport, FactEvidence,
-    FileRecord, IrDocument, IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind,
-    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan,
-    decode_ir_document,
+    AnalysisTier, BuildContextIdentity, Confidence, CoverageStatus, DiagnosticRecord,
+    DiagnosticSeverity, EvidenceKind, ExtensionSupport, FactEvidence, FileRecord, IrDocument,
+    IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord,
+    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan, decode_ir_document,
 };
 use rootlight_query::{
-    ExecutionCompletenessState, GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError,
-    QueryResource, QueryResponse, QueryService, RelationDirection, RelationFamily,
-    RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
+    ExecutionCompletenessState, GenerationSet, LexicalProjectionBuilder, LocateMode, PlanKind,
+    QueryBudget, QueryError, QueryResource, QueryResponse, QueryService, RelationDirection,
+    RelationFamily, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
+    project_lexical_documents_with_sources,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
@@ -27,7 +28,7 @@ use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationManifestRecipe,
     GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration,
 };
-use rootlight_vfs::{RelativePath, RepositoryRoot};
+use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::tempdir_in;
 
 #[derive(Clone)]
@@ -280,6 +281,134 @@ fn fixture_snapshot() -> GenerationSnapshot {
         &ExtensionSupport::default(),
     )
     .expect("query fixture is canonical")
+}
+
+fn fallback_fixture() -> (GenerationSnapshot, SourceSnapshot) {
+    let base = fixture_snapshot();
+    let metadata = base.metadata();
+    let mut document = base.document().clone();
+    let content = b"fallback_identifier { color: green; }\n".to_vec();
+    let path = RelativePath::parse(Path::new("styles/example.sourceblob"))
+        .expect("synthetic fallback path is valid");
+    let file = derive_file(FileIdentity {
+        repository: document.repository,
+        path_identity: path.identity_bytes(),
+    })
+    .id();
+    let content_hash = content_hash(&content);
+    let byte_length = u64::try_from(content.len()).expect("fixture length fits");
+    let source = SourceRef::new(
+        document.repository,
+        document.generation,
+        SourceSpan::new(file, 0, byte_length).expect("fixture span is ordered"),
+        content_hash,
+        None,
+    );
+    let provenance = document.provenance[0].id;
+    document.files.push(FileRecord {
+        id: file,
+        repository: document.repository,
+        generation: document.generation,
+        path: path.as_str().to_owned(),
+        path_locator: None,
+        content_hash,
+        byte_length,
+        language: "synthetic".to_owned(),
+        encoding: "utf-8".to_owned(),
+        generated: false,
+        provenance,
+        evidence: FactEvidence {
+            source: Some(source.clone()),
+            derivation: Vec::new(),
+        },
+    });
+    document.diagnostics.push(DiagnosticRecord {
+        id: FactId::from_bytes([0xee; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "unsupported-language".to_owned(),
+        message: "synthetic source has bounded fallback coverage".to_owned(),
+        severity: DiagnosticSeverity::Warning,
+        source: Some(source.clone()),
+        coverage_effect: CoverageStatus::Unknown,
+        provenance,
+        evidence: FactEvidence {
+            source: Some(source),
+            derivation: Vec::new(),
+        },
+    });
+    let snapshot = GenerationSnapshot::new(
+        metadata,
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("fallback fixture is canonical");
+    let source = SourceSnapshot::from_persisted(
+        snapshot.metadata().repository(),
+        path,
+        file,
+        content_hash,
+        content,
+    )
+    .expect("fallback source identity is canonical");
+    (snapshot, source)
+}
+
+#[test]
+fn streaming_fallback_projection_matches_batch_and_fails_closed() {
+    let (snapshot, source) = fallback_fixture();
+    let cancellation = Cancellation::new();
+    let expected = project_lexical_documents_with_sources(
+        &snapshot,
+        &[&source],
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .expect("batch fallback projection succeeds");
+    let unrelated_content = b"unrelated_identifier".to_vec();
+    let unrelated_path =
+        RelativePath::parse(Path::new("other.sourceblob")).expect("unrelated path is valid");
+    let unrelated_file = derive_file(FileIdentity {
+        repository: snapshot.metadata().repository(),
+        path_identity: unrelated_path.identity_bytes(),
+    })
+    .id();
+    let unrelated_hash = content_hash(&unrelated_content);
+    let unrelated = SourceSnapshot::from_persisted(
+        snapshot.metadata().repository(),
+        unrelated_path,
+        unrelated_file,
+        unrelated_hash,
+        unrelated_content,
+    )
+    .expect("unrelated source identity is canonical");
+
+    let mut projection =
+        LexicalProjectionBuilder::new(&snapshot, BuildBudget::default(), &cancellation)
+            .expect("streaming projection starts");
+    assert_eq!(projection.next_source_file(), Some(source.file()));
+    assert!(matches!(
+        projection.push_source(&unrelated, &cancellation),
+        Err(QueryError::IndexDrift)
+    ));
+    assert_eq!(projection.next_source_file(), Some(source.file()));
+    projection
+        .push_source(&source, &cancellation)
+        .expect("canonical fallback source projects");
+    assert_eq!(projection.next_source_file(), None);
+    let actual = projection
+        .finish(&cancellation)
+        .expect("complete streaming projection finishes");
+    assert_eq!(actual, expected);
+
+    let incomplete =
+        LexicalProjectionBuilder::new(&snapshot, BuildBudget::default(), &cancellation)
+            .expect("second streaming projection starts");
+    assert!(matches!(
+        incomplete.finish(&cancellation),
+        Err(QueryError::IndexDrift)
+    ));
 }
 
 fn dispatch_candidate_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {

@@ -109,8 +109,8 @@ pub use rootlight_query::{
     TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{
-    GenerationLease, GenerationSet, QueryBudget, QueryError, QueryService,
-    SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
+    GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
+    QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -21958,8 +21958,8 @@ mod tests {
             .expect("restored source generation exists");
         assert_eq!(
             retained.len(),
-            1,
-            "only the file-only fallback source is retained eagerly"
+            0,
+            "durable restore streams fallback projection without pinning source bodies"
         );
 
         let located = restored

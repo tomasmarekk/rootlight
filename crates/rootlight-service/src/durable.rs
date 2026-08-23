@@ -39,9 +39,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
-    PreparedIncrementalState, RustSourceInput, check_cancellation, map_catalog_error,
-    map_identity_error, map_incremental_error, map_query_error, map_search_error, map_vfs_error,
-    project_lexical_documents_with_sources, repository_path_hash,
+    LexicalProjectionBuilder, PreparedIncrementalState, RustSourceInput, check_cancellation,
+    map_catalog_error, map_identity_error, map_incremental_error, map_query_error,
+    map_search_error, map_vfs_error, repository_path_hash,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -4423,22 +4423,12 @@ fn restore_generation(
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let uses_source_blobs = manifest.version == GENERATION_MANIFEST_VERSION;
-    let mut sources = Vec::new();
-    let unsupported_files = verified
-        .document()
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "unsupported-language")
-        .filter_map(|diagnostic| {
-            diagnostic
-                .source
-                .as_ref()
-                .map(|source| source.span().file())
-        })
-        .collect::<BTreeSet<_>>();
+    let mut projection =
+        LexicalProjectionBuilder::new(verified.snapshot(), BuildBudget::default(), cancellation)
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     // Retaining the validated directory capabilities avoids reopening the same
     // private parents for every unsupported file in a large generation.
-    let source_reader = if unsupported_files.is_empty() {
+    let source_reader = if projection.next_source_file().is_none() {
         None
     } else {
         Some(PersistedSourceReader::open(
@@ -4448,36 +4438,26 @@ fn restore_generation(
             uses_source_blobs,
         )?)
     };
-    sources
-        .try_reserve_exact(unsupported_files.len())
-        .map_err(|_| FirstSliceError::Limits)?;
-    for file in verified
-        .document()
-        .files
-        .iter()
-        .filter(|file| unsupported_files.contains(&file.id))
-    {
+    while let Some(file_id) = projection.next_source_file() {
+        let file = verified
+            .document()
+            .files
+            .binary_search_by_key(&file_id, |candidate| candidate.id)
+            .ok()
+            .and_then(|index| verified.document().files.get(index))
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
         let snapshot = source_reader
             .as_ref()
             .ok_or(FirstSliceError::CatalogCorrupt)?
             .read(file, cancellation)?;
-        sources.push(RustSourceInput {
-            snapshot,
-            generated: file.generated,
-            origins: Vec::new(),
-        });
+        projection
+            .push_source(&snapshot, cancellation)
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     }
-    let source_snapshots = sources
-        .iter()
-        .map(|source| &source.snapshot)
-        .collect::<Vec<_>>();
-    let documents = project_lexical_documents_with_sources(
-        verified.snapshot(),
-        &source_snapshots,
-        BuildBudget::default(),
-        cancellation,
-    )
-    .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    let documents = projection
+        .finish(cancellation)
+        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    let sources = Vec::new();
     if u64::try_from(verified.document().files.len()).ok() != Some(manifest.receipt.indexed_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || u64::try_from(documents.len()).ok() != Some(manifest.receipt.lexical_documents)

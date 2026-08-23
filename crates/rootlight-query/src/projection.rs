@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use rootlight_cancel::Cancellation;
+use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{BuildBudget, LexicalDocument, SearchError, validate_build_admission};
 use rootlight_storage::GenerationSnapshot;
@@ -14,163 +15,199 @@ pub const SOURCE_FALLBACK_TEXT_BYTES: usize = 32 * 1024;
 const MAX_SOURCE_IDENTIFIERS: usize = 4_096;
 const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
 
-/// Projects normalized entities into bounded source-free lexical documents.
+/// Incremental bounded projection of one immutable generation into lexical documents.
 ///
-/// The projection copies only indexed metadata. Repository source bodies,
-/// comments, and documentation remain outside the core index.
-///
-/// # Errors
-///
-/// Returns [`QueryError`] for invalid construction budgets, cancellation,
-/// missing direct entity source identity, generation drift, or allocation
-/// failure.
-pub fn project_lexical_documents(
-    generation: &GenerationSnapshot,
+/// Entity documents are projected during construction. Callers then supply
+/// unsupported source snapshots in the canonical order exposed by
+/// [`Self::next_source_file`], allowing each full source body to be released
+/// after its bounded fallback document is built.
+#[derive(Debug)]
+#[must_use = "finish the projection after supplying every required source"]
+pub struct LexicalProjectionBuilder<'generation> {
+    generation: &'generation GenerationSnapshot,
     budget: BuildBudget,
-    cancellation: &Cancellation,
-) -> Result<Vec<LexicalDocument>, QueryError> {
-    project_lexical_documents_with_sources(generation, &[], budget, cancellation)
+    projected: Vec<LexicalDocument>,
+    text_bytes: usize,
+    required_source_files: Vec<FileId>,
+    next_source: usize,
 }
 
-/// Projects normalized entities and unsupported retained text into bounded lexical documents.
-///
-/// File-only documents retain the real file identity and never synthesize a
-/// semantic entity. Source text is admitted only for files explicitly marked
-/// unsupported by the normalized generation.
-///
-/// # Errors
-///
-/// Returns [`QueryError`] for invalid construction budgets, cancellation,
-/// source or generation drift, exceeded bounds, or allocation failure.
-pub fn project_lexical_documents_with_sources(
-    generation: &GenerationSnapshot,
-    sources: &[&SourceSnapshot],
-    budget: BuildBudget,
-    cancellation: &Cancellation,
-) -> Result<Vec<LexicalDocument>, QueryError> {
-    validate_build_admission(budget)?;
-    cancellation
-        .check()
-        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-    let document = generation.document();
-    if document.entities.len() > budget.max_documents {
-        return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
-            resource: "documents",
-        }));
-    }
-    let mut projected = Vec::new();
-    projected
-        .try_reserve(document.entities.len())
-        .map_err(|_| QueryError::MemoryUnavailable)?;
-    let mut text_bytes = 0usize;
-    for entity in &document.entities {
+impl<'generation> LexicalProjectionBuilder<'generation> {
+    /// Starts a bounded projection and materializes its semantic entity documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid construction budgets, cancellation,
+    /// missing direct entity source identity, generation drift, exceeded
+    /// bounds, or allocation failure.
+    pub fn new(
+        generation: &'generation GenerationSnapshot,
+        budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, QueryError> {
+        validate_build_admission(budget)?;
         cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        let source = entity
-            .evidence
-            .source
-            .as_ref()
-            .ok_or(QueryError::IndexDrift)?;
-        let file = document
-            .files
-            .binary_search_by_key(&source.span().file(), |record| record.id)
-            .ok()
-            .and_then(|index| document.files.get(index))
-            .ok_or(QueryError::IndexDrift)?;
-        if file.repository != entity.repository
-            || file.generation != entity.generation
-            || file.content_hash != source.content_hash()
-        {
-            return Err(QueryError::IndexDrift);
+        let document = generation.document();
+        if document.entities.len() > budget.max_documents {
+            return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            }));
         }
-        let kind = serialized_label(&entity.kind)?;
-        let tier = serialized_label(&entity.tier)?;
-        text_bytes = [
-            entity.display_name.len(),
-            entity.qualified_name.len(),
-            file.path.len(),
-            kind.len(),
-            entity.language.len(),
-            tier.len(),
-        ]
-        .into_iter()
-        .try_fold(text_bytes, |total, length| {
-            total
-                .checked_add(length)
-                .filter(|value| *value <= budget.max_text_bytes)
-                .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
-                    resource: "text_bytes",
-                }))
-        })?;
-        projected.push(LexicalDocument {
-            symbol_id: Some(entity.id),
-            file_id: file.id,
-            identifier: try_clone(&entity.display_name)?,
-            qualified_name: try_clone(&entity.qualified_name)?,
-            path: try_clone(&file.path)?,
-            kind,
-            language: try_clone(&entity.language)?,
-            tier,
-            package: None,
-            build_target: None,
-            signature: None,
-            type_names: Vec::new(),
-            documentation: None,
-            source_identifiers: Vec::new(),
-            source_text: None,
-            generated: file.generated,
-            test: matches!(entity.kind, EntityKind::Test)
-                || entity.flags.contains(&EntityFlag::Test),
-            declaration_only: entity_is_declaration_only(document, entity, &file.path),
-        });
-    }
-    let unsupported_files = document
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "unsupported-language")
-        .filter_map(|diagnostic| {
-            diagnostic
+        let mut projected = Vec::new();
+        projected
+            .try_reserve(document.entities.len())
+            .map_err(|_| QueryError::MemoryUnavailable)?;
+        let mut text_bytes = 0usize;
+        for entity in &document.entities {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+            let source = entity
+                .evidence
                 .source
                 .as_ref()
-                .map(|source| source.span().file())
+                .ok_or(QueryError::IndexDrift)?;
+            let file = document
+                .files
+                .binary_search_by_key(&source.span().file(), |record| record.id)
+                .ok()
+                .and_then(|index| document.files.get(index))
+                .ok_or(QueryError::IndexDrift)?;
+            if file.repository != entity.repository
+                || file.generation != entity.generation
+                || file.content_hash != source.content_hash()
+            {
+                return Err(QueryError::IndexDrift);
+            }
+            let kind = serialized_label(&entity.kind)?;
+            let tier = serialized_label(&entity.tier)?;
+            text_bytes = [
+                entity.display_name.len(),
+                entity.qualified_name.len(),
+                file.path.len(),
+                kind.len(),
+                entity.language.len(),
+                tier.len(),
+            ]
+            .into_iter()
+            .try_fold(text_bytes, |total, length| {
+                total
+                    .checked_add(length)
+                    .filter(|value| *value <= budget.max_text_bytes)
+                    .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
+                        resource: "text_bytes",
+                    }))
+            })?;
+            projected.push(LexicalDocument {
+                symbol_id: Some(entity.id),
+                file_id: file.id,
+                identifier: try_clone(&entity.display_name)?,
+                qualified_name: try_clone(&entity.qualified_name)?,
+                path: try_clone(&file.path)?,
+                kind,
+                language: try_clone(&entity.language)?,
+                tier,
+                package: None,
+                build_target: None,
+                signature: None,
+                type_names: Vec::new(),
+                documentation: None,
+                source_identifiers: Vec::new(),
+                source_text: None,
+                generated: file.generated,
+                test: matches!(entity.kind, EntityKind::Test)
+                    || entity.flags.contains(&EntityFlag::Test),
+                declaration_only: entity_is_declaration_only(document, entity, &file.path),
+            });
+        }
+        let unsupported_files = document
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unsupported-language")
+            .filter_map(|diagnostic| {
+                diagnostic
+                    .source
+                    .as_ref()
+                    .map(|source| source.span().file())
+            })
+            .collect::<BTreeSet<_>>();
+        if document
+            .entities
+            .len()
+            .checked_add(unsupported_files.len())
+            .is_none_or(|documents| documents > budget.max_documents)
+        {
+            return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            }));
+        }
+        let mut required_source_files = Vec::new();
+        required_source_files
+            .try_reserve_exact(unsupported_files.len())
+            .map_err(|_| QueryError::MemoryUnavailable)?;
+        for file_id in unsupported_files {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+            let file = document
+                .files
+                .binary_search_by_key(&file_id, |candidate| candidate.id)
+                .ok()
+                .and_then(|index| document.files.get(index))
+                .ok_or(QueryError::IndexDrift)?;
+            if source_fallback_eligible(&file.path) {
+                required_source_files.push(file.id);
+            }
+        }
+        projected
+            .try_reserve(required_source_files.len())
+            .map_err(|_| QueryError::MemoryUnavailable)?;
+        Ok(Self {
+            generation,
+            budget,
+            projected,
+            text_bytes,
+            required_source_files,
+            next_source: 0,
         })
-        .collect::<BTreeSet<_>>();
-    let mut sources = sources.to_vec();
-    sources.sort_unstable_by_key(|source| source.file());
-    if sources
-        .windows(2)
-        .any(|pair| pair[0].file() == pair[1].file())
-    {
-        return Err(QueryError::IndexDrift);
     }
-    if document
-        .entities
-        .len()
-        .checked_add(unsupported_files.len())
-        .is_none_or(|documents| documents > budget.max_documents)
-    {
-        return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
-            resource: "documents",
-        }));
+
+    /// Returns the next canonical file whose source snapshot must be supplied.
+    #[must_use]
+    pub fn next_source_file(&self) -> Option<FileId> {
+        self.required_source_files.get(self.next_source).copied()
     }
-    for file_id in unsupported_files {
+
+    /// Projects the next required unsupported source snapshot.
+    ///
+    /// The snapshot must match the file returned by
+    /// [`Self::next_source_file`], including its path, content identity, and
+    /// exact byte length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, out-of-order or drifted source
+    /// identity, exceeded text bounds, or allocation failure.
+    pub fn push_source(
+        &mut self,
+        source: &SourceSnapshot,
+        cancellation: &Cancellation,
+    ) -> Result<(), QueryError> {
         cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+        let expected = self.next_source_file().ok_or(QueryError::IndexDrift)?;
+        if source.file() != expected {
+            return Err(QueryError::IndexDrift);
+        }
+        let document = self.generation.document();
         let file = document
             .files
-            .binary_search_by_key(&file_id, |candidate| candidate.id)
+            .binary_search_by_key(&expected, |candidate| candidate.id)
             .ok()
             .and_then(|index| document.files.get(index))
-            .ok_or(QueryError::IndexDrift)?;
-        if !source_fallback_eligible(&file.path) {
-            continue;
-        }
-        let source = sources
-            .binary_search_by_key(&file.id, |source| source.file())
-            .ok()
-            .and_then(|index| sources.get(index).copied())
             .ok_or(QueryError::IndexDrift)?;
         if source.content_hash() != file.content_hash
             || source.path().as_str() != file.path
@@ -194,7 +231,7 @@ pub fn project_lexical_documents_with_sources(
             .filter(|name| !name.is_empty() && name.len() <= 512)
             .unwrap_or("file");
         let tier = serialized_label(&analysis_tier_for_file(document, file)?)?;
-        text_bytes = [
+        let next_text_bytes = [
             identifier.len(),
             identifier.len(),
             file.path.len(),
@@ -205,15 +242,15 @@ pub fn project_lexical_documents_with_sources(
             source_identifiers.iter().map(String::len).sum(),
         ]
         .into_iter()
-        .try_fold(text_bytes, |total, length| {
+        .try_fold(self.text_bytes, |total, length| {
             total
                 .checked_add(length)
-                .filter(|value| *value <= budget.max_text_bytes)
+                .filter(|value| *value <= self.budget.max_text_bytes)
                 .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
                     resource: "text_bytes",
                 }))
         })?;
-        projected.push(LexicalDocument {
+        let projected = LexicalDocument {
             symbol_id: None,
             file_id: file.id,
             identifier: try_clone(identifier)?,
@@ -232,12 +269,90 @@ pub fn project_lexical_documents_with_sources(
             generated: file.generated,
             test: false,
             declaration_only: false,
-        });
+        };
+        let next_source = self
+            .next_source
+            .checked_add(1)
+            .ok_or(QueryError::IndexDrift)?;
+        self.projected.push(projected);
+        self.text_bytes = next_text_bytes;
+        self.next_source = next_source;
+        Ok(())
     }
-    cancellation
-        .check()
-        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-    Ok(projected)
+
+    /// Completes the projection after every required source was supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::IndexDrift`] when a required source is missing,
+    /// or [`QueryError::Cancelled`] when cancellation stops completion.
+    pub fn finish(self, cancellation: &Cancellation) -> Result<Vec<LexicalDocument>, QueryError> {
+        if self.next_source != self.required_source_files.len() {
+            return Err(QueryError::IndexDrift);
+        }
+        cancellation
+            .check()
+            .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+        Ok(self.projected)
+    }
+}
+
+/// Projects normalized entities into bounded source-free lexical documents.
+///
+/// The projection copies only indexed metadata. Repository source bodies,
+/// comments, and documentation remain outside the core index.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] for invalid construction budgets, cancellation,
+/// missing direct entity source identity, generation drift, or allocation
+/// failure.
+pub fn project_lexical_documents(
+    generation: &GenerationSnapshot,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    LexicalProjectionBuilder::new(generation, budget, cancellation)?.finish(cancellation)
+}
+
+/// Projects normalized entities and unsupported retained text into bounded lexical documents.
+///
+/// File-only documents retain the real file identity and never synthesize a
+/// semantic entity. Source text is admitted only for files explicitly marked
+/// unsupported by the normalized generation.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] for invalid construction budgets, cancellation,
+/// source or generation drift, exceeded bounds, or allocation failure.
+pub fn project_lexical_documents_with_sources(
+    generation: &GenerationSnapshot,
+    sources: &[&SourceSnapshot],
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    let mut projection = LexicalProjectionBuilder::new(generation, budget, cancellation)?;
+    let mut ordered_sources = Vec::new();
+    ordered_sources
+        .try_reserve_exact(sources.len())
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    ordered_sources.extend_from_slice(sources);
+    ordered_sources.sort_unstable_by_key(|source| source.file());
+    if ordered_sources
+        .windows(2)
+        .any(|pair| pair[0].file() == pair[1].file())
+    {
+        return Err(QueryError::IndexDrift);
+    }
+    while let Some(file_id) = projection.next_source_file() {
+        let source = ordered_sources
+            .binary_search_by_key(&file_id, |source| source.file())
+            .ok()
+            .and_then(|index| ordered_sources.get(index).copied())
+            .ok_or(QueryError::IndexDrift)?;
+        projection.push_source(source, cancellation)?;
+    }
+    projection.finish(cancellation)
 }
 
 fn analysis_tier_for_file(
