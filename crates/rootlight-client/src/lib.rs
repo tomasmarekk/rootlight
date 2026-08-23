@@ -3280,6 +3280,11 @@ struct StartupConnection {
 impl Client {
     /// Resolves a validated daemon, optionally coordinating sibling startup.
     ///
+    /// A validated existing daemon that is restoring durable generations is
+    /// returned immediately so callers can observe typed recovery responses.
+    /// A daemon started by this call still crosses the coordinated readiness
+    /// barrier before it is returned.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError`] for runtime validation, discovery, launch-lock,
@@ -3303,6 +3308,8 @@ impl Client {
     /// The optional [`OwnedDaemon`] is returned only to the winning startup caller.
     /// It is intended for lifecycle harnesses that must stop and reap the exact
     /// daemon they launched without signaling a discovery PID.
+    /// An existing daemon that is restoring durable generations is returned
+    /// without ownership so callers can observe typed recovery responses.
     ///
     /// # Errors
     ///
@@ -3364,8 +3371,11 @@ impl Client {
                     owned: None,
                 });
             }
-            ProbeOutcome::Recovering => {
-                return wait_for_existing_ready(paths, client_instance_id);
+            ProbeOutcome::Recovering(recovering) => {
+                return Ok(StartupConnection {
+                    client: recovering.client,
+                    owned: None,
+                });
             }
             ProbeOutcome::Unavailable if policy == ConnectPolicy::ExistingOnly => {
                 return Err(ClientError::DaemonUnavailable);
@@ -7200,7 +7210,7 @@ fn coordinate_start(
                             owned: None,
                         });
                     }
-                    Ok(ProbeOutcome::Recovering) => {
+                    Ok(ProbeOutcome::Recovering(_)) => {
                         deadlines.authorize_recovery(Instant::now())?;
                         drop(launch);
                         wait_before_startup_probe(deadlines)?;
@@ -7224,7 +7234,7 @@ fn coordinate_start(
                             owned: None,
                         });
                     }
-                    ProbeOutcome::Recovering => {
+                    ProbeOutcome::Recovering(_) => {
                         deadlines.authorize_recovery(Instant::now())?;
                     }
                     ProbeOutcome::Unavailable => {}
@@ -7260,7 +7270,7 @@ fn wait_for_ready_daemon(
             return Err(error);
         }
         let probe = probe_ready_client(paths, client_instance_id);
-        if matches!(probe, Ok(ProbeOutcome::Recovering))
+        if matches!(probe, Ok(ProbeOutcome::Recovering(_)))
             && let Err(error) = deadlines.authorize_recovery(Instant::now())
         {
             startup.terminate()?;
@@ -7318,7 +7328,7 @@ fn classify_startup_probe(
         }
         Ok(ProbeOutcome::Ready(_)) if startup_signal_pending => Ok(StartupProbeAction::Continue),
         Ok(ProbeOutcome::Ready(ready)) => Ok(StartupProbeAction::Ready(ready)),
-        Ok(ProbeOutcome::Recovering | ProbeOutcome::Unavailable) => {
+        Ok(ProbeOutcome::Recovering(_) | ProbeOutcome::Unavailable) => {
             if deadlines.expired(now) {
                 Ok(StartupProbeAction::TimedOut)
             } else {
@@ -7593,7 +7603,7 @@ fn terminate_startup_process_until(
 #[derive(Debug)]
 enum ProbeOutcome {
     Ready(ReadyDaemon),
-    Recovering,
+    Recovering(ReadyDaemon),
     Unavailable,
 }
 
@@ -7678,31 +7688,11 @@ fn classify_health_probe(
                     HealthStatus::Healthy | HealthStatus::NotConfigured
                 ) =>
         {
-            Ok(ProbeOutcome::Recovering)
+            Ok(ProbeOutcome::Recovering(ReadyDaemon { client, identity }))
         }
         Ok(_) => Ok(ProbeOutcome::Unavailable),
         Err(ClientError::Ipc(error)) if ipc_unavailable(&error) => Ok(ProbeOutcome::Unavailable),
         Err(error) => Err(error),
-    }
-}
-
-fn wait_for_existing_ready(
-    paths: &RuntimePaths,
-    client_instance_id: [u8; 16],
-) -> Result<StartupConnection, ClientError> {
-    let mut deadlines = StartupDeadlines::new(Instant::now())?;
-    deadlines.authorize_recovery(Instant::now())?;
-    loop {
-        match probe_ready_client(paths, client_instance_id)? {
-            ProbeOutcome::Ready(ready) => {
-                return Ok(StartupConnection {
-                    client: ready.client,
-                    owned: None,
-                });
-            }
-            ProbeOutcome::Recovering => wait_before_startup_probe(deadlines)?,
-            ProbeOutcome::Unavailable => return Err(ClientError::DaemonUnavailable),
-        }
     }
 }
 
@@ -19035,7 +19025,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_probe_waits_for_active_generation_recovery() {
+    fn readiness_probe_preserves_recovering_client_for_typed_requests() {
         let client = Client::new(test_endpoint("recovery"), [1; 16], [2; 16]);
         let identity = ReadyDaemonIdentity {
             pid: 1,
@@ -19069,7 +19059,10 @@ mod tests {
         )
         .expect("published recovering endpoint remains observable");
 
-        assert!(matches!(probe, ProbeOutcome::Recovering));
+        let ProbeOutcome::Recovering(recovering) = probe else {
+            panic!("recovering endpoint remains connectable");
+        };
+        assert_eq!(recovering.identity, identity);
     }
 
     #[test]
