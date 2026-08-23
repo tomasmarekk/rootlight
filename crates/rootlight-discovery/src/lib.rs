@@ -1212,7 +1212,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "cpp",
         suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
         aliases: &["cplusplus"],
-        detectors: &["extension"],
+        detectors: &["extension", "content"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
@@ -1494,9 +1494,93 @@ fn content_language(content: &[u8]) -> Option<&'static str> {
         Some("go")
     } else if text.contains("def ") && text.contains(':') {
         Some("python")
+    } else if looks_like_cpp(&text) {
+        Some("cpp")
     } else {
         None
     }
+}
+
+fn looks_like_cpp(text: &str) -> bool {
+    const NAMESPACE: u8 = 1 << 0;
+    const TEMPLATE: u8 = 1 << 1;
+    const CLASS: u8 = 1 << 2;
+    const DECLARATION_FEATURES: u8 = NAMESPACE | TEMPLATE | CLASS;
+
+    // A `.h` suffix is shared by C and C++, so one incidental token cannot
+    // promote an otherwise ambiguous header into the C++ parser.
+    let mut features = 0u8;
+    let mut inside_block_comment = false;
+    for line in text.lines() {
+        let mut remaining = line;
+        loop {
+            if inside_block_comment {
+                let Some(end) = remaining.find("*/") else {
+                    break;
+                };
+                remaining = &remaining[end + 2..];
+                inside_block_comment = false;
+            }
+
+            let line_comment = remaining.find("//");
+            let block_comment = remaining.find("/*");
+            let code_end = match (line_comment, block_comment) {
+                (Some(line_start), Some(block_start)) => line_start.min(block_start),
+                (Some(line_start), None) => line_start,
+                (None, Some(block_start)) => block_start,
+                (None, None) => remaining.len(),
+            };
+            let code = remaining[..code_end].trim();
+            features |= cpp_features(code);
+            if features & DECLARATION_FEATURES != 0 && features.count_ones() >= 2 {
+                return true;
+            }
+
+            match (line_comment, block_comment) {
+                (Some(line_start), Some(block_start)) if line_start <= block_start => break,
+                (Some(_), None) | (None, None) => break,
+                (_, Some(block_start)) => {
+                    remaining = &remaining[block_start + 2..];
+                    inside_block_comment = true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn cpp_features(code: &str) -> u8 {
+    const NAMESPACE: u8 = 1 << 0;
+    const TEMPLATE: u8 = 1 << 1;
+    const CLASS: u8 = 1 << 2;
+    const STANDARD_LIBRARY: u8 = 1 << 3;
+    const NOEXCEPT: u8 = 1 << 4;
+    const ACCESS_SPECIFIER: u8 = 1 << 5;
+    const CONSTEXPR: u8 = 1 << 6;
+
+    let mut features = 0u8;
+    if code.starts_with("namespace ") || code.starts_with("inline namespace ") {
+        features |= NAMESPACE;
+    }
+    if (code.starts_with("template ") || code.starts_with("template<")) && code.contains('<') {
+        features |= TEMPLATE;
+    }
+    if code.starts_with("class ") {
+        features |= CLASS;
+    }
+    if code.contains("std::") {
+        features |= STANDARD_LIBRARY;
+    }
+    if code.contains("noexcept") {
+        features |= NOEXCEPT;
+    }
+    if matches!(code, "public:" | "protected:" | "private:") {
+        features |= ACCESS_SPECIFIER;
+    }
+    if code.contains("constexpr") {
+        features |= CONSTEXPR;
+    }
+    features
 }
 
 fn default_rules() -> Vec<PolicyRule> {
@@ -2010,9 +2094,19 @@ max_source_file_bytes = 2097152
                 b"function result = classify(value)\nresult = value;\nend".as_slice(),
                 "matlab",
             ),
+            (
+                b"namespace sample {\nclass Parser final {\n public:\n  template <typename T>\n  void prepare() noexcept;\n};\n}".as_slice(),
+                "cpp",
+            ),
         ] {
             assert_eq!(content_language(content), Some(expected));
         }
+        assert_eq!(
+            content_language(
+                b"/* namespace ignored {\nclass CommentOnly {};\n} */\nint ordinary_header(void);"
+            ),
+            None
+        );
         for (language, expected) in [
             ("bash", "bash"),
             ("shell", "bash"),

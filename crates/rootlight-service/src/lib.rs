@@ -13520,20 +13520,45 @@ fn supported_source_language<'a>(
     {
         return Some(language);
     }
+    // Content evidence may resolve the shared C-family header suffix, but it
+    // must never activate a parser for arbitrary text or unknown extensions.
+    if is_ambiguous_c_header(&input.path)
+        && let Some(language) =
+            unique_supported_language(input, analyzers, LanguageEvidence::Content)
+        && matches!(language, "c" | "cpp")
+    {
+        return Some(language);
+    }
     for evidence in [LanguageEvidence::Extension, LanguageEvidence::Shebang] {
-        let mut matched = input
-            .language_signals
-            .iter()
-            .filter(|signal| signal.evidence == evidence)
-            .filter(|signal| analyzers.contains_key(signal.language.as_str()));
-        if let Some(language) = matched.next() {
-            if matched.any(|candidate| candidate.language != language.language) {
-                return None;
-            }
-            return Some(language.language.as_str());
+        if let Some(language) = unique_supported_language(input, analyzers, evidence) {
+            return Some(language);
         }
     }
     None
+}
+
+fn unique_supported_language<'a>(
+    input: &'a ManifestInput,
+    analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
+    evidence: LanguageEvidence,
+) -> Option<&'a str> {
+    let mut matched = input
+        .language_signals
+        .iter()
+        .filter(|signal| signal.evidence == evidence)
+        .filter(|signal| analyzers.contains_key(signal.language.as_str()));
+    let language = matched.next()?;
+    if matched.any(|candidate| candidate.language != language.language) {
+        return None;
+    }
+    Some(language.language.as_str())
+}
+
+fn is_ambiguous_c_header(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
 }
 
 fn detected_source_language(input: &ManifestInput) -> Option<&str> {
@@ -19402,6 +19427,60 @@ mod tests {
             )],
             &[("go", "GoValue")],
         );
+    }
+
+    #[test]
+    fn public_indexing_disambiguates_cpp_headers_from_syntax() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[(
+                "include/parser.h",
+                concat!(
+                    "namespace sample {\n",
+                    "class Parser final {\n",
+                    " public:\n",
+                    "  template <typename Value>\n",
+                    "  void prepare() noexcept {}\n",
+                    "};\n",
+                    "} // namespace sample\n",
+                ),
+            )],
+        );
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("C++ header repository publishes");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("repository status resolves");
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|coverage| coverage.language == "cpp")
+            .expect("C++ coverage is reported");
+        assert_eq!(coverage.status, "bounded");
+        assert_eq!(coverage.discovered_files, 1);
+        assert_eq!(coverage.indexed_files, 1);
+
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "prepare".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("C++ method is queryable");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.identifier == "prepare"
+                && hit.path == "include/parser.h"
+                && hit.language == "cpp"
+                && hit.symbol.is_some()
+        }));
     }
 
     #[test]
