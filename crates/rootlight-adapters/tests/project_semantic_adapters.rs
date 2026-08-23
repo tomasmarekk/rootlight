@@ -782,6 +782,56 @@ fn cpp_gtest_calls_require_positive_macro_and_exact_local_type() {
 }
 
 #[test]
+fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
+    let fixture = ProjectFixture::new(
+        ["src/parser.h", "src/parser_test.cpp"],
+        [
+            concat!(
+                "namespace sample {\n",
+                "class Value {};\n",
+                "class Parser final {\n",
+                "public:\n",
+                "  template <typename Item>\n",
+                "  void prepare() noexcept {}\n",
+                "};\n",
+                "}\n",
+            ),
+            concat!(
+                "namespace sample {\n",
+                "TEST(ParserTest, PreparesValue) {\n",
+                "  auto parser = Parser();\n",
+                "  parser.prepare<Value>();\n",
+                "}\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Cpp,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "prepare" && entity.qualified_name.contains("Parser::prepare")
+        })
+        .expect("templated C++ method is materialized under its declaring type");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.flags.contains(&EntityFlag::Test))
+        .expect("reviewed TEST macro is classified");
+
+    assert_eq!(target.kind, EntityKind::Method);
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
+            && relation.predicate == RelationPredicate::Tests
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+    }));
+}
+
+#[test]
 fn go_gin_literal_route_requires_reviewed_import_receiver_path_and_handler() {
     let fixture = ProjectFixture::new(
         ["routes/other.go", "routes/routes.go"],

@@ -2469,6 +2469,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     input.source().bytes(),
                     occurrence.source.span().start_byte(),
                     qualifier,
+                    definitions,
                 )
             })
         });
@@ -3344,18 +3345,55 @@ fn call_arity_matches(call: Option<usize>, declaration: Option<usize>) -> bool {
     matches!((call, declaration), (Some(call), Some(declaration)) if call == declaration)
 }
 
-fn local_receiver_type(bytes: &[u8], call_start: u64, receiver: &str) -> Option<String> {
+fn local_receiver_type(
+    bytes: &[u8],
+    call_start: u64,
+    receiver: &str,
+    definitions: &BTreeMap<String, Vec<SemanticEntity>>,
+) -> Option<String> {
     if !is_identifier(receiver) || receiver == "$this" {
         return None;
     }
     let call_start = usize::try_from(call_start).ok()?;
     let prefix = std::str::from_utf8(bytes.get(..call_start)?).ok()?;
-    let tokens = tokenize_identifiers(prefix);
-    tokens
-        .windows(2)
-        .rev()
-        .find(|pair| pair[1] == receiver && is_identifier(&pair[0]))
-        .map(|pair| pair[0].clone())
+    for statement in prefix.rsplit([';', '{', '}']) {
+        let (declaration, initializer) = statement.split_once('=').unwrap_or((statement, ""));
+        let tokens = tokenize_identifiers(declaration);
+        let Some(pair) = tokens
+            .windows(2)
+            .rev()
+            .find(|pair| pair[1] == receiver && is_identifier(&pair[0]))
+        else {
+            continue;
+        };
+        if pair[0] != "auto" && is_declared_type(definitions, &pair[0]) {
+            return Some(pair[0].clone());
+        }
+        if pair[0] == "auto" {
+            let constructor = initializer.split_once('(')?.0;
+            let candidate = tokenize_identifiers(constructor).into_iter().last()?;
+            if is_declared_type(definitions, &candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn is_declared_type(definitions: &BTreeMap<String, Vec<SemanticEntity>>, name: &str) -> bool {
+    definitions.get(name).is_some_and(|entities| {
+        entities.iter().any(|entity| {
+            matches!(
+                entity.kind,
+                EntityKind::Class
+                    | EntityKind::Enum
+                    | EntityKind::Interface
+                    | EntityKind::Struct
+                    | EntityKind::Trait
+                    | EntityKind::TypeAlias
+            )
+        })
+    })
 }
 
 fn parameter_arity(signature: &str) -> Option<usize> {
