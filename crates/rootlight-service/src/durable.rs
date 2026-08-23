@@ -640,6 +640,12 @@ struct GenerationRestoreRequest<'a> {
     repository_path: &'a Path,
 }
 
+struct PersistedSourceReader {
+    repository: RepositoryId,
+    sources: PrivateDirectory<'static>,
+    blobs: Option<PrivateDirectory<'static>>,
+}
+
 struct StorageScanBudget {
     visited_entries: usize,
 }
@@ -1575,14 +1581,8 @@ impl DurableCatalog {
             ) => true,
             _ => return Err(FirstSliceError::CatalogCorrupt),
         };
-        read_persisted_source(
-            &repository,
-            &generation,
-            file.repository,
-            file,
-            uses_source_blobs,
-            cancellation,
-        )
+        PersistedSourceReader::open(&repository, &generation, file.repository, uses_source_blobs)?
+            .read(file, cancellation)
     }
 
     pub(super) fn restore(
@@ -4436,6 +4436,18 @@ fn restore_generation(
                 .map(|source| source.span().file())
         })
         .collect::<BTreeSet<_>>();
+    // Retaining the validated directory capabilities avoids reopening the same
+    // private parents for every unsupported file in a large generation.
+    let source_reader = if unsupported_files.is_empty() {
+        None
+    } else {
+        Some(PersistedSourceReader::open(
+            repository_directory,
+            &generation_directory,
+            repository,
+            uses_source_blobs,
+        )?)
+    };
     sources
         .try_reserve_exact(unsupported_files.len())
         .map_err(|_| FirstSliceError::Limits)?;
@@ -4445,14 +4457,10 @@ fn restore_generation(
         .iter()
         .filter(|file| unsupported_files.contains(&file.id))
     {
-        let snapshot = read_persisted_source(
-            repository_directory,
-            &generation_directory,
-            repository,
-            file,
-            uses_source_blobs,
-            cancellation,
-        )?;
+        let snapshot = source_reader
+            .as_ref()
+            .ok_or(FirstSliceError::CatalogCorrupt)?
+            .read(file, cancellation)?;
         sources.push(RustSourceInput {
             snapshot,
             generated: file.generated,
@@ -4728,67 +4736,84 @@ fn map_persisted_identity_error(
     }
 }
 
-fn read_persisted_source(
-    repository_directory: &PrivateDirectory<'_>,
-    generation_directory: &PrivateDirectory<'_>,
-    repository: RepositoryId,
-    file: &FileRecord,
-    uses_source_blobs: bool,
-    cancellation: &Cancellation,
-) -> Result<SourceSnapshot, FirstSliceError> {
-    check_cancellation(cancellation)?;
-    if file.repository != repository
-        || file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES
-        || file.byte_length > MAX_SNAPSHOT_BYTES
-    {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
-    let locator = file
-        .path_locator
-        .as_ref()
-        .ok_or(FirstSliceError::CatalogCorrupt)?;
-    let path = RelativePath::from_locator(locator)
-        .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
-    let sources = PrivateDirectory::open(
-        generation_directory.capability(),
-        OsStr::new(SOURCES_DIRECTORY),
-    )
-    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let maximum = if uses_source_blobs {
-        MAX_SOURCE_POINTER_BYTES
-    } else {
-        file.byte_length
-    };
-    let persisted = sources
-        .read_file_bounded_cancellable(OsStr::new(&file.id.to_string()), maximum, cancellation)
-        .map_err(map_private_read_error)?;
-    let bytes = if uses_source_blobs {
-        let pointer = decode_source_pointer(&persisted)?;
-        if pointer.digest != file.content_hash || pointer.bytes != file.byte_length {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        let blobs = PrivateDirectory::open(
-            repository_directory.capability(),
-            OsStr::new(SOURCE_BLOBS_DIRECTORY),
+impl PersistedSourceReader {
+    fn open(
+        repository_directory: &PrivateDirectory<'_>,
+        generation_directory: &PrivateDirectory<'_>,
+        repository: RepositoryId,
+        uses_source_blobs: bool,
+    ) -> Result<Self, FirstSliceError> {
+        let sources = PrivateDirectory::open(
+            generation_directory.capability(),
+            OsStr::new(SOURCES_DIRECTORY),
         )
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let blob =
-            PrivateDirectory::open(blobs.capability(), OsStr::new(&pointer.digest.to_string()))
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        blob.read_file_bounded_cancellable(
-            OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
-            pointer.bytes,
-            cancellation,
-        )
-        .map_err(map_private_read_error)?
-    } else {
-        persisted
-    };
-    if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
-        return Err(FirstSliceError::CatalogCorrupt);
+        let blobs = uses_source_blobs
+            .then(|| {
+                PrivateDirectory::open(
+                    repository_directory.capability(),
+                    OsStr::new(SOURCE_BLOBS_DIRECTORY),
+                )
+            })
+            .transpose()
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        Ok(Self {
+            repository,
+            sources,
+            blobs,
+        })
     }
-    SourceSnapshot::from_persisted(repository, path, file.id, file.content_hash, bytes)
-        .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))
+
+    fn read(
+        &self,
+        file: &FileRecord,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshot, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        if file.repository != self.repository
+            || file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES
+            || file.byte_length > MAX_SNAPSHOT_BYTES
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let locator = file
+            .path_locator
+            .as_ref()
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let path = RelativePath::from_locator(locator)
+            .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
+        let maximum = if self.blobs.is_some() {
+            MAX_SOURCE_POINTER_BYTES
+        } else {
+            file.byte_length
+        };
+        let persisted = self
+            .sources
+            .read_file_bounded_cancellable(OsStr::new(&file.id.to_string()), maximum, cancellation)
+            .map_err(map_private_read_error)?;
+        let bytes = if let Some(blobs) = &self.blobs {
+            let pointer = decode_source_pointer(&persisted)?;
+            if pointer.digest != file.content_hash || pointer.bytes != file.byte_length {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            let blob =
+                PrivateDirectory::open(blobs.capability(), OsStr::new(&pointer.digest.to_string()))
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            blob.read_file_bounded_cancellable(
+                OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
+                pointer.bytes,
+                cancellation,
+            )
+            .map_err(map_private_read_error)?
+        } else {
+            persisted
+        };
+        if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        SourceSnapshot::from_persisted(self.repository, path, file.id, file.content_hash, bytes)
+            .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))
+    }
 }
 
 fn map_private_read_error(error: PlatformError) -> FirstSliceError {
