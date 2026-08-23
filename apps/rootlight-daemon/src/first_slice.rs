@@ -10,7 +10,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     io,
     path::{Path, PathBuf},
@@ -755,7 +755,56 @@ type IndexSerialization = Arc<Mutex<()>>;
 type SemanticRefinements = Arc<Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>>;
 type GraphProjections = Arc<Mutex<GraphProjectionRegistry>>;
 type RecoveringRepositories = Arc<RwLock<BTreeMap<RepositoryId, RepositoryRecoveryState>>>;
-type RecoveryDemand = Arc<Mutex<BTreeSet<RepositoryId>>>;
+type RecoveryDemand = Arc<Mutex<RecoveryDemandQueue>>;
+
+// Arrival order is the scheduling contract. Content-derived repository IDs
+// must not reorder interactive recovery requests ahead of earlier callers.
+#[derive(Debug, Default)]
+struct RecoveryDemandQueue {
+    repositories: VecDeque<RepositoryId>,
+}
+
+impl RecoveryDemandQueue {
+    fn insert(&mut self, repository: RepositoryId) {
+        if !self.repositories.contains(&repository) {
+            self.repositories.push_back(repository);
+        }
+    }
+
+    fn remove(&mut self, repository: &RepositoryId) {
+        if let Some(position) = self
+            .repositories
+            .iter()
+            .position(|candidate| candidate == repository)
+        {
+            self.repositories.remove(position);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, repository: &RepositoryId) -> bool {
+        self.repositories.contains(repository)
+    }
+
+    fn take_recovery_position(
+        &mut self,
+        recoveries: &[RecoveryOperationGuard<'_>],
+        start: usize,
+    ) -> Option<usize> {
+        let (demand_position, recovery_position) =
+            self.repositories
+                .iter()
+                .enumerate()
+                .find_map(|(demand_position, repository)| {
+                    recoveries[start..]
+                        .iter()
+                        .position(|recovery| recovery.target.repository() == *repository)
+                        .map(|offset| (demand_position, start.saturating_add(offset)))
+                })?;
+        self.repositories.remove(demand_position);
+        Some(recovery_position)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryRecoveryPhase {
@@ -1260,7 +1309,7 @@ impl FirstSliceDaemon {
                 })
                 .unwrap_or_default(),
         ));
-        let recovery_demand = Arc::new(Mutex::new(BTreeSet::new()));
+        let recovery_demand = Arc::new(Mutex::new(RecoveryDemandQueue::default()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -2851,15 +2900,9 @@ fn prioritize_requested_recovery(
         .recovery_demand
         .lock()
         .map_err(|_| FirstSliceHostError::ThreadPanicked)?;
-    let Some((requested, position)) = demand.iter().find_map(|repository| {
-        recoveries[start..]
-            .iter()
-            .position(|recovery| recovery.target.repository() == *repository)
-            .map(|offset| (*repository, start.saturating_add(offset)))
-    }) else {
+    let Some(position) = demand.take_recovery_position(recoveries, start) else {
         return Ok(());
     };
-    demand.remove(&requested);
     recoveries.swap(start, position);
     Ok(())
 }
@@ -13046,7 +13089,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -13151,7 +13194,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: Some(Arc::clone(&state)),
         };
         let metadata = Arc::new(Mutex::new(OperationMetadataSet::new(32)));
@@ -14609,7 +14652,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let root = fixture.path().to_string_lossy().into_owned();
@@ -14922,7 +14965,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
 
@@ -15403,7 +15446,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let stopping = Arc::new(AtomicBool::new(false));
@@ -17241,7 +17284,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let (reached, reached_receiver) = mpsc::sync_channel(1);
@@ -17401,7 +17444,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let error = repository_index(
@@ -17863,6 +17906,28 @@ mod tests {
     }
 
     #[test]
+    fn recovery_demand_preserves_unique_arrival_order() {
+        let first = RepositoryId::from_bytes([2; 16]);
+        let second = RepositoryId::from_bytes([1; 16]);
+        let mut demand = RecoveryDemandQueue::default();
+
+        demand.insert(first);
+        demand.insert(second);
+        demand.insert(first);
+
+        assert_eq!(
+            demand.repositories.iter().copied().collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert!(demand.contains(&first));
+        demand.remove(&first);
+        assert_eq!(
+            demand.repositories.iter().copied().collect::<Vec<_>>(),
+            [second]
+        );
+    }
+
+    #[test]
     fn deferred_recovery_keeps_catalog_reads_and_lifecycle_failures_bounded() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
@@ -17898,7 +17963,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(false)),
             recovery_admission_ready: Arc::new(AtomicBool::new(false)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -18646,7 +18711,7 @@ mod tests {
             recovery_complete: Arc::clone(&recovery_complete),
             recovery_admission_ready: Arc::new(AtomicBool::new(false)),
             recovering_repositories: Arc::new(RwLock::new(recovering_repositories)),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: Some(Arc::clone(&state)),
         };
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
@@ -18916,7 +18981,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -19033,7 +19098,7 @@ mod tests {
             recovery_complete: Arc::new(AtomicBool::new(true)),
             recovery_admission_ready: Arc::new(AtomicBool::new(true)),
             recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
-            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
