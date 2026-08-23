@@ -7197,14 +7197,17 @@ where
             explain_request.repository,
             explain_request.generation,
         )?;
-        if response.result.truncated {
+        let resolved_every_selector = response.result.unresolved_symbols.is_empty()
+            && response.result.symbols.len() == selectors.len();
+        // Symbol explanation can exhaust optional relation or section work after
+        // returning every mandatory definition. Source reads depend only on those
+        // exact definitions, so truncation is fatal only when correlation is incomplete.
+        if response.result.truncated && !resolved_every_selector {
             return Err(ToolExecutionError::new(authoritative_error(
                 MappedDomainFailure::budget_exceeded(),
             )));
         }
-        if !response.result.unresolved_symbols.is_empty()
-            || response.result.symbols.len() != selectors.len()
-        {
+        if !resolved_every_selector {
             return Err(ToolExecutionError::new(invalid_arguments.clone()));
         }
         let resolved_generation = response.result.context.generation;

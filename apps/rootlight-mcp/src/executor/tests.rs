@@ -119,6 +119,10 @@ enum FakeOutcome {
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SymbolExplainPerRequest(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
+    SourceReadSymbolResolution {
+        explain: Result<SymbolExplainPortResponse, ClientPortError>,
+        source: Result<SourceReadPortResponse, ClientPortError>,
+    },
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryCatalogPageSequence(
         Arc<Mutex<VecDeque<Result<RepositoryCatalogPage, ClientPortError>>>>,
@@ -547,6 +551,7 @@ impl FirstSliceClientPort for FakePort {
                 response
             }),
             FakeOutcome::BatchContextPack { explain, .. } => explain.clone(),
+            FakeOutcome::SourceReadSymbolResolution { explain, .. } => explain.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -564,6 +569,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::SourceRead(outcome) => outcome.clone(),
             FakeOutcome::BatchSourceRead { source, .. } => source.clone(),
+            FakeOutcome::SourceReadSymbolResolution { source, .. } => source.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -9354,6 +9360,47 @@ async fn source_read_classifies_truncated_symbol_resolution_as_budget_exhaustion
         matches!(calls.as_slice(), [ObservedCall::SymbolExplain(_)]),
         "source retrieval must not run after bounded symbol resolution"
     );
+}
+
+#[tokio::test]
+async fn source_read_uses_complete_definitions_from_truncated_symbol_resolution() {
+    let source = source_reference(4, 12, 2, 2);
+    let mut explain = explain_response(source.clone());
+    explain.result.unresolved_symbols.clear();
+    explain.result.truncated = true;
+    explain.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Edges,
+        client::ContinuationGuidance::SplitRequest,
+    );
+    let harness = Harness::new(FakeOutcome::SourceReadSymbolResolution {
+        explain: Ok(explain),
+        source: Ok(source_read_response(source.clone())),
+    });
+
+    execute(
+        &harness.executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"symbol_id": symbol()}]
+        }),
+    )
+    .await
+    .expect("a complete definition remains usable when optional explain work is truncated");
+
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let [
+        ObservedCall::SymbolExplain(explain_call),
+        ObservedCall::SourceRead(source_call),
+    ] = calls.as_slice()
+    else {
+        panic!("symbol resolution must feed exactly one source read");
+    };
+    assert_eq!(explain_call.request.symbols(), [symbol()]);
+    assert_eq!(source_call.request.references, [source]);
 }
 
 #[tokio::test]
