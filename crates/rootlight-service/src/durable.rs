@@ -39,9 +39,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
-    PreparedIncrementalState, RustSourceInput, check_cancellation, logical_snapshot_identity,
-    map_catalog_error, map_generation_neutral_digest_error, map_identity_error,
-    map_incremental_error, map_query_error, map_search_error, map_vfs_error,
+    PreparedIncrementalState, RustSourceInput, check_cancellation, map_catalog_error,
+    map_identity_error, map_incremental_error, map_query_error, map_search_error, map_vfs_error,
     project_lexical_documents_with_sources, repository_path_hash,
 };
 
@@ -4478,25 +4477,10 @@ fn restore_generation(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    if let Some(expected) = manifest.receipt.logical_snapshot.as_ref() {
-        let incremental = incremental
-            .as_ref()
-            .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let normalized_ir = verified
-            .generation_neutral_digests(&context)
-            .map_err(|error| {
-                recovery_logical_snapshot_error(map_generation_neutral_digest_error(
-                    error,
-                    cancellation,
-                ))
-            })?;
-        let recomputed =
-            logical_snapshot_identity(normalized_ir, &documents, &incremental.inputs, cancellation)
-                .map_err(recovery_logical_snapshot_error)?;
-        if &recomputed != expected {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-    }
+    // The checksummed recovery snapshot and freshly built lexical projection are
+    // the query authorities. Rehashing every canonical logical component here
+    // only revalidates source-free observability evidence and can turn a bounded
+    // active-generation open into minutes of hidden startup work.
     let search =
         LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
             .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
@@ -4821,17 +4805,6 @@ fn generation_data_error(error: FirstSliceError) -> FirstSliceError {
     }
 }
 
-fn recovery_logical_snapshot_error(error: FirstSliceError) -> FirstSliceError {
-    match error {
-        FirstSliceError::Cancelled(_)
-        | FirstSliceError::ResourceUnavailable { .. }
-        | FirstSliceError::ResourceLimit { .. }
-        | FirstSliceError::EstimatedResourceLimit { .. }
-        | FirstSliceError::GenerationMemoryLimit { .. } => error,
-        _ => FirstSliceError::CatalogCorrupt,
-    }
-}
-
 fn publish_activation_marker(
     repository: &PrivateDirectory<'_>,
     generation: GenerationId,
@@ -4988,6 +4961,7 @@ mod tests {
     use crate::FirstSliceService;
     use rootlight_cancel::Cancellation;
     use rootlight_ids::{GenerationIdentity, content_hash, derive_generation, derive_repository};
+    use rootlight_query::LocateMode;
     use rootlight_runtime::RuntimePaths;
     use std::{fs, io, time::Duration};
     use tempfile::TempDir;
@@ -5525,7 +5499,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
-    fn logical_snapshot_sidecar_hash_must_match_recomputed_projection_on_restore() {
+    fn logical_snapshot_observability_hash_does_not_block_verified_query_state() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -5574,22 +5548,37 @@ mod tests {
         .expect("wrong-hash sidecar overwrites");
 
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
-            .expect("last-good predecessor restores");
+            .expect("checksummed active generation restores");
         assert_eq!(
-            restored.active_generation_for(first.repository),
-            Some(first.generation)
+            restored.active_generation_for(second.repository),
+            Some(second.generation)
         );
         assert_eq!(
             restored
-                .repository_status(first.repository, None)
-                .expect("predecessor status resolves")
+                .repository_status(second.repository, None)
+                .expect("active status resolves")
                 .logical_snapshot,
-            first.logical_snapshot
+            Some(FirstSliceLogicalSnapshotIdentity::new(
+                ContentHash::from_bytes([0xa5; 32])
+            ))
         );
-        assert!(matches!(
-            restored.repository_status(second.repository, Some(second.generation)),
-            Err(FirstSliceError::GenerationNotFound)
-        ));
+        assert_eq!(
+            restored
+                .code_locate(
+                    second.generation,
+                    "logical_recompute_fixture".to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &cancellation,
+                )
+                .expect("verified query state remains available")
+                .data
+                .hits
+                .len(),
+            1
+        );
+        assert_ne!(first.generation, second.generation);
     }
 
     #[test]

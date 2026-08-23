@@ -138,6 +138,8 @@ const RECOVERY_RETRY_RETAINED_MS: u32 = 5_000;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const INITIAL_RECOVERY_DEMAND_GRACE: Duration = Duration::from_secs(5);
+const INITIAL_RECOVERY_DEMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 // The public client timeout is also 30 seconds. Leave enough time after a
 // maximum long poll for serialization, IPC scheduling, and client decoding.
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
@@ -2907,6 +2909,47 @@ fn prioritize_requested_recovery(
     Ok(())
 }
 
+fn wait_for_initial_recovery_demand(
+    lanes: &FirstSliceServiceLanes,
+    recovery_count: usize,
+    stopping: &AtomicBool,
+    cancellation: &Cancellation,
+    grace: Duration,
+) -> Result<(), FirstSliceHostError> {
+    if recovery_count <= 1 {
+        return Ok(());
+    }
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    loop {
+        if stopping.load(Ordering::Acquire) || cancellation.reason().is_some() {
+            return Ok(());
+        }
+        if !lanes
+            .recovery_demand
+            .lock()
+            .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+            .repositories
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        // The recovery lane is a dedicated blocking thread. A short poll keeps
+        // shutdown responsive while giving the recovering MCP surface time to
+        // register the first interactive repository before non-preemptible work.
+        thread::park_timeout(
+            deadline
+                .saturating_duration_since(now)
+                .min(INITIAL_RECOVERY_DEMAND_POLL_INTERVAL),
+        );
+    }
+}
+
 fn recovery_operation_id(target: FirstSliceRecoveryTarget, started_unix_ms: u64) -> OperationId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rootlight.repository-recovery-operation/1\0");
@@ -3035,6 +3078,13 @@ fn durable_recovery_worker(
             return Ok(());
         }
         if deferred.restore_active {
+            wait_for_initial_recovery_demand(
+                &lanes,
+                active_recoveries.len(),
+                stopping.as_ref(),
+                &cancellation,
+                INITIAL_RECOVERY_DEMAND_GRACE,
+            )?;
             for index in 0..active_recoveries.len() {
                 prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
                 mark_current_recovery(&lanes, active_recoveries[index].target.repository())?;
@@ -17925,6 +17975,73 @@ mod tests {
             demand.repositories.iter().copied().collect::<Vec<_>>(),
             [second]
         );
+    }
+
+    #[test]
+    fn initial_recovery_demand_grace_is_bounded_and_skips_single_repository() {
+        let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::new(RwLock::new(
+                FirstSliceService::new(1).expect("empty service initializes"),
+            )),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(false)),
+            recovery_complete: Arc::new(AtomicBool::new(false)),
+            recovery_admission_ready: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(RecoveryDemandQueue::default())),
+            support_state: None,
+        };
+        let stopping = AtomicBool::new(false);
+        let cancellation = Cancellation::new();
+
+        let single_started = Instant::now();
+        wait_for_initial_recovery_demand(
+            &lanes,
+            1,
+            &stopping,
+            &cancellation,
+            Duration::from_secs(5),
+        )
+        .expect("single-repository recovery starts immediately");
+        assert!(single_started.elapsed() < Duration::from_secs(1));
+
+        let multiple_started = Instant::now();
+        wait_for_initial_recovery_demand(
+            &lanes,
+            2,
+            &stopping,
+            &cancellation,
+            Duration::from_millis(50),
+        )
+        .expect("multi-repository demand grace expires cleanly");
+        assert!(multiple_started.elapsed() >= Duration::from_millis(40));
+        assert!(multiple_started.elapsed() < Duration::from_secs(1));
+
+        let demand = Arc::clone(&lanes.recovery_demand);
+        let requested = RepositoryId::from_bytes([17; 16]);
+        let requester = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            demand
+                .lock()
+                .expect("recovery demand writes")
+                .insert(requested);
+        });
+        let demand_started = Instant::now();
+        wait_for_initial_recovery_demand(
+            &lanes,
+            2,
+            &stopping,
+            &cancellation,
+            Duration::from_secs(5),
+        )
+        .expect("first interactive demand ends the grace");
+        requester.join().expect("demand requester joins");
+        assert!(demand_started.elapsed() >= Duration::from_millis(40));
+        assert!(demand_started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

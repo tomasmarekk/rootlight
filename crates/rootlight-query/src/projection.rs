@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashSet};
+
 use rootlight_cancel::Cancellation;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{BuildBudget, LexicalDocument, SearchError, validate_build_admission};
@@ -133,7 +135,7 @@ pub fn project_lexical_documents_with_sources(
                 .as_ref()
                 .map(|source| source.span().file())
         })
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let mut sources = sources.to_vec();
     sources.sort_unstable_by_key(|source| source.file());
     if sources
@@ -177,14 +179,14 @@ pub fn project_lexical_documents_with_sources(
             return Err(QueryError::IndexDrift);
         }
         let source_prefix = bounded_utf8_prefix(source.content(), SOURCE_FALLBACK_TEXT_BYTES);
-        let source_identifiers = source_prefix
+        let (source_identifiers, source_text) = source_prefix
             .as_deref()
-            .map(bounded_source_identifiers)
+            .map(bounded_source_projection)
+            .map(|(identifiers, text)| {
+                let text = (!text.is_empty()).then_some(text);
+                (identifiers, text)
+            })
             .unwrap_or_default();
-        let source_text = source_prefix
-            .as_deref()
-            .map(bounded_searchable_source_text)
-            .filter(|text| !text.is_empty());
         let identifier = file
             .path
             .rsplit('/')
@@ -260,29 +262,8 @@ fn bounded_utf8_prefix(content: &[u8], maximum: usize) -> Option<String> {
     Some(text[..end].to_owned())
 }
 
-fn bounded_source_identifiers(source: &str) -> Vec<String> {
-    let mut identifiers = std::collections::BTreeSet::new();
-    for candidate in
-        source.split(|character: char| !(character == '_' || character.is_alphanumeric()))
-    {
-        if candidate.is_empty()
-            || candidate.len() > MAX_SOURCE_IDENTIFIER_BYTES
-            || candidate
-                .chars()
-                .next()
-                .is_none_or(|character| !(character == '_' || character.is_alphabetic()))
-        {
-            continue;
-        }
-        identifiers.insert(candidate.to_owned());
-        if identifiers.len() == MAX_SOURCE_IDENTIFIERS {
-            break;
-        }
-    }
-    identifiers.into_iter().collect()
-}
-
-fn bounded_searchable_source_text(source: &str) -> String {
+fn bounded_source_projection(source: &str) -> (Vec<String>, String) {
+    let mut identifiers = HashSet::new();
     let mut output = String::with_capacity(source.len());
     for candidate in
         source.split(|character: char| !(character == '_' || character.is_alphanumeric()))
@@ -294,8 +275,24 @@ fn bounded_searchable_source_text(source: &str) -> String {
             output.push(' ');
         }
         output.push_str(candidate);
+        if identifiers.len() < MAX_SOURCE_IDENTIFIERS
+            && candidate
+                .chars()
+                .next()
+                .is_none_or(|character| !(character == '_' || character.is_alphabetic()))
+        {
+            continue;
+        }
+        if identifiers.len() < MAX_SOURCE_IDENTIFIERS {
+            identifiers.insert(candidate);
+        }
     }
-    output
+    let mut identifiers = identifiers
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    identifiers.sort_unstable();
+    (identifiers, output)
 }
 
 fn source_fallback_eligible(path: &str) -> bool {
@@ -366,9 +363,7 @@ fn try_clone(value: &str) -> Result<String, QueryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bounded_searchable_source_text, bounded_source_identifiers, source_fallback_eligible,
-    };
+    use super::{bounded_source_projection, source_fallback_eligible};
 
     #[test]
     fn typescript_declaration_file_suffixes_are_unambiguous() {
@@ -385,12 +380,10 @@ mod tests {
     #[test]
     fn fallback_text_drops_oversized_terms_without_losing_neighboring_identifiers() {
         let source = format!("before {} after", "x".repeat(241));
+        let (identifiers, text) = bounded_source_projection(&source);
 
-        assert_eq!(
-            bounded_source_identifiers(&source),
-            ["after".to_owned(), "before".to_owned()]
-        );
-        assert_eq!(bounded_searchable_source_text(&source), "before after");
+        assert_eq!(identifiers, ["after".to_owned(), "before".to_owned()]);
+        assert_eq!(text, "before after");
     }
 
     #[test]
