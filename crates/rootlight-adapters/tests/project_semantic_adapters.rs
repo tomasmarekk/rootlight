@@ -796,8 +796,15 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
                 "  template <typename Item>\n",
                 "  void prepare() noexcept { postPrepare(); }\n",
                 "private:\n",
+                "  friend class Helper;\n",
+                "  template <class Derived>\n",
+                "  friend class Descriptor;\n",
+                "  void preparse(const Value &value) const noexcept;\n",
                 "  void postPrepare() noexcept;\n",
+                "  const Value *lookup(const Value &value) const noexcept;\n",
+                "  const Value &peek() const noexcept;\n",
                 "  void (*callback)();\n",
+                "  bool ready_{false};\n",
                 "};\n",
                 "}\n",
             ),
@@ -830,6 +837,22 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
                 && entity.qualified_name.contains("Parser::postPrepare")
         })
         .expect("declared C++ method is materialized under its declaring type");
+    let pointer_return_method = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "lookup" && entity.qualified_name.contains("Parser::lookup")
+        })
+        .expect("pointer-return C++ method is materialized under its declaring type");
+    let reference_return_method = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "peek" && entity.qualified_name.contains("Parser::peek")
+        })
+        .expect("reference-return C++ method is materialized under its declaring type");
     let test = output
         .document()
         .entities
@@ -839,6 +862,8 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
 
     assert_eq!(target.kind, EntityKind::Method);
     assert_eq!(declared_method.kind, EntityKind::Method);
+    assert_eq!(pointer_return_method.kind, EntityKind::Method);
+    assert_eq!(reference_return_method.kind, EntityKind::Method);
     assert!(
         !output.document().entities.iter().any(|entity| {
             entity.kind == EntityKind::Method && entity.display_name == "callback"
