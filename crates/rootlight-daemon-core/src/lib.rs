@@ -7926,7 +7926,7 @@ fn first_slice_response_correlates_for_minor(
                         })
                 })
                 && response.hits.iter().all(|hit| {
-                    wire_id_has_len(hit.symbol.as_ref().map(|id| &id.value), 20)
+                    optional_wire_id_has_len(hit.symbol.as_ref().map(|id| &id.value), 20)
                         && wire_id_has_len(hit.file.as_ref().map(|id| &id.value), 20)
                         && valid_analysis_tier(hit.tier)
                         && hit.score <= 1_000
@@ -20212,6 +20212,19 @@ mod tests {
         assert!(!first_slice_response_correlates(
             &locate_request,
             &FirstSliceIpcResponse::CodeLocate(wrong_result_usage)
+        ));
+        let mut file_fallback = locate_response.clone();
+        file_fallback.hits[0].symbol = None;
+        file_fallback.hits[0].kind = "file".to_owned();
+        assert!(first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(file_fallback)
+        ));
+        let mut malformed_optional_symbol = locate_response.clone();
+        malformed_optional_symbol.hits[0].symbol = Some(common::SymbolId { value: vec![8; 19] });
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(malformed_optional_symbol)
         ));
         let pinned_locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
             schema_version: schema,
