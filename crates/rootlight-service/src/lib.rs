@@ -5586,8 +5586,10 @@ impl FirstSliceService {
                     return Err(error);
                 }
             };
-        let memory_bytes = match normalized_document_serialized_bytes(restored.verified.document())
-        {
+        let memory_bytes = match restored.serialized_document_bytes.map_or_else(
+            || normalized_document_serialized_bytes(restored.verified.document()),
+            Ok,
+        ) {
             Ok(memory_bytes) => memory_bytes,
             Err(error) => {
                 cache.release_reservation(generation)?;
@@ -5840,8 +5842,10 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Limits)?;
             let fact_count = u64::try_from(normalized_record_count(restored.verified.document())?)
                 .map_err(|_| FirstSliceError::Limits)?;
-            let serialized_document_bytes =
-                normalized_document_serialized_bytes(restored.verified.document())?;
+            let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
+                || normalized_document_serialized_bytes(restored.verified.document()),
+                Ok,
+            )?;
             let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
             if self.receipts.contains_key(&receipt.generation)
                 || self
@@ -7375,8 +7379,11 @@ impl FirstSliceService {
             cancellation,
         )?;
         if let Some(durable) = durable.as_ref() {
-            let logical_snapshot_bytes =
-                durable.write_logical_snapshot_identity(verified.snapshot(), &logical_snapshot)?;
+            let logical_snapshot_bytes = durable.write_logical_snapshot_identity(
+                verified.snapshot(),
+                &logical_snapshot,
+                serialized_document_bytes,
+            )?;
             written_bytes = written_bytes
                 .checked_add(logical_snapshot_bytes)
                 .ok_or(FirstSliceError::Limits)?;

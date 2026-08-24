@@ -39,9 +39,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
-    LexicalProjectionBuilder, PreparedIncrementalState, RustSourceInput, check_cancellation,
-    map_catalog_error, map_identity_error, map_incremental_error, map_query_error,
-    map_search_error, map_vfs_error, repository_path_hash,
+    LexicalProjectionBuilder, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PreparedIncrementalState,
+    RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
+    map_incremental_error, map_query_error, map_search_error, map_vfs_error, repository_path_hash,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -66,6 +66,8 @@ const SOURCE_STORAGE_VERSION: u16 = 1;
 const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const INCREMENTAL_STATE_VERSION: u16 = 1;
+const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
+const LOGICAL_SNAPSHOT_VERSION: u16 = 2;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -242,6 +244,7 @@ pub(super) struct RestoredGeneration {
     pub(super) global_activation_sequence: Option<u64>,
     pub(super) published_generation_count: Option<u64>,
     pub(super) verified: IdentityVerifiedGeneration,
+    pub(super) serialized_document_bytes: Option<u64>,
     pub(super) search: LexicalIndex,
     pub(super) sources: Vec<RustSourceInput>,
     pub(super) incremental: Option<PreparedIncrementalState>,
@@ -284,6 +287,14 @@ struct DurableLogicalSnapshotIdentity {
     provider_set_hash: ContentHash,
     schema_version: String,
     hash: ContentHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    serialized_document_bytes: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RestoredLogicalSnapshotIdentity {
+    identity: FirstSliceLogicalSnapshotIdentity,
+    serialized_document_bytes: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2641,14 +2652,19 @@ impl DurablePreparedGeneration {
         &self,
         snapshot: &GenerationSnapshot,
         identity: &FirstSliceLogicalSnapshotIdentity,
+        serialized_document_bytes: u64,
     ) -> Result<u64, FirstSliceError> {
         let metadata = snapshot.metadata();
-        if metadata.repository() != self.repository_id || metadata.generation() != self.generation {
+        if metadata.repository() != self.repository_id
+            || metadata.generation() != self.generation
+            || serialized_document_bytes == 0
+            || serialized_document_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let contract = metadata.contract_version();
         let descriptor = DurableLogicalSnapshotIdentity {
-            version: 1,
+            version: LOGICAL_SNAPSHOT_VERSION,
             repository: metadata.repository(),
             generation: metadata.generation(),
             parent: metadata.parent(),
@@ -2659,6 +2675,7 @@ impl DurablePreparedGeneration {
             provider_set_hash: metadata.provider_set_hash(),
             schema_version: identity.schema_version().to_owned(),
             hash: identity.hash(),
+            serialized_document_bytes: Some(serialized_document_bytes),
         };
         let payload = serde_json::to_string(&descriptor).map_err(|_| FirstSliceError::Catalog)?;
         let sidecar = DurableLogicalSnapshotSidecar {
@@ -4394,31 +4411,50 @@ fn restore_generation(
     );
     // A zero oracle charge is the persisted discriminator for semantic
     // generations whose checksummed recovery snapshot is authoritative.
-    let (verified, allocated_bytes) = if manifest.receipt.oracle_allocated_bytes == 0 {
-        match recovered {
-            Ok(Some(verified)) => (verified, 0),
-            Ok(None) | Err(FirstSliceError::CatalogCorrupt) => {
-                return Err(FirstSliceError::CatalogCorrupt);
+    let (verified, allocated_bytes, recovery_serialized_document_bytes) =
+        if manifest.receipt.oracle_allocated_bytes == 0 {
+            match recovered {
+                Ok(Some((verified, serialized_document_bytes))) => {
+                    (verified, 0, Some(serialized_document_bytes))
+                }
+                Ok(None) | Err(FirstSliceError::CatalogCorrupt) => {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
-        }
-    } else {
-        match recovered {
-            Ok(Some(verified)) => (verified, manifest.receipt.oracle_allocated_bytes),
-            Ok(None) | Err(FirstSliceError::CatalogCorrupt) => restore_oracle_generation(
-                &generation_path,
-                repository,
-                generation,
-                manifest.receipt.parent,
-                manifest.receipt.oracle_allocated_bytes,
-                &context,
-                cancellation,
-            )?,
-            Err(error) => return Err(error),
-        }
-    };
-    manifest.receipt.logical_snapshot =
+        } else {
+            match recovered {
+                Ok(Some((verified, serialized_document_bytes))) => (
+                    verified,
+                    manifest.receipt.oracle_allocated_bytes,
+                    Some(serialized_document_bytes),
+                ),
+                Ok(None) | Err(FirstSliceError::CatalogCorrupt) => restore_oracle_generation(
+                    &generation_path,
+                    repository,
+                    generation,
+                    manifest.receipt.parent,
+                    manifest.receipt.oracle_allocated_bytes,
+                    &context,
+                    cancellation,
+                )
+                .map(|(verified, allocated_bytes)| (verified, allocated_bytes, None))?,
+                Err(error) => return Err(error),
+            }
+        };
+    let restored_logical_snapshot =
         restore_logical_snapshot_identity(&generation_directory, verified.snapshot())?;
+    let (logical_snapshot, logical_serialized_document_bytes) =
+        if let Some(restored) = restored_logical_snapshot {
+            (Some(restored.identity), restored.serialized_document_bytes)
+        } else {
+            (None, None)
+        };
+    let serialized_document_bytes = reconcile_restored_serialized_document_bytes(
+        recovery_serialized_document_bytes,
+        logical_serialized_document_bytes,
+    )?;
+    manifest.receipt.logical_snapshot = logical_snapshot;
     if manifest.receipt.logical_snapshot.is_some() && incremental.is_none() {
         return Err(FirstSliceError::CatalogCorrupt);
     }
@@ -4483,6 +4519,7 @@ fn restore_generation(
         global_activation_sequence,
         published_generation_count,
         verified,
+        serialized_document_bytes,
         search,
         sources,
         incremental,
@@ -4515,10 +4552,23 @@ fn restore_incremental_state(
     durable.into_prepared(cancellation).map(Some)
 }
 
+fn reconcile_restored_serialized_document_bytes(
+    recovery: Option<u64>,
+    logical: Option<u64>,
+) -> Result<Option<u64>, FirstSliceError> {
+    match (recovery, logical) {
+        (Some(recovery), Some(logical)) if recovery != logical => {
+            Err(FirstSliceError::CatalogCorrupt)
+        }
+        (Some(recovery), _) => Ok(Some(recovery)),
+        (None, logical) => Ok(logical),
+    }
+}
+
 fn restore_logical_snapshot_identity(
     generation_directory: &PrivateDirectory<'_>,
     snapshot: &GenerationSnapshot,
-) -> Result<Option<FirstSliceLogicalSnapshotIdentity>, FirstSliceError> {
+) -> Result<Option<RestoredLogicalSnapshotIdentity>, FirstSliceError> {
     let metadata = match generation_directory
         .capability()
         .symlink_metadata(Path::new(LOGICAL_SNAPSHOT_FILENAME))
@@ -4551,9 +4601,21 @@ fn restore_logical_snapshot_identity(
         // otherwise valid immutable generation.
         return Ok(None);
     };
-    if descriptor.version != 1 || descriptor.schema_version != "1.0" {
-        return Ok(None);
-    }
+    let serialized_document_bytes = match descriptor.version {
+        LEGACY_LOGICAL_SNAPSHOT_VERSION
+            if descriptor.schema_version == "1.0"
+                && descriptor.serialized_document_bytes.is_none() =>
+        {
+            None
+        }
+        LOGICAL_SNAPSHOT_VERSION if descriptor.schema_version == "1.0" => Some(
+            descriptor
+                .serialized_document_bytes
+                .filter(|bytes| *bytes > 0 && *bytes <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES)
+                .ok_or(FirstSliceError::CatalogCorrupt)?,
+        ),
+        _ => return Ok(None),
+    };
     let generation = snapshot.metadata();
     let contract = generation.contract_version();
     if descriptor.repository != generation.repository()
@@ -4567,9 +4629,10 @@ fn restore_logical_snapshot_identity(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    Ok(Some(FirstSliceLogicalSnapshotIdentity::new(
-        descriptor.hash,
-    )))
+    Ok(Some(RestoredLogicalSnapshotIdentity {
+        identity: FirstSliceLogicalSnapshotIdentity::new(descriptor.hash),
+        serialized_document_bytes,
+    }))
 }
 
 fn restore_recovery_generation(
@@ -4579,7 +4642,7 @@ fn restore_recovery_generation(
     parent: Option<GenerationId>,
     context: &GenerationContext<'_>,
     cancellation: &Cancellation,
-) -> Result<Option<IdentityVerifiedGeneration>, FirstSliceError> {
+) -> Result<Option<(IdentityVerifiedGeneration, u64)>, FirstSliceError> {
     let names = private_entry_names(generation_directory)?;
     if !names
         .iter()
@@ -4672,7 +4735,7 @@ fn restore_recovery_generation(
         &ExtensionSupport::default(),
         context,
     )
-    .map(Some)
+    .map(|verified| Some((verified, decoded_bytes)))
     .map_err(|error| map_persisted_identity_error(error, cancellation))
 }
 
@@ -5182,6 +5245,26 @@ mod tests {
     }
 
     #[test]
+    fn restored_document_size_reconciles_verified_sources_fail_closed() {
+        assert_eq!(
+            reconcile_restored_serialized_document_bytes(Some(512), Some(512)),
+            Ok(Some(512))
+        );
+        assert_eq!(
+            reconcile_restored_serialized_document_bytes(Some(512), None),
+            Ok(Some(512))
+        );
+        assert_eq!(
+            reconcile_restored_serialized_document_bytes(None, Some(512)),
+            Ok(Some(512))
+        );
+        assert_eq!(
+            reconcile_restored_serialized_document_bytes(Some(512), Some(513)),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+    }
+
+    #[test]
     fn persisted_identity_failures_are_generation_scoped_corruption() {
         let cancellation = Cancellation::new();
 
@@ -5306,13 +5389,56 @@ mod tests {
         let snapshot = service
             .loaded_generation_snapshot(receipt.generation)
             .expect("published generation resolves");
+        let expected_serialized_document_bytes = u64::try_from(
+            serde_json::to_vec(snapshot.document())
+                .expect("published document serializes")
+                .len(),
+        )
+        .expect("published document size fits u64");
         let sidecar_path = generation_path.join(LOGICAL_SNAPSHOT_FILENAME);
         let original = fs::read(&sidecar_path).expect("logical sidecar reads");
+        let current: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&original).expect("current sidecar decodes");
+        let current_descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&current.payload).expect("current descriptor decodes");
+        assert_eq!(current_descriptor.version, LOGICAL_SNAPSHOT_VERSION);
         assert_eq!(
-            restore_logical_snapshot_identity(&generation, &snapshot)
-                .expect("logical sidecar restores"),
-            Some(expected)
+            current_descriptor.serialized_document_bytes,
+            Some(expected_serialized_document_bytes)
         );
+        let restored = restore_logical_snapshot_identity(&generation, &snapshot)
+            .expect("logical sidecar restores")
+            .expect("current logical sidecar is recognized");
+        assert_eq!(restored.identity, expected);
+        assert_eq!(
+            restored.serialized_document_bytes,
+            Some(expected_serialized_document_bytes)
+        );
+
+        let mut legacy = current;
+        let mut legacy_descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&legacy.payload).expect("legacy descriptor decodes");
+        legacy_descriptor.version = LEGACY_LOGICAL_SNAPSHOT_VERSION;
+        legacy_descriptor.serialized_document_bytes = None;
+        legacy.payload =
+            serde_json::to_string(&legacy_descriptor).expect("legacy descriptor serializes");
+        legacy.digest = content_hash_bytes(legacy.payload.as_bytes());
+        let legacy_directory = generation
+            .create_directory(OsStr::new("legacy-logical"))
+            .expect("legacy-sidecar fixture directory creates");
+        let mut legacy_file = legacy_directory
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("legacy-sidecar fixture creates");
+        legacy_file
+            .write_all(&serde_json::to_vec(&legacy).expect("legacy sidecar serializes"))
+            .expect("legacy sidecar writes");
+        legacy_file.sync_all().expect("legacy sidecar syncs");
+        drop(legacy_file);
+        let restored = restore_logical_snapshot_identity(&legacy_directory, &snapshot)
+            .expect("legacy logical sidecar restores")
+            .expect("legacy logical sidecar is recognized");
+        assert_eq!(restored.identity, expected);
+        assert_eq!(restored.serialized_document_bytes, None);
 
         let missing = generation
             .create_directory(OsStr::new("missing-logical"))
@@ -5365,11 +5491,34 @@ mod tests {
             Err(FirstSliceError::CatalogCorrupt)
         );
 
+        let mut invalid: DurableLogicalSnapshotSidecar =
+            serde_json::from_slice(&original).expect("sidecar decodes");
+        let mut descriptor: DurableLogicalSnapshotIdentity =
+            serde_json::from_str(&invalid.payload).expect("descriptor decodes");
+        descriptor.serialized_document_bytes = None;
+        invalid.payload = serde_json::to_string(&descriptor).expect("descriptor serializes");
+        invalid.digest = content_hash_bytes(invalid.payload.as_bytes());
+        let invalid_directory = generation
+            .create_directory(OsStr::new("invalid-logical"))
+            .expect("invalid-sidecar fixture directory creates");
+        let mut invalid_file = invalid_directory
+            .create_file(OsStr::new(LOGICAL_SNAPSHOT_FILENAME))
+            .expect("invalid-sidecar fixture creates");
+        invalid_file
+            .write_all(&serde_json::to_vec(&invalid).expect("invalid sidecar serializes"))
+            .expect("invalid sidecar writes");
+        invalid_file.sync_all().expect("invalid sidecar syncs");
+        drop(invalid_file);
+        assert_eq!(
+            restore_logical_snapshot_identity(&invalid_directory, &snapshot),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+
         let mut future: DurableLogicalSnapshotSidecar =
             serde_json::from_slice(&original).expect("sidecar decodes");
         let mut descriptor: DurableLogicalSnapshotIdentity =
             serde_json::from_str(&future.payload).expect("descriptor decodes");
-        descriptor.version = 2;
+        descriptor.version = LOGICAL_SNAPSHOT_VERSION + 1;
         descriptor.schema_version = "2.0".to_owned();
         future.payload = serde_json::to_string(&descriptor).expect("descriptor serializes");
         future.digest = content_hash_bytes(future.payload.as_bytes());
@@ -5390,9 +5539,11 @@ mod tests {
             None
         );
         drop(future_directory);
+        drop(invalid_directory);
         drop(mismatch_directory);
         drop(corrupt_directory);
         drop(missing);
+        drop(legacy_directory);
         generation
             .capability()
             .remove_file(Path::new(LOGICAL_SNAPSHOT_FILENAME))
