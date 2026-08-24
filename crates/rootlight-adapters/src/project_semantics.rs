@@ -351,8 +351,34 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
     let mut selected = mandatory_project_syntax_fact_ids(facts);
     let mut remaining = allowance;
 
+    for fact in facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Import)
+    {
+        if remaining == 0 {
+            break;
+        }
+        select_syntax_fact_group([fact], &facts_by_id, &mut selected, &mut remaining);
+    }
+    let call_names = terminal_call_names(facts);
+    for call in facts.iter().filter(|fact| is_call_fact(fact)) {
+        if remaining == 0 {
+            break;
+        }
+        // A call and its terminal name form one relationship-bearing unit.
+        // Admitting either capture alone spends budget without a resolvable site.
+        let terminal = call_names
+            .get(&call.local_id())
+            .and_then(|name| facts_by_id.get(name))
+            .copied();
+        select_syntax_fact_group(
+            std::iter::once(call).chain(terminal),
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
+    }
     for kind in [
-        SyntaxFactKind::Import,
         SyntaxFactKind::Occurrence,
         SyntaxFactKind::Scope,
         SyntaxFactKind::Root,
@@ -363,7 +389,10 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
         SyntaxFactKind::Comment,
         SyntaxFactKind::StringLiteral,
     ] {
-        for fact in facts.iter().filter(|fact| fact.kind() == kind) {
+        for fact in facts
+            .iter()
+            .filter(|fact| fact.kind() == kind && !is_call_fact(fact) && !is_call_name_fact(fact))
+        {
             if remaining == 0 {
                 break;
             }

@@ -23,7 +23,9 @@ use rootlight_adapter_sdk::{
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
-use rootlight_adapters::{SemanticProjectAnalyzer, SemanticProjectLanguage};
+use rootlight_adapters::{
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, SemanticProjectAnalyzer, SemanticProjectLanguage,
+};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{
@@ -868,6 +870,69 @@ fn cpp_gtest_resolves_auto_constructed_templated_receiver() {
         !output.document().entities.iter().any(|entity| {
             entity.kind == EntityKind::Method && entity.display_name == "callback"
         })
+    );
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
+            && relation.predicate == RelationPredicate::Tests
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+    }));
+}
+
+#[test]
+fn bounded_cpp_syntax_retains_late_test_call_relationship() {
+    let mut consumer = String::from(
+        "namespace sample {\n\
+         TEST(ParserTest, PreparesValue) {\n\
+           int accumulator = 0;\n",
+    );
+    for _ in 0..1_200 {
+        consumer.push_str("  accumulator += unresolved_value;\n");
+    }
+    consumer.push_str(
+        "  auto parser = Parser();\n\
+           parser.prepare<Value>();\n\
+         }\n\
+         }\n",
+    );
+    let fixture = ProjectFixture::new(
+        ["src/parser.h", "src/parser_test.cpp"],
+        [
+            concat!(
+                "namespace sample {\n",
+                "class Value {};\n",
+                "class Parser {\n",
+                "public:\n",
+                "  template <typename Item>\n",
+                "  void prepare() noexcept {}\n",
+                "};\n",
+                "}\n",
+            ),
+            consumer.as_str(),
+        ],
+        SemanticProjectLanguage::Cpp,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "prepare" && entity.qualified_name.contains("Parser::prepare")
+        })
+        .expect("late-call target is materialized");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.flags.contains(&EntityFlag::Test))
+        .expect("reviewed TEST macro is classified");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
     );
     assert!(output.document().relations.iter().any(|relation| {
         relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
