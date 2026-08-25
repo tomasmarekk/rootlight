@@ -661,10 +661,11 @@ where
     /// Executes a prevalidated `symbol.relationships` plan.
     ///
     /// The scan expands each requested relation family around every seed,
-    /// keeping qualifying edges under the result bound and measuring rows,
-    /// edges, results, and memory exactly like `symbol.explain`. Groups are
-    /// keyed by seed, family, and effective direction so a `both` traversal
-    /// reports each edge under the direction it actually matched.
+    /// keeping qualifying edges under the result bound. Cancellation and
+    /// duration checks cover the complete physical scan, while row and edge
+    /// budgets account for seed-scoped candidates. Groups are keyed by seed,
+    /// family, and effective direction so a `both` traversal reports each edge
+    /// under the direction it actually matched.
     ///
     /// # Errors
     ///
@@ -706,19 +707,20 @@ where
             let effective = plan.direction.unwrap_or_else(|| family.natural_direction());
             for relation in &document.relations {
                 control.check()?;
+                if !predicates.contains(&relation.predicate) {
+                    continue;
+                }
+                let candidates = relation_candidates(document, relation, &plan.seeds, effective);
+                if candidates.is_empty() {
+                    continue;
+                }
                 if !tracker.can_add(QueryResource::Rows, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Rows)?;
                     scan_truncated = true;
                     break 'scan;
                 }
                 tracker.add_rows(1)?;
-                if !predicates.contains(&relation.predicate) {
-                    continue;
-                }
-                let candidates = relation_candidates(document, relation, &plan.seeds, effective);
-                if !candidates.is_empty()
-                    && relation.predicate == RelationPredicate::DispatchCandidate
-                {
+                if relation.predicate == RelationPredicate::DispatchCandidate {
                     saw_non_exact_relation = true;
                 }
                 let confidence = effective_relation_confidence(document, relation);

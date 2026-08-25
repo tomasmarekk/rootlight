@@ -1268,6 +1268,28 @@ fn seed_scoped_queries_do_not_spend_edge_budget_on_unrelated_relations() {
     assert_eq!(relationships.data.total_edges, 1);
     assert_eq!(relationships.data.groups[0].items[0].symbol, test);
 
+    let row_bounded = service
+        .plan_symbol_relationships(
+            BTreeSet::from([production]),
+            vec![RelationFamily::Tests],
+            Some(RelationDirection::Inbound),
+            0,
+            1,
+            0,
+            QueryBudget::new().with_max_rows(1),
+        )
+        .and_then(|plan| service.execute_symbol_relationships(&plan, &Cancellation::new()))
+        .expect("an unrelated canonical prefix does not hide a matching edge");
+    assert!(row_bounded.data.truncated);
+    assert_eq!(
+        row_bounded.data.limiting_resources,
+        vec![QueryResource::Rows]
+    );
+    assert_eq!(row_bounded.usage.rows, 1);
+    assert_eq!(row_bounded.data.returned_edges, 1);
+    assert_eq!(row_bounded.data.total_edges, 1);
+    assert_eq!(row_bounded.data.groups[0].items[0].symbol, test);
+
     let explanation = service
         .plan_symbol_explain(production, QueryBudget::new().with_max_edges(1))
         .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
