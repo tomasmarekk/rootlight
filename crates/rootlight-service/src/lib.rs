@@ -20782,7 +20782,12 @@ mod tests {
         });
         let cancellation = deadline();
 
-        let (receipt, structural_written_bytes, semantic_written_bytes) = {
+        let (
+            receipt,
+            structural_written_bytes,
+            semantic_written_bytes,
+            semantic_serialized_document_bytes,
+        ) = {
             let mut service = FirstSliceService::new_durable_with_project_analyzer(
                 3,
                 paths.state_dir(),
@@ -20884,10 +20889,18 @@ mod tests {
                 }
             );
             let structural_written_bytes = receipt.structural().retained_durable_bytes;
+            let semantic_serialized_document_bytes = normalized_document_serialized_bytes(
+                service
+                    .loaded_generation_snapshot(receipt.semantic().generation)
+                    .expect("semantic generation remains loaded")
+                    .document(),
+            )
+            .expect("semantic document size is measurable");
             (
                 receipt,
                 structural_written_bytes,
                 semantic_preparation_written_bytes,
+                semantic_serialized_document_bytes,
             )
         };
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -20903,17 +20916,34 @@ mod tests {
             repository_directory.join(receipt.structural().generation.to_string());
         assert!(structural_directory.join("oracle.sqlite3").is_file());
         assert!(!structural_directory.join("recovery-manifest.json").exists());
-        assert!(!structural_directory.join("recovery.json.gz").exists());
+        assert!(!structural_directory.join("recovery.msgpack.gz").exists());
         let semantic_directory =
             repository_directory.join(receipt.semantic().generation.to_string());
         assert!(!semantic_directory.join("oracle.sqlite3").exists());
         assert!(semantic_directory.join("recovery-manifest.json").is_file());
-        assert!(semantic_directory.join("recovery.json.gz").is_file());
+        assert!(semantic_directory.join("recovery.msgpack.gz").is_file());
+        assert!(!semantic_directory.join("recovery.json.gz").exists());
+        let mut recovery_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(semantic_directory.join("recovery-manifest.json"))
+                .expect("recovery manifest remains readable"),
+        )
+        .expect("recovery manifest is valid JSON");
+        assert_eq!(recovery_manifest["version"], 3);
+        assert_eq!(recovery_manifest["encoding"], "message_pack_gzip");
+        assert!(
+            recovery_manifest["decoded_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+        );
+        assert_eq!(
+            recovery_manifest["serialized_document_bytes"].as_u64(),
+            Some(semantic_serialized_document_bytes)
+        );
 
         let restored = FirstSliceService::new_durable_with_project_analyzer(
             3,
             paths.state_dir(),
-            analyzer,
+            Arc::clone(&analyzer),
             &cancellation,
         )
         .expect("two-stage state restores");
@@ -20956,6 +20986,27 @@ mod tests {
             read.data.chunks[0].bytes,
             b"pub fn two_stage_value() -> u32 { 2 }\n"
         );
+        drop(restored);
+
+        recovery_manifest["serialized_document_bytes"] =
+            serde_json::json!(semantic_serialized_document_bytes + 1);
+        fs::write(
+            semantic_directory.join("recovery-manifest.json"),
+            serde_json::to_vec(&recovery_manifest).expect("tampered recovery manifest serializes"),
+        )
+        .expect("recovery manifest size tampers");
+        let fallback = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("tampered semantic size falls back to the structural parent");
+        assert_eq!(
+            fallback.active_generation_for(receipt.structural().repository),
+            Some(receipt.structural().generation)
+        );
+        assert!(!semantic_directory.exists());
     }
 
     #[test]
@@ -21007,7 +21058,7 @@ mod tests {
             .join(receipt.generation.to_string());
         assert!(generation_directory.join("oracle.sqlite3").is_file());
         assert!(!generation_directory.join("recovery-manifest.json").exists());
-        assert!(!generation_directory.join("recovery.json.gz").exists());
+        assert!(!generation_directory.join("recovery.msgpack.gz").exists());
     }
 
     #[test]
@@ -21053,7 +21104,7 @@ mod tests {
             .join("first-slice/repositories")
             .join(receipt.semantic().repository.to_string())
             .join(receipt.semantic().generation.to_string());
-        fs::write(semantic_directory.join("recovery.json.gz"), b"corrupt")
+        fs::write(semantic_directory.join("recovery.msgpack.gz"), b"corrupt")
             .expect("semantic snapshot corrupts");
 
         let restored = FirstSliceService::new_durable_with_project_analyzer(
@@ -22752,6 +22803,14 @@ mod tests {
             .join(receipt.generation.to_string());
         assert!(generation_directory.join("oracle.sqlite3").is_file());
         assert!(generation_directory.join("recovery.json.gz").is_file());
+        let recovery_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(generation_directory.join("recovery-manifest.json"))
+                .expect("legacy gzip manifest remains readable"),
+        )
+        .expect("legacy gzip manifest is valid JSON");
+        assert_eq!(recovery_manifest["version"], 2);
+        assert_eq!(recovery_manifest["encoding"], "gzip");
+        assert!(recovery_manifest.get("serialized_document_bytes").is_none());
 
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("legacy gzip sidecar restores");
@@ -22904,7 +22963,7 @@ mod tests {
         assert_eq!(generation_manifest["source_storage"]["version"], 1);
         assert!(active_directory.join("oracle.sqlite3").is_file());
         assert!(!active_directory.join("recovery-manifest.json").exists());
-        assert!(!active_directory.join("recovery.json.gz").exists());
+        assert!(!active_directory.join("recovery.msgpack.gz").exists());
         assert!(active_directory.join("incremental.json").is_file());
 
         let (mut restored, deferred) =

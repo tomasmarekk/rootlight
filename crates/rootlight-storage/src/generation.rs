@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    io::{self, Write},
+    io::{self, Read, Write},
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
@@ -15,11 +15,13 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedIrDocument, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, IdentityClaimError, IrDocument,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, IdentityClaimError,
     IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
     NormalizedRebindError, OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
-    decode_file_identity_claim_envelope_with_checkpoint, decode_ir_document_with_checkpoint,
+    decode_file_identity_claim_envelope_with_checkpoint,
+    decode_normalized_ir_document_messagepack_reader_with_checkpoint,
+    decode_normalized_ir_document_with_checkpoint,
     decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
     derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
@@ -849,25 +851,9 @@ impl IdentityVerifiedGeneration {
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
     ) -> Result<Self, IdentityVerificationError> {
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-        let mut digest = IdentityRecipeHashWriter::new(Some(*context))?;
-        if digest.write_all(encoded).is_err() {
-            return digest
-                .control
-                .map_or(Err(IdentityVerificationError::InvalidGeneration), |error| {
-                    Err(IdentityVerificationError::Control(error))
-                });
-        }
-        if digest.finish()? != expected_digest {
-            return Err(IdentityVerificationError::InvalidGeneration);
-        }
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-        let IrDocument::NormalizedV1_1(document) =
-            decode_ir_document_with_checkpoint(encoded, limits, extensions, || {
+        verify_published_digest(encoded, expected_digest, context)?;
+        let document =
+            decode_normalized_ir_document_with_checkpoint(encoded, limits, extensions, || {
                 context.check().is_ok()
             })
             .map_err(|error| match error {
@@ -876,10 +862,59 @@ impl IdentityVerifiedGeneration {
                     IdentityVerificationError::Control,
                 ),
                 _ => IdentityVerificationError::InvalidGeneration,
-            })?
-        else {
+            })?;
+        Self::restore_decoded_published(metadata, document, limits, extensions, context)
+    }
+
+    /// Restores a published snapshot from an exact-length MessagePack stream.
+    ///
+    /// The stream is hashed as it is decoded, avoiding a second in-memory copy
+    /// of large durable recovery documents while preserving the same integrity
+    /// and identity verification as [`Self::restore_published_json`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::restore_published_json`].
+    pub fn restore_published_messagepack_reader<R: Read>(
+        metadata: GenerationMetadata,
+        reader: R,
+        encoded_bytes: usize,
+        expected_digest: ContentHash,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        let mut digest = PublishedDigestReader::new(reader, *context)?;
+        let document = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+            &mut digest,
+            encoded_bytes,
+            limits,
+            extensions,
+            || context.check().is_ok(),
+        );
+        if let Some(error) = digest.control {
+            return Err(IdentityVerificationError::Control(error));
+        }
+        let document = document.map_err(|error| match error {
+            IrDocumentDecodeError::Interrupted => context.check().err().map_or(
+                IdentityVerificationError::InvalidGeneration,
+                IdentityVerificationError::Control,
+            ),
+            _ => IdentityVerificationError::InvalidGeneration,
+        })?;
+        if digest.finish()? != expected_digest {
             return Err(IdentityVerificationError::InvalidGeneration);
-        };
+        }
+        Self::restore_decoded_published(metadata, document, limits, extensions, context)
+    }
+
+    fn restore_decoded_published(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
         if document.repository != metadata.repository()
             || document.generation != metadata.generation()
             || metadata.contract_version() != GENERATION_CONTRACT_VERSION
@@ -929,6 +964,80 @@ impl IdentityVerifiedGeneration {
     #[must_use]
     pub fn into_snapshot(self) -> GenerationSnapshot {
         self.snapshot
+    }
+}
+
+fn verify_published_digest(
+    encoded: &[u8],
+    expected_digest: ContentHash,
+    context: &GenerationContext<'_>,
+) -> Result<(), IdentityVerificationError> {
+    context
+        .check()
+        .map_err(IdentityVerificationError::Control)?;
+    let mut digest = IdentityRecipeHashWriter::new(Some(*context))?;
+    if digest.write_all(encoded).is_err() {
+        return digest
+            .control
+            .map_or(Err(IdentityVerificationError::InvalidGeneration), |error| {
+                Err(IdentityVerificationError::Control(error))
+            });
+    }
+    if digest.finish()? != expected_digest {
+        return Err(IdentityVerificationError::InvalidGeneration);
+    }
+    context.check().map_err(IdentityVerificationError::Control)
+}
+
+struct PublishedDigestReader<'context, R> {
+    inner: R,
+    hasher: blake3::Hasher,
+    context: GenerationContext<'context>,
+    control: Option<GenerationControlError>,
+}
+
+impl<'context, R> PublishedDigestReader<'context, R> {
+    fn new(
+        inner: R,
+        context: GenerationContext<'context>,
+    ) -> Result<Self, IdentityVerificationError> {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        Ok(Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+            context,
+            control: None,
+        })
+    }
+
+    fn finish(self) -> Result<ContentHash, IdentityVerificationError> {
+        if let Some(error) = self.control {
+            return Err(IdentityVerificationError::Control(error));
+        }
+        self.context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        Ok(ContentHash::from_bytes(*self.hasher.finalize().as_bytes()))
+    }
+
+    fn stop(&mut self, error: GenerationControlError) -> io::Error {
+        self.control = Some(error);
+        io::Error::other("published digest verification stopped")
+    }
+}
+
+impl<R: Read> Read for PublishedDigestReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        for chunk in buffer[..read].chunks(IDENTITY_RECIPE_CHECKPOINT_BYTES) {
+            if let Err(error) = self.context.check() {
+                return Err(self.stop(error));
+            }
+            self.hasher.update(chunk);
+        }
+        Ok(read)
     }
 }
 
@@ -2055,6 +2164,62 @@ mod tests {
         );
 
         assert_eq!(result, Err(IdentityVerificationError::ManifestMismatch));
+    }
+
+    #[test]
+    fn published_json_restore_rejects_a_digest_mismatch() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded = serde_json::to_vec(&document).expect("fixture document serializes");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+
+        let result = IdentityVerifiedGeneration::restore_published_json(
+            metadata,
+            &encoded,
+            ContentHash::from_bytes([9; 32]),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        );
+
+        assert_eq!(result, Err(IdentityVerificationError::InvalidGeneration));
+    }
+
+    #[test]
+    fn published_messagepack_stream_hashes_while_restoring() {
+        let repository = RepositoryId::from_bytes([2; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded =
+            rmp_serde::to_vec_named(&document).expect("fixture document serializes as MessagePack");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+
+        let mismatch = IdentityVerifiedGeneration::restore_published_messagepack_reader(
+            metadata,
+            io::Cursor::new(&encoded),
+            encoded.len(),
+            ContentHash::from_bytes([9; 32]),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        );
+        assert_eq!(mismatch, Err(IdentityVerificationError::InvalidGeneration));
+
+        let restored = IdentityVerifiedGeneration::restore_published_messagepack_reader(
+            metadata,
+            io::Cursor::new(&encoded),
+            encoded.len(),
+            content_hash(&encoded),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("the MessagePack recovery stream verifies");
+
+        assert_eq!(restored.document(), &document);
     }
 
     #[test]

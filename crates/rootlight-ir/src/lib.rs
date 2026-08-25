@@ -52,7 +52,9 @@ pub use normalized::{
     decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
     decode_extension_envelope_with_checkpoint, decode_ir_document,
     decode_ir_document_with_checkpoint, decode_legacy_ir_document,
-    decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
+    decode_normalized_ir_document_messagepack_reader_with_checkpoint,
+    decode_normalized_ir_document_with_checkpoint, decode_skipped_region_with_checkpoint,
+    decode_source_mapping_record_with_checkpoint,
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,

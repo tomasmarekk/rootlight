@@ -4,7 +4,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
-    io::{BufWriter, Read as _, Write as _},
+    io::{BufReader, BufWriter, Read as _, Write as _},
     path::{Path, PathBuf},
     str::FromStr as _,
     sync::{
@@ -41,7 +41,8 @@ use super::{
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
     LexicalProjectionBuilder, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PreparedIncrementalState,
     RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
-    map_incremental_error, map_query_error, map_search_error, map_vfs_error, repository_path_hash,
+    map_incremental_error, map_query_error, map_search_error, map_vfs_error,
+    normalized_document_serialized_bytes, repository_path_hash,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -54,6 +55,7 @@ const SOURCE_POINTER_MAGIC: &[u8] = b"rootlight.source-pointer/1\n";
 const MANIFEST_FILENAME: &str = "manifest.json";
 const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
 const RECOVERY_SNAPSHOT_GZIP_FILENAME: &str = "recovery.json.gz";
+const RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME: &str = "recovery.msgpack.gz";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const INCREMENTAL_STATE_FILENAME: &str = "incremental.json";
 const LOGICAL_SNAPSHOT_FILENAME: &str = "logical-snapshot.json";
@@ -64,7 +66,8 @@ const GENERATION_MANIFEST_VERSION: u16 = 2;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const SOURCE_STORAGE_VERSION: u16 = 1;
 const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
-const RECOVERY_SNAPSHOT_VERSION: u16 = 2;
+const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
+const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
 const INCREMENTAL_STATE_VERSION: u16 = 1;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
 const LOGICAL_SNAPSHOT_VERSION: u16 = 2;
@@ -130,6 +133,7 @@ pub(super) fn write_legacy_recovery_snapshot(
         encoding: None,
         decoded_bytes: None,
         decoded_digest: None,
+        serialized_document_bytes: None,
         contract_major: contract.major(),
         contract_minor: contract.minor(),
         manifest_hash: metadata.manifest_hash(),
@@ -176,12 +180,13 @@ pub(super) fn write_legacy_gzip_recovery_snapshot(
     let metadata = snapshot.metadata();
     let contract = metadata.contract_version();
     let recovery = DurableRecoverySnapshot {
-        version: RECOVERY_SNAPSHOT_VERSION,
+        version: JSON_GZIP_RECOVERY_SNAPSHOT_VERSION,
         bytes: encoded_bytes,
         digest: content_hash_bytes(&encoded),
         encoding: Some(RecoverySnapshotEncoding::Gzip),
         decoded_bytes: Some(decoded_bytes),
         decoded_digest: Some(content_hash_bytes(&decoded)),
+        serialized_document_bytes: None,
         contract_major: contract.major(),
         contract_minor: contract.minor(),
         manifest_hash: metadata.manifest_hash(),
@@ -578,6 +583,8 @@ struct DurableRecoverySnapshot {
     decoded_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     decoded_digest: Option<ContentHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    serialized_document_bytes: Option<u64>,
     contract_major: u16,
     contract_minor: u16,
     manifest_hash: ContentHash,
@@ -589,6 +596,14 @@ struct DurableRecoverySnapshot {
 #[serde(rename_all = "snake_case")]
 enum RecoverySnapshotEncoding {
     Gzip,
+    MessagePackGzip,
+}
+
+#[derive(Clone, Copy)]
+enum RecoverySnapshotFormat {
+    Json,
+    JsonGzip,
+    MessagePackGzip,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -2538,24 +2553,27 @@ impl DurablePreparedGeneration {
         snapshot: &GenerationSnapshot,
         expected_bytes: u64,
     ) -> Result<u64, FirstSliceError> {
-        if snapshot.metadata().generation() != self.generation {
+        let observed_bytes = normalized_document_serialized_bytes(snapshot.document())?;
+        if snapshot.metadata().generation() != self.generation
+            || expected_bytes == 0
+            || expected_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+            || observed_bytes != expected_bytes
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let staging = self.staging();
         let file = staging
-            .create_file(OsStr::new(RECOVERY_SNAPSHOT_GZIP_FILENAME))
+            .create_file(OsStr::new(RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
         let encoded_writer = buffered_recovery_writer(file);
         let encoder = GzEncoder::new(encoded_writer, Compression::fast());
         let mut decoded_writer = RecoverySnapshotWriter::new(encoder);
-        serde_json::to_writer(&mut decoded_writer, snapshot.document())
+        rmp_serde::encode::write_named(&mut decoded_writer, snapshot.document())
             .map_err(|_| FirstSliceError::Catalog)?;
         decoded_writer
             .flush()
             .map_err(|_| FirstSliceError::Catalog)?;
-        if decoded_writer.bytes != expected_bytes
-            || decoded_writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES
-        {
+        if decoded_writer.bytes == 0 || decoded_writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let decoded_bytes = decoded_writer.bytes;
@@ -2582,9 +2600,10 @@ impl DurablePreparedGeneration {
             version: RECOVERY_SNAPSHOT_VERSION,
             bytes: encoded_writer.bytes,
             digest: ContentHash::from_bytes(*encoded_writer.hasher.finalize().as_bytes()),
-            encoding: Some(RecoverySnapshotEncoding::Gzip),
+            encoding: Some(RecoverySnapshotEncoding::MessagePackGzip),
             decoded_bytes: Some(decoded_bytes),
             decoded_digest: Some(decoded_digest),
+            serialized_document_bytes: Some(expected_bytes),
             contract_major: contract.major(),
             contract_minor: contract.minor(),
             manifest_hash: metadata.manifest_hash(),
@@ -4663,52 +4682,79 @@ fn restore_recovery_generation(
     if contract != GENERATION_CONTRACT_VERSION {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let (snapshot_name, decoded_bytes, decoded_digest) = match recovery.version {
-        LEGACY_RECOVERY_SNAPSHOT_VERSION
-            if recovery.encoding.is_none()
-                && recovery.decoded_bytes.is_none()
-                && recovery.decoded_digest.is_none()
-                && recovery.bytes > 0
-                && recovery.bytes <= MAX_RECOVERY_SNAPSHOT_BYTES =>
-        {
-            (RECOVERY_SNAPSHOT_FILENAME, recovery.bytes, recovery.digest)
-        }
-        RECOVERY_SNAPSHOT_VERSION
-            if matches!(recovery.encoding, Some(RecoverySnapshotEncoding::Gzip))
-                && recovery.bytes > 0
-                && recovery.bytes <= MAX_RECOVERY_ENCODED_BYTES =>
-        {
-            let decoded_bytes = recovery
-                .decoded_bytes
-                .filter(|bytes| *bytes > 0 && *bytes <= MAX_RECOVERY_SNAPSHOT_BYTES)
-                .ok_or(FirstSliceError::CatalogCorrupt)?;
-            let decoded_digest = recovery
-                .decoded_digest
-                .ok_or(FirstSliceError::CatalogCorrupt)?;
-            (
-                RECOVERY_SNAPSHOT_GZIP_FILENAME,
-                decoded_bytes,
-                decoded_digest,
-            )
-        }
-        _ => return Err(FirstSliceError::CatalogCorrupt),
-    };
+    let (snapshot_name, decoded_bytes, decoded_digest, serialized_document_bytes, format) =
+        match recovery.version {
+            LEGACY_RECOVERY_SNAPSHOT_VERSION
+                if recovery.encoding.is_none()
+                    && recovery.decoded_bytes.is_none()
+                    && recovery.decoded_digest.is_none()
+                    && recovery.serialized_document_bytes.is_none()
+                    && recovery.bytes > 0
+                    && recovery.bytes <= MAX_RECOVERY_SNAPSHOT_BYTES =>
+            {
+                (
+                    RECOVERY_SNAPSHOT_FILENAME,
+                    recovery.bytes,
+                    recovery.digest,
+                    recovery.bytes,
+                    RecoverySnapshotFormat::Json,
+                )
+            }
+            JSON_GZIP_RECOVERY_SNAPSHOT_VERSION
+                if matches!(recovery.encoding, Some(RecoverySnapshotEncoding::Gzip))
+                    && recovery.serialized_document_bytes.is_none()
+                    && recovery.bytes > 0
+                    && recovery.bytes <= MAX_RECOVERY_ENCODED_BYTES =>
+            {
+                let decoded_bytes = recovery
+                    .decoded_bytes
+                    .filter(|bytes| *bytes > 0 && *bytes <= MAX_RECOVERY_SNAPSHOT_BYTES)
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                let decoded_digest = recovery
+                    .decoded_digest
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                (
+                    RECOVERY_SNAPSHOT_GZIP_FILENAME,
+                    decoded_bytes,
+                    decoded_digest,
+                    decoded_bytes,
+                    RecoverySnapshotFormat::JsonGzip,
+                )
+            }
+            RECOVERY_SNAPSHOT_VERSION
+                if matches!(
+                    recovery.encoding,
+                    Some(RecoverySnapshotEncoding::MessagePackGzip)
+                ) && recovery.bytes > 0
+                    && recovery.bytes <= MAX_RECOVERY_ENCODED_BYTES =>
+            {
+                let decoded_bytes = recovery
+                    .decoded_bytes
+                    .filter(|bytes| *bytes > 0 && *bytes <= MAX_RECOVERY_SNAPSHOT_BYTES)
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                let decoded_digest = recovery
+                    .decoded_digest
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                let serialized_document_bytes = recovery
+                    .serialized_document_bytes
+                    .filter(|bytes| *bytes > 0 && *bytes <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES)
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                (
+                    RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME,
+                    decoded_bytes,
+                    decoded_digest,
+                    serialized_document_bytes,
+                    RecoverySnapshotFormat::MessagePackGzip,
+                )
+            }
+            _ => return Err(FirstSliceError::CatalogCorrupt),
+        };
     let encoded = generation_directory
         .read_file_bounded_cancellable(OsStr::new(snapshot_name), recovery.bytes, cancellation)
         .map_err(map_private_read_error)?;
     if u64::try_from(encoded.len()).ok() != Some(recovery.bytes)
         || content_hash_bytes(&encoded) != recovery.digest
     {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
-    let decoded = match recovery.version {
-        LEGACY_RECOVERY_SNAPSHOT_VERSION => encoded,
-        RECOVERY_SNAPSHOT_VERSION => {
-            decode_recovery_snapshot(&encoded, decoded_bytes, cancellation)?
-        }
-        _ => return Err(FirstSliceError::CatalogCorrupt),
-    };
-    if content_hash_bytes(&decoded) != decoded_digest {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let metadata = GenerationMetadata::new_for_contract(
@@ -4727,16 +4773,49 @@ fn restore_recovery_generation(
     // length, still capped by the recovery hard bound.
     recovery_limits.max_document_bytes =
         usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?;
-    IdentityVerifiedGeneration::restore_published_json(
-        metadata,
-        &decoded,
-        decoded_digest,
-        &recovery_limits,
-        &ExtensionSupport::default(),
-        context,
-    )
-    .map(|verified| Some((verified, decoded_bytes)))
-    .map_err(|error| map_persisted_identity_error(error, cancellation))
+    let restored = match format {
+        RecoverySnapshotFormat::Json => IdentityVerifiedGeneration::restore_published_json(
+            metadata,
+            &encoded,
+            decoded_digest,
+            &recovery_limits,
+            &ExtensionSupport::default(),
+            context,
+        ),
+        RecoverySnapshotFormat::JsonGzip => {
+            let decoded = decode_recovery_snapshot(&encoded, decoded_bytes, cancellation)?;
+            IdentityVerifiedGeneration::restore_published_json(
+                metadata,
+                &decoded,
+                decoded_digest,
+                &recovery_limits,
+                &ExtensionSupport::default(),
+                context,
+            )
+        }
+        RecoverySnapshotFormat::MessagePackGzip => {
+            let reader = BufReader::with_capacity(
+                RECOVERY_WRITE_BUFFER_BYTES,
+                GzDecoder::new(encoded.as_slice()),
+            );
+            IdentityVerifiedGeneration::restore_published_messagepack_reader(
+                metadata,
+                reader,
+                usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
+                decoded_digest,
+                &recovery_limits,
+                &ExtensionSupport::default(),
+                context,
+            )
+        }
+    };
+    let restored = restored.map_err(|error| map_persisted_identity_error(error, cancellation))?;
+    if matches!(format, RecoverySnapshotFormat::MessagePackGzip)
+        && normalized_document_serialized_bytes(restored.document())? != serialized_document_bytes
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(Some((restored, serialized_document_bytes)))
 }
 
 fn restore_oracle_generation(

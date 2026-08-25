@@ -1559,29 +1559,195 @@ pub fn decode_ir_document_with_checkpoint(
                 .map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)
         }
         NORMALIZED_IR_VERSION => {
-            let wire = decode_checkpointed::<NormalizedWireDocument>(encoded, &mut checkpoint)
-                .map_err(map_document_wire_error)?;
-            if !checkpoint() {
-                return Err(IrDocumentDecodeError::Interrupted);
-            }
-            let document = wire
-                .into_domain()
-                .map_err(|()| IrDocumentDecodeError::InvalidDocumentShape)?;
-            if !checkpoint() {
-                return Err(IrDocumentDecodeError::Interrupted);
-            }
-            let document = canonicalize_ir_document(document, limits, extensions)
+            decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
                 .map(IrDocument::NormalizedV1_1)
-                .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)?;
-            if !checkpoint() {
-                return Err(IrDocumentDecodeError::Interrupted);
-            }
-            Ok(document)
         }
         version => Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
             minor: version.minor(),
         }),
+    }
+}
+
+/// Decodes one current normalized IR document without a dispatch prepass.
+///
+/// This entry point is for callers whose enclosing contract already requires
+/// the current normalized format. It retains the byte ceiling, strict wire
+/// shape, phase checkpoints, and canonical validation of the general decoder
+/// while avoiding a second full scan of large persisted documents.
+///
+/// # Errors
+///
+/// Returns the normalized-document failures from [`decode_ir_document`], plus
+/// [`IrDocumentDecodeError::Interrupted`] when `checkpoint` stops work.
+pub fn decode_normalized_ir_document_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<NormalizedIrDocument, IrDocumentDecodeError> {
+    let observed = encoded.len();
+    if observed > limits.max_document_bytes {
+        return Err(IrDocumentDecodeError::EncodedDocumentTooLarge {
+            observed,
+            limit: limits.max_document_bytes,
+        });
+    }
+    if !checkpoint() {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(encoded);
+    let wire = NormalizedWireDocument::deserialize(&mut deserializer)
+        .and_then(|value| {
+            deserializer.end()?;
+            Ok(value)
+        })
+        .map_err(map_slice_document_wire_error)?;
+    finish_current_normalized_document(wire, limits, extensions, &mut checkpoint)
+}
+
+/// Decodes one current normalized IR document from a MessagePack reader.
+///
+/// The exact encoded length is enforced while reading, including rejection of
+/// truncated or trailing data. Periodic checkpoints keep large durable
+/// recovery streams cancellable without materializing their encoded bytes.
+///
+/// # Errors
+///
+/// Returns [`IrDocumentDecodeError::EncodedDocumentTooLarge`] before decoding,
+/// [`IrDocumentDecodeError::Interrupted`] at a phase checkpoint, or a
+/// normalized shape or validation error for invalid MessagePack input.
+pub fn decode_normalized_ir_document_messagepack_reader_with_checkpoint<R: Read>(
+    reader: R,
+    encoded_bytes: usize,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<NormalizedIrDocument, IrDocumentDecodeError> {
+    if encoded_bytes > limits.max_document_bytes {
+        return Err(IrDocumentDecodeError::EncodedDocumentTooLarge {
+            observed: encoded_bytes,
+            limit: limits.max_document_bytes,
+        });
+    }
+    if !checkpoint() {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    let mut reader = MessagePackCheckpointReader {
+        inner: reader,
+        checkpoint: &mut checkpoint,
+        expected_bytes: encoded_bytes,
+        bytes: 0,
+        bytes_since_checkpoint: 0,
+        interrupted: false,
+    };
+    let mut deserializer = rmp_serde::Deserializer::new(&mut reader);
+    let wire = NormalizedWireDocument::deserialize(&mut deserializer);
+    drop(deserializer);
+    if reader.interrupted {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    let wire = wire.map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)?;
+    reader.finish().map_err(|error| match error {
+        CheckpointDecodeError::Interrupted => IrDocumentDecodeError::Interrupted,
+        CheckpointDecodeError::Malformed | CheckpointDecodeError::InvalidShape => {
+            IrDocumentDecodeError::MalformedDocument
+        }
+    })?;
+    finish_current_normalized_document(wire, limits, extensions, &mut checkpoint)
+}
+
+struct MessagePackCheckpointReader<'checkpoint, R, F> {
+    inner: R,
+    checkpoint: &'checkpoint mut F,
+    expected_bytes: usize,
+    bytes: usize,
+    bytes_since_checkpoint: usize,
+    interrupted: bool,
+}
+
+impl<R: Read, F: FnMut() -> bool> MessagePackCheckpointReader<'_, R, F> {
+    fn finish(&mut self) -> Result<(), CheckpointDecodeError> {
+        let mut trailing = [0_u8; 1];
+        match self.read(&mut trailing) {
+            Ok(0) if self.bytes == self.expected_bytes => Ok(()),
+            Ok(_) => Err(CheckpointDecodeError::Malformed),
+            Err(_) if self.interrupted => Err(CheckpointDecodeError::Interrupted),
+            Err(_) => Err(CheckpointDecodeError::Malformed),
+        }
+    }
+}
+
+impl<R: Read, F: FnMut() -> bool> Read for MessagePackCheckpointReader<'_, R, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.interrupted {
+            return Err(io::Error::other("controlled MessagePack decode stopped"));
+        }
+        if self.bytes_since_checkpoint >= JSON_CHECKPOINT_BYTES {
+            if !(self.checkpoint)() {
+                self.interrupted = true;
+                return Err(io::Error::other("controlled MessagePack decode stopped"));
+            }
+            self.bytes_since_checkpoint = 0;
+        }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.expected_bytes.saturating_sub(self.bytes);
+        if remaining == 0 {
+            let mut trailing = [0_u8; 1];
+            return match self.inner.read(&mut trailing)? {
+                0 => Ok(0),
+                _ => Err(io::Error::other("MessagePack document has trailing data")),
+            };
+        }
+        let maximum_read = buffer.len().min(remaining);
+        let read = self.inner.read(&mut buffer[..maximum_read])?;
+        self.bytes = self.bytes.saturating_add(read);
+        self.bytes_since_checkpoint = self.bytes_since_checkpoint.saturating_add(read);
+        Ok(read)
+    }
+}
+
+fn decode_current_normalized_document(
+    encoded: &[u8],
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<NormalizedIrDocument, IrDocumentDecodeError> {
+    let wire = decode_checkpointed::<NormalizedWireDocument>(encoded, &mut *checkpoint)
+        .map_err(map_document_wire_error)?;
+    finish_current_normalized_document(wire, limits, extensions, checkpoint)
+}
+
+fn finish_current_normalized_document(
+    wire: NormalizedWireDocument,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<NormalizedIrDocument, IrDocumentDecodeError> {
+    if !checkpoint() {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    let document = wire
+        .into_domain()
+        .map_err(|()| IrDocumentDecodeError::InvalidDocumentShape)?;
+    if !checkpoint() {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    let document = canonicalize_ir_document(document, limits, extensions)
+        .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)?;
+    if !checkpoint() {
+        return Err(IrDocumentDecodeError::Interrupted);
+    }
+    Ok(document)
+}
+
+fn map_slice_document_wire_error(error: serde_json::Error) -> IrDocumentDecodeError {
+    if error.is_data() {
+        IrDocumentDecodeError::InvalidDocumentShape
+    } else {
+        IrDocumentDecodeError::MalformedDocument
     }
 }
 
@@ -2375,6 +2541,96 @@ mod tests {
         .expect_err("the second checkpoint stops document decoding");
 
         assert_eq!(error, IrDocumentDecodeError::Interrupted);
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn current_normalized_decoder_skips_the_dispatch_prepass() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let document = NormalizedIrDocument::empty(repository, generation);
+        let encoded = serde_json::to_vec(&document).expect("fixture document serializes");
+        let mut checkpoints = 0_u8;
+
+        let decoded = decode_normalized_ir_document_with_checkpoint(
+            &encoded,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || {
+                checkpoints = checkpoints.saturating_add(1);
+                checkpoints <= 4
+            },
+        )
+        .expect("the current-contract decoder completes in one decode pass");
+
+        assert_eq!(decoded, document);
+        assert_eq!(checkpoints, 4);
+    }
+
+    #[test]
+    fn current_normalized_messagepack_stream_round_trips_through_the_strict_wire() {
+        let IrDocument::NormalizedV1_1(document) = decode(NORMALIZED_FIXTURE, &IrLimits::default())
+            .expect("frozen normalized fixture decodes")
+        else {
+            panic!("normalized fixture dispatches to version 1.1");
+        };
+        let encoded =
+            rmp_serde::to_vec_named(&document).expect("fixture document serializes as MessagePack");
+
+        let streamed = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+            Cursor::new(&encoded),
+            encoded.len(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("the exact-length MessagePack stream decodes");
+
+        assert_eq!(streamed, document);
+    }
+
+    #[test]
+    fn messagepack_reader_rejects_length_mismatches_and_stops_at_checkpoints() {
+        let IrDocument::NormalizedV1_1(document) = decode(NORMALIZED_FIXTURE, &IrLimits::default())
+            .expect("frozen normalized fixture decodes")
+        else {
+            panic!("normalized fixture dispatches to version 1.1");
+        };
+        let encoded =
+            rmp_serde::to_vec_named(&document).expect("fixture document serializes as MessagePack");
+
+        let short = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+            Cursor::new(&encoded),
+            encoded.len() + 1,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        );
+        assert_eq!(short, Err(IrDocumentDecodeError::MalformedDocument));
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        let extra = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+            Cursor::new(&trailing),
+            trailing.len(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        );
+        assert_eq!(extra, Err(IrDocumentDecodeError::MalformedDocument));
+
+        let mut checkpoints = 0_u8;
+        let interrupted = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+            Cursor::new(&encoded),
+            encoded.len(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || {
+                checkpoints = checkpoints.saturating_add(1);
+                checkpoints < 2
+            },
+        );
+        assert_eq!(interrupted, Err(IrDocumentDecodeError::Interrupted));
         assert_eq!(checkpoints, 2);
     }
 
