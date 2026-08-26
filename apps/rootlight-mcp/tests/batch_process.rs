@@ -599,6 +599,7 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
         .expect("repo.index returns an operation identity")
         .to_owned();
     wait_for_publication(&mut mcp, &index, &operation_id);
+    wait_for_semantic_freshness(&mut mcp, &repository_id);
 
     let locate = |id: &str, local_tokens: u16| {
         json!({
@@ -917,6 +918,45 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
         }
     }
     panic!("fixture indexing did not publish within the bounded wait");
+}
+
+fn wait_for_semantic_freshness(mcp: &mut McpProcess, repository_id: &str) {
+    // Detached deep indexing may publish its structural stage before semantic
+    // refinement completes. Golden responses must observe one terminal state.
+    let deadline = Instant::now() + PUBLICATION_TIMEOUT;
+    for attempt in 0_u64.. {
+        let status = mcp.call(
+            &format!("semantic-status-{attempt}"),
+            "repo.status",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "require_freshness": "semantic"
+            }),
+        );
+        let error = &status["result"]["structuredContent"]["error"];
+        if error["code"] == "BUSY" && error["retryable"] == true {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let retry_after = Duration::from_millis(
+                error["retry_after_ms"]
+                    .as_u64()
+                    .unwrap_or(25)
+                    .clamp(1, 1_000),
+            );
+            thread::sleep(retry_after.min(deadline.saturating_duration_since(now)));
+            continue;
+        }
+        assert_success(&status, "repo.status");
+        assert_eq!(
+            status["result"]["structuredContent"]["generation"]["semantic_freshness"], "current",
+            "semantic freshness requirement returned a non-current generation"
+        );
+        return;
+    }
+    panic!("fixture semantic refinement did not publish within the bounded wait");
 }
 
 fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
