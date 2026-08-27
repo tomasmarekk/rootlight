@@ -91,11 +91,11 @@ const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const SETUP_RETRY_ATTEMPTS: u8 = 32;
-const SETUP_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const ADMISSION_RETRY_ATTEMPTS: u8 = 32;
+const ADMISSION_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 // A watcher can retain repository admission longer than the daemon's minimum
-// retry hint, so setup retries need a floor that also prevents request storms.
-const SETUP_RETRY_DELAY_FLOOR: Duration = Duration::from_millis(250);
+// retry hint, so admission retries need a floor that prevents request storms.
+const ADMISSION_RETRY_DELAY_FLOOR: Duration = Duration::from_millis(250);
 // Match the daemon's retained-generation window so lineage proof cannot turn
 // watcher churn into an unbounded sequence of public reads.
 const GENERATION_LINEAGE_LIMIT: usize = 8;
@@ -430,8 +430,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
 
     let restart_started = Instant::now();
     let mut restarted_daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
-    wait_until_ready(&paths, &mut restarted_daemon)?;
-    daemon_ready_samples.push(elapsed_micros(restart_started.elapsed()));
+    wait_until_requestable(&paths, &mut restarted_daemon)?;
     let (mut restarted_mcp, restarted_catalog, restarted_bridge_start) = open_session(
         "restart",
         &mcp_binary,
@@ -474,6 +473,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         43,
         42,
     )?;
+    wait_until_ready(&paths, &mut restarted_daemon)?;
+    daemon_ready_samples.push(elapsed_micros(restart_started.elapsed()));
     if restarted_snapshot.symbol != v2.symbol || restarted_snapshot.source_ref != v2.source_ref {
         return Err(VerticalError::Invariant(
             "daemon restart did not restore the active generation query evidence",
@@ -1656,34 +1657,14 @@ fn index_repository_with_mode(
         "mode": mode,
         "detached": false
     });
-    let retry_deadline = Instant::now()
-        .checked_add(SETUP_RETRY_TIMEOUT)
-        .ok_or(VerticalError::Clock)?;
-    let mut attempt = 1_u8;
-    let response = loop {
-        let request_label = if attempt == 1 {
-            format!("{label}.repo-index")
-        } else {
-            format!("{label}.repo-index.retry-{attempt}")
-        };
-        let outcome = call_tool(
-            &request_label,
-            process,
-            catalog,
-            transcript,
-            "repo.index",
-            arguments.clone(),
-        )?;
-        let Some(server_delay) = retryable_busy_delay(&outcome) else {
-            break outcome;
-        };
-        let remaining = retry_deadline.saturating_duration_since(Instant::now());
-        let Some(delay) = setup_retry_delay(attempt, server_delay, remaining) else {
-            break outcome;
-        };
-        thread::sleep(delay);
-        attempt = attempt.saturating_add(1);
-    };
+    let response = call_tool_with_admission_retry(
+        &format!("{label}.repo-index"),
+        process,
+        catalog,
+        transcript,
+        "repo.index",
+        arguments,
+    )?;
     require_tool_success(&response, "repo.index")?;
     assert_control_value_omits_sentinels(&response.structured)?;
     let selected_mode = required_string(
@@ -1965,7 +1946,7 @@ fn query_snapshot(
     excluded_value: u32,
 ) -> Result<SnapshotEvidence, VerticalError> {
     let requested_active = generation_selector.as_str() == Some("active");
-    let locate = call_tool(
+    let locate = call_tool_with_admission_retry(
         &format!("{label}.code-locate"),
         process,
         catalog,
@@ -3642,6 +3623,44 @@ fn call_tool(
     catalog.validate_result(tool, &exchange.response)
 }
 
+fn call_tool_with_admission_retry(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    tool: &str,
+    arguments: Value,
+) -> Result<ToolOutcome, VerticalError> {
+    let retry_deadline = Instant::now()
+        .checked_add(ADMISSION_RETRY_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    let mut attempt = 1_u8;
+    loop {
+        let request_label = if attempt == 1 {
+            label.to_owned()
+        } else {
+            format!("{label}.retry-{attempt}")
+        };
+        let outcome = call_tool(
+            &request_label,
+            process,
+            catalog,
+            transcript,
+            tool,
+            arguments.clone(),
+        )?;
+        let Some(server_delay) = retryable_busy_delay(&outcome) else {
+            return Ok(outcome);
+        };
+        let remaining = retry_deadline.saturating_duration_since(Instant::now());
+        let Some(delay) = admission_retry_delay(attempt, server_delay, remaining) else {
+            return Ok(outcome);
+        };
+        thread::sleep(delay);
+        attempt = attempt.saturating_add(1);
+    }
+}
+
 fn call_tool_unchecked(
     label: &str,
     process: &mut McpProcess,
@@ -3699,11 +3718,15 @@ fn retryable_busy_delay(outcome: &ToolOutcome) -> Option<Duration> {
     ))
 }
 
-fn setup_retry_delay(attempt: u8, server_delay: Duration, remaining: Duration) -> Option<Duration> {
-    if attempt >= SETUP_RETRY_ATTEMPTS {
+fn admission_retry_delay(
+    attempt: u8,
+    server_delay: Duration,
+    remaining: Duration,
+) -> Option<Duration> {
+    if attempt >= ADMISSION_RETRY_ATTEMPTS {
         return None;
     }
-    let delay = server_delay.max(SETUP_RETRY_DELAY_FLOOR);
+    let delay = server_delay.max(ADMISSION_RETRY_DELAY_FLOOR);
     (delay <= remaining).then_some(delay)
 }
 
@@ -5166,6 +5189,29 @@ fn wait_until_ready(
             && Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly)
                 .and_then(|client| client.health())
                 .is_ok_and(|health| health.ready)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(VerticalError::DaemonReadyTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn wait_until_requestable(
+    paths: &RuntimePaths,
+    daemon: &mut SupervisedDaemon,
+) -> Result<(), VerticalError> {
+    let deadline = Instant::now()
+        .checked_add(START_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    loop {
+        daemon.require_running()?;
+        // A recovering daemon is intentionally requestable so the first pinned
+        // repository request can prioritize its deferred generation restore.
+        if paths.discover().is_ok()
+            && Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly).is_ok()
         {
             return Ok(());
         }
@@ -6762,15 +6808,14 @@ mod tests {
 
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
-        ToolOutcome, VerticalError, assert_active_generation_lineage,
+        ToolOutcome, VerticalError, admission_retry_delay, assert_active_generation_lineage,
         assert_complete_source_read_with_unknown_tier_b_coverage,
         assert_complete_tier_b_rust_coverage, assert_generation_relationship,
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
         observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
-        require_tool_success, retryable_busy_delay, setup_retry_delay,
-        shrink_cancellation_repository, source_tokenizer_input,
-        validate_architecture_community_data, validate_tool_matrix_cells,
+        require_tool_success, retryable_busy_delay, shrink_cancellation_repository,
+        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -6800,7 +6845,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_retry_accepts_only_the_retryable_busy_contract() {
+    fn admission_retry_accepts_only_the_retryable_busy_contract() {
         let retryable = ToolOutcome {
             structured: json!({
                 "error": {
@@ -6843,25 +6888,25 @@ mod tests {
     }
 
     #[test]
-    fn setup_retry_window_is_count_time_and_rate_bounded() {
+    fn admission_retry_window_is_count_time_and_rate_bounded() {
         assert_eq!(
-            setup_retry_delay(1, Duration::from_millis(7), Duration::from_secs(1)),
+            admission_retry_delay(1, Duration::from_millis(7), Duration::from_secs(1)),
             Some(Duration::from_millis(250))
         );
         assert_eq!(
-            setup_retry_delay(1, Duration::from_millis(500), Duration::from_secs(1)),
+            admission_retry_delay(1, Duration::from_millis(500), Duration::from_secs(1)),
             Some(Duration::from_millis(500))
         );
         assert_eq!(
-            setup_retry_delay(
-                super::SETUP_RETRY_ATTEMPTS,
+            admission_retry_delay(
+                super::ADMISSION_RETRY_ATTEMPTS,
                 Duration::from_millis(7),
                 Duration::from_secs(1)
             ),
             None
         );
         assert_eq!(
-            setup_retry_delay(1, Duration::from_secs(1), Duration::from_millis(999)),
+            admission_retry_delay(1, Duration::from_secs(1), Duration::from_millis(999)),
             None
         );
     }
