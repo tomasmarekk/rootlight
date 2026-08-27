@@ -1600,36 +1600,49 @@ fn windows_scope_sids(scope: PrivateScope) -> Result<Vec<String>, RuntimeError> 
 
     let token = OwnedToken::from_current_process(TOKEN_QUERY)
         .map_err(|_| RuntimeError::WindowsSecurityPolicy)?;
+    let account_sid = token
+        .user()
+        .and_then(|sid| sid.to_string())
+        .map_err(|_| RuntimeError::WindowsSecurityPolicy)?;
     match scope {
-        PrivateScope::Account => Ok(vec![
-            token
-                .user()
-                .and_then(|sid| sid.to_string())
-                .map_err(|_| RuntimeError::WindowsSecurityPolicy)?,
-        ]),
+        PrivateScope::Account => Ok(vec![account_sid]),
         PrivateScope::Session => {
-            let sids = token
-                .logon_sid()
-                .map_err(|_| RuntimeError::WindowsSecurityPolicy)?
-                .into_iter()
-                .map(|group| {
-                    group
-                        .sid()
-                        .to_string()
-                        .map_err(|_| RuntimeError::WindowsSecurityPolicy)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if sids.is_empty() {
-                return Err(RuntimeError::WindowsSecurityPolicy);
-            }
+            let mut sids = vec![account_sid];
+            // The logon SID still isolates each default runtime path, while the
+            // account SID lets that same user reclaim an explicit path after sign-in.
+            sids.extend(windows_logon_sids(&token)?);
             Ok(sids)
         }
     }
 }
 
 #[cfg(windows)]
+fn windows_logon_sids(token: &nt_token::OwnedToken) -> Result<Vec<String>, RuntimeError> {
+    let sids = token
+        .logon_sid()
+        .map_err(|_| RuntimeError::WindowsSecurityPolicy)?
+        .into_iter()
+        .map(|group| {
+            group
+                .sid()
+                .to_string()
+                .map_err(|_| RuntimeError::WindowsSecurityPolicy)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if sids.is_empty() {
+        return Err(RuntimeError::WindowsSecurityPolicy);
+    }
+    Ok(sids)
+}
+
+#[cfg(windows)]
 fn windows_default_runtime_dir(state_dir: &Path) -> Result<PathBuf, RuntimeError> {
-    let logon_sids = windows_scope_sids(PrivateScope::Session)?;
+    use nt_token::OwnedToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+
+    let token = OwnedToken::from_current_process(TOKEN_QUERY)
+        .map_err(|_| RuntimeError::WindowsSecurityPolicy)?;
+    let logon_sids = windows_logon_sids(&token)?;
     let [logon_sid] = logon_sids.as_slice() else {
         return Err(RuntimeError::WindowsSecurityPolicy);
     };
@@ -1849,6 +1862,36 @@ mod tests {
             );
         }
         assert_eq!(CoordinatedStartupSignal::from_byte(b'?'), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_acl_retains_account_authority_across_logons() {
+        use nt_token::OwnedToken;
+        use windows::Win32::Security::TOKEN_QUERY;
+
+        let token =
+            OwnedToken::from_current_process(TOKEN_QUERY).expect("current process token opens");
+        let account_sid = token
+            .user()
+            .and_then(|sid| sid.to_string())
+            .expect("account SID formats");
+        let logon_sids = token
+            .logon_sid()
+            .expect("logon SID is available")
+            .into_iter()
+            .map(|group| group.sid().to_string().expect("logon SID formats"))
+            .collect::<Vec<_>>();
+        let session_sids =
+            windows_scope_sids(PrivateScope::Session).expect("session principals resolve");
+
+        assert!(session_sids.contains(&account_sid));
+        assert!(!logon_sids.is_empty(), "interactive token has a logon SID");
+        assert!(
+            logon_sids
+                .iter()
+                .all(|logon_sid| session_sids.contains(logon_sid))
+        );
     }
 
     #[cfg(windows)]
