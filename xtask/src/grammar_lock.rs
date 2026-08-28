@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "0e614273b37dded50d6ed692db765309e6245faa07ad1d700b4233dd37eb9903";
+    "167d4998a3fdc3b84e735a6c0eb033bdb2a99a8c91db0319b0406e78c6d36718";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -31,7 +31,7 @@ const KOTLIN_LICENSE_SHA256: &str =
     "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 12] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 11] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -61,11 +61,6 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 12] = [
         "tree-sitter-java",
         "0.23.5",
         "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6",
-    ),
-    (
-        "tree-sitter-javascript",
-        "0.25.0",
-        "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5",
     ),
     (
         "tree-sitter-kotlin-ng",
@@ -251,10 +246,16 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
     {
         return Err(GrammarLockError::MissingAuditCaveat("java"));
     }
-    if grammar.language == "typescript"
+    if matches!(grammar.language.as_str(), "javascript" | "typescript")
         && (grammar.audit_notes.len() != 2 || grammar.license_source != TYPESCRIPT_LICENSE_PATH)
     {
-        return Err(GrammarLockError::MissingAuditCaveat("typescript"));
+        return Err(GrammarLockError::MissingAuditCaveat(
+            if grammar.language == "javascript" {
+                "javascript"
+            } else {
+                "typescript"
+            },
+        ));
     }
     if grammar.language == "cpp"
         && (grammar.audit_notes.len() != 3 || grammar.license_source != CPP_LICENSE_PATH)

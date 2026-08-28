@@ -69,7 +69,7 @@ const CASES: [LanguageCase; 11] = [
     LanguageCase {
         name: "javascript",
         path: "src/example.js",
-        frontend: "tree-sitter-javascript-0.25.0",
+        frontend: "tree-sitter-typescript-tsx-0.23.2",
         source: include_str!("fixtures/structural/javascript.js"),
         generated: false,
         body_before: "greet(name) {\n    const text = \"Hello 🌍\";\n    console.log(name);\n    return text;\n  }",
@@ -415,6 +415,36 @@ fn reviewed_queries_preserve_explicit_call_sites() {
             case.name
         );
     }
+}
+
+#[test]
+fn javascript_typed_jsx_preserves_structural_declarations_without_recovery() {
+    let case = CASES[2];
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let fixture = Fixture::new(
+        case,
+        br#"// @flow
+export function renderLabel(input: InputValue): React.Node {
+  return <span>{input.label}</span>;
+}
+"#,
+    );
+    let analyzer = analyzer(&provider, case);
+    let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &request, &extensions);
+
+    assert!(output.document().entities.iter().any(|entity| {
+        entity.kind == EntityKind::Function && entity.canonical_name == "renderLabel"
+    }));
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "syntax-error-recovery")
+    );
 }
 
 #[test]

@@ -678,6 +678,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "formal_parameters") => Some("javascript.parameters"),
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
         (GrammarFamily::JavaScript, "identifier") => Some("javascript.identifier"),
+        (GrammarFamily::JavaScript, "type_identifier") => Some("javascript.identifier"),
         (GrammarFamily::JavaScript, "property_identifier") => {
             Some("javascript.property_identifier")
         }

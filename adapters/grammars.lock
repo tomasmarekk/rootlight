@@ -65,26 +65,26 @@ audit_notes = []
 
 [[grammars]]
 language = "javascript"
-crate_name = "tree-sitter-javascript"
-crate_version = "0.25.0"
-crates_io_checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
-repository = "https://github.com/tree-sitter/tree-sitter-javascript"
-tag = "v0.25.0"
-commit = "44c892e0be055ac465d5eeddae6d3e194424e7de"
-parser_sha256 = "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384"
-scanner_sha256 = "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7"
-abi = 15
+crate_name = "tree-sitter-typescript"
+crate_version = "0.23.2"
+crates_io_checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+repository = "https://github.com/tree-sitter/tree-sitter-typescript"
+tag = "v0.23.2"
+commit = "f975a621f4e7f532fe322e13c4f79495e0a7b2e7"
+parser_sha256 = "1902cb53fa7ff5179df89b2eea863165e84c8cc866226419dc26921d8c055885"
+scanner_sha256 = "d563cd30b2f39718c9ae4292795c5ce03a2ad01954ba3a86ef84c2781a736673"
+abi = 14
 analysis_tier = "D"
 license = "MIT"
-license_source = "https://github.com/tree-sitter/tree-sitter-javascript/blob/44c892e0be055ac465d5eeddae6d3e194424e7de/LICENSE"
-license_sha256 = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+license_source = "adapters/licenses/tree-sitter-typescript-0.23.2-LICENSE"
+license_sha256 = "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
 modifications = "none"
 test_corpus = "upstream:test/corpus plus Rootlight eleven-family golden fixtures"
 msrv = "not declared; verified by Rootlight MSRV 1.90"
-offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c and scanner.c"
-capabilities = ["declarations", "imports", "scopes", "occurrences", "comments", "strings"]
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled TypeScript and TSX parsers and scanners"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "call-sites", "comments", "strings", "jsx", "typed-js"]
 semantic_depth = "structural-only; references and calls are unresolved"
-audit_notes = []
+audit_notes = ["published crate omits LICENSE", "JavaScript selects the bundled TSX parser and scanner so JSX and typed annotations share one structural grammar; exact crate checksum locks both"]
 
 [[grammars]]
 language = "java"

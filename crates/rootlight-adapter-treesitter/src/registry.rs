@@ -17,7 +17,7 @@ pub enum GrammarFamily {
     Rust,
     /// Python grammar.
     Python,
-    /// JavaScript grammar.
+    /// JavaScript and JSX grammar with typed-syntax tolerance.
     JavaScript,
     /// Java grammar.
     Java,
@@ -209,7 +209,9 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
         GrammarFamily::Python => tree_sitter_python::LANGUAGE.into(),
-        GrammarFamily::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        // TSX accepts ordinary JavaScript and JSX while retaining declarations
+        // around type annotations that otherwise trigger file-wide recovery.
+        GrammarFamily::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         GrammarFamily::Java => tree_sitter_java::LANGUAGE.into(),
         GrammarFamily::Go => tree_sitter_go::LANGUAGE.into(),
         GrammarFamily::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -252,11 +254,11 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         },
         GrammarFamily::JavaScript => GrammarIdentity {
             language_id: "javascript",
-            grammar_version: "0.25.0",
-            source_package_sha256: "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5",
-            parser_sha256: "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384",
+            grammar_version: "0.23.2",
+            source_package_sha256: "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
+            parser_sha256: "1902cb53fa7ff5179df89b2eea863165e84c8cc866226419dc26921d8c055885",
             scanner_sha256: Some(
-                "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7",
+                "d563cd30b2f39718c9ae4292795c5ce03a2ad01954ba3a86ef84c2781a736673",
             ),
         },
         GrammarFamily::Java => GrammarIdentity {
@@ -396,7 +398,7 @@ mod tests {
             (
                 GrammarFamily::JavaScript,
                 "javascript",
-                "tree-sitter-javascript",
+                "tree-sitter-typescript",
             ),
             (GrammarFamily::Java, "java", "tree-sitter-java"),
             (GrammarFamily::Go, "go", "tree-sitter-go"),

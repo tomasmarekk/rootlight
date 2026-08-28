@@ -20,7 +20,6 @@ tree-sitter-c-sharp.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
-tree-sitter-javascript.workspace = true
 tree-sitter-kotlin-ng.workspace = true
 tree-sitter-php.workspace = true
 tree-sitter-python.workspace = true

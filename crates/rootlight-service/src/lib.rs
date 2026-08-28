@@ -35,9 +35,9 @@ use rootlight_adapter_sdk::{
     TransformationId,
 };
 use rootlight_adapter_treesitter::{
-    ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, GrammarDescriptor, GrammarRegistry,
-    ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION, TreeSitterAnalyzer,
-    TreeSitterProvider, TreeSitterStructuralArtifact,
+    ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, GrammarDescriptor, GrammarFamily,
+    GrammarRegistry, ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION,
+    TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -189,7 +189,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/8";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/9";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -201,7 +201,7 @@ const LOWERING_PASS_ID: &str = "first-slice.lowering";
 const RESOLVER_PASS_ID: &str = "first-slice.resolver";
 const DERIVED_PASS_ID: &str = "first-slice.derived";
 const SEARCH_PASS_ID: &str = "first-slice.search";
-const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/2";
+const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/3";
 const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
 const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/1";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
@@ -5394,11 +5394,18 @@ impl FirstSliceService {
         let mut analyzers = BTreeMap::new();
         for descriptor in registry.descriptors() {
             let language = descriptor.language().clone();
-            let frontend_version = format!(
-                "tree-sitter-{}-{}",
-                language.as_str(),
-                descriptor.grammar_version()
-            );
+            let frontend_version = if descriptor.family() == GrammarFamily::JavaScript {
+                format!(
+                    "tree-sitter-typescript-tsx-{}",
+                    descriptor.grammar_version()
+                )
+            } else {
+                format!(
+                    "tree-sitter-{}-{}",
+                    language.as_str(),
+                    descriptor.grammar_version()
+                )
+            };
             let parse_provider: Arc<dyn ParseProvider> =
                 Arc::clone(&parser) as Arc<dyn ParseProvider>;
             let analyzer = if language.as_str() == "rust" {

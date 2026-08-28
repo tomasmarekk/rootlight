@@ -12,7 +12,7 @@
 
 [
   (function_declaration name: (identifier) @definition)
-  (class_declaration name: (identifier) @definition)
+  (class_declaration name: (type_identifier) @definition)
   (method_definition name: [(property_identifier) (identifier)] @definition)
   (variable_declarator name: (identifier) @definition)
 ]
