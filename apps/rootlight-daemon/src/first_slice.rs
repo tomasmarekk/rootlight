@@ -4892,6 +4892,52 @@ fn read_service(
     service.read().map_err(|_| internal_error())
 }
 
+struct RepositoryIndexAdmissionSnapshot {
+    repository: Option<RepositoryId>,
+    active_generation_is_deep: bool,
+    deep_analysis_available: bool,
+}
+
+fn repository_index_admission_snapshot(
+    lanes: &FirstSliceServiceLanes,
+    root: &Path,
+    cancellation: &Cancellation,
+) -> Result<RepositoryIndexAdmissionSnapshot, PublicError> {
+    // Recovery installs a verified generation under the service write lock.
+    // Admission must remain retryable instead of waiting behind that unbounded payload install.
+    let service = match lanes.service.try_read() {
+        Ok(service) => service,
+        Err(TryLockError::WouldBlock) => {
+            if let Some((repository, recovery)) = current_recovery(&lanes.recovering_repositories)?
+            {
+                return Err(recovery_in_progress(
+                    Some(repository),
+                    Some(recovery),
+                    recovery.phase,
+                ));
+            }
+            return Err(operation_in_progress());
+        }
+        Err(TryLockError::Poisoned(_)) => return Err(internal_error()),
+    };
+    let repository = service
+        .registered_repository_for_root(root, cancellation)
+        .map_err(service_error)?;
+    let active_generation_is_deep = repository
+        .map(|repository| {
+            service
+                .active_generation_is_deep(repository)
+                .map_err(service_error)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    Ok(RepositoryIndexAdmissionSnapshot {
+        repository,
+        active_generation_is_deep,
+        deep_analysis_available: service.deep_analysis_available(),
+    })
+}
+
 fn write_service(
     service: &RwLock<FirstSliceService>,
 ) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
@@ -5345,28 +5391,19 @@ fn repository_index_with_intent(
     let requested_mode =
         daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
     let root = PathBuf::from(&request.root);
-    let requested_repository = read_service(service)?
-        .registered_repository_for_root(&root, &context.cancellation)
-        .map_err(service_error)?;
+    let admission = repository_index_admission_snapshot(lanes, &root, &context.cancellation)?;
+    let requested_repository = admission.repository;
     guard_repository_index_recovery(lanes, requested_repository)?;
     let clean_rebuild = matches!(
         intent,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher
     ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild;
-    let active_generation_is_deep = requested_repository
-        .map(|repository| {
-            read_service(service)?
-                .active_generation_is_deep(repository)
-                .map_err(service_error)
-        })
-        .transpose()?
-        .unwrap_or(false);
     let auto_refinement = matches!(
         intent,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher
     ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
-        && read_service(service)?.deep_analysis_available()
-        && !active_generation_is_deep;
+        && admission.deep_analysis_available
+        && !admission.active_generation_is_deep;
     let mut mode = match intent {
         RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => match requested_mode {
@@ -5375,13 +5412,17 @@ fn repository_index_with_intent(
                 FirstSliceIndexMode::Structural
             }
             daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
-            daemon::RepositoryIndexMode::RepositoryIndexRebuild if active_generation_is_deep => {
+            daemon::RepositoryIndexMode::RepositoryIndexRebuild
+                if admission.active_generation_is_deep =>
+            {
                 FirstSliceIndexMode::Deep
             }
             daemon::RepositoryIndexMode::RepositoryIndexRebuild => FirstSliceIndexMode::Structural,
             // An already-deep generation can prove a no-op without publishing
             // a weaker structural generation and queueing redundant refinement.
-            daemon::RepositoryIndexMode::RepositoryIndexAuto if active_generation_is_deep => {
+            daemon::RepositoryIndexMode::RepositoryIndexAuto
+                if admission.active_generation_is_deep =>
+            {
                 FirstSliceIndexMode::Deep
             }
             // Cold Auto publishes the interactive structural stage first. A
@@ -5405,7 +5446,7 @@ fn repository_index_with_intent(
             // Preserve the original caller-plan identity across the two-stage
             // activation change so a durable Auto submission remains retryable.
             let plan_mode = if requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
-                && read_service(service)?.deep_analysis_available()
+                && admission.deep_analysis_available
             {
                 FirstSliceIndexMode::Deep
             } else {
@@ -19234,6 +19275,54 @@ mod tests {
                 },
             );
         }
+        let service_write = lanes
+            .service
+            .write()
+            .expect("service write lock remains healthy");
+        let bounded_operation = OperationId::from_bytes([96; 16]);
+        let bounded_request =
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().display().to_string(),
+                operation: Some(operation_to_wire(bounded_operation)),
+                detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            });
+        let bounded_context = context();
+        let (bounded, bounded_receiver) = mpsc::sync_channel(1);
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut reply = None;
+                let resources = ServiceRequestResources {
+                    journal: &handle,
+                    metadata: &metadata,
+                    runtime: &runtime,
+                    catalog_epoch: Instant::now(),
+                    publication_hook: None,
+                };
+                let result = execute_service_request(
+                    &lanes,
+                    resources,
+                    bounded_request,
+                    bounded_context,
+                    &mut reply,
+                );
+                bounded
+                    .send(result)
+                    .expect("bounded recovery observation sends");
+            });
+            let observation = bounded_receiver.recv_timeout(Duration::from_secs(1));
+            drop(service_write);
+            worker.join().expect("bounded recovery worker joins");
+            let error = observation
+                .expect("recovery rejection does not wait for the service write lock")
+                .expect_err("the exact unrecovered repository remains blocked");
+            assert_eq!(error.code(), ErrorCode::Busy);
+            assert_eq!(error.repository(), Some(receipt.repository));
+            assert_eq!(error.generation(), Some(receipt.generation));
+            assert_eq!(error.operation(), Some(recovery_operation));
+            assert!(error.retryable());
+        });
         let error = execute_service_request(
             &lanes,
             resources,
