@@ -979,12 +979,12 @@ impl Fields {
         } else {
             let mut language_clauses = Vec::with_capacity(languages.len());
             for language in languages {
-                language_clauses.push(work.term_clause(
+                language_clauses.push(intersection_filter_clause(
                     self.language,
                     language,
                     IndexRecordOption::Basic,
                     1.0,
-                )?);
+                ));
             }
             Box::new(BooleanQuery::new(vec![
                 (Occur::Must, lexical_query),
@@ -1640,6 +1640,17 @@ fn boosted_term(term: Term, index_option: IndexRecordOption, boost: f32) -> Quer
             boost,
         )),
     )
+}
+
+fn intersection_filter_clause(
+    field: Field,
+    value: &str,
+    index_option: IndexRecordOption,
+    boost: f32,
+) -> QueryClause {
+    // Tantivy drives a `Must` intersection from its cheapest scorer, so the
+    // admitted lexical postings bound visits to this independently capped domain.
+    boosted_term(Term::from_field_text(field, value), index_option, boost)
 }
 
 fn validate_build_budget(budget: BuildBudget) -> Result<(), SearchError> {
@@ -2305,6 +2316,46 @@ mod tests {
             .expect("unknown canonical language is a deterministic empty domain");
         assert_eq!(no_match.matched_candidates, 0);
         assert!(no_match.hits.is_empty());
+    }
+
+    #[test]
+    fn selective_language_filter_is_bounded_by_lexical_postings() {
+        let mut javascript_match = document(1, "needle", "src/match.js");
+        javascript_match.language = "javascript".to_owned();
+        let mut rust_match = document(2, "needle", "src/match.rs");
+        rust_match.language = "rust".to_owned();
+        let mut javascript_other = document(3, "haystack", "src/other.js");
+        javascript_other.language = "javascript".to_owned();
+        let mut javascript_unrelated = document(4, "unrelated", "src/unrelated.js");
+        javascript_unrelated.language = "javascript".to_owned();
+        let (_directory, _manifest, index) = build(vec![
+            javascript_match,
+            rust_match,
+            javascript_other,
+            javascript_unrelated,
+        ]);
+
+        let outcome = index
+            .search_with_language_filter_and_stats(
+                &SearchRequest {
+                    query: "needle".to_owned(),
+                    mode: SearchMode::Exact,
+                    max_results: 10,
+                    page_offset: 0,
+                },
+                &["javascript".to_owned()],
+                SearchBudget {
+                    max_postings: 2,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new(),
+            )
+            .expect("selective lexical work bounds the language intersection");
+
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].language, "javascript");
+        assert_eq!(outcome.hits[0].path, "src/match.js");
     }
 
     #[test]

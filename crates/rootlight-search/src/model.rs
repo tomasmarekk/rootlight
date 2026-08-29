@@ -125,7 +125,10 @@ pub struct SearchBudget {
     pub max_expanded_terms: usize,
     /// Maximum index terms examined while evaluating bounded pattern ranges.
     pub max_examined_terms: usize,
-    /// Maximum aggregate posting entries admitted before execution.
+    /// Maximum aggregate lexical posting entries admitted before execution.
+    ///
+    /// Independently capped filter domains are intersected with this admitted
+    /// lexical work and do not contribute their global document frequency.
     pub max_postings: u64,
     /// Maximum aggregate UTF-8 bytes materialized while selecting returned hits.
     pub max_returned_text_bytes: usize,
