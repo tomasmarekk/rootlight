@@ -683,6 +683,23 @@ pub struct FirstSliceRestoredState {
     generations: Vec<RestoredGeneration>,
 }
 
+/// State-independent active-recovery validation awaiting atomic installation.
+///
+/// Preparing this value may traverse a large normalized snapshot and search
+/// index. The opaque result lets a daemon complete that work without holding
+/// the service publication lock.
+pub struct FirstSlicePreparedActiveRestore {
+    generations: Vec<PreparedRestoredGeneration>,
+}
+
+struct PreparedRestoredGeneration {
+    restored: RestoredGeneration,
+    language_coverage: Vec<LanguageCoverageSummary>,
+    relationship_count: u64,
+    fact_count: u64,
+    memory_bytes: u64,
+}
+
 impl FirstSliceDeferredRestore {
     /// Reports whether the deferred-open snapshot contains active restore work.
     ///
@@ -835,6 +852,23 @@ impl FirstSliceRestoredState {
             files_examined,
             bytes_examined,
         })
+    }
+
+    /// Performs state-independent validation for active-generation installation.
+    ///
+    /// The returned value retains every verified payload and precomputed
+    /// accounting field needed by the short stateful installation boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed query smoke, cancellation, integrity, or resource-limit
+    /// failure.
+    pub fn prepare_active_installation(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSlicePreparedActiveRestore, FirstSliceError> {
+        prepare_restored_generations(self.generations, true, cancellation)
+            .map(|generations| FirstSlicePreparedActiveRestore { generations })
     }
 }
 
@@ -4195,6 +4229,41 @@ fn smoke_query_restored_generation(
     Ok(())
 }
 
+fn prepare_restored_generations(
+    restored: Vec<RestoredGeneration>,
+    validate_active_query: bool,
+    cancellation: &Cancellation,
+) -> Result<Vec<PreparedRestoredGeneration>, FirstSliceError> {
+    let mut prepared = Vec::new();
+    prepared
+        .try_reserve_exact(restored.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    for restored in restored {
+        check_cancellation(cancellation)?;
+        if validate_active_query {
+            smoke_query_restored_generation(&restored, cancellation)?;
+        }
+        let language_coverage = language_coverage(restored.verified.document());
+        let relationship_count = u64::try_from(restored.verified.document().relations.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        let fact_count = u64::try_from(normalized_record_count(restored.verified.document())?)
+            .map_err(|_| FirstSliceError::Limits)?;
+        let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
+            || normalized_document_serialized_bytes(restored.verified.document()),
+            Ok,
+        )?;
+        let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
+        prepared.push(PreparedRestoredGeneration {
+            restored,
+            language_coverage,
+            relationship_count,
+            fact_count,
+            memory_bytes,
+        });
+    }
+    Ok(prepared)
+}
+
 /// Resident payload cache with normalized-IR admission charges.
 ///
 /// Charges deliberately use the stable serialized generation measure. Backend
@@ -4878,7 +4947,24 @@ impl FirstSliceService {
         restored: FirstSliceRestoredState,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
-        self.install_restored(restored.generations, true, cancellation)
+        let prepared = restored.prepare_active_installation(cancellation)?;
+        self.install_prepared_progressive_deferred_restore(prepared, cancellation)
+    }
+
+    /// Installs one independently prepared active-recovery batch.
+    ///
+    /// The state-independent payload validation has already completed, so this
+    /// method retains only stateful admission and atomic publication work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed cancellation, integrity, or bounded-retention failure.
+    pub fn install_prepared_progressive_deferred_restore(
+        &mut self,
+        prepared: FirstSlicePreparedActiveRestore,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        self.install_prepared_restored(prepared.generations, true, cancellation)
     }
 
     /// Adds verified retained predecessors without changing active pointers.
@@ -5826,11 +5912,16 @@ impl FirstSliceService {
         activate_latest: bool,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
-        if activate_latest {
-            for generation in &restored {
-                smoke_query_restored_generation(generation, cancellation)?;
-            }
-        }
+        let prepared = prepare_restored_generations(restored, activate_latest, cancellation)?;
+        self.install_prepared_restored(prepared, activate_latest, cancellation)
+    }
+
+    fn install_prepared_restored(
+        &mut self,
+        restored: Vec<PreparedRestoredGeneration>,
+        activate_latest: bool,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
         let mut active = BTreeMap::<RepositoryId, (u64, GenerationId)>::new();
         let mut legacy_generation_counts = BTreeMap::<RepositoryId, u64>::new();
         let mut global_activation_order = self
@@ -5841,19 +5932,16 @@ impl FirstSliceService {
             })
             .collect::<BTreeMap<_, _>>();
         let mut legacy_most_recent = None::<(u64, RepositoryId, GenerationId)>;
-        for restored in restored {
+        for prepared in restored {
             check_cancellation(cancellation)?;
+            let PreparedRestoredGeneration {
+                restored,
+                language_coverage,
+                relationship_count,
+                fact_count,
+                memory_bytes,
+            } = prepared;
             let receipt = restored.receipt;
-            let language_coverage = language_coverage(restored.verified.document());
-            let relationship_count = u64::try_from(restored.verified.document().relations.len())
-                .map_err(|_| FirstSliceError::Limits)?;
-            let fact_count = u64::try_from(normalized_record_count(restored.verified.document())?)
-                .map_err(|_| FirstSliceError::Limits)?;
-            let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
-                || normalized_document_serialized_bytes(restored.verified.document()),
-                Ok,
-            )?;
-            let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
             if self.receipts.contains_key(&receipt.generation)
                 || self
                     .repositories
@@ -17670,9 +17758,11 @@ mod tests {
         path::Path,
         process::Command,
         sync::{
-            Mutex,
+            Mutex, RwLock,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
+        thread,
         time::{Duration, Instant},
     };
 
@@ -22059,6 +22149,67 @@ mod tests {
             .source_read(receipt.generation, vec![source], &cancellation)
             .expect("restored source bytes remain readable");
         assert_eq!(read.data.generation, receipt.generation);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn active_restore_preparation_does_not_require_the_service_lock() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn recovery_lock_probe() -> bool { true }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("durable generation publishes")
+        };
+        let (service, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred durable service opens");
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("active generation payload restores");
+        let service = RwLock::new(service);
+        let service_write = service.write().expect("service write lock opens");
+        let (prepared_sender, prepared_receiver) = mpsc::sync_channel(1);
+
+        thread::scope(|scope| {
+            let preparation_cancellation = cancellation.clone();
+            let preparation = scope.spawn(move || {
+                prepared_sender
+                    .send(restored.prepare_active_installation(&preparation_cancellation))
+                    .expect("prepared restore sends");
+            });
+            let prepared = prepared_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("active restore prepares while the service write lock is held")
+                .expect("active restore validation succeeds");
+            drop(service_write);
+            preparation.join().expect("restore preparation joins");
+            service
+                .write()
+                .expect("service write lock reopens")
+                .install_prepared_progressive_deferred_restore(prepared, &cancellation)
+                .expect("prepared active restore installs");
+        });
+
+        assert_eq!(
+            service
+                .read()
+                .expect("service read lock opens")
+                .active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

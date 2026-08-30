@@ -3936,12 +3936,19 @@ fn durable_recovery_worker(
                     return Ok(());
                 }
                 let installed = active.generation_ids();
-                if let Err(error) = lanes
-                    .service
-                    .write()
-                    .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                    .install_progressive_deferred_restore(active, recovery.cancellation())
-                {
+                let active = active.prepare_active_installation(recovery.cancellation());
+                let install_result = match active {
+                    Ok(active) => lanes
+                        .service
+                        .write()
+                        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                        .install_prepared_progressive_deferred_restore(
+                            active,
+                            recovery.cancellation(),
+                        ),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = install_result {
                     match error {
                         FirstSliceError::Cancelled(reason) => {
                             recovery.cancel(&runtime, reason)?;
@@ -4903,8 +4910,8 @@ fn repository_index_admission_snapshot(
     root: &Path,
     cancellation: &Cancellation,
 ) -> Result<RepositoryIndexAdmissionSnapshot, PublicError> {
-    // Recovery installs a verified generation under the service write lock.
-    // Admission must remain retryable instead of waiting behind that unbounded payload install.
+    // Recovery validates large payloads before taking the service write lock.
+    // Admission remains retryable rather than waiting behind atomic installation.
     let service = match lanes.service.try_read() {
         Ok(service) => service,
         Err(TryLockError::WouldBlock) => {
