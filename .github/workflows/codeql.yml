@@ -1,0 +1,106 @@
+# CodeQL is an independent required security gate for every relevant revision.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions: {}
+
+concurrency:
+  # Preserve every pushed revision while allowing superseded pull-request
+  # analyses to release their runners.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze-upload:
+    name: analyze and upload / ${{ matrix.language }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+      - name: Analyze
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: /language:${{ matrix.language }}
+
+  analyze-pull-request:
+    name: analyze pull request / ${{ matrix.language }}
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+      - name: Analyze without privileged upload
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: /language:${{ matrix.language }}
+          upload: never
+          upload-database: false
+
+  codeql-required:
+    name: codeql-required
+    if: always()
+    needs: [analyze-upload, analyze-pull-request]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CodeQL language analysis
+        env:
+          PULL_REQUEST_RESULT: ${{ needs.analyze-pull-request.result }}
+          UPLOAD_RESULT: ${{ needs.analyze-upload.result }}
+        run: |
+          if { [ "$UPLOAD_RESULT" = "success" ] && [ "$PULL_REQUEST_RESULT" = "skipped" ]; } ||
+             { [ "$UPLOAD_RESULT" = "skipped" ] && [ "$PULL_REQUEST_RESULT" = "success" ]; }; then
+            echo "all required CodeQL analyses succeeded"
+          else
+            echo "required CodeQL analyses did not succeed: upload=$UPLOAD_RESULT pull_request=$PULL_REQUEST_RESULT" >&2
+            exit 1
+          fi
