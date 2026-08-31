@@ -979,6 +979,151 @@ fn architecture_overview_returns_scoped_truncation_when_workspace_is_unfunded() 
 }
 
 #[test]
+fn architecture_cycles_returns_scoped_truncation_when_workspace_is_unfunded() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let plan = service
+        .plan_architecture_cycles(
+            vec![RelationFamily::Calls],
+            0,
+            2,
+            1,
+            false,
+            QueryBudget::new().with_max_memory_bytes(1),
+        )
+        .expect("the bounded cycle plan is admitted");
+
+    let response = service
+        .execute_architecture_cycles(&plan, &Cancellation::new())
+        .expect("workspace exhaustion returns an honest partial result");
+
+    assert_eq!(response.plan.kind, PlanKind::ArchitectureCycles);
+    assert_eq!(
+        response.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
+    assert_eq!(
+        response.data.execution.limiting_resources(),
+        &[QueryResource::MemoryBytes]
+    );
+    assert_eq!(
+        response.data.limiting_resources,
+        vec![QueryResource::MemoryBytes]
+    );
+    assert!(response.data.components.is_empty());
+    assert!(response.data.cycles.is_empty());
+    assert!(response.data.break_candidates.is_empty());
+    assert_eq!(response.usage.rows, 0);
+    assert_eq!(response.usage.edges, 0);
+    assert_eq!(response.usage.memory_bytes, 0);
+    assert_exact_response_accounting(&response);
+}
+
+#[test]
+fn analytical_queries_return_scoped_truncation_when_workspace_is_unfunded() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let symbol = search.hits[0]
+        .symbol_id
+        .expect("symbol projection has identity");
+    let budget = QueryBudget::new().with_max_memory_bytes(1);
+
+    let flow_plan = service
+        .plan_flow_trace(
+            symbol,
+            None,
+            Some(RelationDirection::Both),
+            vec![RelationFamily::Calls],
+            0,
+            1,
+            1,
+            budget,
+        )
+        .expect("the bounded flow plan is admitted");
+    let flow = service
+        .execute_flow_trace(&flow_plan, &Cancellation::new())
+        .expect("flow workspace exhaustion returns an honest partial result");
+    assert_eq!(flow.plan.kind, PlanKind::FlowTrace);
+    assert_eq!(
+        flow.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
+    assert_eq!(
+        flow.data.execution.limiting_resources(),
+        &[QueryResource::MemoryBytes]
+    );
+    assert_eq!(
+        flow.data.limiting_resources,
+        vec![QueryResource::MemoryBytes]
+    );
+    assert!(flow.data.paths.is_empty());
+    assert!(flow.data.frontier.truncated);
+    assert_eq!(flow.usage.rows, 0);
+    assert_eq!(flow.usage.edges, 0);
+    assert_eq!(flow.usage.memory_bytes, 0);
+    assert_exact_response_accounting(&flow);
+
+    let impact_plan = service
+        .plan_change_impact(BTreeSet::from([symbol]), Vec::new(), 1, 0, false, 1, budget)
+        .expect("the bounded impact plan is admitted");
+    let impact = service
+        .execute_change_impact(&impact_plan, &Cancellation::new())
+        .expect("impact workspace exhaustion returns an honest partial result");
+    assert_eq!(impact.plan.kind, PlanKind::ChangeImpact);
+    assert_eq!(
+        impact.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
+    assert_eq!(
+        impact.data.execution.limiting_resources(),
+        &[QueryResource::MemoryBytes]
+    );
+    assert_eq!(
+        impact.data.limiting_resources,
+        vec![QueryResource::MemoryBytes]
+    );
+    assert!(impact.data.resolved_changes.is_empty());
+    assert!(impact.data.impacted.is_empty());
+    assert!(impact.data.tests.is_empty());
+    assert_eq!(impact.data.risk_summary.coverage, CoverageStatus::Bounded);
+    assert!(impact.data.risk_summary.dynamic_blind_spots);
+    assert_eq!(impact.usage.rows, 0);
+    assert_eq!(impact.usage.edges, 0);
+    assert_eq!(impact.usage.memory_bytes, 0);
+    assert_exact_response_accounting(&impact);
+
+    let history_plan = service
+        .plan_history_compare(snapshot.metadata().generation(), BTreeSet::new(), 1, budget)
+        .expect("the bounded history plan is admitted");
+    let history = service
+        .execute_history_compare(&history_plan, snapshot.document(), &Cancellation::new())
+        .expect("history workspace exhaustion returns an honest partial result");
+    assert_eq!(history.plan.kind, PlanKind::HistoryCompare);
+    assert_eq!(
+        history.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
+    assert_eq!(
+        history.data.execution.limiting_resources(),
+        &[QueryResource::MemoryBytes]
+    );
+    assert_eq!(
+        history.data.limiting_resources,
+        vec![QueryResource::MemoryBytes]
+    );
+    assert_eq!(history.data.coverage, CoverageStatus::Complete);
+    assert!(history.data.changes.is_empty());
+    assert!(history.data.breaking_candidates.is_empty());
+    assert!(history.data.lineage.is_empty());
+    assert_eq!(history.usage.rows, 0);
+    assert_eq!(history.usage.edges, 0);
+    assert_eq!(history.usage.memory_bytes, 0);
+    assert_exact_response_accounting(&history);
+}
+
+#[test]
 fn plans_and_execution_enforce_all_query_resource_families() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);

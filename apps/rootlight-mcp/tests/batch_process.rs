@@ -198,9 +198,15 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
             ));
             continue;
         }
-        let results = response["result"]["structuredContent"]["data"]["operation_results"]
-            .as_array()
-            .expect("query.batch returns operation results");
+        let Some(results) =
+            response["result"]["structuredContent"]["data"]["operation_results"].as_array()
+        else {
+            failures.push(format!(
+                "{}: malformed top-level response ({response})",
+                descriptor.batch_tool.name()
+            ));
+            continue;
+        };
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result["id"], format!("adapter_{index}"));
@@ -215,14 +221,16 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
         }
         assert!(result["data"].is_object());
     }
+    if failures.is_empty() {
+        assert_process_profile_semantics(&mut mcp, &repository_id);
+    }
+
+    mcp.finish();
+    daemon.finish();
     assert!(
         failures.is_empty(),
         "production batch adapters did not complete successfully: {failures:#?}"
     );
-    assert_process_profile_semantics(&mut mcp, &repository_id);
-
-    mcp.finish();
-    daemon.finish();
 }
 
 #[test]

@@ -88,8 +88,8 @@ use rootlight_ir::{
     ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
     RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason,
     SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_provenance_record_id, derive_skipped_region_id,
-    generation_neutral_workspace_bytes, new_file_identity_claim_envelope,
+    derive_diagnostic_record_id, derive_provenance_record_id, derive_relation_record_id,
+    derive_skipped_region_id, generation_neutral_workspace_bytes, new_file_identity_claim_envelope,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -3914,6 +3914,63 @@ impl FirstSliceProjectAnalysisRequest<'_> {
     }
 }
 
+/// Proof that one supplemental adapter input starts with an exact primary-file prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceSupplementalPrefix {
+    file: FileId,
+    primary_content_hash: ContentHash,
+    projected_content_hash: ContentHash,
+    primary_bytes: u64,
+    projected_bytes: u64,
+    retained_prefix_bytes: u64,
+}
+
+impl FirstSliceSupplementalPrefix {
+    /// Creates a bounded prefix proof for supplemental relation recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Analysis`] when the primary
+    /// hash does not match its source, the retained bytes do not form a
+    /// non-empty strict prefix shared by both sources, or their lengths cannot
+    /// be represented.
+    pub fn new(
+        file: FileId,
+        primary_content_hash: ContentHash,
+        primary_source: &[u8],
+        projected_source: &[u8],
+        retained_prefix_bytes: usize,
+    ) -> Result<Self, FirstSliceProjectAnalysisError> {
+        let Some(primary_prefix) = primary_source.get(..retained_prefix_bytes) else {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        };
+        let Some(projected_prefix) = projected_source.get(..retained_prefix_bytes) else {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        };
+        if retained_prefix_bytes == 0
+            || retained_prefix_bytes >= primary_source.len()
+            || primary_prefix != projected_prefix
+            || content_hash(primary_source) != primary_content_hash
+        {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        let primary_bytes = u64::try_from(primary_source.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let projected_bytes = u64::try_from(projected_source.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let retained_prefix_bytes = u64::try_from(retained_prefix_bytes)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        Ok(Self {
+            file,
+            primary_content_hash,
+            projected_content_hash: content_hash(projected_source),
+            primary_bytes,
+            projected_bytes,
+            retained_prefix_bytes,
+        })
+    }
+}
+
 /// Validated project output plus evidence from its exact producing process.
 #[derive(Debug)]
 pub struct FirstSliceProjectAnalysis {
@@ -4015,14 +4072,41 @@ impl FirstSliceProjectAnalysis {
         document: NormalizedIrDocument,
         isolation_permits_deep_adapter: bool,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
+        self.append_supplemental_relations_with_cancellation(
+            document,
+            isolation_permits_deep_adapter,
+            &Cancellation::new(),
+        )
+    }
+
+    /// Merges novel supplemental relations with cooperative cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Cancelled`] when cancellation
+    /// wins. Returns [`FirstSliceProjectAnalysisError::Analysis`] when the
+    /// supplemental document names a different identity or bounded allocation
+    /// fails.
+    pub fn append_supplemental_relations_with_cancellation(
+        &mut self,
+        document: NormalizedIrDocument,
+        isolation_permits_deep_adapter: bool,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
         let merged = self
             .documents
             .first_mut()
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-        let relations = supplemental_project_relations(merged, document)
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let relations = supplemental_project_relations(merged, document, &[], cancellation)
+            .map_err(map_supplemental_project_error)?;
         let mut supplemental = NormalizedIrDocument::empty(merged.repository, merged.generation);
         supplemental.relations = relations;
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
         let diagnostic_capacity = IrLimits::default()
             .max_diagnostics
             .saturating_sub(PROJECT_PARTITION_DIAGNOSTIC_RESERVE);
@@ -4033,7 +4117,92 @@ impl FirstSliceProjectAnalysis {
             diagnostic_capacity,
             &IrLimits::default(),
         )
-        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        .map_err(map_supplemental_project_error)?;
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        self.diagnostics_truncated |= truncation.diagnostics;
+        self.facts_truncated |= truncation.facts;
+        self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
+        self.partitioned = true;
+        Ok(())
+    }
+
+    /// Merges relations recovered from bounded exact-prefix adapter inputs.
+    ///
+    /// Prefix relations are admitted only when projected provider provenance
+    /// maps unambiguously to already retained primary evidence. Consumer
+    /// relationship evidence and call-site occurrences must come from the exact
+    /// retained primary source, so no fact backed only by truncated consumer
+    /// source survives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Analysis`] when document
+    /// identity, a prefix proof, or bounded allocation is invalid.
+    pub fn append_supplemental_prefix_relations(
+        &mut self,
+        document: NormalizedIrDocument,
+        isolation_permits_deep_adapter: bool,
+        prefixes: &[FirstSliceSupplementalPrefix],
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        self.append_supplemental_prefix_relations_with_cancellation(
+            document,
+            isolation_permits_deep_adapter,
+            prefixes,
+            &Cancellation::new(),
+        )
+    }
+
+    /// Merges exact-prefix supplemental relations with cooperative cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Cancelled`] when cancellation
+    /// wins. Returns [`FirstSliceProjectAnalysisError::Analysis`] when document
+    /// identity, a prefix proof, or bounded allocation is invalid.
+    pub fn append_supplemental_prefix_relations_with_cancellation(
+        &mut self,
+        document: NormalizedIrDocument,
+        isolation_permits_deep_adapter: bool,
+        prefixes: &[FirstSliceSupplementalPrefix],
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if prefixes.is_empty() {
+            return self.append_supplemental_relations_with_cancellation(
+                document,
+                isolation_permits_deep_adapter,
+                cancellation,
+            );
+        }
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        let merged = self
+            .documents
+            .first_mut()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let relations = supplemental_project_relations(merged, document, prefixes, cancellation)
+            .map_err(map_supplemental_project_error)?;
+        let mut supplemental = NormalizedIrDocument::empty(merged.repository, merged.generation);
+        supplemental.relations = relations;
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        let diagnostic_capacity = IrLimits::default()
+            .max_diagnostics
+            .saturating_sub(PROJECT_PARTITION_DIAGNOSTIC_RESERVE);
+        let truncation = merge_project_document(
+            merged,
+            supplemental,
+            &mut self.external_symbols,
+            diagnostic_capacity,
+            &IrLimits::default(),
+        )
+        .map_err(map_supplemental_project_error)?;
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
         self.diagnostics_truncated |= truncation.diagnostics;
         self.facts_truncated |= truncation.facts;
         self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
@@ -7381,61 +7550,63 @@ impl FirstSliceService {
                 0,
             )?;
         }
-        let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
-            &self.durable
-        {
-            let prepared = durable.begin_generation(repository, generation)?;
-            let source_write = prepared.write_sources(&retained_sources)?;
-            incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
-            let source_written_bytes = source_write.newly_written_bytes;
-            observe_progress(FirstSliceIndexProgress::observed(
-                FirstSliceIndexStage::Persistence,
-                4,
-                fully_examined_files,
-                fully_examined_bytes,
-                source_written_bytes,
-            ));
-            let (allocated_bytes, verified, generation_written_bytes) = match representation {
-                DurableGenerationRepresentation::Oracle => {
-                    let (oracle, verified) = OracleWriter::create_in(prepared.path())
-                        .map_err(|error| map_catalog_error(&error, cancellation))?
-                        .seal_preserving_verified(verified, &context)
-                        .map_err(|error| map_catalog_error(&error, cancellation))?;
-                    let allocated_bytes = oracle
-                        .allocated_bytes(&context)
-                        .map_err(|error| map_catalog_error(&error, cancellation))?;
-                    prepared.account_external_staging_bytes(allocated_bytes)?;
-                    (allocated_bytes, verified, allocated_bytes)
-                }
-                DurableGenerationRepresentation::RecoverySnapshot => {
-                    let recovery_bytes = prepared
-                        .write_recovery_snapshot(verified.snapshot(), serialized_document_bytes)?;
-                    (0, verified, recovery_bytes)
-                }
+        let (oracle_allocated_bytes, verified, durable, mut written_bytes) =
+            if let Some(durable) = &self.durable {
+                let prepared = durable.begin_generation(repository, generation)?;
+                let source_write = prepared.write_sources(&retained_sources)?;
+                incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
+                let source_written_bytes = source_write.newly_written_bytes;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    source_written_bytes,
+                ));
+                let (allocated_bytes, verified, generation_written_bytes) = match representation {
+                    DurableGenerationRepresentation::Oracle => {
+                        let (oracle, verified) = OracleWriter::create_in(prepared.path())
+                            .map_err(|error| map_catalog_error(&error, cancellation))?
+                            .seal_preserving_verified(verified, &context)
+                            .map_err(|error| map_catalog_error(&error, cancellation))?;
+                        let allocated_bytes = oracle
+                            .allocated_bytes(&context)
+                            .map_err(|error| map_catalog_error(&error, cancellation))?;
+                        prepared.account_external_staging_bytes(allocated_bytes)?;
+                        (allocated_bytes, verified, allocated_bytes)
+                    }
+                    DurableGenerationRepresentation::RecoverySnapshot => {
+                        let recovery_bytes = prepared.write_recovery_snapshot(
+                            verified.snapshot(),
+                            serialized_document_bytes,
+                            cancellation,
+                        )?;
+                        (0, verified, recovery_bytes)
+                    }
+                };
+                let written_bytes = source_written_bytes
+                    .checked_add(generation_written_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    written_bytes,
+                ));
+                (allocated_bytes, verified, Some(prepared), written_bytes)
+            } else {
+                let (oracle, verified) = EphemeralOracleWriter::create()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?
+                    .seal_and_retain(verified, &context)
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                let allocated_bytes = oracle
+                    .allocated_bytes()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                (allocated_bytes, verified, None, 0)
             };
-            let written_bytes = source_written_bytes
-                .checked_add(generation_written_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            observe_progress(FirstSliceIndexProgress::observed(
-                FirstSliceIndexStage::Persistence,
-                4,
-                fully_examined_files,
-                fully_examined_bytes,
-                written_bytes,
-            ));
-            (allocated_bytes, verified, Some(prepared), written_bytes)
-        } else {
-            let (oracle, verified) = EphemeralOracleWriter::create()
-                .map_err(|error| map_catalog_error(&error, cancellation))?
-                .seal_and_retain(verified, &context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            let allocated_bytes = oracle
-                .allocated_bytes()
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            (allocated_bytes, verified, None, 0)
-        };
         if let Some(durable) = durable.as_ref() {
-            let incremental_bytes = durable.write_incremental_state(&incremental)?;
+            let incremental_bytes = durable.write_incremental_state(&incremental, cancellation)?;
             written_bytes = written_bytes
                 .checked_add(incremental_bytes)
                 .ok_or(FirstSliceError::Limits)?;
@@ -14633,25 +14804,534 @@ fn project_external_symbols(document: &NormalizedIrDocument) -> BTreeSet<SymbolI
         .collect()
 }
 
+fn map_supplemental_project_error(error: FirstSliceError) -> FirstSliceProjectAnalysisError {
+    match error {
+        FirstSliceError::Cancelled(reason) => FirstSliceProjectAnalysisError::Cancelled(reason),
+        _ => FirstSliceProjectAnalysisError::Analysis,
+    }
+}
+
+fn collect_supplemental_cancellable<I, T, C, F>(
+    items: I,
+    cancellation: &Cancellation,
+    mut select: F,
+) -> Result<C, FirstSliceError>
+where
+    I: IntoIterator,
+    C: Default + Extend<T>,
+    F: FnMut(I::Item) -> Option<T>,
+{
+    let mut output = C::default();
+    for item in items {
+        check_cancellation(cancellation)?;
+        output.extend(select(item));
+    }
+    Ok(output)
+}
+
+fn remap_supplemental_prefix_relations(
+    merged: &NormalizedIrDocument,
+    document: &mut NormalizedIrDocument,
+    prefixes: &[FirstSliceSupplementalPrefix],
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    check_cancellation(cancellation)?;
+    if prefixes.is_empty() {
+        return Ok(());
+    }
+    let mut by_file = BTreeMap::new();
+    for prefix in prefixes {
+        check_cancellation(cancellation)?;
+        if by_file.insert(prefix.file, *prefix).is_some() {
+            return Err(FirstSliceError::Identity);
+        }
+    }
+    let primary_files: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&merged.files, cancellation, |file| {
+            by_file
+                .contains_key(&file.id)
+                .then_some((file.id, (file.content_hash, file.byte_length)))
+        })?;
+    let projected_files: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&document.files, cancellation, |file| {
+            by_file
+                .contains_key(&file.id)
+                .then_some((file.id, (file.content_hash, file.byte_length)))
+        })?;
+    if primary_files.len() != by_file.len() || projected_files.len() != by_file.len() {
+        return Err(FirstSliceError::Identity);
+    }
+    for (file, prefix) in &by_file {
+        check_cancellation(cancellation)?;
+        if primary_files.get(file) != Some(&(prefix.primary_content_hash, prefix.primary_bytes))
+            || projected_files.get(file)
+                != Some(&(prefix.projected_content_hash, prefix.projected_bytes))
+        {
+            return Err(FirstSliceError::Identity);
+        }
+    }
+
+    let mut required_provenance = BTreeSet::new();
+    for relation in &document.relations {
+        check_cancellation(cancellation)?;
+        required_provenance.insert(relation.provenance);
+        for reference in &relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+            if let FactRef::Fact(fact) = reference {
+                required_provenance.insert(*fact);
+            }
+        }
+    }
+    let mut provenance_needing_projection = BTreeSet::new();
+    for record in &document.provenance {
+        check_cancellation(cancellation)?;
+        if !required_provenance.contains(&record.id) {
+            continue;
+        }
+        for source in record.input_sources.iter().chain(&record.evidence_sources) {
+            check_cancellation(cancellation)?;
+            if by_file.contains_key(&source.span().file()) {
+                provenance_needing_projection.insert(record.id);
+                break;
+            }
+        }
+    }
+    let mut expected_provenance = Vec::new();
+    expected_provenance
+        .try_reserve_exact(provenance_needing_projection.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for record in document
+        .provenance
+        .iter()
+        .filter(|record| provenance_needing_projection.contains(&record.id))
+    {
+        check_cancellation(cancellation)?;
+        // Projected derivation parents would need their own transitive identity
+        // proof. Supplemental recovery is optional, so reject that unsupported
+        // shape instead of treating changed parent IDs as equivalent.
+        if !record.derivation_parents.is_empty() {
+            continue;
+        }
+        let Some(primary) = project_provenance_to_primary(record, &by_file, cancellation)? else {
+            continue;
+        };
+        expected_provenance.push((record.id, primary));
+    }
+    let expected_ids: BTreeSet<_> =
+        collect_supplemental_cancellable(&expected_provenance, cancellation, |(_, primary)| {
+            Some(primary.id)
+        })?;
+    let retained_provenance: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&merged.provenance, cancellation, |record| {
+            expected_ids
+                .contains(&record.id)
+                .then_some((record.id, record))
+        })?;
+    let projected_provenance: BTreeMap<_, _> = collect_supplemental_cancellable(
+        expected_provenance,
+        cancellation,
+        |(projected, primary)| {
+            retained_provenance
+                .get(&primary.id)
+                .is_some_and(|retained| **retained == primary)
+                .then_some((projected, primary.id))
+        },
+    )?;
+
+    let mut required_occurrences = BTreeSet::new();
+    for relation in &document.relations {
+        check_cancellation(cancellation)?;
+        for endpoint in [relation.subject, relation.object] {
+            check_cancellation(cancellation)?;
+            if let RelationEndpoint::Occurrence(occurrence) = endpoint {
+                required_occurrences.insert(occurrence);
+            }
+        }
+        for reference in &relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+            if let FactRef::Fact(fact) = reference {
+                required_occurrences.insert(*fact);
+            }
+        }
+    }
+    let projected_occurrences: BTreeSet<_> =
+        collect_supplemental_cancellable(&document.occurrences, cancellation, |occurrence| {
+            (required_occurrences.contains(&occurrence.id)
+                && source_projects_to_primary(&occurrence.source, &by_file).is_some())
+            .then_some(occurrence.id)
+        })?;
+    let required_consumer_files: BTreeSet<_> =
+        collect_supplemental_cancellable(&document.occurrences, cancellation, |occurrence| {
+            required_occurrences
+                .contains(&occurrence.id)
+                .then_some(occurrence.file)
+        })?;
+    let retained_consumer_files: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&merged.files, cancellation, |file| {
+            required_consumer_files
+                .contains(&file.id)
+                .then_some((file.id, (file.content_hash, file.byte_length)))
+        })?;
+    let exact_consumer_occurrences: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&document.occurrences, cancellation, |occurrence| {
+            let rootlight_ir::OccurrenceTarget::Resolved { symbol } = &occurrence.target else {
+                return None;
+            };
+            let (primary_hash, primary_bytes) = retained_consumer_files.get(&occurrence.file)?;
+            let source = &occurrence.source;
+            (required_occurrences.contains(&occurrence.id)
+                && occurrence.role == OccurrenceRole::CallSite
+                && occurrence.repository == merged.repository
+                && occurrence.generation == merged.generation
+                && occurrence.file == source.span().file()
+                && source.repository() == merged.repository
+                && source.generation() == merged.generation
+                && source.content_hash() == *primary_hash
+                && source.span().end_byte() <= *primary_bytes)
+                .then_some((occurrence.id, (*symbol, source)))
+        })?;
+
+    let mut remapped = Vec::new();
+    remapped
+        .try_reserve_exact(document.relations.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for mut relation in std::mem::take(&mut document.relations) {
+        check_cancellation(cancellation)?;
+        for _ in &relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+        }
+        // Prefix equality proves source bytes, not JavaScript or TypeScript
+        // binding equivalence. Relations and occurrence facts must therefore
+        // come from exact full-source consumers; projection is allowed only in
+        // the provider provenance that is remapped below.
+        if relation
+            .evidence
+            .source
+            .as_ref()
+            .is_some_and(|source| source_projects_to_primary(source, &by_file).is_some())
+            || [relation.subject, relation.object]
+                .into_iter()
+                .any(|endpoint| {
+                    matches!(
+                        endpoint,
+                        RelationEndpoint::Occurrence(occurrence)
+                            if projected_occurrences.contains(&occurrence)
+                    )
+                })
+            || relation.evidence.derivation.iter().any(|reference| {
+                matches!(
+                    reference,
+                    FactRef::Fact(fact) if projected_occurrences.contains(fact)
+                )
+            })
+        {
+            continue;
+        }
+        let mut changed = false;
+        let provenance_was_projected = provenance_needing_projection.contains(&relation.provenance);
+        let derivation_uses_projected_provenance =
+            relation.evidence.derivation.iter().any(|reference| {
+                matches!(
+                    reference,
+                    FactRef::Fact(fact) if provenance_needing_projection.contains(fact)
+                )
+            });
+        if provenance_was_projected || derivation_uses_projected_provenance {
+            let (
+                RelationPredicate::Calls,
+                RelationEndpoint::Occurrence(occurrence),
+                RelationEndpoint::Entity(target),
+            ) = (relation.predicate, relation.subject, relation.object)
+            else {
+                continue;
+            };
+            let Some((resolved_target, occurrence_source)) =
+                exact_consumer_occurrences.get(&occurrence)
+            else {
+                continue;
+            };
+            if target != *resolved_target
+                || relation.evidence.source.as_ref() != Some(*occurrence_source)
+            {
+                continue;
+            }
+        }
+        if provenance_was_projected {
+            let Some(provenance) = projected_provenance.get(&relation.provenance).copied() else {
+                continue;
+            };
+            relation.provenance = provenance;
+            changed = true;
+        }
+        let mut unresolved_projection = false;
+        for reference in &mut relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+            let FactRef::Fact(fact) = reference else {
+                continue;
+            };
+            if provenance_needing_projection.contains(fact) {
+                let Some(primary) = projected_provenance.get(fact) else {
+                    unresolved_projection = true;
+                    break;
+                };
+                *fact = *primary;
+                changed = true;
+            }
+        }
+        if unresolved_projection {
+            continue;
+        }
+        if changed {
+            relation.id =
+                derive_relation_record_id(&relation).map_err(|_| FirstSliceError::Adapter)?;
+        }
+        remapped.push(relation);
+    }
+    document.relations = remapped;
+    Ok(())
+}
+
+fn project_provenance_to_primary(
+    projected: &ProvenanceRecord,
+    prefixes: &BTreeMap<FileId, FirstSliceSupplementalPrefix>,
+    cancellation: &Cancellation,
+) -> Result<Option<ProvenanceRecord>, FirstSliceError> {
+    let Some(input_sources) =
+        project_provenance_sources(&projected.input_sources, prefixes, cancellation)?
+    else {
+        return Ok(None);
+    };
+    let Some(evidence_sources) =
+        project_provenance_sources(&projected.evidence_sources, prefixes, cancellation)?
+    else {
+        return Ok(None);
+    };
+    check_cancellation(cancellation)?;
+    let mut primary = projected.clone();
+    primary.id = FactId::from_bytes([0; 20]);
+    primary.input_sources = input_sources;
+    primary.evidence_sources = evidence_sources;
+    primary.id = derive_provenance_record_id(&primary).map_err(|_| FirstSliceError::Adapter)?;
+    Ok(Some(primary))
+}
+
+fn project_provenance_sources(
+    sources: &[SourceRef],
+    prefixes: &BTreeMap<FileId, FirstSliceSupplementalPrefix>,
+    cancellation: &Cancellation,
+) -> Result<Option<Vec<SourceRef>>, FirstSliceError> {
+    let mut primary = Vec::new();
+    primary
+        .try_reserve_exact(sources.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for source in sources {
+        check_cancellation(cancellation)?;
+        let Some(prefix) = prefixes.get(&source.span().file()) else {
+            primary.push(source.clone());
+            continue;
+        };
+        let exact_primary = source.span().start_byte() == 0
+            && source.span().end_byte() == prefix.primary_bytes
+            && source.content_hash() == prefix.primary_content_hash;
+        if exact_primary {
+            primary.push(source.clone());
+            continue;
+        }
+        let exact_projection = source.span().start_byte() == 0
+            && source.span().end_byte() == prefix.projected_bytes
+            && source.content_hash() == prefix.projected_content_hash;
+        if !exact_projection {
+            return Ok(None);
+        }
+        let span = SourceSpan::new(source.span().file(), 0, prefix.primary_bytes)
+            .map_err(|_| FirstSliceError::Identity)?;
+        primary.push(SourceRef::new(
+            source.repository(),
+            source.generation(),
+            span,
+            prefix.primary_content_hash,
+            source.line_hint(),
+        ));
+    }
+    Ok(Some(primary))
+}
+
+fn source_projects_to_primary(
+    source: &SourceRef,
+    prefixes: &BTreeMap<FileId, FirstSliceSupplementalPrefix>,
+) -> Option<ContentHash> {
+    let prefix = prefixes.get(&source.span().file())?;
+    (source.content_hash() == prefix.projected_content_hash
+        && source.span().end_byte() <= prefix.retained_prefix_bytes)
+        .then_some(prefix.primary_content_hash)
+}
+
+fn remap_supplemental_occurrence_endpoints(
+    merged: &NormalizedIrDocument,
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let mut call_targets = BTreeMap::new();
+    let mut ambiguous_calls = BTreeSet::new();
+    for relation in &document.relations {
+        check_cancellation(cancellation)?;
+        let (
+            RelationPredicate::Calls,
+            RelationEndpoint::Occurrence(occurrence),
+            RelationEndpoint::Entity(target),
+        ) = (relation.predicate, relation.subject, relation.object)
+        else {
+            continue;
+        };
+        if call_targets
+            .insert(occurrence, target)
+            .is_some_and(|previous| previous != target)
+        {
+            ambiguous_calls.insert(occurrence);
+        }
+    }
+    for occurrence in &ambiguous_calls {
+        check_cancellation(cancellation)?;
+        call_targets.remove(occurrence);
+    }
+
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(call_targets.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for occurrence in document
+        .occurrences
+        .iter()
+        .filter(|occurrence| call_targets.contains_key(&occurrence.id))
+    {
+        check_cancellation(cancellation)?;
+        let Some(enclosing) = occurrence.enclosing else {
+            continue;
+        };
+        let rootlight_ir::OccurrenceTarget::Resolved { symbol } = &occurrence.target else {
+            continue;
+        };
+        if occurrence.role != OccurrenceRole::CallSite
+            || call_targets.get(&occurrence.id) != Some(symbol)
+            || occurrence.repository != merged.repository
+            || occurrence.generation != merged.generation
+            || occurrence.file != occurrence.source.span().file()
+        {
+            continue;
+        }
+        candidates.push((occurrence, enclosing, *symbol));
+    }
+    let required_files: BTreeSet<_> =
+        collect_supplemental_cancellable(&candidates, cancellation, |(occurrence, _, _)| {
+            Some(occurrence.file)
+        })?;
+    let mut required_entities = BTreeSet::new();
+    for (_, enclosing, target) in &candidates {
+        check_cancellation(cancellation)?;
+        required_entities.insert(*enclosing);
+        required_entities.insert(*target);
+    }
+    let retained_files: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&merged.files, cancellation, |file| {
+            required_files
+                .contains(&file.id)
+                .then_some((file.id, (file.content_hash, file.byte_length)))
+        })?;
+    let retained_entities: BTreeSet<_> =
+        collect_supplemental_cancellable(&merged.entities, cancellation, |entity| {
+            required_entities.contains(&entity.id).then_some(entity.id)
+        })?;
+    let occurrences: BTreeMap<_, _> = collect_supplemental_cancellable(
+        candidates,
+        cancellation,
+        |(occurrence, enclosing, target)| {
+            if !retained_entities.contains(&enclosing) || !retained_entities.contains(&target) {
+                return None;
+            }
+            let (primary_hash, primary_bytes) = retained_files.get(&occurrence.file)?;
+            let source = &occurrence.source;
+            let exact_primary = source.repository() == merged.repository
+                && source.generation() == merged.generation
+                && source.content_hash() == *primary_hash
+                && source.span().end_byte() <= *primary_bytes;
+            exact_primary.then_some((occurrence.id, (enclosing, target, source.clone())))
+        },
+    )?;
+
+    let mut remapped = Vec::new();
+    remapped
+        .try_reserve_exact(document.relations.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for mut relation in std::mem::take(&mut document.relations) {
+        check_cancellation(cancellation)?;
+        let endpoint_occurrence = match (relation.subject, relation.object) {
+            (RelationEndpoint::Occurrence(occurrence), RelationEndpoint::Entity(target))
+                if relation.predicate == RelationPredicate::Calls =>
+            {
+                Some((occurrence, target))
+            }
+            (RelationEndpoint::Occurrence(_), _) | (_, RelationEndpoint::Occurrence(_)) => continue,
+            _ => None,
+        };
+        let Some((occurrence, target)) = endpoint_occurrence else {
+            remapped.push(relation);
+            continue;
+        };
+        let Some((enclosing, resolved_target, occurrence_source)) = occurrences.get(&occurrence)
+        else {
+            continue;
+        };
+        if target != *resolved_target
+            || relation.evidence.source.as_ref() != Some(occurrence_source)
+        {
+            continue;
+        }
+        relation.subject = RelationEndpoint::Entity(*enclosing);
+        for reference in &mut relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+            if *reference == FactRef::Fact(occurrence) {
+                *reference = FactRef::Entity(*enclosing);
+            }
+        }
+        relation.id = derive_relation_record_id(&relation).map_err(|_| FirstSliceError::Adapter)?;
+        remapped.push(relation);
+    }
+    document.relations = remapped;
+    Ok(())
+}
+
 fn supplemental_project_relations(
     merged: &NormalizedIrDocument,
-    document: NormalizedIrDocument,
+    mut document: NormalizedIrDocument,
+    prefixes: &[FirstSliceSupplementalPrefix],
+    cancellation: &Cancellation,
 ) -> Result<Vec<RelationRecord>, FirstSliceError> {
+    check_cancellation(cancellation)?;
     if document.version != merged.version
         || document.repository != merged.repository
         || document.generation != merged.generation
     {
         return Err(FirstSliceError::Identity);
     }
+    remap_supplemental_prefix_relations(merged, &mut document, prefixes, cancellation)?;
+    remap_supplemental_occurrence_endpoints(merged, &mut document, cancellation)?;
 
     let mut candidate_ids = BTreeSet::new();
-    let mut relations = document.relations;
-    relations.retain(|relation| {
-        relation.repository == merged.repository
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(document.relations.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for relation in document.relations {
+        check_cancellation(cancellation)?;
+        if relation.repository == merged.repository
             && relation.generation == merged.generation
             && (relation.evidence.source.is_some() || !relation.evidence.derivation.is_empty())
             && candidate_ids.insert(relation.id)
-    });
+        {
+            relations.push(relation);
+        }
+    }
     if relations.is_empty() {
         return Ok(relations);
     }
@@ -14662,7 +15342,9 @@ fn supplemental_project_relations(
     let mut required_facts = BTreeSet::new();
     let mut required_provenance = BTreeSet::new();
     for relation in &relations {
+        check_cancellation(cancellation)?;
         for endpoint in [relation.subject, relation.object] {
+            check_cancellation(cancellation)?;
             match endpoint {
                 RelationEndpoint::Repository(_) => {}
                 RelationEndpoint::File(file) => {
@@ -14680,6 +15362,7 @@ fn supplemental_project_relations(
             required_files.insert(source.span().file());
         }
         for reference in &relation.evidence.derivation {
+            check_cancellation(cancellation)?;
             match reference {
                 FactRef::File(file) => {
                     required_files.insert(*file);
@@ -14695,35 +15378,28 @@ fn supplemental_project_relations(
         required_provenance.insert(relation.provenance);
     }
 
-    let retained_files = merged
-        .files
-        .iter()
-        .filter(|file| required_files.contains(&file.id))
-        .map(|file| (file.id, (file.content_hash, file.byte_length)))
-        .collect::<BTreeMap<_, _>>();
-    let retained_entities = merged
-        .entities
-        .iter()
-        .filter_map(|entity| required_entities.contains(&entity.id).then_some(entity.id))
-        .collect::<BTreeSet<_>>();
-    let retained_occurrences = merged
-        .occurrences
-        .iter()
-        .filter_map(|occurrence| {
+    let retained_files: BTreeMap<_, _> =
+        collect_supplemental_cancellable(&merged.files, cancellation, |file| {
+            required_files
+                .contains(&file.id)
+                .then_some((file.id, (file.content_hash, file.byte_length)))
+        })?;
+    let retained_entities: BTreeSet<_> =
+        collect_supplemental_cancellable(&merged.entities, cancellation, |entity| {
+            required_entities.contains(&entity.id).then_some(entity.id)
+        })?;
+    let retained_occurrences: BTreeSet<_> =
+        collect_supplemental_cancellable(&merged.occurrences, cancellation, |occurrence| {
             required_occurrences
                 .contains(&occurrence.id)
                 .then_some(occurrence.id)
-        })
-        .collect::<BTreeSet<_>>();
-    let retained_provenance = merged
-        .provenance
-        .iter()
-        .filter_map(|record| {
+        })?;
+    let retained_provenance: BTreeSet<_> =
+        collect_supplemental_cancellable(&merged.provenance, cancellation, |record| {
             required_provenance
                 .contains(&record.id)
                 .then_some(record.id)
-        })
-        .collect::<BTreeSet<_>>();
+        })?;
     let merged_fact_ids = merged
         .occurrences
         .iter()
@@ -14738,6 +15414,7 @@ fn supplemental_project_relations(
     let mut retained_facts = BTreeSet::new();
     let mut colliding_relation_ids = BTreeSet::new();
     for fact in merged_fact_ids {
+        check_cancellation(cancellation)?;
         if required_facts.contains(&fact) {
             retained_facts.insert(fact);
         }
@@ -14746,8 +15423,16 @@ fn supplemental_project_relations(
         }
     }
 
-    relations.retain(|relation| {
-        !colliding_relation_ids.contains(&relation.id)
+    let mut retained_relations = Vec::new();
+    retained_relations
+        .try_reserve_exact(relations.len())
+        .map_err(|_| FirstSliceError::Adapter)?;
+    for relation in relations {
+        check_cancellation(cancellation)?;
+        for _ in &relation.evidence.derivation {
+            check_cancellation(cancellation)?;
+        }
+        if !colliding_relation_ids.contains(&relation.id)
             && retained_provenance.contains(&relation.provenance)
             && supplemental_relation_endpoint_resolves(
                 relation.subject,
@@ -14782,8 +15467,11 @@ fn supplemental_project_relations(
                     FactRef::Entity(entity) => retained_entities.contains(entity),
                     FactRef::Fact(fact) => retained_facts.contains(fact),
                 })
-    });
-    Ok(relations)
+        {
+            retained_relations.push(relation);
+        }
+    }
+    Ok(retained_relations)
 }
 
 fn supplemental_relation_endpoint_resolves(
@@ -18516,6 +19204,24 @@ mod tests {
             &inputs,
         ));
 
+        let mut cancelled_analysis =
+            FirstSliceProjectAnalysis::new(declaration_document.clone(), true);
+        cancelled_analysis
+            .append_partition(test_document.clone(), true)
+            .expect("primary partition merges");
+        let cancelled = deadline();
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            cancelled_analysis.append_supplemental_relations_with_cancellation(
+                bridge.clone(),
+                true,
+                &cancelled
+            ),
+            Err(FirstSliceProjectAnalysisError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        ));
+
         let mut analysis = FirstSliceProjectAnalysis::new(declaration_document, true);
         analysis
             .append_partition(test_document, true)
@@ -18549,6 +19255,700 @@ mod tests {
             &ExtensionSupport::default(),
         )
         .expect("supplemental relation merge remains valid normalized IR");
+    }
+
+    #[test]
+    fn supplemental_prefix_rejects_projected_consumer_call() {
+        fn document(
+            repository: RepositoryId,
+            generation: GenerationId,
+            file: FileId,
+            path: &str,
+            source_bytes: &[u8],
+            symbol: SymbolId,
+            symbol_name: &str,
+        ) -> (NormalizedIrDocument, SourceRef, FactId) {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(
+                    file,
+                    0,
+                    u64::try_from(source_bytes.len()).expect("fixture source length fits"),
+                )
+                .expect("fixture source span is valid"),
+                content_hash(source_bytes),
+                None,
+            );
+            let producer = ProducerIdentity::new(
+                "rootlight-prefix-test",
+                "1.0",
+                content_hash(b"supplemental-prefix-producer"),
+            )
+            .expect("fixture producer is valid");
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                producer_kind: ProducerKind::Derivation,
+                producer,
+                binary_digest: content_hash(b"supplemental-prefix-binary"),
+                frontend_version: Some("prefix-test-1".to_owned()),
+                language: "javascript".to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context: BuildContextIdentity::new(content_hash(
+                    b"supplemental-prefix-context",
+                )),
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .expect("fixture provenance identity derives");
+            let file_record = FileRecord {
+                id: file,
+                repository,
+                generation,
+                path: path.to_owned(),
+                path_locator: None,
+                content_hash: source.content_hash(),
+                byte_length: u64::try_from(source_bytes.len()).expect("fixture source length fits"),
+                language: "javascript".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: false,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let entity = EntityRecord {
+                id: symbol,
+                repository,
+                generation,
+                kind: EntityKind::Function,
+                language: "javascript".to_owned(),
+                tier: AnalysisTier::TierB,
+                canonical_name: symbol_name.to_owned(),
+                display_name: symbol_name.to_owned(),
+                qualified_name: symbol_name.to_owned(),
+                container: Some(ContainerRef::File(file)),
+                visibility: EntityVisibility::Unknown,
+                flags: Vec::new(),
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let provenance_id = provenance.id;
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            document.files.push(file_record);
+            document.entities.push(entity);
+            document.provenance.push(provenance);
+            (document, source, provenance_id)
+        }
+
+        let repository = derive_repository(b"supplemental-prefix-repository").id();
+        let generation = GenerationId::from_bytes([61; 20]);
+        let provider_file = FileId::from_bytes([62; 20]);
+        let consumer_file = FileId::from_bytes([63; 20]);
+        let target_symbol = SymbolId::from_bytes([64; 20]);
+        let caller_symbol = SymbolId::from_bytes([65; 20]);
+        let provider_source = b"export function target() {}\n";
+        let consumer_prefix = b"export function caller() { return target(); }\n";
+        let consumer_source =
+            b"export function caller() { return target(); }\nconst retained = true;\n";
+        let mut projected_consumer_source = consumer_prefix.to_vec();
+        projected_consumer_source.extend_from_slice(b"}\n");
+        let (provider_document, _, _) = document(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            provider_source,
+            target_symbol,
+            "target",
+        );
+        let (consumer_document, _, _) = document(
+            repository,
+            generation,
+            consumer_file,
+            "src/consumer.js",
+            consumer_source,
+            caller_symbol,
+            "caller",
+        );
+        let (projected_consumer, _, projected_provenance) = document(
+            repository,
+            generation,
+            consumer_file,
+            "src/consumer.js",
+            &projected_consumer_source,
+            caller_symbol,
+            "caller",
+        );
+        let call_start = consumer_prefix
+            .windows(b"target".len())
+            .position(|window| window == b"target")
+            .expect("fixture call is present");
+        let call_span = SourceSpan::new(
+            consumer_file,
+            u64::try_from(call_start).expect("fixture offset fits"),
+            u64::try_from(call_start + "target".len()).expect("fixture offset fits"),
+        )
+        .expect("fixture call span is valid");
+        let call_source = SourceRef::new(
+            repository,
+            generation,
+            call_span,
+            content_hash(&projected_consumer_source),
+            None,
+        );
+        let mut occurrence = OccurrenceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            file: consumer_file,
+            source: call_source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: Some(caller_symbol),
+            target: OccurrenceTarget::Resolved {
+                symbol: target_symbol,
+            },
+            syntactic_text_hash: content_hash(b"target"),
+            syntax_kind: "call_expression".to_owned(),
+            provenance: projected_provenance,
+            confidence: rootlight_ir::Confidence::new(1000).expect("fixture confidence is valid"),
+            evidence: FactEvidence {
+                source: Some(call_source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        occurrence.id = rootlight_ir::derive_occurrence_record_id(&occurrence)
+            .expect("fixture occurrence identity derives");
+        let mut relation = RelationRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            subject: RelationEndpoint::Occurrence(occurrence.id),
+            predicate: RelationPredicate::Calls,
+            object: RelationEndpoint::Entity(target_symbol),
+            confidence: occurrence.confidence,
+            evidence_kind: rootlight_ir::EvidenceKind::Derived,
+            provenance: projected_provenance,
+            evidence: FactEvidence {
+                source: Some(call_source),
+                derivation: Vec::new(),
+            },
+        };
+        relation.id =
+            derive_relation_record_id(&relation).expect("fixture relation identity derives");
+        let mut bridge = provider_document.clone();
+        bridge.files.extend(projected_consumer.files);
+        bridge.entities.extend(projected_consumer.entities);
+        bridge.provenance.extend(projected_consumer.provenance);
+        bridge.occurrences.push(occurrence);
+        bridge.relations.push(relation);
+        let prefix = FirstSliceSupplementalPrefix::new(
+            consumer_file,
+            content_hash(consumer_source),
+            consumer_source,
+            &projected_consumer_source,
+            consumer_prefix.len(),
+        )
+        .expect("closed prefix proof is valid");
+
+        let mut analysis = FirstSliceProjectAnalysis::new(provider_document, true);
+        analysis
+            .append_partition(consumer_document, true)
+            .expect("primary consumer partition merges");
+        analysis
+            .append_supplemental_prefix_relations(bridge, true, &[prefix])
+            .expect("unsafe projected relation is ignored");
+        let (documents, ..) = analysis.into_parts();
+        let [merged] = documents.as_slice() else {
+            panic!("one merged document is expected");
+        };
+        assert!(merged.relations.is_empty());
+        rootlight_ir::validate_ir_document(
+            merged,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("rejecting projected evidence preserves valid normalized IR");
+    }
+
+    fn supplemental_ecmascript_partition(
+        repository: RepositoryId,
+        generation: GenerationId,
+        file: FileId,
+        path: &str,
+        source_bytes: &[u8],
+        symbol: SymbolId,
+        symbol_name: &str,
+    ) -> (NormalizedIrDocument, SourceRef, FactId) {
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(
+                file,
+                0,
+                u64::try_from(source_bytes.len()).expect("fixture source length fits"),
+            )
+            .expect("fixture source span is valid"),
+            content_hash(source_bytes),
+            None,
+        );
+        let producer = ProducerIdentity::new(
+            "rootlight-supplemental-call-test",
+            "1.0",
+            content_hash(b"supplemental-call-producer"),
+        )
+        .expect("fixture producer is valid");
+        let mut provenance = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Derivation,
+            producer,
+            binary_digest: content_hash(b"supplemental-call-binary"),
+            frontend_version: Some("supplemental-call-1".to_owned()),
+            language: "javascript".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(b"supplemental-call-context")),
+            input_sources: vec![source.clone()],
+            evidence_sources: vec![source.clone()],
+            derivation_parents: Vec::new(),
+            rule: None,
+        };
+        provenance.id =
+            derive_provenance_record_id(&provenance).expect("fixture provenance identity derives");
+        let file_record = FileRecord {
+            id: file,
+            repository,
+            generation,
+            path: path.to_owned(),
+            path_locator: None,
+            content_hash: source.content_hash(),
+            byte_length: u64::try_from(source_bytes.len()).expect("fixture source length fits"),
+            language: "javascript".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        let entity = EntityRecord {
+            id: symbol,
+            repository,
+            generation,
+            kind: EntityKind::Function,
+            language: "javascript".to_owned(),
+            tier: AnalysisTier::TierB,
+            canonical_name: symbol_name.to_owned(),
+            display_name: symbol_name.to_owned(),
+            qualified_name: symbol_name.to_owned(),
+            container: Some(ContainerRef::File(file)),
+            visibility: EntityVisibility::Unknown,
+            flags: Vec::new(),
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        let provenance_id = provenance.id;
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.files.push(file_record);
+        document.entities.push(entity);
+        document.provenance.push(provenance);
+        (document, source, provenance_id)
+    }
+
+    fn supplemental_combined_provenance(
+        template: &ProvenanceRecord,
+        sources: Vec<SourceRef>,
+        rule: Option<&str>,
+    ) -> ProvenanceRecord {
+        let mut provenance = template.clone();
+        provenance.id = FactId::from_bytes([0; 20]);
+        provenance.input_sources = sources.clone();
+        provenance.evidence_sources = sources;
+        provenance.rule = rule.map(str::to_owned);
+        provenance.id =
+            derive_provenance_record_id(&provenance).expect("fixture provenance identity derives");
+        provenance
+    }
+
+    fn append_supplemental_call_fixture(
+        document: &mut NormalizedIrDocument,
+        source: SourceRef,
+        provenance: FactId,
+        caller: SymbolId,
+        target: SymbolId,
+    ) {
+        let mut occurrence = OccurrenceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            file: source.span().file(),
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: Some(caller),
+            target: OccurrenceTarget::Resolved { symbol: target },
+            syntactic_text_hash: content_hash(b"target"),
+            syntax_kind: "call_expression".to_owned(),
+            provenance,
+            confidence: rootlight_ir::Confidence::new(1000).expect("fixture confidence is valid"),
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        occurrence.id = rootlight_ir::derive_occurrence_record_id(&occurrence)
+            .expect("fixture occurrence identity derives");
+        let mut relation = RelationRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            subject: RelationEndpoint::Occurrence(occurrence.id),
+            predicate: RelationPredicate::Calls,
+            object: RelationEndpoint::Entity(target),
+            confidence: occurrence.confidence,
+            evidence_kind: rootlight_ir::EvidenceKind::Derived,
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        relation.id =
+            derive_relation_record_id(&relation).expect("fixture relation identity derives");
+        document.occurrences.push(occurrence);
+        document.relations.push(relation);
+    }
+
+    fn assert_supplemental_call_owner(
+        analysis: FirstSliceProjectAnalysis,
+        caller: SymbolId,
+        target: SymbolId,
+    ) {
+        let (documents, ..) = analysis.into_parts();
+        let [merged] = documents.as_slice() else {
+            panic!("one merged document is expected");
+        };
+        let [relation] = merged.relations.as_slice() else {
+            panic!("one supplemental call relation is expected");
+        };
+        assert_eq!(relation.subject, RelationEndpoint::Entity(caller));
+        assert_eq!(relation.object, RelationEndpoint::Entity(target));
+        rootlight_ir::validate_ir_document(
+            merged,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("supplemental call merge remains valid normalized IR");
+    }
+
+    #[test]
+    fn supplemental_full_call_remaps_occurrence_to_primary_enclosing_entity() {
+        let repository = derive_repository(b"supplemental-full-call-repository").id();
+        let generation = GenerationId::from_bytes([70; 20]);
+        let provider_file = FileId::from_bytes([71; 20]);
+        let consumer_file = FileId::from_bytes([72; 20]);
+        let target = SymbolId::from_bytes([73; 20]);
+        let caller = SymbolId::from_bytes([74; 20]);
+        let provider_source = b"export function target() {}\n";
+        let consumer_source = b"export function caller() { return target(); }\n";
+        let (provider, _, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            provider_source,
+            target,
+            "target",
+        );
+        let (consumer, consumer_ref, consumer_provenance) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            consumer_file,
+            "src/consumer.js",
+            consumer_source,
+            caller,
+            "caller",
+        );
+        let mut bridge = provider.clone();
+        bridge.files.extend(consumer.files.clone());
+        bridge.entities.extend(consumer.entities.clone());
+        bridge.provenance.extend(consumer.provenance.clone());
+        append_supplemental_call_fixture(
+            &mut bridge,
+            consumer_ref,
+            consumer_provenance,
+            caller,
+            target,
+        );
+
+        let mut analysis = FirstSliceProjectAnalysis::new(provider, true);
+        analysis
+            .append_partition(consumer, true)
+            .expect("primary consumer partition merges");
+        analysis
+            .append_supplemental_relations(bridge, true)
+            .expect("full supplemental call merges");
+
+        assert_supplemental_call_owner(analysis, caller, target);
+    }
+
+    #[test]
+    fn supplemental_projected_provider_call_remaps_full_consumer_occurrence() {
+        let repository = derive_repository(b"supplemental-mixed-call-repository").id();
+        let generation = GenerationId::from_bytes([75; 20]);
+        let provider_file = FileId::from_bytes([76; 20]);
+        let consumer_file = FileId::from_bytes([77; 20]);
+        let target = SymbolId::from_bytes([78; 20]);
+        let caller = SymbolId::from_bytes([79; 20]);
+        let provider_prefix = b"export function target() {}\n";
+        let provider_source = b"export function target() {}\nconst retained = true;\n";
+        let mut projected_provider_source = provider_prefix.to_vec();
+        projected_provider_source.push(b'\n');
+        let consumer_source = b"export function caller() { return target(); }\n";
+        let (provider, _, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            provider_source,
+            target,
+            "target",
+        );
+        let (projected_provider, _, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            &projected_provider_source,
+            target,
+            "target",
+        );
+        let (consumer, consumer_ref, consumer_provenance) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            consumer_file,
+            "src/consumer.js",
+            consumer_source,
+            caller,
+            "caller",
+        );
+        let mut bridge = projected_provider;
+        bridge.files.extend(consumer.files.clone());
+        bridge.entities.extend(consumer.entities.clone());
+        bridge.provenance.extend(consumer.provenance.clone());
+        append_supplemental_call_fixture(
+            &mut bridge,
+            consumer_ref,
+            consumer_provenance,
+            caller,
+            target,
+        );
+        let prefix = FirstSliceSupplementalPrefix::new(
+            provider_file,
+            content_hash(provider_source),
+            provider_source,
+            &projected_provider_source,
+            provider_prefix.len(),
+        )
+        .expect("provider prefix proof is valid");
+
+        let mut analysis = FirstSliceProjectAnalysis::new(provider, true);
+        analysis
+            .append_partition(consumer, true)
+            .expect("primary consumer partition merges");
+        analysis
+            .append_supplemental_prefix_relations(bridge, true, &[prefix])
+            .expect("mixed supplemental call merges");
+
+        assert_supplemental_call_owner(analysis, caller, target);
+    }
+
+    #[test]
+    fn supplemental_mixed_provenance_maps_only_relation_required_projection() {
+        let repository = derive_repository(b"supplemental-mixed-provenance-repository").id();
+        let generation = GenerationId::from_bytes([80; 20]);
+        let provider_file = FileId::from_bytes([81; 20]);
+        let consumer_file = FileId::from_bytes([82; 20]);
+        let target = SymbolId::from_bytes([83; 20]);
+        let caller = SymbolId::from_bytes([84; 20]);
+        let provider_prefix = b"export function target() {}\n";
+        let provider_source = b"export function target() {}\nconst retained = true;\n";
+        let mut projected_provider_source = provider_prefix.to_vec();
+        projected_provider_source.push(b'\n');
+        let consumer_source = b"export function caller() { return target(); }\n";
+        let (provider, provider_ref, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            provider_source,
+            target,
+            "target",
+        );
+        let (projected_provider, projected_provider_ref, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            provider_file,
+            "src/provider.js",
+            &projected_provider_source,
+            target,
+            "target",
+        );
+        let (mut consumer, consumer_ref, _) = supplemental_ecmascript_partition(
+            repository,
+            generation,
+            consumer_file,
+            "src/consumer.js",
+            consumer_source,
+            caller,
+            "caller",
+        );
+        let consumer_base_provenance = consumer.provenance.clone();
+        let primary_combined = supplemental_combined_provenance(
+            &consumer.provenance[0],
+            vec![provider_ref.clone(), consumer_ref.clone()],
+            Some("ecmascript-import"),
+        );
+        consumer.provenance.push(primary_combined.clone());
+
+        let projected_combined = supplemental_combined_provenance(
+            &consumer.provenance[0],
+            vec![projected_provider_ref.clone(), consumer_ref.clone()],
+            Some("ecmascript-import"),
+        );
+        let unused_projection = supplemental_combined_provenance(
+            &consumer.provenance[0],
+            vec![projected_provider_ref],
+            Some("unused-projection"),
+        );
+        let mut bridge = projected_provider;
+        bridge.files.extend(consumer.files.clone());
+        bridge.entities.extend(consumer.entities.clone());
+        bridge.provenance.extend(consumer_base_provenance);
+        bridge.provenance.push(projected_combined.clone());
+        // An unrelated projected record cannot invalidate a relation whose own
+        // provenance closure maps exactly to retained primary evidence.
+        bridge.provenance.push(unused_projection);
+        append_supplemental_call_fixture(
+            &mut bridge,
+            consumer_ref,
+            projected_combined.id,
+            caller,
+            target,
+        );
+        let mut mismatched_call_source = bridge.relations[0].clone();
+        mismatched_call_source.id = FactId::from_bytes([0; 20]);
+        mismatched_call_source.evidence.source = Some(provider_ref);
+        mismatched_call_source.id = derive_relation_record_id(&mismatched_call_source)
+            .expect("mismatched relation identity derives");
+        bridge.relations.push(mismatched_call_source);
+        let mut source_free_entity_relation = bridge.relations[0].clone();
+        source_free_entity_relation.id = FactId::from_bytes([0; 20]);
+        source_free_entity_relation.subject = RelationEndpoint::Entity(caller);
+        source_free_entity_relation.evidence.source = None;
+        source_free_entity_relation.evidence.derivation = vec![FactRef::Entity(caller)];
+        source_free_entity_relation.id = derive_relation_record_id(&source_free_entity_relation)
+            .expect("source-free relation identity derives");
+        bridge.relations.push(source_free_entity_relation);
+        let prefix = FirstSliceSupplementalPrefix::new(
+            provider_file,
+            content_hash(provider_source),
+            provider_source,
+            &projected_provider_source,
+            provider_prefix.len(),
+        )
+        .expect("provider prefix proof is valid");
+
+        let mut analysis = FirstSliceProjectAnalysis::new(provider, true);
+        analysis
+            .append_partition(consumer, true)
+            .expect("primary consumer partition merges");
+        analysis
+            .append_supplemental_prefix_relations(bridge, true, &[prefix])
+            .expect("required mixed provenance maps");
+
+        let (documents, ..) = analysis.into_parts();
+        let [merged] = documents.as_slice() else {
+            panic!("one merged document is expected");
+        };
+        let [relation] = merged.relations.as_slice() else {
+            panic!("one supplemental call relation is expected");
+        };
+        assert_eq!(relation.subject, RelationEndpoint::Entity(caller));
+        assert_eq!(relation.object, RelationEndpoint::Entity(target));
+        assert_eq!(relation.provenance, primary_combined.id);
+        rootlight_ir::validate_ir_document(
+            merged,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("mixed provenance relation remains valid normalized IR");
+    }
+
+    #[test]
+    fn supplemental_prefix_rejects_synthetic_suffix_evidence() {
+        let repository = derive_repository(b"supplemental-prefix-boundary-repository").id();
+        let generation = GenerationId::from_bytes([66; 20]);
+        let file = FileId::from_bytes([67; 20]);
+        let primary_source = b"function caller() {\n  target();\n}\nconst retained = true;\n";
+        let retained_prefix = b"function caller() {\n  target();\n";
+        let mut projected_source = retained_prefix.to_vec();
+        projected_source.extend_from_slice(b"}\n");
+        let primary_hash = content_hash(primary_source);
+        let prefix = FirstSliceSupplementalPrefix::new(
+            file,
+            primary_hash,
+            primary_source,
+            &projected_source,
+            retained_prefix.len(),
+        )
+        .expect("closed prefix proof is valid");
+        let prefixes = BTreeMap::from([(file, prefix)]);
+        let retained_span = SourceSpan::new(
+            file,
+            0,
+            u64::try_from(retained_prefix.len()).expect("fixture length fits"),
+        )
+        .expect("retained span is valid");
+        let suffix_span = SourceSpan::new(
+            file,
+            u64::try_from(retained_prefix.len()).expect("fixture length fits"),
+            u64::try_from(projected_source.len()).expect("fixture length fits"),
+        )
+        .expect("suffix span is valid");
+        let retained_source = SourceRef::new(
+            repository,
+            generation,
+            retained_span,
+            content_hash(&projected_source),
+            None,
+        );
+        let suffix_source = SourceRef::new(
+            repository,
+            generation,
+            suffix_span,
+            content_hash(&projected_source),
+            None,
+        );
+
+        assert_eq!(
+            source_projects_to_primary(&retained_source, &prefixes),
+            Some(primary_hash)
+        );
+        assert_eq!(source_projects_to_primary(&suffix_source, &prefixes), None);
     }
 
     #[test]
@@ -21036,6 +22436,9 @@ mod tests {
             recovery_manifest["serialized_document_bytes"].as_u64(),
             Some(semantic_serialized_document_bytes)
         );
+        let logical_sidecar_path = semantic_directory.join("logical-snapshot.json");
+        let logical_sidecar =
+            fs::read(&logical_sidecar_path).expect("logical snapshot sidecar remains readable");
 
         let restored = FirstSliceService::new_durable_with_project_analyzer(
             3,
@@ -21084,6 +22487,48 @@ mod tests {
             b"pub fn two_stage_value() -> u32 { 2 }\n"
         );
         drop(restored);
+
+        let decoded_bytes = recovery_manifest["decoded_bytes"]
+            .as_u64()
+            .expect("decoded recovery size is present");
+        let underreported_bytes = semantic_serialized_document_bytes
+            .checked_sub(1)
+            .expect("semantic document is non-empty");
+        assert!(
+            decoded_bytes <= underreported_bytes,
+            "fixture must distinguish the decoded MessagePack lower bound from exact JSON size"
+        );
+        fs::remove_file(&logical_sidecar_path).expect("logical snapshot sidecar deletes");
+        recovery_manifest["serialized_document_bytes"] = serde_json::json!(underreported_bytes);
+        fs::write(
+            semantic_directory.join("recovery-manifest.json"),
+            serde_json::to_vec(&recovery_manifest)
+                .expect("underreported recovery manifest serializes"),
+        )
+        .expect("recovery manifest size underreports");
+        let recomputed = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            Arc::clone(&analyzer),
+            &cancellation,
+        )
+        .expect("missing logical charge falls back to exact document accounting");
+        assert_eq!(
+            recomputed.active_generation_for(receipt.semantic().repository),
+            Some(receipt.semantic().generation)
+        );
+        assert_eq!(
+            recomputed
+                .generation_cache
+                .lock()
+                .expect("generation cache remains available")
+                .logical_charge_bytes_by_generation
+                .get(&receipt.semantic().generation),
+            Some(&semantic_serialized_document_bytes)
+        );
+        drop(recomputed);
+        fs::write(&logical_sidecar_path, logical_sidecar)
+            .expect("logical snapshot sidecar restores");
 
         recovery_manifest["serialized_document_bytes"] =
             serde_json::json!(semantic_serialized_document_bytes + 1);

@@ -15,7 +15,7 @@ use std::{
 
 use cap_std::{ambient_authority, fs::Dir};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use rootlight_cancel::Cancellation;
+use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
@@ -41,8 +41,7 @@ use super::{
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
     LexicalProjectionBuilder, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PreparedIncrementalState,
     RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
-    map_incremental_error, map_query_error, map_search_error, map_vfs_error,
-    normalized_document_serialized_bytes, repository_path_hash,
+    map_incremental_error, map_query_error, map_search_error, map_vfs_error, repository_path_hash,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -84,6 +83,7 @@ const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
+const RECOVERY_SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
 const MAX_SOURCE_BLOB_ENTRIES: usize = 1_000_000;
 const MAX_STORAGE_INVENTORY_ENTRIES: usize = 2_000_000;
@@ -749,24 +749,58 @@ impl Default for DurableStorageAccounting {
     }
 }
 
-struct RecoverySnapshotWriter<W> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryWriteFailure {
+    Cancelled(CancellationReason),
+    Limit,
+}
+
+struct RecoverySnapshotWriter<'a, W> {
     inner: W,
     hasher: blake3::Hasher,
     bytes: u64,
+    limit: u64,
+    cancellation: &'a Cancellation,
+    failure: Option<RecoveryWriteFailure>,
 }
 
-impl<W> RecoverySnapshotWriter<W> {
-    fn new(inner: W) -> Self {
+impl<'a, W> RecoverySnapshotWriter<'a, W> {
+    fn new(inner: W, limit: u64, cancellation: &'a Cancellation) -> Self {
         Self {
             inner,
             hasher: blake3::Hasher::new(),
             bytes: 0,
+            limit,
+            cancellation,
+            failure: None,
         }
+    }
+
+    fn checkpoint(&mut self) -> std::io::Result<()> {
+        self.cancellation.check().map_err(|cancelled| {
+            self.failure = Some(RecoveryWriteFailure::Cancelled(cancelled.reason()));
+            std::io::Error::other("recovery serialization cancelled")
+        })
+    }
+
+    fn fail_limit<T>(&mut self) -> std::io::Result<T> {
+        self.failure = Some(RecoveryWriteFailure::Limit);
+        Err(std::io::Error::other(
+            "recovery serialization limit exceeded",
+        ))
     }
 }
 
-fn buffered_recovery_writer<W: std::io::Write>(inner: W) -> RecoverySnapshotWriter<BufWriter<W>> {
-    RecoverySnapshotWriter::new(BufWriter::with_capacity(RECOVERY_WRITE_BUFFER_BYTES, inner))
+fn buffered_recovery_writer<W: std::io::Write>(
+    inner: W,
+    limit: u64,
+    cancellation: &Cancellation,
+) -> RecoverySnapshotWriter<'_, BufWriter<W>> {
+    RecoverySnapshotWriter::new(
+        BufWriter::with_capacity(RECOVERY_WRITE_BUFFER_BYTES, inner),
+        limit,
+        cancellation,
+    )
 }
 
 fn content_hash_bytes(bytes: &[u8]) -> ContentHash {
@@ -810,9 +844,28 @@ fn decode_recovery_snapshot(
     Ok(decoded)
 }
 
-impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
+impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<'_, W> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buffer)?;
+        self.checkpoint()?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let checkpoint_bytes = buffer.len().min(RECOVERY_SERIALIZATION_CHECKPOINT_BYTES);
+        let checkpoint_bytes_u64 =
+            u64::try_from(checkpoint_bytes).map_err(|_| std::io::Error::other("size overflow"))?;
+        let next_bytes = self
+            .bytes
+            .checked_add(checkpoint_bytes_u64)
+            .ok_or_else(|| std::io::Error::other("size overflow"))?;
+        if next_bytes > self.limit {
+            return self.fail_limit();
+        }
+        let written = self.inner.write(&buffer[..checkpoint_bytes])?;
+        if written > checkpoint_bytes {
+            return Err(std::io::Error::other(
+                "recovery writer returned an invalid byte count",
+            ));
+        }
         let written_bytes =
             u64::try_from(written).map_err(|_| std::io::Error::other("size overflow"))?;
         self.bytes = self
@@ -824,8 +877,39 @@ impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.checkpoint()?;
         self.inner.flush()
     }
+}
+
+fn recovery_writer_error(
+    failures: impl IntoIterator<Item = Option<RecoveryWriteFailure>>,
+    fallback: FirstSliceError,
+    limit_error: FirstSliceError,
+) -> FirstSliceError {
+    match failures.into_iter().flatten().next() {
+        Some(RecoveryWriteFailure::Cancelled(reason)) => FirstSliceError::Cancelled(reason),
+        Some(RecoveryWriteFailure::Limit) => limit_error,
+        None => fallback,
+    }
+}
+
+fn recovery_json_serialized_bytes<T: Serialize>(
+    value: &T,
+    limit: u64,
+    cancellation: &Cancellation,
+) -> Result<u64, FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let mut writer = RecoverySnapshotWriter::new(std::io::sink(), limit, cancellation);
+    if serde_json::to_writer(&mut writer, value).is_err() {
+        return Err(recovery_writer_error(
+            [writer.failure],
+            FirstSliceError::Limits,
+            FirstSliceError::CatalogCorrupt,
+        ));
+    }
+    check_cancellation(cancellation)?;
+    Ok(writer.bytes)
 }
 
 impl DurableIncrementalState {
@@ -2552,47 +2636,84 @@ impl DurablePreparedGeneration {
         &self,
         snapshot: &GenerationSnapshot,
         expected_bytes: u64,
+        cancellation: &Cancellation,
     ) -> Result<u64, FirstSliceError> {
-        let observed_bytes = normalized_document_serialized_bytes(snapshot.document())?;
+        check_cancellation(cancellation)?;
         if snapshot.metadata().generation() != self.generation
             || expected_bytes == 0
             || expected_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
-            || observed_bytes != expected_bytes
         {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let observed_bytes =
+            recovery_json_serialized_bytes(snapshot.document(), expected_bytes, cancellation)?;
+        if observed_bytes != expected_bytes {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let staging = self.staging();
         let file = staging
             .create_file(OsStr::new(RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let encoded_writer = buffered_recovery_writer(file);
+        let encoded_writer =
+            buffered_recovery_writer(file, MAX_RECOVERY_ENCODED_BYTES, cancellation);
         let encoder = GzEncoder::new(encoded_writer, Compression::fast());
-        let mut decoded_writer = RecoverySnapshotWriter::new(encoder);
-        rmp_serde::encode::write_named(&mut decoded_writer, snapshot.document())
-            .map_err(|_| FirstSliceError::Catalog)?;
-        decoded_writer
-            .flush()
-            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut decoded_writer =
+            RecoverySnapshotWriter::new(encoder, MAX_RECOVERY_SNAPSHOT_BYTES, cancellation);
+        if rmp_serde::encode::write_named(&mut decoded_writer, snapshot.document()).is_err() {
+            return Err(recovery_writer_error(
+                [
+                    decoded_writer.failure,
+                    decoded_writer.inner.get_ref().failure,
+                ],
+                FirstSliceError::Catalog,
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
+        if decoded_writer.flush().is_err() {
+            return Err(recovery_writer_error(
+                [
+                    decoded_writer.failure,
+                    decoded_writer.inner.get_ref().failure,
+                ],
+                FirstSliceError::Catalog,
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
+        check_cancellation(cancellation)?;
         if decoded_writer.bytes == 0 || decoded_writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let decoded_bytes = decoded_writer.bytes;
+        validate_recovery_document_accounting(decoded_bytes, expected_bytes)?;
         let decoded_digest = ContentHash::from_bytes(*decoded_writer.hasher.finalize().as_bytes());
-        let mut encoded_writer = decoded_writer
-            .inner
-            .finish()
-            .map_err(|_| FirstSliceError::Catalog)?;
-        encoded_writer
-            .flush()
-            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut encoder = decoded_writer.inner;
+        if encoder.try_finish().is_err() {
+            return Err(recovery_writer_error(
+                [encoder.get_ref().failure],
+                FirstSliceError::Catalog,
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
+        check_cancellation(cancellation)?;
+        let mut encoded_writer = encoder.finish().map_err(|_| FirstSliceError::Catalog)?;
+        if encoded_writer.flush().is_err() {
+            return Err(recovery_writer_error(
+                [encoded_writer.failure],
+                FirstSliceError::Catalog,
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
+        check_cancellation(cancellation)?;
         if encoded_writer.bytes == 0 || encoded_writer.bytes > MAX_RECOVERY_ENCODED_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
+        check_cancellation(cancellation)?;
         encoded_writer
             .inner
             .get_ref()
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
+        check_cancellation(cancellation)?;
         self.account_staging_bytes(encoded_writer.bytes)?;
         let metadata = snapshot.metadata();
         let contract = metadata.contract_version();
@@ -2610,6 +2731,7 @@ impl DurablePreparedGeneration {
             configuration_hash: metadata.configuration_hash(),
             provider_set_hash: metadata.provider_set_hash(),
         };
+        check_cancellation(cancellation)?;
         let descriptor = serde_json::to_vec(&recovery).map_err(|_| FirstSliceError::Catalog)?;
         let descriptor_bytes =
             u64::try_from(descriptor.len()).map_err(|_| FirstSliceError::Limits)?;
@@ -2625,6 +2747,7 @@ impl DurablePreparedGeneration {
         descriptor_file
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
+        check_cancellation(cancellation)?;
         self.account_staging_bytes(descriptor_bytes)?;
         encoded_writer
             .bytes
@@ -2635,15 +2758,31 @@ impl DurablePreparedGeneration {
     pub(super) fn write_incremental_state(
         &self,
         state: &PreparedIncrementalState,
+        cancellation: &Cancellation,
     ) -> Result<u64, FirstSliceError> {
+        check_cancellation(cancellation)?;
         let durable = DurableIncrementalState::from_prepared(state)?;
+        check_cancellation(cancellation)?;
         let staging = self.staging();
         let file = staging
             .create_file(OsStr::new(INCREMENTAL_STATE_FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let mut writer = buffered_recovery_writer(file);
-        serde_json::to_writer(&mut writer, &durable).map_err(|_| FirstSliceError::Catalog)?;
-        writer.flush().map_err(|_| FirstSliceError::Catalog)?;
+        let mut writer = buffered_recovery_writer(file, MAX_INCREMENTAL_STATE_BYTES, cancellation);
+        if serde_json::to_writer(&mut writer, &durable).is_err() {
+            return Err(recovery_writer_error(
+                [writer.failure],
+                FirstSliceError::Catalog,
+                FirstSliceError::Limits,
+            ));
+        }
+        if writer.flush().is_err() {
+            return Err(recovery_writer_error(
+                [writer.failure],
+                FirstSliceError::Catalog,
+                FirstSliceError::Limits,
+            ));
+        }
+        check_cancellation(cancellation)?;
         if writer.bytes > MAX_INCREMENTAL_STATE_BYTES {
             return Err(FirstSliceError::Limits);
         }
@@ -2652,6 +2791,7 @@ impl DurablePreparedGeneration {
             .get_ref()
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
+        check_cancellation(cancellation)?;
         self.account_staging_bytes(writer.bytes)?;
         let descriptor = DurableSidecarDescriptor {
             bytes: writer.bytes,
@@ -4579,9 +4719,23 @@ fn reconcile_restored_serialized_document_bytes(
         (Some(recovery), Some(logical)) if recovery != logical => {
             Err(FirstSliceError::CatalogCorrupt)
         }
-        (Some(recovery), _) => Ok(Some(recovery)),
-        (None, logical) => Ok(logical),
+        (Some(recovery), Some(_)) => Ok(Some(recovery)),
+        _ => Ok(None),
     }
+}
+
+fn validate_recovery_document_accounting(
+    decoded_bytes: u64,
+    serialized_document_bytes: u64,
+) -> Result<u64, FirstSliceError> {
+    if decoded_bytes == 0
+        || decoded_bytes > MAX_RECOVERY_SNAPSHOT_BYTES
+        || serialized_document_bytes < decoded_bytes
+        || serialized_document_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(serialized_document_bytes)
 }
 
 fn restore_logical_snapshot_identity(
@@ -4735,10 +4889,12 @@ fn restore_recovery_generation(
                 let decoded_digest = recovery
                     .decoded_digest
                     .ok_or(FirstSliceError::CatalogCorrupt)?;
-                let serialized_document_bytes = recovery
-                    .serialized_document_bytes
-                    .filter(|bytes| *bytes > 0 && *bytes <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES)
-                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                let serialized_document_bytes = validate_recovery_document_accounting(
+                    decoded_bytes,
+                    recovery
+                        .serialized_document_bytes
+                        .ok_or(FirstSliceError::CatalogCorrupt)?,
+                )?;
                 (
                     RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME,
                     decoded_bytes,
@@ -4810,11 +4966,9 @@ fn restore_recovery_generation(
         }
     };
     let restored = restored.map_err(|error| map_persisted_identity_error(error, cancellation))?;
-    if matches!(format, RecoverySnapshotFormat::MessagePackGzip)
-        && normalized_document_serialized_bytes(restored.document())? != serialized_document_bytes
-    {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
+    // The caller may reuse this charge only after the independently persisted
+    // logical descriptor confirms it; otherwise it recomputes the exact JSON
+    // measure from the verified document.
     Ok(Some((restored, serialized_document_bytes)))
 }
 
@@ -5106,7 +5260,7 @@ fn parse_activation_name(name: &str) -> Option<(u64, GenerationId)> {
 mod tests {
     use super::*;
     use crate::FirstSliceService;
-    use rootlight_cancel::Cancellation;
+    use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::{GenerationIdentity, content_hash, derive_generation, derive_repository};
     use rootlight_query::LocateMode;
     use rootlight_runtime::RuntimePaths;
@@ -5129,6 +5283,26 @@ mod tests {
                 .writes
                 .checked_add(1)
                 .expect("test write count is representable");
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CancellingWriter {
+        bytes: usize,
+        cancellation: Cancellation,
+    }
+
+    impl io::Write for CancellingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(buffer.len())
+                .expect("test byte count is representable");
+            self.cancellation.cancel(CancellationReason::ClientRequest);
             Ok(buffer.len())
         }
 
@@ -5310,7 +5484,8 @@ mod tests {
 
     #[test]
     fn recovery_snapshot_writer_batches_small_serialization_fragments() {
-        let mut writer = buffered_recovery_writer(CountingWriter::default());
+        let cancellation = Cancellation::new();
+        let mut writer = buffered_recovery_writer(CountingWriter::default(), 10_000, &cancellation);
         for _ in 0..10_000 {
             writer
                 .write_all(b"x")
@@ -5324,6 +5499,76 @@ mod tests {
     }
 
     #[test]
+    fn recovery_snapshot_writer_checks_cancellation_between_large_chunks() {
+        let cancellation = Cancellation::new();
+        let mut writer = RecoverySnapshotWriter::new(
+            CancellingWriter {
+                bytes: 0,
+                cancellation: cancellation.clone(),
+            },
+            u64::MAX,
+            &cancellation,
+        );
+        let payload = vec![0_u8; RECOVERY_SERIALIZATION_CHECKPOINT_BYTES * 2];
+
+        assert!(writer.write_all(&payload).is_err());
+        assert_eq!(
+            writer.failure,
+            Some(RecoveryWriteFailure::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        );
+        assert_eq!(
+            writer.bytes,
+            u64::try_from(RECOVERY_SERIALIZATION_CHECKPOINT_BYTES)
+                .expect("checkpoint size is representable")
+        );
+        assert_eq!(writer.inner.bytes, RECOVERY_SERIALIZATION_CHECKPOINT_BYTES);
+    }
+
+    #[test]
+    fn recovery_snapshot_writer_rejects_limit_before_inner_write() {
+        let cancellation = Cancellation::new();
+        let mut writer = RecoverySnapshotWriter::new(CountingWriter::default(), 8, &cancellation);
+
+        assert!(writer.write_all(b"123456789").is_err());
+        assert_eq!(writer.failure, Some(RecoveryWriteFailure::Limit));
+        assert_eq!(writer.bytes, 0);
+        assert_eq!(writer.inner.bytes, 0);
+        assert_eq!(writer.inner.writes, 0);
+    }
+
+    #[test]
+    fn recovery_json_count_is_exact_bounded_and_cancellable() {
+        let value = vec!["bounded recovery payload"; 128];
+        let expected = u64::try_from(
+            serde_json::to_vec(&value)
+                .expect("test recovery payload serializes")
+                .len(),
+        )
+        .expect("test recovery payload size is representable");
+        let cancellation = Cancellation::new();
+
+        assert_eq!(
+            recovery_json_serialized_bytes(&value, expected, &cancellation),
+            Ok(expected)
+        );
+        assert_eq!(
+            recovery_json_serialized_bytes(&value, expected - 1, &cancellation),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            recovery_json_serialized_bytes(&value, expected, &cancelled),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        );
+    }
+
+    #[test]
     fn restored_document_size_reconciles_verified_sources_fail_closed() {
         assert_eq!(
             reconcile_restored_serialized_document_bytes(Some(512), Some(512)),
@@ -5331,14 +5576,42 @@ mod tests {
         );
         assert_eq!(
             reconcile_restored_serialized_document_bytes(Some(512), None),
-            Ok(Some(512))
+            Ok(None)
         );
         assert_eq!(
             reconcile_restored_serialized_document_bytes(None, Some(512)),
-            Ok(Some(512))
+            Ok(None)
         );
         assert_eq!(
             reconcile_restored_serialized_document_bytes(Some(512), Some(513)),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+    }
+
+    #[test]
+    fn messagepack_recovery_accounting_rejects_charge_below_decoded_payload() {
+        assert_eq!(validate_recovery_document_accounting(512, 640), Ok(640));
+        assert_eq!(validate_recovery_document_accounting(512, 512), Ok(512));
+        assert_eq!(
+            validate_recovery_document_accounting(512, 511),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            validate_recovery_document_accounting(0, 512),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            validate_recovery_document_accounting(
+                MAX_RECOVERY_SNAPSHOT_BYTES + 1,
+                MAX_RECOVERY_SNAPSHOT_BYTES + 1,
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            validate_recovery_document_accounting(
+                MAX_RECOVERY_SNAPSHOT_BYTES,
+                MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1,
+            ),
             Err(FirstSliceError::CatalogCorrupt)
         );
     }

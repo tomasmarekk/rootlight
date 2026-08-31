@@ -6227,7 +6227,7 @@ impl Client {
             options,
         )? {
             daemon::response_envelope::Response::ChangeImpact(response) => {
-                parse_change_impact(response, repository, generation)
+                parse_change_impact(response, repository, generation, false)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -6368,9 +6368,12 @@ impl Client {
             )
             .await?
         {
-            daemon::response_envelope::Response::ChangeImpact(response) => {
-                parse_change_impact(response, repository, generation)
-            }
+            daemon::response_envelope::Response::ChangeImpact(response) => parse_change_impact(
+                response,
+                repository,
+                generation,
+                impact_options.include_history,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -11985,6 +11988,7 @@ fn parse_change_impact(
     response: daemon::ChangeImpactResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
+    include_history: bool,
 ) -> Result<ChangeImpact, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
@@ -11992,7 +11996,15 @@ fn parse_change_impact(
     let wire_risk = response
         .risk_summary
         .ok_or(ClientError::InvalidResponseCorrelation)?;
-    if response.resolved_changes.is_empty()
+    if (response.resolved_changes.is_empty()
+        && !valid_empty_change_impact_fallback(
+            &execution_completeness,
+            &response.impacted,
+            &response.service_impacts,
+            &response.tests,
+            &wire_risk,
+            include_history,
+        ))
         || response.resolved_changes.len() > 1_256
         || response.impacted.len() > 1_256
         || response.tests.len() > 500
@@ -12036,6 +12048,11 @@ fn parse_change_impact(
         if group.dependents.len() > 500 {
             return Err(ClientError::InvalidResponseCorrelation);
         }
+        let source_index = usize::try_from(group.source_index)
+            .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+        if source_index >= resolved_changes.len() {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
         let mut dependents = Vec::new();
         dependents
             .try_reserve_exact(group.dependents.len())
@@ -12066,7 +12083,7 @@ fn parse_change_impact(
             });
         }
         impacted.push(ChangeImpactGroup {
-            source_index: u16::try_from(group.source_index)
+            source_index: u16::try_from(source_index)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
             dependents,
         });
@@ -12148,6 +12165,47 @@ fn parse_change_impact(
         },
         execution_completeness,
     })
+}
+
+fn valid_empty_change_impact_fallback(
+    completeness: &ResultCompleteness,
+    impacted: &[daemon::FirstSliceImpactGroup],
+    service_impacts: &[daemon::FirstSliceServiceImpact],
+    tests: &[daemon::FirstSliceChangeImpactTest],
+    risk: &daemon::FirstSliceImpactRiskSummary,
+    include_history: bool,
+) -> bool {
+    let expected_reasons: &[&str] = if include_history {
+        &[
+            "no_measured_impact",
+            "dynamic_dispatch_blind_spot",
+            "history_signal_unavailable",
+            "impact_coverage_incomplete",
+        ]
+    } else {
+        &[
+            "no_measured_impact",
+            "dynamic_dispatch_blind_spot",
+            "impact_coverage_incomplete",
+        ]
+    };
+    completeness.state == ResultCompletenessState::Truncated
+        && completeness.continuation == ContinuationAvailability::Unavailable
+        && !completeness.limiting_resources.is_empty()
+        && !completeness.guidance.is_empty()
+        && impacted.is_empty()
+        && service_impacts.is_empty()
+        && tests.is_empty()
+        && risk.level == "none"
+        && risk.coverage == "bounded"
+        && !risk.breaking_surface
+        && risk.fanout == 0
+        && risk.dynamic_blind_spots
+        && risk
+            .reasons
+            .iter()
+            .map(String::as_str)
+            .eq(expected_reasons.iter().copied())
 }
 
 fn build_plan_change_request(
@@ -15008,6 +15066,151 @@ mod tests {
         assert!(!parsed.exact);
         assert!(!parsed.truncated);
         assert!(parsed.next_page_offset.is_none());
+    }
+
+    #[test]
+    fn change_impact_accepts_only_authoritative_empty_truncated_fallback() {
+        let mut response = daemon::ChangeImpactResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(0, 0)),
+            risk_summary: Some(daemon::FirstSliceImpactRiskSummary {
+                level: "none".to_owned(),
+                reasons: vec![
+                    "no_measured_impact".to_owned(),
+                    "dynamic_dispatch_blind_spot".to_owned(),
+                    "impact_coverage_incomplete".to_owned(),
+                ],
+                coverage: "bounded".to_owned(),
+                dynamic_blind_spots: true,
+                ..daemon::FirstSliceImpactRiskSummary::default()
+            }),
+            completeness: Some(daemon::FirstSliceCompleteness {
+                state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+                limiting_resources: vec![daemon::FirstSliceLimitingResource {
+                    kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes as i32,
+                    limit: Some(1),
+                    observed: Some(1),
+                }],
+                continuation:
+                    daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable
+                        as i32,
+                guidance: vec![
+                    daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope as i32,
+                ],
+            }),
+            ..daemon::ChangeImpactResponse::default()
+        };
+
+        let parsed = parse_change_impact(
+            response.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            false,
+        )
+        .expect("bounded empty fallback remains useful");
+        assert!(parsed.resolved_changes.is_empty());
+        assert_eq!(
+            parsed.execution_completeness.state,
+            ResultCompletenessState::Truncated
+        );
+
+        for malformed_reasons in [
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+            ],
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+                "public_surface_affected".to_owned(),
+            ],
+            vec![
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "no_measured_impact".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+            ],
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+            ],
+        ] {
+            let mut malformed = response.clone();
+            malformed
+                .risk_summary
+                .as_mut()
+                .expect("risk summary is present")
+                .reasons = malformed_reasons;
+            assert!(matches!(
+                parse_change_impact(
+                    malformed,
+                    test_repository(),
+                    GenerationSelector::Active,
+                    false
+                ),
+                Err(ClientError::InvalidResponseCorrelation)
+            ));
+        }
+        assert!(matches!(
+            parse_change_impact(
+                response.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                true
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut history_response = response.clone();
+        history_response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .reasons
+            .insert(2, "history_signal_unavailable".to_owned());
+        parse_change_impact(
+            history_response,
+            test_repository(),
+            GenerationSelector::Active,
+            true,
+        )
+        .expect("history fallback carries its canonical gap reason");
+
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .dynamic_blind_spots = false;
+        assert!(matches!(
+            parse_change_impact(
+                response.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                false
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .dynamic_blind_spots = true;
+        response.service_impacts = vec![daemon::FirstSliceServiceImpact {
+            target: "service:unfunded".to_owned(),
+            kind: "calls".to_owned(),
+            confidence: 1,
+            reason: "unfunded".to_owned(),
+        }];
+        assert!(matches!(
+            parse_change_impact(
+                response,
+                test_repository(),
+                GenerationSelector::Active,
+                false
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
     }
 
     #[test]

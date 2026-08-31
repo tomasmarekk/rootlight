@@ -96,8 +96,8 @@ use rootlight_service::{
     FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
     FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
     FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
-    FirstSliceSupportInventory, FirstSliceWorkingTreeSelection, HistoryChangeKind,
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
+    FirstSliceSupplementalPrefix, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
+    HistoryChangeKind, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -185,10 +185,24 @@ const PROJECT_ADAPTER_PARTITION_FILES: usize = 512;
 const PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES: usize = 64 * 1024;
 const PROJECT_ADAPTER_PARTITION_CONTEXT_FILES: usize = 64;
 const PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES: usize = 256;
+// Candidate ranking remains capped at the reference ceiling, while optional
+// discovery may inspect more rejected imports within the existing byte and file
+// budgets. This prevents malformed or unusable prefixes from consuming all
+// candidate opportunities before a later valid dependency.
+const PROJECT_ADAPTER_PARTITION_CONTEXT_WORK: usize =
+    PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES * PROJECT_ADAPTER_PARTITION_CONTEXT_FILES;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 type ProjectPartition = Vec<adapter::ProjectInput>;
+struct ProjectSupplementalPartition {
+    inputs: ProjectPartition,
+    prefixes: Vec<FirstSliceSupplementalPrefix>,
+}
+struct EcmascriptBridgeProjection {
+    source: Vec<u8>,
+    retained_prefix_bytes: usize,
+}
 #[derive(Clone, Copy)]
 enum ProjectPartitionRole {
     Primary,
@@ -199,6 +213,7 @@ type ProjectPartitionAppender<'a> = dyn FnMut(
         bool,
         &[adapter::ProjectInput],
         ProjectPartitionRole,
+        &[FirstSliceSupplementalPrefix],
     ) -> Result<(), FirstSliceProjectAnalysisError>
     + 'a;
 
@@ -364,13 +379,19 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                     &session,
                     batch,
                     cancellation,
-                    &mut |document, isolated, partition_inputs, role| {
+                    &mut |document, isolated, partition_inputs, role, prefixes| {
                         match (&mut analysis, role) {
                             (Some(analysis), ProjectPartitionRole::Primary) => {
                                 analysis.append_partition(document, isolated)?;
                             }
                             (Some(analysis), ProjectPartitionRole::Supplemental) => {
-                                analysis.append_supplemental_relations(document, isolated)?;
+                                append_supplemental_relations(
+                                    analysis,
+                                    document,
+                                    isolated,
+                                    prefixes,
+                                    cancellation,
+                                )?;
                             }
                             (None, ProjectPartitionRole::Primary) => {
                                 analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
@@ -422,13 +443,19 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             &session,
             batch,
             cancellation,
-            &mut |document, isolated, partition_inputs, role| {
+            &mut |document, isolated, partition_inputs, role, prefixes| {
                 match (&mut analysis, role) {
                     (Some(analysis), ProjectPartitionRole::Primary) => {
                         analysis.append_partition(document, isolated)?;
                     }
                     (Some(analysis), ProjectPartitionRole::Supplemental) => {
-                        analysis.append_supplemental_relations(document, isolated)?;
+                        append_supplemental_relations(
+                            analysis,
+                            document,
+                            isolated,
+                            prefixes,
+                            cancellation,
+                        )?;
                     }
                     (None, ProjectPartitionRole::Primary) => {
                         analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
@@ -454,22 +481,31 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 Ok(())
             },
         )?;
-        let mut bridge_planner =
-            ProjectIncludeBridgePlanner::new(request.context_manifest().len())?;
+        let mut bridge_planner = ProjectIncludeBridgePlanner::new(
+            request.context_manifest().len(),
+            base_request_payload_bytes,
+        )?;
         bridge_planner.scan_top_level_partitions(
             &request,
             &ordered_inputs,
             &top_level_partitions,
+            cancellation,
         )?;
         self.execute_supplemental_partitions(
             &request,
             &session,
-            bridge_planner.finish()?,
+            bridge_planner.finish(cancellation)?,
             cancellation,
-            &mut |document, isolated, partition_inputs, role| {
+            &mut |document, isolated, partition_inputs, role, prefixes| {
                 match (&mut analysis, role) {
                     (Some(analysis), ProjectPartitionRole::Supplemental) => {
-                        analysis.append_supplemental_relations(document, isolated)?;
+                        append_supplemental_relations(
+                            analysis,
+                            document,
+                            isolated,
+                            prefixes,
+                            cancellation,
+                        )?;
                     }
                     _ => return Err(FirstSliceProjectAnalysisError::Analysis),
                 }
@@ -533,17 +569,38 @@ fn record_project_partition_progress(
     Ok((files, bytes))
 }
 
+fn append_supplemental_relations(
+    analysis: &mut FirstSliceProjectAnalysis,
+    document: NormalizedIrDocument,
+    isolated: bool,
+    prefixes: &[FirstSliceSupplementalPrefix],
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if prefixes.is_empty() {
+        analysis.append_supplemental_relations_with_cancellation(document, isolated, cancellation)
+    } else {
+        analysis.append_supplemental_prefix_relations_with_cancellation(
+            document,
+            isolated,
+            prefixes,
+            cancellation,
+        )
+    }
+}
+
 fn append_supplemental_project_partition(
     append: &mut ProjectPartitionAppender<'_>,
     document: NormalizedIrDocument,
     isolated: bool,
     inputs: &[adapter::ProjectInput],
+    prefixes: &[FirstSliceSupplementalPrefix],
 ) -> Result<(), FirstSliceProjectAnalysisError> {
     match append(
         document,
         isolated,
         inputs,
         ProjectPartitionRole::Supplemental,
+        prefixes,
     ) {
         Ok(()) => Ok(()),
         Err(
@@ -568,8 +625,17 @@ impl InstalledProjectAnalyzer {
         append: &mut ProjectPartitionAppender<'_>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         let mut pending = Vec::new();
-        let mut bridge_planner =
-            ProjectIncludeBridgePlanner::new(request.context_manifest().len())?;
+        let sizing_request = build_project_analysis_request(
+            request,
+            session.session_id(),
+            &[1; ADAPTER_NONCE_BYTES],
+            request.build_context(),
+            Vec::new(),
+        );
+        let mut bridge_planner = ProjectIncludeBridgePlanner::new(
+            request.context_manifest().len(),
+            project_analysis_request_payload_bytes(&sizing_request),
+        )?;
         pending
             .try_reserve(1)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
@@ -581,30 +647,41 @@ impl InstalledProjectAnalyzer {
             match self.execute_partition(request, session, batch, cancellation) {
                 Ok((document, isolated, analyzed)) => {
                     if project_partition_needs_syntax_split(&document, analyzed.len()) {
-                        let (left, right) = split_project_partition(analyzed)
-                            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-                        bridge_planner.scan_partition_pair(&left, &right)?;
+                        let (left, right) =
+                            split_project_adapter_partition(analyzed, cancellation)?
+                                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                        bridge_planner.scan_partition_pair(&left, &right, cancellation)?;
                         pending
                             .try_reserve(2)
                             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-                        // Match output-limit retry ordering so progress and
-                        // merged identities remain deterministic.
+                        // LIFO preserves deterministic left-before-right
+                        // execution; dependency groups retain canonical order
+                        // internally even when they are not contiguous.
                         pending.push(right);
                         pending.push(left);
                         continue;
                     }
-                    append(document, isolated, &analyzed, ProjectPartitionRole::Primary)?;
+                    append(
+                        document,
+                        isolated,
+                        &analyzed,
+                        ProjectPartitionRole::Primary,
+                        &[],
+                    )?;
                 }
                 Err(ProjectPartitionError::OutputLimit(oversized)) => {
-                    let Some((left, right)) = split_project_partition(oversized) else {
+                    let Some((left, right)) =
+                        split_project_adapter_partition(oversized, cancellation)?
+                    else {
                         return Err(FirstSliceProjectAnalysisError::OutputLimit);
                     };
-                    bridge_planner.scan_partition_pair(&left, &right)?;
+                    bridge_planner.scan_partition_pair(&left, &right, cancellation)?;
                     pending
                         .try_reserve(2)
                         .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-                    // LIFO ordering keeps the left half observable before the
-                    // right half and therefore preserves canonical path order.
+                    // LIFO preserves deterministic left-before-right
+                    // execution; dependency groups retain canonical order
+                    // internally even when they are not contiguous.
                     pending.push(right);
                     pending.push(left);
                 }
@@ -614,7 +691,7 @@ impl InstalledProjectAnalyzer {
         self.execute_supplemental_partitions(
             request,
             session,
-            bridge_planner.finish()?,
+            bridge_planner.finish(cancellation)?,
             cancellation,
             append,
         )
@@ -624,7 +701,7 @@ impl InstalledProjectAnalyzer {
         &self,
         request: &FirstSliceProjectAnalysisRequest<'_>,
         session: &NegotiatedSession,
-        bridges: Vec<ProjectPartition>,
+        bridges: Vec<ProjectSupplementalPartition>,
         cancellation: &Cancellation,
         append: &mut ProjectPartitionAppender<'_>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
@@ -632,9 +709,15 @@ impl InstalledProjectAnalyzer {
             cancellation.check().map_err(|cancelled| {
                 FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
             })?;
-            match self.execute_partition(request, session, bridge, cancellation) {
+            match self.execute_partition(request, session, bridge.inputs, cancellation) {
                 Ok((document, isolated, analyzed)) => {
-                    append_supplemental_project_partition(append, document, isolated, &analyzed)?;
+                    append_supplemental_project_partition(
+                        append,
+                        document,
+                        isolated,
+                        &analyzed,
+                        &bridge.prefixes,
+                    )?;
                 }
                 Err(ProjectPartitionError::OutputLimit(_)) => {}
                 Err(ProjectPartitionError::Analysis(
@@ -732,29 +815,704 @@ fn split_project_partition<T>(mut items: Vec<T>) -> Option<(Vec<T>, Vec<T>)> {
     })
 }
 
+fn split_project_adapter_partition(
+    inputs: Vec<adapter::ProjectInput>,
+    cancellation: &Cancellation,
+) -> Result<Option<(ProjectPartition, ProjectPartition)>, FirstSliceProjectAnalysisError> {
+    if inputs.len() <= 1 {
+        return Ok(None);
+    }
+    let Some(right_by_input) = project_partition_assignment(&inputs, cancellation)? else {
+        return Ok(split_project_partition(inputs));
+    };
+    let right_size = right_by_input.iter().filter(|right| **right).count();
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    left.try_reserve_exact(inputs.len().saturating_sub(right_size))
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    right
+        .try_reserve_exact(right_size)
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    for (input, assigned_right) in inputs.into_iter().zip(right_by_input) {
+        if assigned_right {
+            right.push(input);
+        } else {
+            left.push(input);
+        }
+    }
+    Ok(Some((left, right)))
+}
+
+fn project_partition_assignment(
+    inputs: &[adapter::ProjectInput],
+    cancellation: &Cancellation,
+) -> Result<Option<Vec<bool>>, FirstSliceProjectAnalysisError> {
+    if inputs.len() <= 2 {
+        return Ok(None);
+    }
+    let mut provider_by_module = BTreeMap::<String, Option<usize>>::new();
+    for (index, input) in inputs.iter().enumerate() {
+        let module = project_module_path(&input.path);
+        provider_by_module
+            .entry(module)
+            .and_modify(|provider| *provider = None)
+            .or_insert(Some(index));
+    }
+    let mut dependency_demand = BTreeMap::<(usize, usize), usize>::new();
+    let mut remaining_scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES;
+    for (consumer, input) in inputs.iter().enumerate() {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        if !matches!(input.language.as_str(), "javascript" | "typescript") {
+            continue;
+        }
+        if input.source.len() > remaining_scan_bytes || remaining_imports == 0 {
+            continue;
+        }
+        remaining_scan_bytes = remaining_scan_bytes.saturating_sub(input.source.len());
+        let Ok(source) = std::str::from_utf8(&input.source) else {
+            continue;
+        };
+        let observed = for_each_ecmascript_relative_import(
+            source,
+            remaining_imports,
+            cancellation,
+            |module, _bindings, demand, _statement_end, _occurrence_end| {
+                let resolved = relative_include_path(&input.path, module)
+                    .map(|resolved| project_module_path(&resolved));
+                let provider = resolved
+                    .as_deref()
+                    .and_then(|resolved| provider_by_module.get(resolved))
+                    .copied()
+                    .flatten()
+                    .or_else(|| {
+                        resolved
+                            .as_deref()
+                            .and_then(|resolved| {
+                                provider_by_module.get(&format!("{resolved}/index"))
+                            })
+                            .copied()
+                            .flatten()
+                    });
+                let Some(provider) = provider.filter(|provider| *provider != consumer) else {
+                    return Ok(());
+                };
+                dependency_demand
+                    .entry((consumer, provider))
+                    .and_modify(|total| *total = total.saturating_add(demand))
+                    .or_insert(demand);
+                Ok(())
+            },
+        )?;
+        remaining_imports = remaining_imports.saturating_sub(observed);
+    }
+    let mut dependencies = Vec::new();
+    dependencies
+        .try_reserve_exact(dependency_demand.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    dependencies.extend(
+        dependency_demand
+            .into_iter()
+            .map(|((consumer, provider), demand)| (consumer, provider, demand)),
+    );
+    dependencies.sort_unstable_by(
+        |(left_consumer, left_provider, left_demand),
+         (right_consumer, right_provider, right_demand)| {
+            right_demand
+                .cmp(left_demand)
+                .then_with(|| left_consumer.cmp(right_consumer))
+                .then_with(|| left_provider.cmp(right_provider))
+        },
+    );
+    dependencies.truncate(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES);
+    if dependencies.is_empty() {
+        return Ok(None);
+    }
+    let minimum_group = (inputs.len() / 4).max(1);
+    let maximum_group = inputs.len().saturating_sub(minimum_group);
+    let mut parents = Vec::new();
+    let mut component_sizes = Vec::<usize>::new();
+    parents
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    component_sizes
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    parents.extend(0..inputs.len());
+    component_sizes.resize(inputs.len(), 1);
+    let mut retained_dependencies = 0_usize;
+    for (consumer, provider, _) in dependencies {
+        let consumer_root = project_partition_component_root(&parents, consumer);
+        let provider_root = project_partition_component_root(&parents, provider);
+        if consumer_root == provider_root {
+            continue;
+        }
+        let combined = component_sizes[consumer_root]
+            .checked_add(component_sizes[provider_root])
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if combined > maximum_group {
+            continue;
+        }
+        let retained_root = consumer_root.min(provider_root);
+        let merged_root = consumer_root.max(provider_root);
+        parents[merged_root] = retained_root;
+        component_sizes[retained_root] = combined;
+        retained_dependencies = retained_dependencies.saturating_add(1);
+    }
+    if retained_dependencies == 0 {
+        return Ok(None);
+    }
+    let mut components = BTreeMap::<usize, Vec<usize>>::new();
+    for index in 0..inputs.len() {
+        components
+            .entry(project_partition_component_root(&parents, index))
+            .or_default()
+            .push(index);
+    }
+    let mut components = components.into_values().collect::<Vec<_>>();
+    components.sort_unstable_by(|left, right| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| left[0].cmp(&right[0]))
+    });
+    let mut right_by_input = vec![false; inputs.len()];
+    let mut left_size = 0_usize;
+    let mut right_size = 0_usize;
+    for component in components {
+        let component_size = component.len();
+        let left_fits = left_size.saturating_add(component_size) <= maximum_group;
+        let right_fits = right_size.saturating_add(component_size) <= maximum_group;
+        let assigned_right = match (left_fits, right_fits) {
+            (true, true) => right_size < left_size,
+            (true, false) => false,
+            (false, true) => true,
+            (false, false) => return Ok(None),
+        };
+        if assigned_right {
+            right_size = right_size
+                .checked_add(component_size)
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+            for index in component {
+                right_by_input[index] = true;
+            }
+        } else {
+            left_size = left_size
+                .checked_add(component_size)
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        }
+    }
+    if left_size < minimum_group || right_size < minimum_group {
+        return Ok(None);
+    }
+    Ok(Some(right_by_input))
+}
+
+fn project_module_path(path: &str) -> String {
+    project_module_path_ref(path).to_owned()
+}
+
+fn project_module_path_ref(path: &str) -> &str {
+    [
+        ".d.ts", ".d.mts", ".d.cts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".js", ".ts",
+    ]
+    .into_iter()
+    .find_map(|suffix| path.strip_suffix(suffix))
+    .unwrap_or(path)
+}
+
+fn project_partition_component_root(parents: &[usize], mut index: usize) -> usize {
+    while parents[index] != index {
+        index = parents[index];
+    }
+    index
+}
+
+struct EcmascriptRelativeImport<'a> {
+    module: &'a str,
+    bindings: &'a str,
+    statement_end: usize,
+    demand: usize,
+    occurrence_end: Option<usize>,
+}
+
+struct EcmascriptIdentifierScan {
+    occurrences: usize,
+    pending_imports: Vec<(usize, usize)>,
+    next_pending: usize,
+}
+
+struct EcmascriptBridgeDemand<'a> {
+    consumer_source: &'a str,
+    bindings: &'a str,
+    occurrence_end: Option<usize>,
+    demand: usize,
+}
+
+fn for_each_ecmascript_relative_import(
+    source: &str,
+    max_imports: usize,
+    cancellation: &Cancellation,
+    mut observe: impl FnMut(
+        &str,
+        &str,
+        usize,
+        usize,
+        Option<usize>,
+    ) -> Result<(), FirstSliceProjectAnalysisError>,
+) -> Result<usize, FirstSliceProjectAnalysisError> {
+    let mut imports = Vec::new();
+    imports
+        .try_reserve_exact(max_imports.min(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK))
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    let mut offset = 0_usize;
+    while imports.len() < max_imports {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        let Some(tail) = source.get(offset..) else {
+            break;
+        };
+        let statement = tail
+            .find("import ")
+            .map(|start| (start, "import ".len()))
+            .into_iter()
+            .chain(tail.find("export ").map(|start| (start, "export ".len())))
+            .min_by_key(|(start, _)| *start);
+        let Some((relative_statement_start, keyword_bytes)) = statement else {
+            break;
+        };
+        let statement_start = offset.saturating_add(relative_statement_start);
+        let bindings_start = statement_start.saturating_add(keyword_bytes);
+        let Some(bindings_tail) = source.get(bindings_start..) else {
+            break;
+        };
+        let Some(relative_from) = bindings_tail.find(" from ") else {
+            break;
+        };
+        if let Some(statement_boundary) = bindings_tail.find(';')
+            && statement_boundary < relative_from
+        {
+            offset = bindings_start
+                .saturating_add(statement_boundary)
+                .saturating_add(1);
+            continue;
+        }
+        let from = bindings_start.saturating_add(relative_from);
+        let Some(bindings) = source.get(bindings_start..from) else {
+            break;
+        };
+        let Some(module_tail) = source.get(from.saturating_add(" from ".len())..) else {
+            break;
+        };
+        let Some((module, module_end)) = first_quoted_slice(module_tail) else {
+            offset = from.saturating_add(" from ".len());
+            continue;
+        };
+        if module.starts_with('.') && !module.contains('\\') {
+            let statement_end = from
+                .checked_add(" from ".len())
+                .and_then(|value| value.checked_add(module_end))
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+            imports.push(EcmascriptRelativeImport {
+                module,
+                bindings,
+                statement_end,
+                demand: 1,
+                occurrence_end: None,
+            });
+        }
+        offset = from
+            .saturating_add(" from ".len())
+            .saturating_add(module_end);
+    }
+
+    let mut identifier_scans = BTreeMap::<&str, EcmascriptIdentifierScan>::new();
+    let mut identifier_edges = 0_usize;
+    for (import_index, import) in imports.iter().enumerate() {
+        let mut import_identifiers = BTreeSet::new();
+        for_each_ecmascript_import_identifier(import.bindings, |identifier| {
+            if identifier_edges >= PROJECT_ADAPTER_PARTITION_CONTEXT_WORK
+                || !import_identifiers.insert(identifier)
+            {
+                return;
+            }
+            identifier_edges = identifier_edges.saturating_add(1);
+            identifier_scans
+                .entry(identifier)
+                .or_insert_with(|| EcmascriptIdentifierScan {
+                    occurrences: 0,
+                    pending_imports: Vec::new(),
+                    next_pending: 0,
+                })
+                .pending_imports
+                .push((import.statement_end, import_index));
+        });
+        if identifier_edges >= PROJECT_ADAPTER_PARTITION_CONTEXT_WORK {
+            break;
+        }
+    }
+    for_each_ecmascript_identifier(source, cancellation, |start, end, identifier| {
+        let Some(scan) = identifier_scans.get_mut(identifier) else {
+            return;
+        };
+        scan.occurrences = scan.occurrences.saturating_add(1);
+        while let Some((statement_end, import_index)) =
+            scan.pending_imports.get(scan.next_pending).copied()
+        {
+            if statement_end > start {
+                break;
+            }
+            if let Some(import) = imports.get_mut(import_index) {
+                import.occurrence_end.get_or_insert(end);
+            }
+            scan.next_pending = scan.next_pending.saturating_add(1);
+        }
+    })?;
+    for import in &mut imports {
+        let mut identifiers = BTreeSet::new();
+        let mut demand = 0_usize;
+        for_each_ecmascript_import_identifier(import.bindings, |identifier| {
+            if identifiers.len() < PROJECT_ADAPTER_PARTITION_CONTEXT_WORK
+                && identifiers.insert(identifier)
+            {
+                demand = demand.saturating_add(
+                    identifier_scans
+                        .get(identifier)
+                        .map_or(0, |scan| scan.occurrences),
+                );
+            }
+        });
+        import.demand = demand.max(1);
+    }
+    let observed = imports.len();
+    for import in imports {
+        observe(
+            import.module,
+            import.bindings,
+            import.demand,
+            import.statement_end,
+            import.occurrence_end,
+        )?;
+    }
+    Ok(observed)
+}
+
+fn first_quoted_slice(value: &str) -> Option<(&str, usize)> {
+    let (start, quote) = value
+        .char_indices()
+        .find(|(_, character)| matches!(character, '\'' | '"'))?;
+    let content_start = start.checked_add(quote.len_utf8())?;
+    let tail = value.get(content_start..)?;
+    let end = tail.find(quote)?;
+    let consumed = content_start
+        .checked_add(end)?
+        .checked_add(quote.len_utf8())?;
+    Some((tail.get(..end)?, consumed))
+}
+
+fn for_each_ecmascript_import_identifier<'a>(bindings: &'a str, mut observe: impl FnMut(&'a str)) {
+    let mut start = None;
+    for (index, byte) in bindings
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b' '))
+        .enumerate()
+    {
+        if ecmascript_identifier_byte(byte) {
+            start.get_or_insert(index);
+        } else if let Some(identifier_start) = start.take()
+            && let Some(identifier) = bindings.get(identifier_start..index)
+            && !matches!(
+                identifier,
+                "as" | "from" | "import" | "export" | "type" | "typeof"
+            )
+        {
+            observe(identifier);
+        }
+    }
+}
+
+fn ecmascript_import_has_runtime_binding(bindings: &str) -> bool {
+    let bindings = bindings.trim_start();
+    !bindings
+        .strip_prefix("type")
+        .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
+}
+
+const fn ecmascript_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
+}
+
+fn for_each_ecmascript_identifier(
+    source: &str,
+    cancellation: &Cancellation,
+    mut observe: impl FnMut(usize, usize, &str),
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    let bytes = source.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if index.is_multiple_of(4096) {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+        }
+        if !ecmascript_identifier_byte(bytes[index]) {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| ecmascript_identifier_byte(*byte))
+        {
+            index = index.saturating_add(1);
+        }
+        if let Some(identifier) = source.get(start..index) {
+            observe(start, index, identifier);
+        }
+    }
+    Ok(())
+}
+
+fn project_module_provider_index(
+    providers: &[adapter::ProjectInput],
+) -> BTreeMap<String, Option<&adapter::ProjectInput>> {
+    let mut by_module = BTreeMap::new();
+    for provider in providers {
+        if !matches!(provider.language.as_str(), "javascript" | "typescript") {
+            continue;
+        }
+        by_module
+            .entry(project_module_path(&provider.path))
+            .and_modify(|candidate| *candidate = None)
+            .or_insert(Some(provider));
+    }
+    by_module
+}
+
+fn project_ecmascript_provider<'a>(
+    consumer_path: &str,
+    module: &str,
+    providers: &BTreeMap<String, Option<&'a adapter::ProjectInput>>,
+) -> Option<&'a adapter::ProjectInput> {
+    let resolved = relative_include_path(consumer_path, module)?;
+    let resolved = project_module_path(&resolved);
+    providers.get(&resolved).copied().flatten().or_else(|| {
+        providers
+            .get(&format!("{resolved}/index"))
+            .copied()
+            .flatten()
+    })
+}
+
+fn ecmascript_bridge_consumer_minimum(
+    source: &str,
+    occurrence_end: Option<usize>,
+) -> Option<usize> {
+    ecmascript_bridge_context_end(source, occurrence_end?)
+}
+
+fn ecmascript_bridge_context_end(source: &str, occurrence_end: usize) -> Option<usize> {
+    let context_bytes = PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES / 16;
+    let desired = occurrence_end
+        .saturating_add(context_bytes)
+        .min(source.len());
+    utf8_prefix_boundary(source, desired).filter(|boundary| *boundary >= occurrence_end)
+}
+
+fn utf8_prefix_boundary(source: &str, mut limit: usize) -> Option<usize> {
+    limit = limit.min(source.len());
+    while !source.is_char_boundary(limit) {
+        limit = limit.checked_sub(1)?;
+    }
+    Some(limit)
+}
+
+fn ecmascript_bridge_prefix(
+    source: &[u8],
+    maximum: usize,
+    minimum: usize,
+) -> Option<EcmascriptBridgeProjection> {
+    let source_text = std::str::from_utf8(source).ok()?;
+    let prefix_limit = utf8_prefix_boundary(source_text, maximum)?;
+    if prefix_limit < minimum {
+        return None;
+    }
+    if prefix_limit == source.len() {
+        return Some(EcmascriptBridgeProjection {
+            source: source.to_vec(),
+            retained_prefix_bytes: source.len(),
+        });
+    }
+    let mut prefix = source_text
+        .get(..prefix_limit)?
+        .rfind('\n')
+        .and_then(|boundary| boundary.checked_add(1))
+        .filter(|boundary| *boundary >= minimum)
+        .unwrap_or(prefix_limit);
+    loop {
+        let retained = source.get(..prefix)?;
+        let open_braces = retained
+            .iter()
+            .filter(|byte| **byte == b'{')
+            .count()
+            .saturating_sub(retained.iter().filter(|byte| **byte == b'}').count());
+        let suffix_bytes = open_braces.checked_mul(2)?.checked_add(1)?;
+        if prefix.checked_add(suffix_bytes)? <= maximum {
+            let mut projected = Vec::new();
+            projected
+                .try_reserve_exact(prefix.checked_add(suffix_bytes)?)
+                .ok()?;
+            projected.extend_from_slice(retained);
+            projected.push(b'\n');
+            for _ in 0..open_braces {
+                projected.extend_from_slice(b"}\n");
+            }
+            return Some(EcmascriptBridgeProjection {
+                source: projected,
+                retained_prefix_bytes: prefix,
+            });
+        }
+        let reduced = utf8_prefix_boundary(
+            source_text,
+            maximum
+                .checked_sub(suffix_bytes)?
+                .min(prefix.saturating_sub(1)),
+        )?;
+        prefix = source_text
+            .get(..reduced)?
+            .rfind('\n')
+            .and_then(|boundary| boundary.checked_add(1))
+            .filter(|boundary| *boundary >= minimum)
+            .unwrap_or(reduced);
+        if prefix < minimum {
+            return None;
+        }
+    }
+}
+
+fn ecmascript_bridge_projection_is_equivalent(
+    primary: &adapter::ProjectInput,
+    projection: &EcmascriptBridgeProjection,
+) -> bool {
+    if projection.retained_prefix_bytes == primary.source.len() {
+        return projection.source == primary.source;
+    }
+    let Some(retained) = primary.source.get(..projection.retained_prefix_bytes) else {
+        return false;
+    };
+    let Some(omitted) = primary.source.get(projection.retained_prefix_bytes..) else {
+        return false;
+    };
+    let retained_open_braces = retained
+        .iter()
+        .filter(|byte| **byte == b'{')
+        .count()
+        .saturating_sub(retained.iter().filter(|byte| **byte == b'}').count());
+    let omitted_closing_braces = omitted.iter().filter(|byte| **byte == b'}').count();
+    retained_open_braces == omitted_closing_braces
+        && omitted
+            .iter()
+            .all(|byte| byte.is_ascii_whitespace() || matches!(*byte, b'}' | b';'))
+}
+
+fn apply_supplemental_prefix_identity(
+    primary: &adapter::ProjectInput,
+    projected: &mut adapter::ProjectInput,
+    retained_prefix_bytes: usize,
+) -> Result<Option<FirstSliceSupplementalPrefix>, FirstSliceProjectAnalysisError> {
+    if projected.source.len() == primary.source.len()
+        && retained_prefix_bytes == primary.source.len()
+    {
+        return Ok(None);
+    }
+    let file = FileId::from_bytes(
+        primary
+            .file
+            .as_ref()
+            .ok_or(FirstSliceProjectAnalysisError::Identity)?
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| FirstSliceProjectAnalysisError::Identity)?,
+    );
+    let primary_hash = ContentHash::from_bytes(
+        primary
+            .source_digest
+            .as_ref()
+            .ok_or(FirstSliceProjectAnalysisError::Identity)?
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| FirstSliceProjectAnalysisError::Identity)?,
+    );
+    let prefix = FirstSliceSupplementalPrefix::new(
+        file,
+        primary_hash,
+        &primary.source,
+        &projected.source,
+        retained_prefix_bytes,
+    )?;
+    projected.source_digest = Some(common::ContentHash {
+        value: content_hash(&projected.source).as_bytes().to_vec(),
+    });
+    Ok(Some(prefix))
+}
+
 struct ProjectIncludeBridgePlanner {
     candidates: Vec<ProjectIncludeBridgeCandidate>,
+    retained_pairs: BTreeSet<(FileId, FileId)>,
+    base_request_payload_bytes: usize,
     max_bytes: usize,
+    max_candidates: usize,
+    examined_pair_attempts: usize,
+    max_pair_attempts: usize,
+    remaining_candidate_bytes: usize,
+    ecmascript_provider_identifiers: BTreeMap<FileId, BTreeMap<String, usize>>,
+    remaining_scan_bytes: usize,
+    remaining_imports: usize,
 }
 
 struct ProjectIncludeBridgeCandidate {
     consumer: adapter::ProjectInput,
     provider: adapter::ProjectInput,
+    prefixes: Vec<FirstSliceSupplementalPrefix>,
     test_context: bool,
     demand: usize,
     shared_path_components: usize,
     source_bytes: usize,
+    owned_bytes: usize,
 }
 
 impl ProjectIncludeBridgePlanner {
-    fn new(fixed_source_bytes: usize) -> Result<Self, FirstSliceProjectAnalysisError> {
+    fn new(
+        fixed_source_bytes: usize,
+        base_request_payload_bytes: usize,
+    ) -> Result<Self, FirstSliceProjectAnalysisError> {
         let partition_source_limit = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let input_bytes = usize::try_from(PROJECT_ADAPTER_INPUT_BYTES)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let remaining_scan_bytes = partition_source_limit.saturating_sub(fixed_source_bytes);
+        let max_bytes = remaining_scan_bytes.min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES);
+        let enabled = usize::from(max_bytes > 0);
         Ok(Self {
             candidates: Vec::new(),
-            max_bytes: partition_source_limit
-                .saturating_sub(fixed_source_bytes)
-                .min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES),
+            retained_pairs: BTreeSet::new(),
+            base_request_payload_bytes,
+            max_bytes,
+            max_candidates: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES),
+            examined_pair_attempts: 0,
+            max_pair_attempts: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
+            remaining_candidate_bytes: enabled.saturating_mul(input_bytes),
+            ecmascript_provider_identifiers: BTreeMap::new(),
+            remaining_scan_bytes,
+            remaining_imports: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
         })
     }
 
@@ -762,9 +1520,10 @@ impl ProjectIncludeBridgePlanner {
         &mut self,
         left: &[adapter::ProjectInput],
         right: &[adapter::ProjectInput],
+        cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
-        self.scan(right, left)?;
-        self.scan(left, right)
+        self.scan(right, left, cancellation)?;
+        self.scan(left, right, cancellation)
     }
 
     fn scan_top_level_partitions(
@@ -772,58 +1531,144 @@ impl ProjectIncludeBridgePlanner {
         request: &FirstSliceProjectAnalysisRequest<'_>,
         inputs: &[&rootlight_service::FirstSliceProjectInput<'_>],
         partitions: &BTreeMap<&str, usize>,
+        cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         if !matches!(request.language(), "c" | "cpp") {
+            if !matches!(request.language(), "javascript" | "typescript") {
+                return Ok(());
+            }
+            let mut remaining_scan_bytes = self.remaining_scan_bytes;
+            let mut remaining_imports = self.remaining_imports;
+            scan_cross_partition_ecmascript(
+                inputs,
+                partitions,
+                &mut remaining_scan_bytes,
+                &mut remaining_imports,
+                cancellation,
+                |consumer, provider, bindings, demand, occurrence_end, scan_bytes| {
+                    if self.discovery_exhausted() {
+                        return Ok(false);
+                    }
+                    self.remaining_scan_bytes = *scan_bytes;
+                    let source = std::str::from_utf8(consumer.source())
+                        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+                    self.consider_request_ecmascript_pair(
+                        request,
+                        consumer,
+                        provider,
+                        EcmascriptBridgeDemand {
+                            consumer_source: source,
+                            bindings,
+                            occurrence_end,
+                            demand,
+                        },
+                        cancellation,
+                    )?;
+                    *scan_bytes = self.remaining_scan_bytes;
+                    Ok(!self.discovery_exhausted())
+                },
+            )?;
+            self.remaining_scan_bytes = remaining_scan_bytes;
+            self.remaining_imports = remaining_imports;
             return Ok(());
         }
-        scan_cross_partition_includes(inputs, partitions, |consumer, provider| {
-            self.consider_request_pair(request, consumer, provider)
-        })
+        let mut remaining_scan_bytes = self.remaining_scan_bytes;
+        scan_cross_partition_includes(
+            inputs,
+            partitions,
+            &mut remaining_scan_bytes,
+            cancellation,
+            |consumer, provider| {
+                if self.discovery_exhausted() {
+                    return Ok(false);
+                }
+                self.consider_request_pair(request, consumer, provider)?;
+                Ok(!self.discovery_exhausted())
+            },
+        )?;
+        self.remaining_scan_bytes = remaining_scan_bytes;
+        Ok(())
     }
 
-    fn finish(self) -> Result<Vec<ProjectPartition>, FirstSliceProjectAnalysisError> {
+    fn finish(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<ProjectSupplementalPartition>, FirstSliceProjectAnalysisError> {
         let mut candidates = self.candidates;
+        candidates.sort_unstable_by(project_include_candidate_order);
         let mut partitions = Vec::new();
         partitions
             .try_reserve(candidates.len())
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         // Every request retains the original bridge ceiling. Emitting further
-        // bounded requests preserves retained direct-include evidence instead
-        // of silently discarding candidates that do not fit the first request.
+        // bounded requests preserves direct dependency evidence instead of
+        // silently discarding candidates that do not fit the first request.
         while !candidates.is_empty() {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
             let mut selected = BTreeMap::<String, adapter::ProjectInput>::new();
+            let mut selected_prefixes = Vec::new();
+            let mut selected_projected = false;
             let mut selected_bytes = 0_usize;
+            let mut selected_request_payload_bytes = self.base_request_payload_bytes;
             // Recompute marginal cost after every choice so several useful
             // providers can share one already-selected consumer.
             loop {
+                cancellation.check().map_err(|cancelled| {
+                    FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+                })?;
                 let best = candidates
                     .iter()
                     .enumerate()
                     .filter_map(|(index, candidate)| {
-                        let (additional_bytes, additional_files) =
-                            project_include_candidate_cost(candidate, &selected);
+                        if !selected.is_empty()
+                            && (selected_projected || !candidate.prefixes.is_empty())
+                        {
+                            return None;
+                        }
+                        let (additional_bytes, additional_files, additional_payload_bytes) =
+                            project_include_candidate_cost(candidate, &selected)?;
+                        let request_payload_bytes =
+                            selected_request_payload_bytes.checked_add(additional_payload_bytes)?;
                         (selected_bytes.saturating_add(additional_bytes) <= self.max_bytes
                             && selected.len().saturating_add(additional_files)
-                                <= PROJECT_ADAPTER_PARTITION_CONTEXT_FILES)
-                            .then_some((index, candidate, additional_bytes))
+                                <= PROJECT_ADAPTER_PARTITION_CONTEXT_FILES
+                            && project_analysis_frame_bytes(request_payload_bytes)
+                                .is_some_and(|bytes| bytes <= MAX_ADAPTER_FRAME_BYTES))
+                        .then_some((index, candidate, additional_bytes, request_payload_bytes))
                     })
-                    .max_by(|(_, left, left_bytes), (_, right, right_bytes)| {
+                    .max_by(|(_, left, left_bytes, _), (_, right, right_bytes, _)| {
                         project_include_candidate_priority(left, *left_bytes, right, *right_bytes)
                     })
-                    .map(|(index, _, additional_bytes)| (index, additional_bytes));
-                let Some((index, additional_bytes)) = best else {
+                    .map(|(index, _, additional_bytes, request_payload_bytes)| {
+                        (index, additional_bytes, request_payload_bytes)
+                    });
+                let Some((index, additional_bytes, request_payload_bytes)) = best else {
                     break;
                 };
                 let candidate = candidates.swap_remove(index);
                 selected_bytes = selected_bytes.saturating_add(additional_bytes);
+                selected_request_payload_bytes = request_payload_bytes;
+                if !candidate.prefixes.is_empty() {
+                    selected_projected = true;
+                    selected_prefixes = candidate.prefixes;
+                }
                 for input in [candidate.consumer, candidate.provider] {
                     selected.entry(input.path.clone()).or_insert(input);
                 }
             }
             if selected.len() < 2 {
-                return Err(FirstSliceProjectAnalysisError::Analysis);
+                // Bridge evidence is optional. A candidate that no longer fits
+                // the exact final envelope is discarded without rejecting the
+                // already-complete primary analysis.
+                candidates.pop();
+                continue;
             }
-            partitions.push(selected.into_values().collect());
+            partitions.push(ProjectSupplementalPartition {
+                inputs: selected.into_values().collect(),
+                prefixes: selected_prefixes,
+            });
         }
         Ok(partitions)
     }
@@ -832,30 +1677,88 @@ impl ProjectIncludeBridgePlanner {
         &mut self,
         consumers: &[adapter::ProjectInput],
         providers: &[adapter::ProjectInput],
+        cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if self.discovery_exhausted() || self.remaining_scan_bytes == 0 {
+            return Ok(());
+        }
         let consumer_paths = ProjectInputPathSet::new(consumers);
         let provider_paths = ProjectInputPathIndex::new(providers);
+        let module_providers = project_module_provider_index(providers);
         for consumer in consumers {
-            if !matches!(consumer.language.as_str(), "c" | "cpp") {
-                continue;
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+            if self.discovery_exhausted() {
+                return Ok(());
             }
             let Ok(source) = std::str::from_utf8(&consumer.source) else {
                 continue;
             };
-            for line in source.lines() {
-                let Some((include, relative_first)) = cpp_include_path(line) else {
-                    continue;
-                };
-                let Some(provider) = cross_partition_include_provider(
-                    &consumer.path,
-                    include,
-                    relative_first,
-                    &consumer_paths,
-                    &provider_paths,
-                ) else {
-                    continue;
-                };
-                self.consider_pair(consumer, provider)?;
+            match consumer.language.as_str() {
+                "c" | "cpp" => {
+                    if !self.claim_scan_bytes(consumer.source.len()) {
+                        return Ok(());
+                    }
+                    for line in source.lines() {
+                        cancellation.check().map_err(|cancelled| {
+                            FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+                        })?;
+                        let Some((include, relative_first)) = cpp_include_path(line) else {
+                            continue;
+                        };
+                        let Some(provider) = cross_partition_include_provider(
+                            &consumer.path,
+                            include,
+                            relative_first,
+                            &consumer_paths,
+                            &provider_paths,
+                        ) else {
+                            continue;
+                        };
+                        self.consider_pair(consumer, provider)?;
+                        if self.discovery_exhausted() {
+                            return Ok(());
+                        }
+                    }
+                }
+                "javascript" | "typescript" => {
+                    if self.remaining_imports == 0 || !self.claim_scan_bytes(source.len()) {
+                        return Ok(());
+                    }
+                    let observed = for_each_ecmascript_relative_import(
+                        source,
+                        self.remaining_imports,
+                        cancellation,
+                        |module, bindings, demand, _statement_end, occurrence_end| {
+                            if self.discovery_exhausted()
+                                || !ecmascript_import_has_runtime_binding(bindings)
+                            {
+                                return Ok(());
+                            }
+                            let Some(provider) = project_ecmascript_provider(
+                                &consumer.path,
+                                module,
+                                &module_providers,
+                            ) else {
+                                return Ok(());
+                            };
+                            self.consider_ecmascript_pair(
+                                consumer,
+                                provider,
+                                EcmascriptBridgeDemand {
+                                    consumer_source: source,
+                                    bindings,
+                                    occurrence_end,
+                                    demand,
+                                },
+                                cancellation,
+                            )
+                        },
+                    )?;
+                    self.remaining_imports = self.remaining_imports.saturating_sub(observed);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -866,9 +1769,11 @@ impl ProjectIncludeBridgePlanner {
         consumer: &adapter::ProjectInput,
         provider: &adapter::ProjectInput,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
-        if self.candidates.iter().any(|candidate| {
-            candidate.consumer.path == consumer.path && candidate.provider.path == provider.path
-        }) {
+        let pair = (
+            adapter_project_input_file_id(consumer)?,
+            adapter_project_input_file_id(provider)?,
+        );
+        if !self.begin_pair_attempt(pair) {
             return Ok(());
         }
         let source_bytes = consumer
@@ -879,7 +1784,19 @@ impl ProjectIncludeBridgePlanner {
         if source_bytes > self.max_bytes || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
             return Ok(());
         }
-        self.consider_owned_pair(consumer.clone(), provider.clone(), source_bytes)
+        let Some(owned_bytes) = project_include_pair_owned_bytes(consumer, provider) else {
+            return Ok(());
+        };
+        if !self.can_materialize_pair(consumer, provider, owned_bytes) {
+            return Ok(());
+        }
+        self.consider_owned_pair(
+            pair,
+            consumer.clone(),
+            provider.clone(),
+            source_bytes,
+            owned_bytes,
+        )
     }
 
     fn consider_request_pair(
@@ -888,9 +1805,8 @@ impl ProjectIncludeBridgePlanner {
         consumer: &rootlight_service::FirstSliceProjectInput<'_>,
         provider: &rootlight_service::FirstSliceProjectInput<'_>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
-        if self.candidates.iter().any(|candidate| {
-            candidate.consumer.path == consumer.path() && candidate.provider.path == provider.path()
-        }) {
+        let pair = (consumer.file(), provider.file());
+        if !self.begin_pair_attempt(pair) {
             return Ok(());
         }
         let source_bytes = consumer
@@ -901,66 +1817,480 @@ impl ProjectIncludeBridgePlanner {
         if source_bytes > self.max_bytes || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
             return Ok(());
         }
+        let Some(preview_bytes) =
+            project_request_include_pair_owned_bytes(request, consumer, provider)
+        else {
+            return Ok(());
+        };
+        if preview_bytes > self.remaining_candidate_bytes {
+            return Ok(());
+        }
+        let consumer = project_input_to_wire(request, consumer)?;
+        let provider = project_input_to_wire(request, provider)?;
+        let Some(owned_bytes) = project_include_pair_owned_bytes(&consumer, &provider) else {
+            return Ok(());
+        };
+        if !self.can_materialize_pair(&consumer, &provider, owned_bytes.max(preview_bytes)) {
+            return Ok(());
+        }
         self.consider_owned_pair(
-            project_input_to_wire(request, consumer)?,
-            project_input_to_wire(request, provider)?,
+            pair,
+            consumer,
+            provider,
             source_bytes,
+            owned_bytes.max(preview_bytes),
         )
     }
 
     fn consider_owned_pair(
         &mut self,
+        pair: (FileId, FileId),
         consumer: adapter::ProjectInput,
         provider: adapter::ProjectInput,
         source_bytes: usize,
+        owned_bytes: usize,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let test_context = cpp_positive_test_context(&consumer.source);
+        let demand = cpp_include_provider_demand(&consumer, &provider);
+        self.consider_ranked_pair(
+            pair,
+            project_include_bridge_candidate(
+                consumer,
+                provider,
+                source_bytes,
+                Vec::new(),
+                test_context,
+                demand,
+                owned_bytes,
+            ),
+        )
+    }
+
+    fn consider_request_ecmascript_pair(
+        &mut self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        consumer: &rootlight_service::FirstSliceProjectInput<'_>,
+        provider: &rootlight_service::FirstSliceProjectInput<'_>,
+        bridge: EcmascriptBridgeDemand<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let pair = (consumer.file(), provider.file());
+        if !self.begin_pair_attempt(pair) || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        let Some(preview_bytes) =
+            project_request_include_pair_owned_bytes(request, consumer, provider)
+        else {
+            return Ok(());
+        };
+        if preview_bytes > self.remaining_candidate_bytes {
+            return Ok(());
+        }
+        let consumer = project_input_to_wire(request, consumer)?;
+        let provider = project_input_to_wire(request, provider)?;
+        self.consider_ecmascript_owned_pair(
+            pair,
+            &consumer,
+            &provider,
+            bridge,
+            cancellation,
+            preview_bytes,
+        )
+    }
+
+    fn consider_ecmascript_pair(
+        &mut self,
+        consumer: &adapter::ProjectInput,
+        provider: &adapter::ProjectInput,
+        bridge: EcmascriptBridgeDemand<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let pair = (
+            adapter_project_input_file_id(consumer)?,
+            adapter_project_input_file_id(provider)?,
+        );
+        if !self.begin_pair_attempt(pair) || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        self.consider_ecmascript_owned_pair(pair, consumer, provider, bridge, cancellation, 0)
+    }
+
+    fn consider_ecmascript_owned_pair(
+        &mut self,
+        pair: (FileId, FileId),
+        consumer: &adapter::ProjectInput,
+        provider: &adapter::ProjectInput,
+        bridge: EcmascriptBridgeDemand<'_>,
+        cancellation: &Cancellation,
+        preview_bytes: usize,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let Some(owned_bytes) = project_include_pair_owned_bytes(consumer, provider) else {
+            return Ok(());
+        };
+        let owned_bytes = owned_bytes.max(preview_bytes);
+        if !self.can_materialize_pair(consumer, provider, owned_bytes) {
+            return Ok(());
+        }
+        if bridge.occurrence_end.is_none() {
+            return Ok(());
+        }
+        let Some(provider_minimum) =
+            self.ecmascript_provider_minimum(provider, bridge.bindings, cancellation)?
+        else {
+            return Ok(());
+        };
+        let full_source_bytes = consumer
+            .source
+            .len()
+            .checked_add(provider.source.len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if full_source_bytes <= self.max_bytes {
+            return self.consider_ranked_pair(
+                pair,
+                project_include_bridge_candidate(
+                    consumer.clone(),
+                    provider.clone(),
+                    full_source_bytes,
+                    Vec::new(),
+                    false,
+                    bridge.demand,
+                    owned_bytes,
+                ),
+            );
+        }
+        if ecmascript_bridge_consumer_minimum(bridge.consumer_source, bridge.occurrence_end)
+            .is_none()
+        {
+            return Ok(());
+        }
+        if consumer.source.len() >= self.max_bytes {
+            return Ok(());
+        }
+        if consumer.source.len().saturating_add(provider_minimum) > self.max_bytes {
+            return Ok(());
+        }
+        let remaining = self.max_bytes.saturating_sub(consumer.source.len());
+        let Some(provider_projection) =
+            ecmascript_bridge_prefix(&provider.source, remaining, provider_minimum)
+        else {
+            return Ok(());
+        };
+        if !ecmascript_bridge_projection_is_equivalent(provider, &provider_projection) {
+            return Ok(());
+        }
+        let source_bytes = consumer
+            .source
+            .len()
+            .checked_add(provider_projection.source.len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let mut projected_provider = provider.clone();
+        // Consumer call sites retain exact full-source identity. Only provider
+        // provenance may use a parseable, semantically empty-suffix prefix.
+        projected_provider.source = provider_projection.source;
+        let mut prefixes = Vec::new();
+        prefixes
+            .try_reserve_exact(1)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        if let Some(prefix) = apply_supplemental_prefix_identity(
+            provider,
+            &mut projected_provider,
+            provider_projection.retained_prefix_bytes,
+        )? {
+            prefixes.push(prefix);
+        }
+        if prefixes.is_empty() {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        self.consider_ranked_pair(
+            pair,
+            project_include_bridge_candidate(
+                consumer.clone(),
+                projected_provider,
+                source_bytes,
+                prefixes,
+                false,
+                bridge.demand,
+                owned_bytes,
+            ),
+        )
+    }
+
+    fn ecmascript_provider_minimum(
+        &mut self,
+        provider: &adapter::ProjectInput,
+        bindings: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<usize>, FirstSliceProjectAnalysisError> {
+        let file = adapter_project_input_file_id(provider)?;
+        if !self.ecmascript_provider_identifiers.contains_key(&file) {
+            if !self.claim_scan_bytes(provider.source.len()) {
+                return Ok(None);
+            }
+            let Ok(source) = std::str::from_utf8(&provider.source) else {
+                return Ok(None);
+            };
+            let mut identifiers = BTreeMap::new();
+            for_each_ecmascript_identifier(source, cancellation, |_, end, identifier| {
+                if identifiers.len() < PROJECT_ADAPTER_PARTITION_CONTEXT_WORK {
+                    identifiers.entry(identifier.to_owned()).or_insert(end);
+                }
+            })?;
+            self.ecmascript_provider_identifiers
+                .insert(file, identifiers);
+        }
+        let Some(identifiers) = self.ecmascript_provider_identifiers.get(&file) else {
+            return Ok(None);
+        };
+        let mut occurrence_end = None;
+        for_each_ecmascript_import_identifier(bindings, |identifier| {
+            if let Some(end) = identifiers.get(identifier).copied() {
+                occurrence_end =
+                    Some(occurrence_end.map_or(end, |observed: usize| observed.min(end)));
+            }
+        });
+        Ok(occurrence_end.and_then(|end| {
+            std::str::from_utf8(&provider.source)
+                .ok()
+                .and_then(|source| ecmascript_bridge_context_end(source, end))
+        }))
+    }
+
+    fn consider_ranked_pair(
+        &mut self,
+        pair: (FileId, FileId),
+        mut candidate: ProjectIncludeBridgeCandidate,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let Some(actual_owned_bytes) =
+            project_include_pair_owned_bytes(&candidate.consumer, &candidate.provider)
+        else {
+            return Ok(());
+        };
+        candidate.owned_bytes = candidate.owned_bytes.max(actual_owned_bytes);
+        if candidate.owned_bytes > self.remaining_candidate_bytes
+            || self.retained_pairs.len() >= self.max_candidates
+            || !project_include_request_fits(
+                self.base_request_payload_bytes,
+                [&candidate.consumer, &candidate.provider],
+            )
+        {
+            return Ok(());
+        }
         self.candidates
             .try_reserve(1)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        self.candidates.push(ProjectIncludeBridgeCandidate {
-            test_context: cpp_positive_test_context(&consumer.source),
-            demand: cpp_include_provider_demand(&consumer, &provider),
-            shared_path_components: shared_project_path_components(&consumer.path, &provider.path),
-            consumer,
-            provider,
-            source_bytes,
-        });
-        self.candidates.sort_unstable_by(|left, right| {
-            right
-                .test_context
-                .cmp(&left.test_context)
-                .then_with(|| right.demand.cmp(&left.demand))
-                .then_with(|| {
-                    right
-                        .shared_path_components
-                        .cmp(&left.shared_path_components)
-                })
-                .then_with(|| left.source_bytes.cmp(&right.source_bytes))
-                .then_with(|| left.consumer.path.cmp(&right.consumer.path))
-                .then_with(|| left.provider.path.cmp(&right.provider.path))
-        });
-        // Each retained pair is individually bounded by the 64 KiB bridge.
-        // Capping the pool therefore bounds cloned source storage while later
-        // splits can still replace weaker earlier evidence.
-        self.candidates
-            .truncate(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES);
+        if !self.retained_pairs.insert(pair) {
+            return Ok(());
+        }
+        self.remaining_candidate_bytes = self
+            .remaining_candidate_bytes
+            .saturating_sub(candidate.owned_bytes);
+        self.candidates.push(candidate);
         Ok(())
     }
+
+    fn begin_pair_attempt(&mut self, pair: (FileId, FileId)) -> bool {
+        if self.retained_pairs.contains(&pair)
+            || self.retained_pairs.len() >= self.max_candidates
+            || self.examined_pair_attempts >= self.max_pair_attempts
+        {
+            return false;
+        }
+        self.examined_pair_attempts = self.examined_pair_attempts.saturating_add(1);
+        true
+    }
+
+    fn can_materialize_pair(
+        &self,
+        consumer: &adapter::ProjectInput,
+        provider: &adapter::ProjectInput,
+        owned_bytes: usize,
+    ) -> bool {
+        owned_bytes <= self.remaining_candidate_bytes
+            && self.retained_pairs.len() < self.max_candidates
+            && project_include_request_fits(self.base_request_payload_bytes, [consumer, provider])
+    }
+
+    fn discovery_exhausted(&self) -> bool {
+        self.retained_pairs.len() >= self.max_candidates
+            || self.examined_pair_attempts >= self.max_pair_attempts
+            || self.remaining_candidate_bytes == 0
+    }
+
+    fn claim_scan_bytes(&mut self, bytes: usize) -> bool {
+        let Some(remaining) = self.remaining_scan_bytes.checked_sub(bytes) else {
+            self.remaining_scan_bytes = 0;
+            return false;
+        };
+        self.remaining_scan_bytes = remaining;
+        true
+    }
+}
+
+fn adapter_project_input_file_id(
+    input: &adapter::ProjectInput,
+) -> Result<FileId, FirstSliceProjectAnalysisError> {
+    Ok(FileId::from_bytes(
+        input
+            .file
+            .as_ref()
+            .ok_or(FirstSliceProjectAnalysisError::Identity)?
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| FirstSliceProjectAnalysisError::Identity)?,
+    ))
+}
+
+fn project_include_pair_owned_bytes(
+    consumer: &adapter::ProjectInput,
+    provider: &adapter::ProjectInput,
+) -> Option<usize> {
+    adapter_project_input_owned_bytes(consumer)?
+        .checked_add(adapter_project_input_owned_bytes(provider)?)
+}
+
+fn adapter_project_input_owned_bytes(input: &adapter::ProjectInput) -> Option<usize> {
+    let mut owned_bytes = std::mem::size_of::<adapter::ProjectInput>();
+    for bytes in [
+        input.file.as_ref().map_or(0, |file| file.value.len()),
+        input.path.len(),
+        input.language.len(),
+        input
+            .source_digest
+            .as_ref()
+            .map_or(0, |digest| digest.value.len()),
+        input.source.len(),
+        input
+            .origins
+            .len()
+            .checked_mul(std::mem::size_of::<adapter::GeneratedOrigin>())?,
+    ] {
+        owned_bytes = owned_bytes.checked_add(bytes)?;
+    }
+    for origin in &input.origins {
+        owned_bytes = owned_bytes.checked_add(origin.origin_path.len())?;
+        owned_bytes = owned_bytes.checked_add(origin.transformation.len())?;
+        owned_bytes = owned_bytes.checked_add(
+            origin
+                .generator_digest
+                .as_ref()
+                .map_or(0, |digest| digest.value.len()),
+        )?;
+    }
+    Some(owned_bytes.max(project_analysis_input_field_bytes(input)?))
+}
+
+fn project_request_include_pair_owned_bytes(
+    request: &FirstSliceProjectAnalysisRequest<'_>,
+    consumer: &rootlight_service::FirstSliceProjectInput<'_>,
+    provider: &rootlight_service::FirstSliceProjectInput<'_>,
+) -> Option<usize> {
+    project_request_input_owned_bytes(request, consumer)?
+        .checked_add(project_request_input_owned_bytes(request, provider)?)
+}
+
+fn project_request_input_owned_bytes(
+    request: &FirstSliceProjectAnalysisRequest<'_>,
+    input: &rootlight_service::FirstSliceProjectInput<'_>,
+) -> Option<usize> {
+    let mut owned_bytes = std::mem::size_of::<adapter::ProjectInput>();
+    for bytes in [
+        input.file().as_bytes().len(),
+        input.path().len(),
+        request.language().len(),
+        input.content_hash().as_bytes().len(),
+        input.source().len(),
+        input
+            .origins()
+            .len()
+            .checked_mul(std::mem::size_of::<adapter::GeneratedOrigin>())?,
+    ] {
+        owned_bytes = owned_bytes.checked_add(bytes)?;
+    }
+    for origin in input.origins() {
+        owned_bytes = owned_bytes.checked_add(origin.origin_path().as_str().len())?;
+        owned_bytes = owned_bytes.checked_add(origin.transformation().as_str().len())?;
+        owned_bytes = owned_bytes.checked_add(
+            origin
+                .generator_digest()
+                .map_or(0, |digest| digest.as_bytes().len()),
+        )?;
+    }
+    Some(owned_bytes)
+}
+
+fn project_include_request_fits<'a>(
+    base_request_payload_bytes: usize,
+    inputs: impl IntoIterator<Item = &'a adapter::ProjectInput>,
+) -> bool {
+    let request_payload_bytes =
+        inputs
+            .into_iter()
+            .try_fold(base_request_payload_bytes, |payload_bytes, input| {
+                payload_bytes.checked_add(project_analysis_input_field_bytes(input)?)
+            });
+    request_payload_bytes
+        .and_then(project_analysis_frame_bytes)
+        .is_some_and(|frame_bytes| frame_bytes <= MAX_ADAPTER_FRAME_BYTES)
+}
+
+fn project_include_bridge_candidate(
+    consumer: adapter::ProjectInput,
+    provider: adapter::ProjectInput,
+    source_bytes: usize,
+    prefixes: Vec<FirstSliceSupplementalPrefix>,
+    test_context: bool,
+    demand: usize,
+    owned_bytes: usize,
+) -> ProjectIncludeBridgeCandidate {
+    ProjectIncludeBridgeCandidate {
+        prefixes,
+        test_context,
+        demand,
+        shared_path_components: shared_project_path_components(&consumer.path, &provider.path),
+        consumer,
+        provider,
+        source_bytes,
+        owned_bytes,
+    }
+}
+
+fn project_include_candidate_order(
+    left: &ProjectIncludeBridgeCandidate,
+    right: &ProjectIncludeBridgeCandidate,
+) -> std::cmp::Ordering {
+    right
+        .test_context
+        .cmp(&left.test_context)
+        .then_with(|| right.demand.cmp(&left.demand))
+        .then_with(|| {
+            right
+                .shared_path_components
+                .cmp(&left.shared_path_components)
+        })
+        .then_with(|| left.source_bytes.cmp(&right.source_bytes))
+        .then_with(|| left.owned_bytes.cmp(&right.owned_bytes))
+        .then_with(|| left.consumer.path.cmp(&right.consumer.path))
+        .then_with(|| left.provider.path.cmp(&right.provider.path))
 }
 
 fn project_include_candidate_cost(
     candidate: &ProjectIncludeBridgeCandidate,
     selected: &BTreeMap<String, adapter::ProjectInput>,
-) -> (usize, usize) {
+) -> Option<(usize, usize, usize)> {
     [&candidate.consumer, &candidate.provider]
         .into_iter()
         .filter(|input| !selected.contains_key(&input.path))
-        .fold((0_usize, 0_usize), |(bytes, files), input| {
-            (
-                bytes.saturating_add(input.source.len()),
-                files.saturating_add(1),
-            )
-        })
+        .try_fold(
+            (0_usize, 0_usize, 0_usize),
+            |(bytes, files, payload_bytes), input| {
+                Some((
+                    bytes.checked_add(input.source.len())?,
+                    files.checked_add(1)?,
+                    payload_bytes.checked_add(project_analysis_input_field_bytes(input)?)?,
+                ))
+            },
+        )
 }
 
 fn project_include_candidate_priority(
@@ -1072,7 +2402,9 @@ impl ProjectIncludeSource for rootlight_service::FirstSliceProjectInput<'_> {
 fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
     inputs: &[&'a T],
     partitions: &BTreeMap<&str, usize>,
-    mut visit: impl FnMut(&'a T, &'a T) -> Result<(), FirstSliceProjectAnalysisError>,
+    remaining_scan_bytes: &mut usize,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&'a T, &'a T) -> Result<bool, FirstSliceProjectAnalysisError>,
 ) -> Result<(), FirstSliceProjectAnalysisError> {
     if inputs
         .windows(2)
@@ -1082,6 +2414,9 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
             .any(|input| !partitions.contains_key(input.include_path()))
     {
         return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    if inputs.len() > PROJECT_ADAPTER_PARTITION_CONTEXT_WORK {
+        return Ok(());
     }
     let mut by_file_name = Vec::new();
     by_file_name
@@ -1095,6 +2430,15 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
     });
 
     for consumer in inputs {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        let Some(remaining) = remaining_scan_bytes.checked_sub(consumer.include_source().len())
+        else {
+            *remaining_scan_bytes = 0;
+            return Ok(());
+        };
+        *remaining_scan_bytes = remaining;
         let source = match std::str::from_utf8(consumer.include_source()) {
             Ok(source) => source,
             Err(_) => continue,
@@ -1104,6 +2448,9 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
             .copied()
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
         for line in source.lines() {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
             let Some((include, relative_first)) = cpp_include_path(line) else {
                 continue;
             };
@@ -1120,12 +2467,128 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
                 .get(provider.include_path())
                 .copied()
                 .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-            if consumer_partition != provider_partition {
-                visit(consumer, provider)?;
+            if consumer_partition != provider_partition && !visit(consumer, provider)? {
+                return Ok(());
             }
         }
     }
     Ok(())
+}
+
+fn scan_cross_partition_ecmascript<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+    partitions: &BTreeMap<&str, usize>,
+    remaining_scan_bytes: &mut usize,
+    remaining_imports: &mut usize,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(
+        &'a T,
+        &'a T,
+        &str,
+        usize,
+        Option<usize>,
+        &mut usize,
+    ) -> Result<bool, FirstSliceProjectAnalysisError>,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if inputs
+        .windows(2)
+        .any(|pair| pair[0].include_path() >= pair[1].include_path())
+        || inputs
+            .iter()
+            .any(|input| !partitions.contains_key(input.include_path()))
+    {
+        return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    for consumer in inputs.iter().take(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK) {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        if *remaining_imports == 0 {
+            return Ok(());
+        }
+        let Some(remaining) = remaining_scan_bytes.checked_sub(consumer.include_source().len())
+        else {
+            *remaining_scan_bytes = 0;
+            return Ok(());
+        };
+        *remaining_scan_bytes = remaining;
+        let Ok(source) = std::str::from_utf8(consumer.include_source()) else {
+            continue;
+        };
+        let consumer_partition = partitions
+            .get(consumer.include_path())
+            .copied()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let mut continue_scanning = true;
+        let observed = for_each_ecmascript_relative_import(
+            source,
+            *remaining_imports,
+            cancellation,
+            |module, bindings, demand, _statement_end, occurrence_end| {
+                if !continue_scanning || !ecmascript_import_has_runtime_binding(bindings) {
+                    return Ok(());
+                }
+                let Some(provider) = project_ecmascript_provider_from_sorted(
+                    consumer.include_path(),
+                    module,
+                    inputs,
+                ) else {
+                    return Ok(());
+                };
+                let provider_partition = partitions
+                    .get(provider.include_path())
+                    .copied()
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                if consumer_partition != provider_partition {
+                    continue_scanning = visit(
+                        consumer,
+                        provider,
+                        bindings,
+                        demand,
+                        occurrence_end,
+                        remaining_scan_bytes,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        *remaining_imports = remaining_imports.saturating_sub(observed);
+        if !continue_scanning {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn project_ecmascript_provider_from_sorted<'a, T: ProjectIncludeSource>(
+    consumer_path: &str,
+    module: &str,
+    inputs: &[&'a T],
+) -> Option<&'a T> {
+    const MODULE_SUFFIXES: [&str; 12] = [
+        "", ".d.ts", ".d.mts", ".d.cts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".js",
+        ".ts",
+    ];
+
+    let resolved = relative_include_path(consumer_path, module)?;
+    let module = project_module_path_ref(&resolved);
+    let index_module = format!("{module}/index");
+    let mut provider = None;
+    for stem in [module, index_module.as_str()] {
+        for suffix in MODULE_SUFFIXES {
+            let candidate_path = format!("{stem}{suffix}");
+            let Some(candidate) = exact_project_include(inputs, &candidate_path) else {
+                continue;
+            };
+            if provider
+                .is_some_and(|provider: &T| provider.include_path() != candidate.include_path())
+            {
+                return None;
+            }
+            provider = Some(candidate);
+        }
+    }
+    provider
 }
 
 fn project_include_provider<'a, T: ProjectIncludeSource>(
@@ -14313,6 +15776,546 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_split_keeps_relative_ecmascript_imports_together() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: vec![file_byte; 32],
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let batch = vec![
+            input(1, "src/alpha.js", b"export const alpha = 1;\n"),
+            input(
+                2,
+                "src/caller.js",
+                b"import {\n  provide\n} from './provider.js';\nprovide();\n",
+            ),
+            input(3, "src/provider.js", b"export function provide() {}\n"),
+            input(4, "src/zeta.js", b"export const zeta = 1;\n"),
+        ];
+        let (left, right) = split_project_adapter_partition(batch, &Cancellation::new())
+            .expect("adapter split planning succeeds")
+            .expect("adapter batch is splittable");
+        let partition = |path: &str| {
+            if left.iter().any(|input| input.path == path) {
+                0
+            } else if right.iter().any(|input| input.path == path) {
+                1
+            } else {
+                2
+            }
+        };
+
+        let caller_partition = partition("src/caller.js");
+        assert_ne!(caller_partition, 2);
+        assert_eq!(caller_partition, partition("src/provider.js"));
+        assert!(left.len().max(right.len()) <= 3);
+    }
+
+    #[test]
+    fn adaptive_ecmascript_split_projects_bounded_import_bridge() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let mut provider_source = b"export function provide() { return 1; }\n".to_vec();
+        provider_source.resize(80 * 1024, b' ');
+        let mut consumer_source = b"import {provide} from './provider';\n".to_vec();
+        consumer_source.extend_from_slice(b"export function outer() {\n");
+        while consumer_source.len() < 20 * 1024 {
+            consumer_source.extend_from_slice(b"// retained lexical context\n");
+        }
+        consumer_source.extend_from_slice(b"function caller() { return provide(); }\n");
+        consumer_source.extend_from_slice(b"}\n");
+        let provider = input(1, "src/provider.js", &provider_source);
+        let consumer = input(2, "src/consumer.js", &consumer_source);
+        let original_provider_digest = provider.source_digest.clone();
+        let consumer_text =
+            std::str::from_utf8(&consumer.source).expect("consumer fixture is UTF-8");
+        let mut import = None;
+        for_each_ecmascript_relative_import(
+            consumer_text,
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES,
+            &Cancellation::new(),
+            |module, bindings, demand, statement_end, occurrence_end| {
+                import = Some((
+                    module.to_owned(),
+                    bindings.to_owned(),
+                    demand,
+                    statement_end,
+                    occurrence_end,
+                ));
+                Ok(())
+            },
+        )
+        .expect("fixture import is scanned");
+        let (_, _, _, _, occurrence_end) = import.expect("fixture import is present");
+        ecmascript_bridge_consumer_minimum(consumer_text, occurrence_end)
+            .expect("consumer bridge minimum is available");
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+        planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("ECMAScript bridge planning succeeds");
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("ECMAScript bridge finalizes");
+        let [bridge] = bridges.as_slice() else {
+            panic!(
+                "one relative import produces one bridge, observed {}",
+                bridges.len()
+            );
+        };
+        let projected_consumer = bridge
+            .inputs
+            .iter()
+            .find(|input| input.path == "src/consumer.js")
+            .expect("bridge retains the consumer");
+        let projected_provider = bridge
+            .inputs
+            .iter()
+            .find(|input| input.path == "src/provider.js")
+            .expect("bridge retains the provider");
+
+        assert_eq!(projected_consumer.source, consumer.source);
+        assert!(projected_provider.source.len() < provider.source.len());
+        assert_ne!(projected_provider.source_digest, original_provider_digest);
+        assert_eq!(
+            projected_provider
+                .source_digest
+                .as_ref()
+                .expect("projected source has its own digest")
+                .value,
+            content_hash(&projected_provider.source).as_bytes()
+        );
+        assert_eq!(bridge.prefixes.len(), 1);
+        let retained_bytes = projected_provider
+            .source
+            .iter()
+            .zip(&provider.source)
+            .take_while(|(projected, primary)| projected == primary)
+            .count();
+        assert!(retained_bytes < projected_provider.source.len());
+        assert_eq!(
+            projected_provider.source.get(retained_bytes..),
+            Some(b"\n".as_slice())
+        );
+        assert!(
+            std::str::from_utf8(&projected_consumer.source)
+                .expect("projected source remains UTF-8")
+                .contains("return provide();")
+        );
+        assert!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>()
+                <= PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn ecmascript_bridge_planning_bounds_optional_scan_and_candidate_work() {
+        fn input(file_index: usize, path: String, source: Vec<u8>) -> adapter::ProjectInput {
+            let mut file = vec![0_u8; 20];
+            file[..8].copy_from_slice(
+                &u64::try_from(file_index)
+                    .expect("fixture index fits")
+                    .to_le_bytes(),
+            );
+            adapter::ProjectInput {
+                file: Some(common::FileId { value: file }),
+                path,
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider_count = PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES.saturating_add(8);
+        let mut source = String::new();
+        let mut providers = Vec::new();
+        providers
+            .try_reserve_exact(provider_count)
+            .expect("fixture providers fit");
+        for index in 0..provider_count {
+            source.push_str(&format!(
+                "import {{value{index}}} from './provider{index}';\nvalue{index}();\n"
+            ));
+            providers.push(input(
+                index.saturating_add(1),
+                format!("src/provider{index}.js"),
+                format!("export function value{index}() {{}}\n").into_bytes(),
+            ));
+        }
+        let consumer = input(
+            provider_count.saturating_add(1),
+            "src/consumer.js".to_owned(),
+            source.into_bytes(),
+        );
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+        planner
+            .scan_partition_pair(
+                &providers,
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("bounded bridge scan succeeds");
+
+        assert_eq!(
+            planner.examined_pair_attempts,
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
+        );
+        assert_eq!(
+            planner.candidates.len(),
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
+        );
+        assert_eq!(
+            planner.retained_pairs.len(),
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
+        );
+        assert_eq!(
+            planner.remaining_imports,
+            PROJECT_ADAPTER_PARTITION_CONTEXT_WORK.saturating_sub(provider_count)
+        );
+        planner
+            .scan_partition_pair(
+                &providers,
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("exhausted optional bridge scan fails open");
+        assert_eq!(
+            planner.candidates.len(),
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
+        );
+    }
+
+    #[test]
+    fn ecmascript_bridge_rejects_early_unusable_imports_without_spending_candidate_capacity() {
+        fn input(file_byte: u8, path: &str, source: Vec<u8>) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let mut provider_source = b"export function target() { return 1; }\n".to_vec();
+        provider_source.resize(80 * 1024, b' ');
+        let provider = input(1, "src/provider.js", provider_source);
+        let mut source = String::new();
+        for _ in 0..PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES {
+            source.push_str("import type {TargetShape} from './provider';\n");
+        }
+        source.push_str("import {MissingValue} from './provider';\n");
+        source.push_str("import {target} from './provider';\ntarget();\n");
+        let consumer = input(2, "src/consumer.js", source.into_bytes());
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("unusable imports fail open before the valid bridge");
+
+        assert_eq!(planner.examined_pair_attempts, 2);
+        assert_eq!(planner.retained_pairs.len(), 1);
+        assert_eq!(planner.candidates.len(), 1);
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("valid import bridge finalizes");
+        assert_eq!(bridges.len(), 1);
+        assert!(
+            std::str::from_utf8(&bridges[0].inputs[0].source)
+                .expect("projected fixture remains UTF-8")
+                .contains("target")
+                || std::str::from_utf8(&bridges[0].inputs[1].source)
+                    .expect("projected fixture remains UTF-8")
+                    .contains("target")
+        );
+    }
+
+    #[test]
+    fn ecmascript_bridge_rejects_projection_when_omitted_suffix_can_change_binding() {
+        fn input(file_byte: u8, path: &str, source: Vec<u8>) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider = input(
+            1,
+            "src/provider.js",
+            b"export function target() { return 1; }\n".to_vec(),
+        );
+        let mut consumer_source =
+            b"import {target} from './provider';\nconst observed = target();\n".to_vec();
+        consumer_source.resize(80 * 1024, b' ');
+        consumer_source.extend_from_slice(b"\nfunction target() { return 2; }\n");
+        let consumer = input(2, "src/consumer.js", consumer_source);
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("unsafe projection fails open");
+
+        assert_eq!(planner.examined_pair_attempts, 1);
+        assert!(planner.retained_pairs.is_empty());
+        assert!(planner.candidates.is_empty());
+    }
+
+    #[test]
+    fn bridge_candidate_accounting_includes_origin_metadata_and_frame_envelope() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider = input(1, "include/provider.hpp", b"struct Provider {};\n");
+        let mut consumer = input(
+            2,
+            "src/consumer.cpp",
+            b"#include <provider.hpp>\nProvider value;\n",
+        );
+        consumer.origins.push(adapter::GeneratedOrigin {
+            generated_start_byte: 0,
+            generated_end_byte: 1,
+            origin_path: "generated/".repeat(512),
+            origin_start_byte: 0,
+            origin_end_byte: 1,
+            transformation: "bounded-origin-fixture".repeat(32),
+            generator_digest: Some(common::ContentHash { value: vec![7; 32] }),
+        });
+        let owned_bytes = project_include_pair_owned_bytes(&consumer, &provider)
+            .expect("candidate ownership is measurable");
+        let source_bytes = consumer.source.len() + provider.source.len();
+        assert!(owned_bytes > source_bytes);
+
+        let mut ownership_planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+        ownership_planner.remaining_candidate_bytes = owned_bytes.saturating_sub(1);
+        ownership_planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("oversized origin metadata fails open");
+        assert_eq!(ownership_planner.examined_pair_attempts, 1);
+        assert!(ownership_planner.candidates.is_empty());
+        assert!(ownership_planner.retained_pairs.is_empty());
+
+        let mut frame_planner = ProjectIncludeBridgePlanner::new(0, MAX_ADAPTER_FRAME_BYTES)
+            .expect("bridge planner accepts a saturated base envelope");
+        frame_planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("saturated request envelope fails open");
+        assert_eq!(frame_planner.examined_pair_attempts, 1);
+        assert!(frame_planner.candidates.is_empty());
+    }
+
+    #[test]
+    fn cpp_bridge_discovery_stops_at_shared_scan_byte_bound() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider = input(1, "include/provider.hpp", b"struct Provider {};\n");
+        let consumer = input(
+            2,
+            "src/consumer.cpp",
+            b"#include <provider.hpp>\nProvider value;\n",
+        );
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+        planner.remaining_scan_bytes = consumer.source.len().saturating_sub(1);
+        planner
+            .scan_partition_pair(
+                std::slice::from_ref(&provider),
+                std::slice::from_ref(&consumer),
+                &Cancellation::new(),
+            )
+            .expect("adaptive discovery stops at exhaustion");
+        assert_eq!(planner.remaining_scan_bytes, 0);
+        assert_eq!(planner.examined_pair_attempts, 0);
+
+        let inputs = [&provider, &consumer];
+        let partitions = BTreeMap::from([("include/provider.hpp", 0), ("src/consumer.cpp", 1)]);
+        let mut scan_bytes = consumer.source.len().saturating_sub(1);
+        let mut visited = false;
+        scan_cross_partition_includes(
+            &inputs,
+            &partitions,
+            &mut scan_bytes,
+            &Cancellation::new(),
+            |_, _| {
+                visited = true;
+                Ok(true)
+            },
+        )
+        .expect("top-level discovery stops at exhaustion");
+        assert!(!visited);
+        assert_eq!(scan_bytes, 0);
+    }
+
+    #[test]
+    fn top_level_ecmascript_discovery_crosses_initial_file_partition_boundary() {
+        fn input(file_index: usize, path: String, source: Vec<u8>) -> adapter::ProjectInput {
+            let mut file = vec![0_u8; 20];
+            file[..8].copy_from_slice(
+                &u64::try_from(file_index)
+                    .expect("fixture index fits")
+                    .to_le_bytes(),
+            );
+            adapter::ProjectInput {
+                file: Some(common::FileId { value: file }),
+                path,
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let mut inputs = Vec::new();
+        for index in 0..PROJECT_ADAPTER_PARTITION_FILES.saturating_sub(1) {
+            inputs.push(input(index, format!("src/{index:04}.js"), Vec::new()));
+        }
+        inputs.push(input(
+            PROJECT_ADAPTER_PARTITION_FILES,
+            "src/provider.js".to_owned(),
+            b"export function target() {}\n".to_vec(),
+        ));
+        inputs.push(input(
+            PROJECT_ADAPTER_PARTITION_FILES.saturating_add(1),
+            "src/zz_consumer.js".to_owned(),
+            b"import {target} from './provider.js';\ntarget();\n".to_vec(),
+        ));
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let partitions = ordered
+            .iter()
+            .map(|input| {
+                (
+                    input.path.as_str(),
+                    usize::from(input.path == "src/zz_consumer.js"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .expect("scan budget fits usize");
+        let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+        let mut pairs = Vec::new();
+
+        scan_cross_partition_ecmascript(
+            &ordered,
+            &partitions,
+            &mut scan_bytes,
+            &mut remaining_imports,
+            &Cancellation::new(),
+            |consumer, provider, _, _, _, _| {
+                pairs.push((consumer.path.as_str(), provider.path.as_str()));
+                Ok(true)
+            },
+        )
+        .expect("top-level ECMAScript discovery succeeds");
+
+        assert_eq!(
+            pairs,
+            [("src/zz_consumer.js", "src/provider.js")],
+            "an explicit-extension import bridges the initial 512-file boundary"
+        );
+    }
+
+    #[test]
     fn adaptive_cpp_split_emits_bounded_direct_include_bridge() {
         fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
             adapter::ProjectInput {
@@ -14349,24 +16352,24 @@ mod tests {
             - consumer.source.len();
         let left = vec![provider];
         let right = vec![consumer];
-        let mut fixed_planner = ProjectIncludeBridgePlanner::new(fixed_source_bytes)
+        let mut fixed_planner = ProjectIncludeBridgePlanner::new(fixed_source_bytes, 0)
             .expect("fixed source overhead is accounted");
         fixed_planner
-            .scan_partition_pair(&left, &right)
+            .scan_partition_pair(&left, &right, &Cancellation::new())
             .expect("fixed-overhead bridge planning succeeds");
         assert!(
             fixed_planner
-                .finish()
+                .finish(&Cancellation::new())
                 .expect("fixed-overhead bridge finalization succeeds")
                 .is_empty()
         );
         let mut direct_planner =
-            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
         direct_planner
-            .scan_partition_pair(&left, &right)
+            .scan_partition_pair(&left, &right, &Cancellation::new())
             .expect("bridge planning succeeds");
         let bridges = direct_planner
-            .finish()
+            .finish(&Cancellation::new())
             .expect("direct bridge finalization succeeds");
         let [bridge] = bridges.as_slice() else {
             panic!("direct cross-partition include produces one bridge");
@@ -14376,6 +16379,7 @@ mod tests {
         assert_eq!(right.len(), 1);
         assert_eq!(
             bridge
+                .inputs
                 .iter()
                 .map(|input| input.path.as_str())
                 .collect::<Vec<_>>(),
@@ -14408,20 +16412,21 @@ mod tests {
         ];
         let second_right = vec![input(5, "tests/second_test.cpp", &second_consumer_source)];
         let mut planner =
-            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
         planner
-            .scan_partition_pair(&left, &right)
+            .scan_partition_pair(&left, &right, &Cancellation::new())
             .expect("first split bridge planning succeeds");
         planner
-            .scan_partition_pair(&second_left, &second_right)
+            .scan_partition_pair(&second_left, &second_right, &Cancellation::new())
             .expect("second split bridge planning succeeds");
         let bounded_bridges = planner
-            .finish()
+            .finish(&Cancellation::new())
             .expect("bounded bridge finalization succeeds");
         assert_eq!(bounded_bridges.len(), 2);
         let bounded_bridge = &bounded_bridges[0];
         assert_eq!(
             bounded_bridge
+                .inputs
                 .iter()
                 .map(|input| input.path.as_str())
                 .collect::<Vec<_>>(),
@@ -14433,6 +16438,7 @@ mod tests {
         );
         assert!(
             bounded_bridge
+                .inputs
                 .iter()
                 .map(|input| input.source.len())
                 .sum::<usize>()
@@ -14440,6 +16446,7 @@ mod tests {
         );
         assert_eq!(
             bounded_bridges[1]
+                .inputs
                 .iter()
                 .map(|input| input.path.as_str())
                 .collect::<Vec<_>>(),
@@ -14447,6 +16454,7 @@ mod tests {
         );
         assert!(bounded_bridges.iter().all(|partition| {
             partition
+                .inputs
                 .iter()
                 .map(|input| input.source.len())
                 .sum::<usize>()
@@ -14458,7 +16466,7 @@ mod tests {
             .expect("first partition progress is valid");
         let second = record_project_partition_progress(&right, &mut completed_paths)
             .expect("second partition progress is valid");
-        let supplemental = record_project_partition_progress(bridge, &mut completed_paths)
+        let supplemental = record_project_partition_progress(&bridge.inputs, &mut completed_paths)
             .expect("bridge duplicates are excluded from progress");
         assert_eq!(first.0 + second.0, 2);
         assert_eq!(first.1 + second.1, expected_bytes);
@@ -14507,10 +16515,17 @@ mod tests {
             ("tests/parser_test.cpp", 1),
         ]);
         let mut pairs = Vec::new();
-        scan_cross_partition_includes(&ordered, &split_partitions, |consumer, provider| {
-            pairs.push((consumer.path.as_str(), provider.path.as_str()));
-            Ok(())
-        })
+        let mut scan_bytes = usize::MAX;
+        scan_cross_partition_includes(
+            &ordered,
+            &split_partitions,
+            &mut scan_bytes,
+            &Cancellation::new(),
+            |consumer, provider| {
+                pairs.push((consumer.path.as_str(), provider.path.as_str()));
+                Ok(true)
+            },
+        )
         .expect("cross-partition includes scan");
 
         assert_eq!(
@@ -14523,9 +16538,14 @@ mod tests {
             .iter()
             .map(|input| (input.path.as_str(), 0))
             .collect::<BTreeMap<_, _>>();
-        scan_cross_partition_includes(&ordered, &same_partition, |_, _| {
-            panic!("same-partition includes must not produce supplemental work")
-        })
+        let mut scan_bytes = usize::MAX;
+        scan_cross_partition_includes(
+            &ordered,
+            &same_partition,
+            &mut scan_bytes,
+            &Cancellation::new(),
+            |_, _| panic!("same-partition includes must not produce supplemental work"),
+        )
         .expect("same-partition includes scan");
     }
 
@@ -14534,25 +16554,29 @@ mod tests {
         let repository = RepositoryId::from_bytes([41; 16]);
         let generation = GenerationId::from_bytes([42; 20]);
         let inputs = Vec::new();
-        let mut local_failure =
-            |_, _, _: &[adapter::ProjectInput], _| Err(FirstSliceProjectAnalysisError::Analysis);
+        let mut local_failure = |_, _, _: &[adapter::ProjectInput], _, _: &[_]| {
+            Err(FirstSliceProjectAnalysisError::Analysis)
+        };
 
         append_supplemental_project_partition(
             &mut local_failure,
             NormalizedIrDocument::empty(repository, generation),
             true,
             &inputs,
+            &[],
         )
         .expect("supplemental local failure does not reject primary analysis");
 
-        let mut identity_failure =
-            |_, _, _: &[adapter::ProjectInput], _| Err(FirstSliceProjectAnalysisError::Identity);
+        let mut identity_failure = |_, _, _: &[adapter::ProjectInput], _, _: &[_]| {
+            Err(FirstSliceProjectAnalysisError::Identity)
+        };
         assert!(matches!(
             append_supplemental_project_partition(
                 &mut identity_failure,
                 NormalizedIrDocument::empty(repository, generation),
                 true,
                 &inputs,
+                &[],
             ),
             Err(FirstSliceProjectAnalysisError::Identity)
         ));
@@ -14590,13 +16614,13 @@ mod tests {
         assert_eq!(left.len(), 2);
         assert_eq!(right.len(), 2);
         let mut planner =
-            ProjectIncludeBridgePlanner::new(0).expect("bridge planner accepts empty overhead");
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
         planner
-            .scan_partition_pair(&left, &right)
+            .scan_partition_pair(&left, &right, &Cancellation::new())
             .expect("bridge planning succeeds");
         assert!(
             planner
-                .finish()
+                .finish(&Cancellation::new())
                 .expect("ambiguous bridge finalization succeeds")
                 .is_empty()
         );

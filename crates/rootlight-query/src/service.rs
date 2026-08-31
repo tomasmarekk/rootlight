@@ -670,7 +670,8 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. Exhausting a per-edge request budget
+    /// during the scan produces an explicit truncated result.
     pub fn execute_symbol_relationships(
         &self,
         plan: &SymbolRelationshipsPlan,
@@ -905,7 +906,8 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. A request budget that cannot fund flow
+    /// analysis produces an explicit truncated result.
     pub fn execute_flow_trace(
         &self,
         plan: &FlowTracePlan,
@@ -1085,7 +1087,8 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. A request budget that cannot fund cycle
+    /// analysis produces an explicit truncated result.
     pub fn execute_architecture_cycles(
         &self,
         plan: &ArchitectureCyclesPlan,
@@ -1255,7 +1258,8 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. A request budget that cannot fund the
+    /// reachability workspace produces an explicit truncated result.
     pub fn execute_code_dead(
         &self,
         plan: &CodeDeadPlan,
@@ -1428,7 +1432,9 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. Exhausting the request budget during
+    /// component or connection aggregation produces an explicit truncated
+    /// overview.
     pub fn execute_architecture_overview(
         &self,
         plan: &ArchitectureOverviewPlan,
@@ -1613,7 +1619,9 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. Exhausting the request budget during test
+    /// discovery, relation traversal, or ranking produces an explicit
+    /// truncated selection.
     pub fn execute_tests_select(
         &self,
         plan: &TestsSelectPlan,
@@ -1818,7 +1826,9 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. A request budget that cannot fund impact
+    /// analysis produces an explicit truncated result without inventing
+    /// resolved changes.
     pub fn execute_change_impact(
         &self,
         plan: &ChangeImpactPlan,
@@ -1996,7 +2006,8 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource exhaustion.
+    /// resource-accounting overflow. A request budget that cannot fund the
+    /// comparison workspace produces an explicit truncated result.
     pub fn execute_plan_change(
         &self,
         plan: &PlanChangePlan,
@@ -4193,7 +4204,12 @@ fn build_flow_adjacency(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(BTreeMap<SymbolId, Vec<FlowAdjEdge>>, bool), QueryError> {
     control.check()?;
-    tracker.add_memory(flow_adjacency_workspace_bytes(document, plan.direction)?)?;
+    let workspace_bytes = flow_adjacency_workspace_bytes(document, plan.direction)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok((BTreeMap::new(), true));
+    }
+    tracker.add_memory(workspace_bytes)?;
 
     let allowed: BTreeSet<RelationPredicate> = plan
         .families
@@ -6110,7 +6126,17 @@ fn build_change_impact(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ChangeImpactAnalysis, QueryError> {
     control.check()?;
-    tracker.add_memory(change_impact_workspace_bytes(document)?)?;
+    let lower_bound_bytes = checked_usize_to_u64(change_impact_workspace_lower_bound(document))?;
+    if !tracker.can_add(QueryResource::MemoryBytes, lower_bound_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return bounded_change_impact_fallback(plan, control);
+    }
+    let workspace_bytes = change_impact_workspace_bytes(document)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return bounded_change_impact_fallback(plan, control);
+    }
+    tracker.add_memory(workspace_bytes)?;
 
     // Resolve per-entity metadata: declaring file, kind label, and public
     // surface membership, plus the path-to-file map used to resolve explicit
@@ -6297,8 +6323,30 @@ fn build_change_impact(
     })
 }
 
-fn change_impact_workspace_bytes(document: &NormalizedIrDocument) -> Result<u64, QueryError> {
-    let mut bytes = CHANGE_IMPACT_FIXED_WORKSPACE_BYTES
+fn bounded_change_impact_fallback(
+    plan: &ChangeImpactPlan,
+    control: &QueryControl<'_>,
+) -> Result<ChangeImpactAnalysis, QueryError> {
+    control.check()?;
+    let resolved_changes = Vec::new();
+    let risk_summary = change_impact_risk_summary(
+        &resolved_changes,
+        &[],
+        false,
+        false,
+        plan.include_history,
+        false,
+    );
+    Ok(ChangeImpactAnalysis {
+        resolved_changes,
+        impacted: Vec::new(),
+        tests: Vec::new(),
+        risk_summary,
+    })
+}
+
+fn change_impact_workspace_lower_bound(document: &NormalizedIrDocument) -> usize {
+    CHANGE_IMPACT_FIXED_WORKSPACE_BYTES
         .saturating_add(
             document
                 .files
@@ -6316,7 +6364,11 @@ fn change_impact_workspace_bytes(document: &NormalizedIrDocument) -> Result<u64,
                 .relations
                 .len()
                 .saturating_mul(CHANGE_IMPACT_RELATION_WORKSPACE_BYTES),
-        );
+        )
+}
+
+fn change_impact_workspace_bytes(document: &NormalizedIrDocument) -> Result<u64, QueryError> {
+    let mut bytes = change_impact_workspace_lower_bound(document);
     for file in &document.files {
         bytes = bytes.saturating_add(file.path.len().saturating_mul(2));
     }
@@ -7850,10 +7902,27 @@ fn build_history_compare(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<HistoryCompareAnalysis, QueryError> {
     control.check()?;
-    tracker.add_memory(history_compare_workspace_bytes(
-        base_document,
-        head_document,
-    )?)?;
+    let workspace_bytes = history_compare_workspace_bytes(base_document, head_document)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(HistoryCompareAnalysis {
+            coverage: if plan.base_generation == plan.explanation.generation {
+                CoverageStatus::Complete
+            } else {
+                CoverageStatus::Unknown
+            },
+            changes: Vec::new(),
+            architecture_delta: HistoryArchitectureDelta {
+                new_cross_service_edges: 0,
+                removed_cross_service_edges: 0,
+                new_boundaries: 0,
+                removed_boundaries: 0,
+            },
+            breaking_candidates: Vec::new(),
+            lineage: Vec::new(),
+        });
+    }
+    tracker.add_memory(workspace_bytes)?;
     let source_snapshots_match = history_source_snapshots_match(base_document, head_document);
     let base_entities = history_entity_index(
         base_document,
@@ -9065,7 +9134,12 @@ fn build_cycle_adjacency(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(BTreeMap<SymbolId, Vec<CycleAdjEdge>>, u32), QueryError> {
     control.check()?;
-    tracker.add_memory(cycle_adjacency_workspace_bytes(document)?)?;
+    let workspace_bytes = cycle_adjacency_workspace_bytes(document)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok((BTreeMap::new(), 0));
+    }
+    tracker.add_memory(workspace_bytes)?;
 
     let allowed: BTreeSet<RelationPredicate> = plan
         .families
@@ -9179,7 +9253,12 @@ fn detect_cycles(
     control: &QueryControl<'_>,
 ) -> Result<CycleDetection, QueryError> {
     control.check()?;
-    tracker.add_memory(cycle_detection_workspace_bytes(adjacency)?)?;
+    let workspace_bytes = cycle_detection_workspace_bytes(adjacency)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, workspace_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+    tracker.add_memory(workspace_bytes)?;
 
     let mut nodes: BTreeSet<SymbolId> = BTreeSet::new();
     for (source, edges) in adjacency {
@@ -10874,7 +10953,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_trace_rejects_unfunded_bidirectional_adjacency() {
+    fn flow_trace_truncates_unfunded_bidirectional_adjacency() {
         let mut document = overview_document();
         add_file(&mut document, 1, "src/a.rs");
         add_file(&mut document, 2, "src/b.rs");
@@ -10895,23 +10974,20 @@ mod tests {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            build_flow_adjacency(
-                &document,
-                &plan,
-                &control,
-                &mut tracker,
-                &mut limiting_resources,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit,
-            }) if limit == bidirectional - 1
-        ));
+        let (adjacency, truncated) = build_flow_adjacency(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("workspace exhaustion returns an honest partial adjacency");
+        assert!(adjacency.is_empty());
+        assert!(truncated);
         assert_eq!(tracker.memory_bytes, 0);
         assert_eq!(tracker.rows, 0);
         assert_eq!(tracker.edges, 0);
-        assert!(limiting_resources.is_empty());
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
     }
 
     #[test]
@@ -11124,7 +11200,7 @@ mod tests {
     }
 
     #[test]
-    fn architecture_cycles_rejects_unfunded_detection_workspace() {
+    fn architecture_cycles_truncates_unfunded_detection_workspace() {
         let (a, b) = (symbol(1), symbol(2));
         let adjacency =
             BTreeMap::from([(a, vec![cycle_edge(b, 900)]), (b, vec![cycle_edge(a, 900)])]);
@@ -11135,25 +11211,24 @@ mod tests {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            detect_cycles(
-                &adjacency,
-                &plan,
-                &mut tracker,
-                &mut limiting_resources,
-                &control,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit: 1,
-            })
-        ));
+        let (components, cycles, break_candidates) = detect_cycles(
+            &adjacency,
+            &plan,
+            &mut tracker,
+            &mut limiting_resources,
+            &control,
+        )
+        .expect("an unfunded detection workspace returns bounded partial data");
+        assert!(components.is_empty());
+        assert!(cycles.is_empty());
+        assert!(break_candidates.is_empty());
         assert_eq!(tracker.memory_bytes, 0);
-        assert!(limiting_resources.is_empty());
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
+        assert!(authoritative_execution(&limiting_resources).is_truncated());
     }
 
     #[test]
-    fn architecture_cycles_rejects_unfunded_adjacency_before_scanning() {
+    fn architecture_cycles_truncates_unfunded_adjacency_before_scanning() {
         let mut document = overview_document();
         add_file(&mut document, 1, "src/a.rs");
         add_file(&mut document, 2, "src/b.rs");
@@ -11168,23 +11243,21 @@ mod tests {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            build_cycle_adjacency(
-                &document,
-                &plan,
-                &control,
-                &mut tracker,
-                &mut limiting_resources,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit: 1,
-            })
-        ));
+        let (adjacency, omitted_nodes) = build_cycle_adjacency(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("an unfunded adjacency workspace returns bounded partial data");
+        assert!(adjacency.is_empty());
+        assert_eq!(omitted_nodes, 0);
         assert_eq!(tracker.memory_bytes, 0);
         assert_eq!(tracker.rows, 0);
         assert_eq!(tracker.edges, 0);
-        assert!(limiting_resources.is_empty());
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
+        assert!(authoritative_execution(&limiting_resources).is_truncated());
     }
 
     #[test]
@@ -12964,31 +13037,42 @@ mod tests {
     }
 
     #[test]
-    fn change_impact_rejects_unfunded_graph_workspace() {
-        let document = overview_document();
+    fn change_impact_truncates_unfunded_graph_workspace() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/public.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        document
+            .entities
+            .last_mut()
+            .expect("changed symbol exists")
+            .visibility = EntityVisibility::Public;
         let mut plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 1);
-        plan.budget = QueryBudget::new().with_max_memory_bytes(1);
+        let lower_bound = checked_usize_to_u64(change_impact_workspace_lower_bound(&document))
+            .expect("workspace lower bound is representable");
+        plan.budget = QueryBudget::new().with_max_memory_bytes(lower_bound - 1);
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            build_change_impact(
-                &document,
-                &plan,
-                &control,
-                &mut tracker,
-                &mut limiting_resources,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit: 1,
-            })
-        ));
+        let analysis = build_change_impact(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("workspace exhaustion returns an honest partial impact analysis");
+        assert!(analysis.resolved_changes.is_empty());
+        assert!(analysis.impacted.is_empty());
+        assert!(analysis.tests.is_empty());
+        assert_eq!(analysis.risk_summary.level, ChangeImpactRiskLevel::None);
+        assert_eq!(analysis.risk_summary.coverage, CoverageStatus::Bounded);
+        assert!(analysis.risk_summary.dynamic_blind_spots);
         assert_eq!(tracker.memory_bytes, 0);
         assert_eq!(tracker.rows, 0);
         assert_eq!(tracker.edges, 0);
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
     }
 
     #[test]
@@ -13719,7 +13803,7 @@ mod tests {
     }
 
     #[test]
-    fn history_compare_rejects_unfunded_lineage_workspace() {
+    fn history_compare_truncates_unfunded_lineage_workspace() {
         let mut base = history_document(1);
         add_file(&mut base, 1, "src/a.rs");
         add_entity(&mut base, 11, 1, EntityKind::Function);
@@ -13740,26 +13824,36 @@ mod tests {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
 
-        assert!(matches!(
-            build_history_compare(
-                &base,
-                &head,
-                &plan,
-                &control,
-                &mut tracker,
-                &mut limiting_resources,
-            ),
-            Err(QueryError::BudgetExceeded {
-                resource: QueryResource::MemoryBytes,
-                limit: 1,
-            })
-        ));
+        let analysis = build_history_compare(
+            &base,
+            &head,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("workspace exhaustion returns an honest partial comparison");
+        assert_eq!(analysis.coverage, CoverageStatus::Unknown);
+        assert!(analysis.changes.is_empty());
+        assert!(analysis.breaking_candidates.is_empty());
+        assert!(analysis.lineage.is_empty());
+        assert_eq!(
+            analysis.architecture_delta,
+            HistoryArchitectureDelta {
+                new_cross_service_edges: 0,
+                removed_cross_service_edges: 0,
+                new_boundaries: 0,
+                removed_boundaries: 0,
+            }
+        );
         assert_eq!(tracker.memory_bytes, 0);
+        assert_eq!(limiting_resources, vec![QueryResource::MemoryBytes]);
 
         let required =
             history_compare_workspace_bytes(&base, &head).expect("workspace size is representable");
         plan.budget = QueryBudget::new().with_max_memory_bytes(required);
         let mut tracker = UsageTracker::new(plan.budget);
+        limiting_resources.clear();
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
         build_history_compare(
             &base,

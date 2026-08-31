@@ -1035,6 +1035,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             // wrapper sits between a child declaration and its real parent.
             let mut materialized_declarations = BTreeSet::new();
             let mut nearest_materialized_declaration = BTreeMap::<u64, Option<u64>>::new();
+            let mut nearest_callable_declaration = BTreeMap::<u64, Option<u64>>::new();
             for (fact_index, declaration) in ordered_facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
                 let declaration = *declaration;
@@ -1049,9 +1050,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 .flatten()
                         })
                 });
+                let parent_callable = declaration.parent().and_then(|parent| {
+                    nearest_callable_declaration.get(&parent).copied().flatten()
+                });
                 if structural_entity_kind(declaration).is_none() {
                     nearest_materialized_declaration
                         .insert(declaration.local_id(), parent_declaration);
+                    nearest_callable_declaration.insert(declaration.local_id(), parent_callable);
                     continue;
                 }
                 let draft = 'draft: {
@@ -1166,6 +1171,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     ));
                 };
                 if let Some((definition_span, draft)) = draft {
+                    let callable_declaration =
+                        is_callable_entity_kind(draft.kind).then_some(declaration.local_id());
                     selected_definition_spans.insert(definition_span);
                     declaration_kinds.insert(declaration.local_id(), draft.kind);
                     declaration_names.insert(declaration.local_id(), draft.name.clone());
@@ -1173,9 +1180,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     materialized_declarations.insert(declaration.local_id());
                     nearest_materialized_declaration
                         .insert(declaration.local_id(), Some(declaration.local_id()));
+                    let callable = callable_declaration.or(parent_callable);
+                    nearest_callable_declaration.insert(declaration.local_id(), callable);
                 } else {
                     nearest_materialized_declaration
                         .insert(declaration.local_id(), parent_declaration);
+                    nearest_callable_declaration.insert(declaration.local_id(), parent_callable);
                 }
             }
 
@@ -1250,12 +1260,32 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else {
                             OccurrenceRole::Reference
                         };
-                        let enclosing_declaration = fact.parent().and_then(|parent| {
+                        let nearest_declaration = fact.parent().and_then(|parent| {
                             nearest_materialized_declaration
                                 .get(&parent)
                                 .copied()
                                 .flatten()
                         });
+                        // A local declaration can contain a call without being its
+                        // executable owner; call graphs must retain the callable scope.
+                        // Parser recovery can leave the parent-first cache incomplete,
+                        // so the bounded ancestry walk provides the same exact fallback.
+                        let enclosing_declaration = if role == OccurrenceRole::CallSite {
+                            fact.parent()
+                                .and_then(|parent| {
+                                    nearest_callable_declaration.get(&parent).copied().flatten()
+                                })
+                                .or_else(|| {
+                                    enclosing_callable_declaration(
+                                        fact,
+                                        &facts_by_id,
+                                        &declaration_kinds,
+                                    )
+                                })
+                                .or(nearest_declaration)
+                        } else {
+                            nearest_declaration
+                        };
                         let enclosing = enclosing_scope(fact, &facts_by_id, &scope_symbols)
                             .or_else(|| self.module_by_file.get(&fact.span().file()).copied());
                         self.occurrences.push(OccurrenceDraft {
@@ -3114,6 +3144,29 @@ fn enclosing_scope(
     None
 }
 
+fn enclosing_callable_declaration(
+    fact: &SyntaxFact,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    declaration_kinds: &BTreeMap<u64, EntityKind>,
+) -> Option<u64> {
+    let mut parent = fact.parent();
+    let mut remaining = facts_by_id.len();
+    while let Some(parent_id) = parent {
+        if remaining == 0 {
+            return None;
+        }
+        remaining -= 1;
+        if declaration_kinds
+            .get(&parent_id)
+            .is_some_and(|kind| is_callable_entity_kind(*kind))
+        {
+            return Some(parent_id);
+        }
+        parent = facts_by_id.get(&parent_id).and_then(|fact| fact.parent());
+    }
+    None
+}
+
 fn enclosing_rust_impl_scope_before_declaration<'fact>(
     fact: &SyntaxFact,
     facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
@@ -3523,6 +3576,13 @@ const fn supports_symbol_signature(kind: EntityKind) -> bool {
             | EntityKind::Enum
             | EntityKind::Trait
             | EntityKind::Interface
+    )
+}
+
+const fn is_callable_entity_kind(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Function | EntityKind::Method | EntityKind::Constructor | EntityKind::Closure
     )
 }
 
@@ -4158,14 +4218,19 @@ fn provider_failure(code: &'static str) -> AdapterError {
 
 #[cfg(test)]
 mod tests {
-    use rootlight_ids::SymbolId;
-    use rootlight_ir::{CoverageStatus, EntityVisibility, OccurrenceTarget};
+    use std::collections::BTreeMap;
+
+    use rootlight_adapter_sdk::{SyntaxFact, SyntaxFactKind, SyntaxKindLabel};
+    use rootlight_ids::{FileId, SymbolId};
+    use rootlight_ir::{
+        CoverageStatus, EntityKind, EntityVisibility, OccurrenceTarget, SourceSpan,
+    };
 
     use super::{
         ImportBinding, MAX_OPTIONAL_PROJECT_SYNTAX_FACTS, ParsedOccurrenceName,
         ResolutionCandidates, ResolutionKind, SemanticProjectLanguage, bound_resolution_candidates,
-        infer_visibility, occurrence_name, occurrence_target, parse_import,
-        project_optional_syntax_fact_limit,
+        enclosing_callable_declaration, infer_visibility, occurrence_name, occurrence_target,
+        parse_import, project_optional_syntax_fact_limit,
     };
 
     #[test]
@@ -4176,6 +4241,49 @@ mod tests {
                 MAX_OPTIONAL_PROJECT_SYNTAX_FACTS
             );
         }
+    }
+
+    #[test]
+    fn callable_ancestry_skips_materialized_local_declarations() {
+        let file = FileId::from_bytes([1; 20]);
+        let function = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(file, 0, 64).expect("function span is valid"),
+            0,
+            SyntaxKindLabel::new("javascript.function.declaration").expect("label is valid"),
+        );
+        let local = SyntaxFact::new(
+            2,
+            Some(function.local_id()),
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(file, 16, 48).expect("local span is valid"),
+            1,
+            SyntaxKindLabel::new("javascript.variable.declaration").expect("label is valid"),
+        );
+        let call = SyntaxFact::new(
+            3,
+            Some(local.local_id()),
+            SyntaxFactKind::Occurrence,
+            SourceSpan::new(file, 24, 32).expect("call span is valid"),
+            2,
+            SyntaxKindLabel::new("javascript.call").expect("label is valid"),
+        );
+        let facts_by_id = BTreeMap::from([
+            (function.local_id(), &function),
+            (local.local_id(), &local),
+            (call.local_id(), &call),
+        ]);
+        let declaration_kinds = BTreeMap::from([
+            (function.local_id(), EntityKind::Function),
+            (local.local_id(), EntityKind::Variable),
+        ]);
+
+        assert_eq!(
+            enclosing_callable_declaration(&call, &facts_by_id, &declaration_kinds),
+            Some(function.local_id())
+        );
     }
 
     #[test]

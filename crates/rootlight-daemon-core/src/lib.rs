@@ -8506,6 +8506,20 @@ fn first_slice_response_correlates_for_minor(
             let Some(risk_summary) = response.risk_summary.as_ref() else {
                 return false;
             };
+            let expected_empty_fallback_reasons: &[&str] = if request.include_history {
+                &[
+                    "no_measured_impact",
+                    "dynamic_dispatch_blind_spot",
+                    "history_signal_unavailable",
+                    "impact_coverage_incomplete",
+                ]
+            } else {
+                &[
+                    "no_measured_impact",
+                    "dynamic_dispatch_blind_spot",
+                    "impact_coverage_incomplete",
+                ]
+            };
             first_slice_schema_matches(response.schema_version.as_ref())
                 && query_context_correlates(
                     context,
@@ -8532,7 +8546,24 @@ fn first_slice_response_correlates_for_minor(
                 && request
                     .max_dependents
                     .is_none_or(|max| (1..=500).contains(&max))
-                && !response.resolved_changes.is_empty()
+                && (!response.resolved_changes.is_empty()
+                    || (response
+                        .completeness
+                        .as_ref()
+                        .is_some_and(valid_unresumable_truncation)
+                        && response.impacted.is_empty()
+                        && response.service_impacts.is_empty()
+                        && response.tests.is_empty()
+                        && risk_summary.level == "none"
+                        && risk_summary.coverage == "bounded"
+                        && !risk_summary.breaking_surface
+                        && risk_summary.fanout == 0
+                        && risk_summary.dynamic_blind_spots
+                        && risk_summary
+                            .reasons
+                            .iter()
+                            .map(String::as_str)
+                            .eq(expected_empty_fallback_reasons.iter().copied())))
                 && response.resolved_changes.len() <= 1_256
                 && response.impacted.len() <= 1_256
                 && response.tests.len() <= 500
@@ -8547,7 +8578,9 @@ fn first_slice_response_correlates_for_minor(
                             .is_none_or(|kind| !kind.is_empty() && kind.len() <= 32)
                 })
                 && response.impacted.iter().all(|group| {
-                    group.dependents.len() <= 500
+                    usize::try_from(group.source_index)
+                        .is_ok_and(|source_index| source_index < response.resolved_changes.len())
+                        && group.dependents.len() <= 500
                         && group.dependents.iter().all(|entry| {
                             entry
                                 .symbol_id
@@ -9278,6 +9311,44 @@ fn wire_id_has_len(value: Option<&Vec<u8>>, expected: usize) -> bool {
 
 fn optional_wire_id_has_len(value: Option<&Vec<u8>>, expected: usize) -> bool {
     value.is_none_or(|value| value.len() == expected)
+}
+
+fn valid_unresumable_truncation(completeness: &daemon::FirstSliceCompleteness) -> bool {
+    if completeness.state
+        != daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32
+        || completeness.continuation
+            != daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable as i32
+        || completeness.limiting_resources.is_empty()
+        || completeness.limiting_resources.len() > 14
+        || completeness.guidance.is_empty()
+        || completeness.guidance.len() > 9
+    {
+        return false;
+    }
+    let mut resources = BTreeSet::new();
+    if !completeness.limiting_resources.iter().all(|resource| {
+        daemon::FirstSliceLimitingResourceKind::try_from(resource.kind)
+            .ok()
+            .is_some_and(|kind| {
+                kind != daemon::FirstSliceLimitingResourceKind::FirstSliceLimitUnspecified
+                    && resources.insert(resource.kind)
+                    && resource
+                        .limit
+                        .zip(resource.observed)
+                        .is_none_or(|(limit, observed)| observed >= limit)
+            })
+    }) {
+        return false;
+    }
+    let mut guidance = BTreeSet::new();
+    completeness.guidance.iter().all(|value| {
+        daemon::FirstSliceContinuationGuidance::try_from(*value)
+            .ok()
+            .is_some_and(|item| {
+                item != daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUnspecified
+                    && guidance.insert(*value)
+            })
+    })
 }
 
 fn wire_id_equals(left: Option<&Vec<u8>>, right: Option<&Vec<u8>>) -> bool {
@@ -19519,6 +19590,241 @@ mod tests {
             semantic_freshness: "current".to_owned(),
             coverage_gaps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn truncated_change_impact_response_may_omit_unfunded_resolution() {
+        let schema = common::ContractVersion { major: 1, minor: 0 };
+        let repository = common::RepositoryId { value: vec![3; 16] };
+        let generation = common::GenerationId { value: vec![4; 20] };
+        let request = FirstSliceIpcRequest::ChangeImpact(daemon::ChangeImpactRequest {
+            schema_version: Some(schema),
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            changed_symbols: vec![common::SymbolId { value: vec![5; 20] }],
+            ..daemon::ChangeImpactRequest::default()
+        });
+        let mut response = daemon::ChangeImpactResponse {
+            schema_version: Some(schema),
+            context: Some(correlation_context(&repository, &generation, 0, 0)),
+            risk_summary: Some(daemon::FirstSliceImpactRiskSummary {
+                level: "none".to_owned(),
+                reasons: vec![
+                    "no_measured_impact".to_owned(),
+                    "dynamic_dispatch_blind_spot".to_owned(),
+                    "impact_coverage_incomplete".to_owned(),
+                ],
+                coverage: "bounded".to_owned(),
+                dynamic_blind_spots: true,
+                ..daemon::FirstSliceImpactRiskSummary::default()
+            }),
+            completeness: Some(daemon::FirstSliceCompleteness {
+                state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+                limiting_resources: vec![daemon::FirstSliceLimitingResource {
+                    kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes as i32,
+                    limit: Some(1),
+                    observed: Some(1),
+                }],
+                continuation:
+                    daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable
+                        as i32,
+                guidance: vec![
+                    daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope as i32,
+                ],
+            }),
+            ..daemon::ChangeImpactResponse::default()
+        };
+
+        assert!(first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        for malformed_reasons in [
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+            ],
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+                "public_surface_affected".to_owned(),
+            ],
+            vec![
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "no_measured_impact".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+            ],
+            vec![
+                "no_measured_impact".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "dynamic_dispatch_blind_spot".to_owned(),
+                "impact_coverage_incomplete".to_owned(),
+            ],
+        ] {
+            let mut malformed = response.clone();
+            malformed
+                .risk_summary
+                .as_mut()
+                .expect("risk summary is present")
+                .reasons = malformed_reasons;
+            assert!(!first_slice_response_correlates(
+                &request,
+                &FirstSliceIpcResponse::ChangeImpact(malformed)
+            ));
+        }
+        let mut history_request = request.clone();
+        let FirstSliceIpcRequest::ChangeImpact(history_request_payload) = &mut history_request
+        else {
+            unreachable!("test request is change impact");
+        };
+        history_request_payload.include_history = true;
+        assert!(!first_slice_response_correlates(
+            &history_request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        let mut history_response = response.clone();
+        history_response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .reasons
+            .insert(2, "history_signal_unavailable".to_owned());
+        assert!(first_slice_response_correlates(
+            &history_request,
+            &FirstSliceIpcResponse::ChangeImpact(history_response)
+        ));
+        response.impacted = vec![daemon::FirstSliceImpactGroup {
+            source_index: 0,
+            dependents: Vec::new(),
+        }];
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response.impacted.clear();
+        response.tests = vec![daemon::FirstSliceChangeImpactTest {
+            test_id: "test:unfunded".to_owned(),
+            relevance: 1,
+            why: vec!["unfunded".to_owned()],
+            estimated_cost_ms: None,
+        }];
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response.tests.clear();
+        response.service_impacts = vec![daemon::FirstSliceServiceImpact {
+            target: "service:unfunded".to_owned(),
+            kind: "calls".to_owned(),
+            confidence: 1,
+            reason: "unfunded".to_owned(),
+        }];
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response.service_impacts.clear();
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .fanout = 1;
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .fanout = 0;
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .level = "critical".to_owned();
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .level = "none".to_owned();
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .breaking_surface = true;
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .breaking_surface = false;
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .coverage = "complete".to_owned();
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .coverage = "bounded".to_owned();
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .dynamic_blind_spots = false;
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .risk_summary
+            .as_mut()
+            .expect("risk summary is present")
+            .dynamic_blind_spots = true;
+        response
+            .completeness
+            .as_mut()
+            .expect("completeness is present")
+            .limiting_resources
+            .clear();
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response.clone())
+        ));
+        response
+            .completeness
+            .as_mut()
+            .expect("completeness is present")
+            .limiting_resources = vec![daemon::FirstSliceLimitingResource {
+            kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes as i32,
+            limit: Some(1),
+            observed: Some(1),
+        }];
+        response
+            .completeness
+            .as_mut()
+            .expect("completeness is present")
+            .state = daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete as i32;
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::ChangeImpact(response)
+        ));
     }
 
     #[test]

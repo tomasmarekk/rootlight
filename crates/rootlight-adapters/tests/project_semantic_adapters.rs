@@ -224,6 +224,113 @@ fn repeated_declarations_retain_each_resolved_definition_site() {
 }
 
 #[test]
+fn javascript_closed_prefix_materializes_nested_import_call() {
+    let retained_prefix = concat!(
+        "import {provide} from './provider';\n",
+        "export function outer() {\n",
+        "  function caller() {\n",
+        "    const result = provide();\n",
+        "    return result;\n",
+        "  }\n",
+    );
+    let projected_consumer = format!("{retained_prefix}}}\n");
+    let fixture = ProjectFixture::new(
+        ["src/consumer.js", "src/provider.js"],
+        [
+            projected_consumer.as_str(),
+            "export function provide() { return 1; }\n",
+        ],
+        SemanticProjectLanguage::JavaScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "caller")
+        .expect("nested caller is materialized");
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "provide")
+        .expect("import target is materialized");
+    assert!(
+        output.document().entities.iter().any(|entity| {
+            entity.kind == EntityKind::Variable && entity.display_name == "result"
+        })
+    );
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.enclosing == Some(caller.id)
+                && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+        })
+        .expect("nested imported call is resolved");
+
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+            && relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+    }));
+}
+
+#[test]
+fn javascript_typed_nested_call_belongs_to_function_not_local_binding() {
+    let fixture = ProjectFixture::new(
+        ["src/consumer.js", "src/provider.js"],
+        [
+            concat!(
+                "import {provide} from './provider';\n",
+                "export function outer(): number {\n",
+                "  function caller(input: number): number {\n",
+                "    const created = provide(input);\n",
+                "    return created;\n",
+                "  }\n",
+                "  return caller(1);\n",
+                "}\n",
+            ),
+            "export function provide(input: number): number { return input; }\n",
+        ],
+        SemanticProjectLanguage::JavaScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "caller")
+        .expect("typed nested caller is materialized");
+    let local = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.display_name == "created")
+        .expect("local binding is materialized");
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "provide")
+        .expect("typed import target is materialized");
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+        })
+        .expect("typed nested import call is resolved");
+
+    assert_eq!(call.enclosing, Some(caller.id));
+    assert_ne!(call.enclosing, Some(local.id));
+}
+
+#[test]
 fn nested_same_name_declarations_bind_their_own_definition_sites() {
     let fixture = ProjectFixture::new(
         ["src/shared.rs"],
