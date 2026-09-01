@@ -216,6 +216,12 @@ enum ProjectBridgeScanScope {
     CrossPartition,
     BoundedPartition,
 }
+#[derive(Clone, Copy)]
+enum ProjectPartitionDependencyScope {
+    All,
+    #[cfg(test)]
+    CrossPartition,
+}
 type ProjectPartitionAppender<'a> = dyn FnMut(
         NormalizedIrDocument,
         bool,
@@ -1585,11 +1591,14 @@ impl ProjectIncludeBridgePlanner {
             }
             let mut remaining_scan_bytes = self.remaining_scan_bytes;
             let mut remaining_imports = self.remaining_imports;
-            scan_cross_partition_ecmascript(
+            // Primary output can remain ambiguity-bounded without a syntax split,
+            // so direct dependencies share one fixed planner across every partition.
+            scan_partitioned_ecmascript(
                 inputs,
                 partitions,
                 &mut remaining_scan_bytes,
                 &mut remaining_imports,
+                ProjectPartitionDependencyScope::All,
                 cancellation,
                 |consumer, provider, bindings, demand, occurrence_end, scan_bytes| {
                     if self.discovery_exhausted() {
@@ -1619,10 +1628,12 @@ impl ProjectIncludeBridgePlanner {
             return Ok(());
         }
         let mut remaining_scan_bytes = self.remaining_scan_bytes;
-        scan_cross_partition_includes(
+        // Includes need the same bounded recovery when both files stayed together.
+        scan_partitioned_includes(
             inputs,
             partitions,
             &mut remaining_scan_bytes,
+            ProjectPartitionDependencyScope::All,
             cancellation,
             |consumer, provider| {
                 if self.discovery_exhausted() {
@@ -2506,10 +2517,11 @@ impl ProjectIncludeSource for rootlight_service::FirstSliceProjectInput<'_> {
     }
 }
 
-fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
+fn scan_partitioned_includes<'a, T: ProjectIncludeSource>(
     inputs: &[&'a T],
     partitions: &BTreeMap<&str, usize>,
     remaining_scan_bytes: &mut usize,
+    scope: ProjectPartitionDependencyScope,
     cancellation: &Cancellation,
     mut visit: impl FnMut(&'a T, &'a T) -> Result<bool, FirstSliceProjectAnalysisError>,
 ) -> Result<(), FirstSliceProjectAnalysisError> {
@@ -2574,7 +2586,10 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
                 .get(provider.include_path())
                 .copied()
                 .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-            if consumer_partition != provider_partition && !visit(consumer, provider)? {
+            if (matches!(scope, ProjectPartitionDependencyScope::All)
+                || consumer_partition != provider_partition)
+                && !visit(consumer, provider)?
+            {
                 return Ok(());
             }
         }
@@ -2582,11 +2597,12 @@ fn scan_cross_partition_includes<'a, T: ProjectIncludeSource>(
     Ok(())
 }
 
-fn scan_cross_partition_ecmascript<'a, T: ProjectIncludeSource>(
+fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
     inputs: &[&'a T],
     partitions: &BTreeMap<&str, usize>,
     remaining_scan_bytes: &mut usize,
     remaining_imports: &mut usize,
+    scope: ProjectPartitionDependencyScope,
     cancellation: &Cancellation,
     mut visit: impl FnMut(
         &'a T,
@@ -2646,7 +2662,9 @@ fn scan_cross_partition_ecmascript<'a, T: ProjectIncludeSource>(
                     .get(provider.include_path())
                     .copied()
                     .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-                if consumer_partition != provider_partition {
+                if matches!(scope, ProjectPartitionDependencyScope::All)
+                    || consumer_partition != provider_partition
+                {
                     continue_scanning = visit(
                         consumer,
                         provider,
@@ -16354,10 +16372,11 @@ mod tests {
         let partitions = BTreeMap::from([("include/provider.hpp", 0), ("src/consumer.cpp", 1)]);
         let mut scan_bytes = consumer.source.len().saturating_sub(1);
         let mut visited = false;
-        scan_cross_partition_includes(
+        scan_partitioned_includes(
             &inputs,
             &partitions,
             &mut scan_bytes,
+            ProjectPartitionDependencyScope::CrossPartition,
             &Cancellation::new(),
             |_, _| {
                 visited = true;
@@ -16420,11 +16439,12 @@ mod tests {
         let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
         let mut pairs = Vec::new();
 
-        scan_cross_partition_ecmascript(
+        scan_partitioned_ecmascript(
             &ordered,
             &partitions,
             &mut scan_bytes,
             &mut remaining_imports,
+            ProjectPartitionDependencyScope::CrossPartition,
             &Cancellation::new(),
             |consumer, provider, _, _, _, _| {
                 pairs.push((consumer.path.as_str(), provider.path.as_str()));
@@ -16438,6 +16458,56 @@ mod tests {
             [("src/zz_consumer.js", "src/provider.js")],
             "an explicit-extension import bridges the initial 512-file boundary"
         );
+    }
+
+    #[test]
+    fn top_level_ecmascript_discovery_includes_same_partition_imports() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "typescript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = [
+            input(
+                1,
+                "src/consumer.ts",
+                b"import {target} from './provider';\ntarget();\n",
+            ),
+            input(2, "src/provider.ts", b"export function target() {}\n"),
+        ];
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let partitions = BTreeMap::from([("src/consumer.ts", 0), ("src/provider.ts", 0)]);
+        let mut scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .expect("scan budget fits usize");
+        let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+        let mut pairs = Vec::new();
+
+        scan_partitioned_ecmascript(
+            &ordered,
+            &partitions,
+            &mut scan_bytes,
+            &mut remaining_imports,
+            ProjectPartitionDependencyScope::All,
+            &Cancellation::new(),
+            |consumer, provider, _, _, _, _| {
+                pairs.push((consumer.path.as_str(), provider.path.as_str()));
+                Ok(true)
+            },
+        )
+        .expect("top-level ECMAScript discovery succeeds");
+
+        assert_eq!(pairs, [("src/consumer.ts", "src/provider.ts")]);
     }
 
     #[test]
@@ -16851,10 +16921,11 @@ mod tests {
         ]);
         let mut pairs = Vec::new();
         let mut scan_bytes = usize::MAX;
-        scan_cross_partition_includes(
+        scan_partitioned_includes(
             &ordered,
             &split_partitions,
             &mut scan_bytes,
+            ProjectPartitionDependencyScope::CrossPartition,
             &Cancellation::new(),
             |consumer, provider| {
                 pairs.push((consumer.path.as_str(), provider.path.as_str()));
@@ -16874,10 +16945,11 @@ mod tests {
             .map(|input| (input.path.as_str(), 0))
             .collect::<BTreeMap<_, _>>();
         let mut scan_bytes = usize::MAX;
-        scan_cross_partition_includes(
+        scan_partitioned_includes(
             &ordered,
             &same_partition,
             &mut scan_bytes,
+            ProjectPartitionDependencyScope::CrossPartition,
             &Cancellation::new(),
             |_, _| panic!("same-partition includes must not produce supplemental work"),
         )
