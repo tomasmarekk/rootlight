@@ -1667,10 +1667,12 @@ impl ProjectIncludeBridgePlanner {
             let mut selected = BTreeMap::<String, adapter::ProjectInput>::new();
             let mut selected_prefixes = Vec::new();
             let mut selected_projected = false;
+            let mut selected_consumer = None::<String>;
             let mut selected_bytes = 0_usize;
             let mut selected_request_payload_bytes = self.base_request_payload_bytes;
-            // Recompute marginal cost after every choice so several useful
-            // providers can share one already-selected consumer.
+            // Unrelated consumers can exhaust the adapter's optional syntax
+            // fact ceiling before their calls resolve. Keep one consumer per
+            // request while still sharing its providers and marginal cost.
             loop {
                 cancellation.check().map_err(|cancelled| {
                     FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
@@ -1680,7 +1682,11 @@ impl ProjectIncludeBridgePlanner {
                     .enumerate()
                     .filter_map(|(index, candidate)| {
                         if !selected.is_empty()
-                            && (selected_projected || !candidate.prefixes.is_empty())
+                            && (selected_projected
+                                || !candidate.prefixes.is_empty()
+                                || selected_consumer
+                                    .as_deref()
+                                    .is_some_and(|consumer| candidate.consumer.path != consumer))
                         {
                             return None;
                         }
@@ -1707,6 +1713,7 @@ impl ProjectIncludeBridgePlanner {
                 let candidate = candidates.swap_remove(index);
                 selected_bytes = selected_bytes.saturating_add(additional_bytes);
                 selected_request_payload_bytes = request_payload_bytes;
+                selected_consumer.get_or_insert_with(|| candidate.consumer.path.clone());
                 if !candidate.prefixes.is_empty() {
                     selected_projected = true;
                     selected_prefixes = candidate.prefixes;
@@ -16085,6 +16092,78 @@ mod tests {
                 .sum::<usize>()
                 <= PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES
         );
+    }
+
+    #[test]
+    fn supplemental_bridge_partitions_do_not_mix_consumers() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "typescript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let providers = [
+            input(
+                1,
+                "src/first-provider.ts",
+                b"export function target() { return 1; }\n",
+            ),
+            input(
+                2,
+                "src/second-provider.ts",
+                b"export function target() { return 2; }\n",
+            ),
+        ];
+        let consumers = [
+            input(
+                3,
+                "src/first-consumer.ts",
+                b"import {target} from './first-provider';\ntarget();\n",
+            ),
+            input(
+                4,
+                "src/second-consumer.ts",
+                b"import {target} from './second-provider';\ntarget();\n",
+            ),
+        ];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+        planner
+            .scan_partition_pair(&providers, &consumers, &Cancellation::new())
+            .expect("independent bridge discovery succeeds");
+
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("independent bridges finalize");
+        assert_eq!(bridges.len(), 2);
+        let bridge_paths = bridges
+            .iter()
+            .map(|bridge| {
+                bridge
+                    .inputs
+                    .iter()
+                    .map(|input| input.path.as_str())
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(bridge_paths.contains(&BTreeSet::from([
+            "src/first-consumer.ts",
+            "src/first-provider.ts",
+        ])));
+        assert!(bridge_paths.contains(&BTreeSet::from([
+            "src/second-consumer.ts",
+            "src/second-provider.ts",
+        ])));
     }
 
     #[test]
