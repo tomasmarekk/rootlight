@@ -6,7 +6,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -45,7 +48,10 @@ use rootlight_storage::{
     OccurrenceReadRequest, ReadPageCompleteness, RelationReadDirection, RelationReadRequest,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot};
-use rusqlite::Connection;
+use rusqlite::{
+    Connection,
+    hooks::{AuthAction, Authorization},
+};
 use tempfile::TempDir as RawTempDir;
 
 struct TempDir(RawTempDir);
@@ -625,6 +631,84 @@ fn oracle_is_exactly_named_and_cannot_be_overwritten() {
     let error = OracleWriter::create_in(directory.path())
         .expect_err("existing oracle must not be overwritten");
     assert_eq!(error.kind(), CatalogErrorKind::AlreadyExists);
+}
+
+#[test]
+fn payload_rows_are_loaded_before_secondary_indexes_are_rebuilt() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    let OracleWriter {
+        mut connection,
+        path: _,
+    } = OracleWriter::create_in(directory.path()).expect("oracle schema initializes");
+    let expected_index_count = usize::try_from(
+        connection
+            .query_row(
+                "SELECT count(*)
+             FROM sqlite_schema
+             WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("secondary index count is readable"),
+    )
+    .expect("secondary index count fits memory");
+    assert!(expected_index_count > 0);
+
+    let dropped_indexes = Arc::new(AtomicUsize::new(0));
+    let payload_started = Arc::new(AtomicBool::new(false));
+    let rebuilt_indexes = Arc::new(AtomicUsize::new(0));
+    let observed_dropped = Arc::clone(&dropped_indexes);
+    let observed_payload = Arc::clone(&payload_started);
+    let observed_rebuilt = Arc::clone(&rebuilt_indexes);
+    connection
+        .authorizer(Some(
+            move |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                AuthAction::DropIndex { .. } => {
+                    observed_dropped.fetch_add(1, Ordering::Relaxed);
+                    Authorization::Allow
+                }
+                AuthAction::Insert {
+                    table_name: "generation_meta",
+                } => {
+                    if observed_dropped.load(Ordering::Relaxed) == expected_index_count {
+                        observed_payload.store(true, Ordering::Relaxed);
+                        Authorization::Allow
+                    } else {
+                        Authorization::Deny
+                    }
+                }
+                AuthAction::CreateIndex { .. } => {
+                    if observed_payload.load(Ordering::Relaxed) {
+                        observed_rebuilt.fetch_add(1, Ordering::Relaxed);
+                        Authorization::Allow
+                    } else {
+                        Authorization::Deny
+                    }
+                }
+                _ => Authorization::Allow,
+            },
+        ))
+        .expect("test authorizer installs");
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    crate::schema::install_generation_cancellation(&connection, &context)
+        .expect("generation cancellation installs");
+    let generation = snapshot(fixture_documents().0);
+    crate::write::write_generation(&mut connection, &generation, &context)
+        .expect("generation seals with deferred secondary indexes");
+
+    assert!(payload_started.load(Ordering::Relaxed));
+    assert_eq!(
+        dropped_indexes.load(Ordering::Relaxed),
+        expected_index_count
+    );
+    assert_eq!(
+        rebuilt_indexes.load(Ordering::Relaxed),
+        expected_index_count
+    );
+    crate::schema::validate_oracle(&connection, &context)
+        .expect("rebuilt oracle retains the exact sealed schema");
 }
 
 #[cfg(windows)]

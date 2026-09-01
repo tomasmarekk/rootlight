@@ -489,6 +489,17 @@ const ORACLE_INDEXES: [NamedSql; 8] = [
     NamedSql::index("coverage_by_scope", COVERAGE_SCOPE_INDEX_SQL),
 ];
 
+const ORACLE_INDEX_DROPS: [&str; 8] = [
+    "DROP INDEX files_by_path",
+    "DROP INDEX entities_by_canonical_name",
+    "DROP INDEX entities_by_qualified_name",
+    "DROP INDEX occurrences_by_file",
+    "DROP INDEX relations_by_subject",
+    "DROP INDEX relations_by_object",
+    "DROP INDEX source_refs_by_file_span",
+    "DROP INDEX coverage_by_scope",
+];
+
 #[derive(Clone, Copy)]
 struct NamedSql {
     kind: &'static str,
@@ -628,6 +639,24 @@ pub(crate) fn install_generation_cancellation(
     connection
         .progress_handler(1_000, Some(move || cancellation.check().is_err()))
         .map_err(CatalogError::sqlite)
+}
+
+pub(crate) fn drop_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
+    for sql in ORACLE_INDEX_DROPS {
+        connection
+            .execute_batch(sql)
+            .map_err(CatalogError::sqlite)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn create_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
+    for index in ORACLE_INDEXES {
+        connection
+            .execute_batch(index.sql)
+            .map_err(CatalogError::sqlite)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_control(connection: &Connection) -> Result<(), CatalogError> {
