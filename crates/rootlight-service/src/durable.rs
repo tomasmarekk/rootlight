@@ -19,7 +19,7 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
-use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
+use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
 use rootlight_incremental::{
     BaselineFile, FileDescriptor, FileMetadata, InputFingerprint, InputKey, InputSnapshot,
     MetadataBaseline, MetadataReliability, PlanningLimits, PlatformFileIdentity, ReconcileLimits,
@@ -50,6 +50,9 @@ const QUARANTINE_DIRECTORY: &str = "quarantine";
 const SOURCES_DIRECTORY: &str = "sources";
 const SOURCE_BLOBS_DIRECTORY: &str = "source-blobs";
 const SOURCE_BLOB_PAYLOAD_FILENAME: &str = "content";
+const SOURCE_PACK_INDEX_FILENAME: &str = "index.msgpack";
+const SOURCE_PACK_PREFIX: &str = "pack-";
+const SOURCE_PACK_SUFFIX: &str = ".bin";
 const SOURCE_POINTER_MAGIC: &[u8] = b"rootlight.source-pointer/1\n";
 const MANIFEST_FILENAME: &str = "manifest.json";
 const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
@@ -63,7 +66,9 @@ const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
 const GENERATION_MANIFEST_VERSION: u16 = 2;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
-const SOURCE_STORAGE_VERSION: u16 = 1;
+const LEGACY_SOURCE_STORAGE_VERSION: u16 = 1;
+const SOURCE_STORAGE_VERSION: u16 = 2;
+const SOURCE_PACK_INDEX_VERSION: u16 = 1;
 const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
@@ -82,6 +87,9 @@ const RECOVERY_DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
+const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
+const SOURCE_PACK_TARGET_BYTES: u64 = DEFAULT_MAX_SOURCE_FILE_BYTES;
+const PACKED_SOURCE_MIN_FILES: usize = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const RECOVERY_SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
@@ -313,6 +321,16 @@ struct DurableLogicalSnapshotSidecar {
 #[serde(deny_unknown_fields)]
 struct DurableSourceStorage {
     version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    packs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_digest: Option<ContentHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload_bytes: Option<u64>,
 }
 
 pub(super) struct DurableSourceWrite {
@@ -669,7 +687,52 @@ struct GenerationRestoreRequest<'a> {
 struct PersistedSourceReader {
     repository: RepositoryId,
     sources: PrivateDirectory<'static>,
-    blobs: Option<PrivateDirectory<'static>>,
+    layout: PersistedSourceLayout,
+}
+
+enum PersistedSourceLayout {
+    Inline,
+    Blobs(PrivateDirectory<'static>),
+    Packed {
+        index: PackedSourceIndex,
+        cached_pack: Mutex<Option<CachedSourcePack>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum DurableSourceLayout {
+    Inline,
+    Blobs,
+    Packed(DurableSourceStorage),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePackedSourceIndex {
+    version: u16,
+    payload_bytes: u64,
+    pack_bytes: Vec<u64>,
+    entries: Vec<DurablePackedSourceEntry>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePackedSourceEntry {
+    file: FileId,
+    digest: ContentHash,
+    pack: u32,
+    offset: u64,
+    bytes: u64,
+}
+
+struct PackedSourceIndex {
+    pack_bytes: Vec<u64>,
+    entries: BTreeMap<FileId, DurablePackedSourceEntry>,
+}
+
+struct CachedSourcePack {
+    ordinal: u32,
+    bytes: Vec<u8>,
 }
 
 struct StorageScanBudget {
@@ -805,6 +868,47 @@ fn buffered_recovery_writer<W: std::io::Write>(
 
 fn content_hash_bytes(bytes: &[u8]) -> ContentHash {
     ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
+fn legacy_source_storage() -> DurableSourceStorage {
+    DurableSourceStorage {
+        version: LEGACY_SOURCE_STORAGE_VERSION,
+        files: None,
+        packs: None,
+        index_bytes: None,
+        index_digest: None,
+        payload_bytes: None,
+    }
+}
+
+fn source_storage_layout(
+    manifest_version: u16,
+    storage: Option<DurableSourceStorage>,
+) -> Result<DurableSourceLayout, FirstSliceError> {
+    match (manifest_version, storage) {
+        (LEGACY_GENERATION_MANIFEST_VERSION, None) => Ok(DurableSourceLayout::Inline),
+        (GENERATION_MANIFEST_VERSION, Some(storage))
+            if storage.version == LEGACY_SOURCE_STORAGE_VERSION
+                && storage.files.is_none()
+                && storage.packs.is_none()
+                && storage.index_bytes.is_none()
+                && storage.index_digest.is_none()
+                && storage.payload_bytes.is_none() =>
+        {
+            Ok(DurableSourceLayout::Blobs)
+        }
+        (GENERATION_MANIFEST_VERSION, Some(storage))
+            if storage.version == SOURCE_STORAGE_VERSION
+                && storage.files.is_some()
+                && storage.packs.is_some()
+                && storage.index_bytes.is_some()
+                && storage.index_digest.is_some()
+                && storage.payload_bytes.is_some() =>
+        {
+            Ok(DurableSourceLayout::Packed(storage))
+        }
+        _ => Err(FirstSliceError::CatalogCorrupt),
+    }
 }
 
 fn decode_recovery_snapshot(
@@ -1681,17 +1785,8 @@ impl DurableCatalog {
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let manifest: DurableGenerationManifest =
             serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let uses_source_blobs = match (manifest.version, manifest.source_storage) {
-            (LEGACY_GENERATION_MANIFEST_VERSION, None) => false,
-            (
-                GENERATION_MANIFEST_VERSION,
-                Some(DurableSourceStorage {
-                    version: SOURCE_STORAGE_VERSION,
-                }),
-            ) => true,
-            _ => return Err(FirstSliceError::CatalogCorrupt),
-        };
-        PersistedSourceReader::open(&repository, &generation, file.repository, uses_source_blobs)?
+        let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
+        PersistedSourceReader::open(&repository, &generation, file.repository, source_layout)?
             .read(file, cancellation)
     }
 
@@ -2562,6 +2657,27 @@ impl DurablePreparedGeneration {
         let sources_directory = staging
             .create_directory(OsStr::new(SOURCES_DIRECTORY))
             .map_err(|_| FirstSliceError::Catalog)?;
+        {
+            let created = self
+                .created_source_blobs
+                .lock()
+                .map_err(|_| FirstSliceError::Catalog)?;
+            if !created.is_empty() {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        if sources.len() >= PACKED_SOURCE_MIN_FILES {
+            let (storage, newly_written_bytes) = write_packed_sources(&sources_directory, sources)?;
+            sources_directory
+                .sync_all()
+                .map_err(|_| FirstSliceError::Catalog)?;
+            self.account_staging_bytes(newly_written_bytes)?;
+            self.set_source_storage(storage)?;
+            return Ok(DurableSourceWrite {
+                newly_written_bytes,
+                referenced_bytes: 0,
+            });
+        }
         let blobs = ensure_private_directory(
             self.repository().capability(),
             OsStr::new(SOURCE_BLOBS_DIRECTORY),
@@ -2614,22 +2730,25 @@ impl DurablePreparedGeneration {
         blobs.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         self.account_staging_bytes(newly_written_bytes)?;
         drop(created);
-        let mut storage = self
-            .source_storage
-            .lock()
-            .map_err(|_| FirstSliceError::Catalog)?;
-        if storage
-            .replace(DurableSourceStorage {
-                version: SOURCE_STORAGE_VERSION,
-            })
-            .is_some()
-        {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
+        self.set_source_storage(legacy_source_storage())?;
         Ok(DurableSourceWrite {
             newly_written_bytes,
             referenced_bytes,
         })
+    }
+
+    fn set_source_storage(
+        &self,
+        source_storage: DurableSourceStorage,
+    ) -> Result<(), FirstSliceError> {
+        let mut storage = self
+            .source_storage
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if storage.replace(source_storage).is_some() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(())
     }
 
     pub(super) fn write_recovery_snapshot(
@@ -2918,8 +3037,13 @@ impl DurablePreparedGeneration {
         self.account_staging_bytes(manifest_bytes)?;
         let materialized_bytes = self.accounted_bytes.load(Ordering::Acquire);
         let mut budget = StorageScanBudget::new();
-        let scanned_generation =
-            scan_generation_storage(repository, self.generation, self.staging(), &mut budget)?;
+        let scanned_generation = scan_generation_storage(
+            repository,
+            self.generation,
+            self.staging(),
+            &mut budget,
+            SourceBlobScan::AccountPhysicalBytes,
+        )?;
         Ok(DurableSealedGeneration {
             prepared: self,
             repository,
@@ -3203,6 +3327,131 @@ fn ensure_private_directory(
     }
 }
 
+fn write_packed_sources(
+    sources_directory: &PrivateDirectory<'_>,
+    sources: &[RustSourceInput],
+) -> Result<(DurableSourceStorage, u64), FirstSliceError> {
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(sources.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    ordered.extend(sources);
+    ordered.sort_unstable_by_key(|source| source.snapshot.file());
+    if ordered
+        .windows(2)
+        .any(|pair| pair[0].snapshot.file() == pair[1].snapshot.file())
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    let mut pack_sizes = Vec::new();
+    let mut pack = Vec::new();
+    pack.try_reserve_exact(
+        usize::try_from(SOURCE_PACK_TARGET_BYTES).map_err(|_| FirstSliceError::Limits)?,
+    )
+    .map_err(|_| FirstSliceError::Retention)?;
+    let mut payload_bytes = 0_u64;
+    for source in ordered {
+        let content = source.snapshot.content();
+        let digest = source.snapshot.content_hash();
+        if content_hash_bytes(content) != digest {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let bytes = u64::try_from(content.len()).map_err(|_| FirstSliceError::Limits)?;
+        let pack_len = u64::try_from(pack.len()).map_err(|_| FirstSliceError::Limits)?;
+        if !pack.is_empty()
+            && pack_len
+                .checked_add(bytes)
+                .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES)
+        {
+            write_source_pack(sources_directory, &pack, &mut pack_sizes)?;
+            pack.clear();
+        }
+        let offset = u64::try_from(pack.len()).map_err(|_| FirstSliceError::Limits)?;
+        let pack_ordinal = u32::try_from(pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
+        pack.extend_from_slice(content);
+        payload_bytes = payload_bytes
+            .checked_add(bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        entries.push(DurablePackedSourceEntry {
+            file: source.snapshot.file(),
+            digest,
+            pack: pack_ordinal,
+            offset,
+            bytes,
+        });
+    }
+    if !pack.is_empty() || (!entries.is_empty() && pack_sizes.is_empty()) {
+        write_source_pack(sources_directory, &pack, &mut pack_sizes)?;
+    }
+
+    let index = DurablePackedSourceIndex {
+        version: SOURCE_PACK_INDEX_VERSION,
+        payload_bytes,
+        pack_bytes: pack_sizes,
+        entries,
+    };
+    let encoded = rmp_serde::to_vec_named(&index).map_err(|_| FirstSliceError::Catalog)?;
+    let index_bytes = u64::try_from(encoded.len()).map_err(|_| FirstSliceError::Limits)?;
+    if index_bytes == 0 || index_bytes > MAX_SOURCE_PACK_INDEX_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    let mut index_file = sources_directory
+        .create_file(OsStr::new(SOURCE_PACK_INDEX_FILENAME))
+        .map_err(|_| FirstSliceError::Catalog)?;
+    index_file
+        .write_all(&encoded)
+        .map_err(|_| FirstSliceError::Catalog)?;
+    index_file
+        .sync_all()
+        .map_err(|_| FirstSliceError::Catalog)?;
+    let files = u64::try_from(index.entries.len()).map_err(|_| FirstSliceError::Limits)?;
+    let packs = u64::try_from(index.pack_bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+    let newly_written_bytes = payload_bytes
+        .checked_add(index_bytes)
+        .ok_or(FirstSliceError::Limits)?;
+    Ok((
+        DurableSourceStorage {
+            version: SOURCE_STORAGE_VERSION,
+            files: Some(files),
+            packs: Some(packs),
+            index_bytes: Some(index_bytes),
+            index_digest: Some(content_hash_bytes(&encoded)),
+            payload_bytes: Some(payload_bytes),
+        },
+        newly_written_bytes,
+    ))
+}
+
+fn write_source_pack(
+    sources_directory: &PrivateDirectory<'_>,
+    bytes: &[u8],
+    pack_sizes: &mut Vec<u64>,
+) -> Result<(), FirstSliceError> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > SOURCE_PACK_TARGET_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    let ordinal = u32::try_from(pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
+    let mut file = sources_directory
+        .create_file(OsStr::new(&source_pack_name(ordinal)))
+        .map_err(|_| FirstSliceError::Catalog)?;
+    file.write_all(bytes)
+        .map_err(|_| FirstSliceError::Catalog)?;
+    // Immutable bounded packs preserve crash safety with one durability barrier
+    // per pack instead of one barrier for every source file.
+    file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+    pack_sizes.push(u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?);
+    Ok(())
+}
+
+fn source_pack_name(ordinal: u32) -> String {
+    format!("{SOURCE_PACK_PREFIX}{ordinal:08}{SOURCE_PACK_SUFFIX}")
+}
+
 fn persist_source_blob(
     blobs: &PrivateDirectory<'_>,
     digest: ContentHash,
@@ -3317,6 +3566,115 @@ fn decode_source_pointer(encoded: &[u8]) -> Result<SourcePointer, FirstSliceErro
         return Err(FirstSliceError::CatalogCorrupt);
     }
     Ok(SourcePointer { digest, bytes })
+}
+
+fn read_packed_source_index(
+    sources: &PrivateDirectory<'_>,
+    storage: DurableSourceStorage,
+) -> Result<PackedSourceIndex, FirstSliceError> {
+    let expected_index_bytes = storage.index_bytes.ok_or(FirstSliceError::CatalogCorrupt)?;
+    let expected_index_digest = storage
+        .index_digest
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    if expected_index_bytes == 0 || expected_index_bytes > MAX_SOURCE_PACK_INDEX_BYTES {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let encoded = sources
+        .read_file_bounded(OsStr::new(SOURCE_PACK_INDEX_FILENAME), expected_index_bytes)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if u64::try_from(encoded.len()).ok() != Some(expected_index_bytes)
+        || content_hash_bytes(&encoded) != expected_index_digest
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let index: DurablePackedSourceIndex =
+        rmp_serde::from_slice(&encoded).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    validate_packed_source_index(index, storage)
+}
+
+fn validate_packed_source_index(
+    index: DurablePackedSourceIndex,
+    storage: DurableSourceStorage,
+) -> Result<PackedSourceIndex, FirstSliceError> {
+    let expected_files = storage.files.ok_or(FirstSliceError::CatalogCorrupt)?;
+    let expected_packs = storage.packs.ok_or(FirstSliceError::CatalogCorrupt)?;
+    let expected_payload_bytes = storage
+        .payload_bytes
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    if index.version != SOURCE_PACK_INDEX_VERSION
+        || u64::try_from(index.entries.len()).ok() != Some(expected_files)
+        || u64::try_from(index.pack_bytes.len()).ok() != Some(expected_packs)
+        || index.entries.len() > MAX_SOURCE_BLOB_ENTRIES
+        || index.pack_bytes.len() > index.entries.len()
+        || index.payload_bytes != expected_payload_bytes
+        || index
+            .pack_bytes
+            .iter()
+            .any(|bytes| *bytes > SOURCE_PACK_TARGET_BYTES)
+        || index.pack_bytes.iter().try_fold(0_u64, |total, bytes| {
+            total.checked_add(*bytes).ok_or(FirstSliceError::Limits)
+        })? != expected_payload_bytes
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    if index.entries.is_empty() || index.pack_bytes.is_empty() {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+
+    let mut entries = BTreeMap::new();
+    let mut expected_pack = 0_u32;
+    let mut expected_offset = 0_u64;
+    for entry in index.entries {
+        if entry.bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        if entry.pack != expected_pack {
+            let expected_size = index
+                .pack_bytes
+                .get(usize::try_from(expected_pack).map_err(|_| FirstSliceError::Limits)?)
+                .copied()
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            if expected_offset != expected_size
+                || entry.pack != expected_pack.saturating_add(1)
+                || entry.offset != 0
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            expected_pack = entry.pack;
+            expected_offset = 0;
+        }
+        if entry.offset != expected_offset {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        expected_offset = expected_offset
+            .checked_add(entry.bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        let pack_size = index
+            .pack_bytes
+            .get(usize::try_from(entry.pack).map_err(|_| FirstSliceError::Limits)?)
+            .copied()
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if expected_offset > pack_size || entries.insert(entry.file, entry).is_some() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    let final_size = index
+        .pack_bytes
+        .get(usize::try_from(expected_pack).map_err(|_| FirstSliceError::Limits)?)
+        .copied()
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    if expected_offset != final_size
+        || usize::try_from(expected_pack)
+            .ok()
+            .and_then(|ordinal| ordinal.checked_add(1))
+            != Some(index.pack_bytes.len())
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(PackedSourceIndex {
+        pack_bytes: index.pack_bytes,
+        entries,
+    })
 }
 
 fn private_entry_names(directory: &PrivateDirectory<'_>) -> Result<Vec<OsString>, FirstSliceError> {
@@ -3598,8 +3956,13 @@ fn scan_repository_storage(
         } else if let Ok(generation) = GenerationId::from_str(text) {
             let generation_directory = PrivateDirectory::open(repository.capability(), &name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            let generation_storage =
-                scan_generation_storage(repository_id, generation, &generation_directory, budget)?;
+            let generation_storage = scan_generation_storage(
+                repository_id,
+                generation,
+                &generation_directory,
+                budget,
+                source_blob_scan,
+            )?;
             if scanned
                 .generations
                 .insert(generation, generation_storage)
@@ -3626,6 +3989,7 @@ fn scan_generation_storage(
     generation: GenerationId,
     directory: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
+    source_scan: SourceBlobScan,
 ) -> Result<ScannedGeneration, FirstSliceError> {
     let manifest_bytes = directory
         .read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
@@ -3635,15 +3999,13 @@ fn scan_generation_storage(
     if manifest.receipt.repository != repository || manifest.receipt.generation != generation {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let source_blobs = match (manifest.version, manifest.source_storage) {
-        (LEGACY_GENERATION_MANIFEST_VERSION, None) => BTreeMap::new(),
-        (
-            GENERATION_MANIFEST_VERSION,
-            Some(DurableSourceStorage {
-                version: SOURCE_STORAGE_VERSION,
-            }),
-        ) => generation_source_digests(directory)?,
-        _ => return Err(FirstSliceError::CatalogCorrupt),
+    let source_blobs = match source_storage_layout(manifest.version, manifest.source_storage)? {
+        DurableSourceLayout::Inline => BTreeMap::new(),
+        DurableSourceLayout::Blobs => generation_source_digests(directory)?,
+        DurableSourceLayout::Packed(storage) => {
+            scan_packed_source_storage(directory, storage, budget, source_scan)?;
+            BTreeMap::new()
+        }
     };
     Ok(ScannedGeneration {
         repository,
@@ -3672,6 +4034,74 @@ fn generation_source_digests(
         }
     }
     Ok(blobs)
+}
+
+fn scan_packed_source_storage(
+    generation: &PrivateDirectory<'_>,
+    storage: DurableSourceStorage,
+    budget: &mut StorageScanBudget,
+    source_scan: SourceBlobScan,
+) -> Result<(), FirstSliceError> {
+    let sources = PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let index = read_packed_source_index(&sources, storage)?;
+    let mut expected_names = BTreeSet::from([OsString::from(SOURCE_PACK_INDEX_FILENAME)]);
+    for ordinal in 0..index.pack_bytes.len() {
+        let ordinal = u32::try_from(ordinal).map_err(|_| FirstSliceError::Limits)?;
+        expected_names.insert(OsString::from(source_pack_name(ordinal)));
+    }
+    let observed_names = private_entry_names(&sources)?;
+    if observed_names.len() != expected_names.len()
+        || observed_names
+            .iter()
+            .any(|name| !expected_names.contains(name))
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    for (ordinal, expected_bytes) in index.pack_bytes.iter().copied().enumerate() {
+        budget.visit()?;
+        let ordinal = u32::try_from(ordinal).map_err(|_| FirstSliceError::Limits)?;
+        let name = source_pack_name(ordinal);
+        let metadata = sources
+            .capability()
+            .symlink_metadata(Path::new(&name))
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != expected_bytes
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        if matches!(source_scan, SourceBlobScan::VerifyContent) {
+            let pack = sources
+                .read_file_bounded(OsStr::new(&name), expected_bytes)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            verify_source_pack(&pack, ordinal, &index)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_source_pack(
+    pack: &[u8],
+    ordinal: u32,
+    index: &PackedSourceIndex,
+) -> Result<(), FirstSliceError> {
+    for entry in index.entries.values().filter(|entry| entry.pack == ordinal) {
+        let start = usize::try_from(entry.offset).map_err(|_| FirstSliceError::Limits)?;
+        let end = entry
+            .offset
+            .checked_add(entry.bytes)
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or(FirstSliceError::Limits)?;
+        let content = pack
+            .get(start..end)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if content_hash_bytes(content) != entry.digest {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    Ok(())
 }
 
 fn scan_source_blob_storage(
@@ -4191,16 +4621,7 @@ fn read_generation_bootstrap_identity(
     let Ok(manifest) = serde_json::from_slice::<DurableGenerationManifest>(&bytes) else {
         return Ok(None);
     };
-    let version_is_valid = matches!(
-        (manifest.version, manifest.source_storage),
-        (LEGACY_GENERATION_MANIFEST_VERSION, None)
-            | (
-                GENERATION_MANIFEST_VERSION,
-                Some(DurableSourceStorage {
-                    version: SOURCE_STORAGE_VERSION,
-                }),
-            )
-    );
+    let version_is_valid = source_storage_layout(manifest.version, manifest.source_storage).is_ok();
     if manifest.receipt.repository != repository_id
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
@@ -4344,15 +4765,9 @@ fn retained_source_blobs(
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let manifest: DurableGenerationManifest =
             serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        match (manifest.version, manifest.source_storage) {
-            (LEGACY_GENERATION_MANIFEST_VERSION, None) => continue,
-            (
-                GENERATION_MANIFEST_VERSION,
-                Some(DurableSourceStorage {
-                    version: SOURCE_STORAGE_VERSION,
-                }),
-            ) => {}
-            _ => return Err(FirstSliceError::CatalogCorrupt),
+        match source_storage_layout(manifest.version, manifest.source_storage)? {
+            DurableSourceLayout::Inline | DurableSourceLayout::Packed(_) => continue,
+            DurableSourceLayout::Blobs => {}
         }
         let sources =
             PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
@@ -4532,16 +4947,7 @@ fn restore_generation(
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let mut manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    match (manifest.version, manifest.source_storage) {
-        (LEGACY_GENERATION_MANIFEST_VERSION, None) => {}
-        (
-            GENERATION_MANIFEST_VERSION,
-            Some(DurableSourceStorage {
-                version: SOURCE_STORAGE_VERSION,
-            }),
-        ) => {}
-        _ => return Err(FirstSliceError::CatalogCorrupt),
-    }
+    let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
     if manifest.receipt.repository != repository
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
@@ -4617,7 +5023,6 @@ fn restore_generation(
     if manifest.receipt.logical_snapshot.is_some() && incremental.is_none() {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let uses_source_blobs = manifest.version == GENERATION_MANIFEST_VERSION;
     let mut projection =
         LexicalProjectionBuilder::new(verified.snapshot(), BuildBudget::default(), cancellation)
             .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
@@ -4630,7 +5035,7 @@ fn restore_generation(
             repository_directory,
             &generation_directory,
             repository,
-            uses_source_blobs,
+            source_layout,
         )?)
     };
     while let Some(file_id) = projection.next_source_file() {
@@ -5017,26 +5422,32 @@ impl PersistedSourceReader {
         repository_directory: &PrivateDirectory<'_>,
         generation_directory: &PrivateDirectory<'_>,
         repository: RepositoryId,
-        uses_source_blobs: bool,
+        source_layout: DurableSourceLayout,
     ) -> Result<Self, FirstSliceError> {
         let sources = PrivateDirectory::open(
             generation_directory.capability(),
             OsStr::new(SOURCES_DIRECTORY),
         )
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let blobs = uses_source_blobs
-            .then(|| {
-                PrivateDirectory::open(
+        let layout = match source_layout {
+            DurableSourceLayout::Inline => PersistedSourceLayout::Inline,
+            DurableSourceLayout::Blobs => {
+                let blobs = PrivateDirectory::open(
                     repository_directory.capability(),
                     OsStr::new(SOURCE_BLOBS_DIRECTORY),
                 )
-            })
-            .transpose()
-            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+                PersistedSourceLayout::Blobs(blobs)
+            }
+            DurableSourceLayout::Packed(storage) => PersistedSourceLayout::Packed {
+                index: read_packed_source_index(&sources, storage)?,
+                cached_pack: Mutex::new(None),
+            },
+        };
         Ok(Self {
             repository,
             sources,
-            blobs,
+            layout,
         })
     }
 
@@ -5058,37 +5469,100 @@ impl PersistedSourceReader {
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         let path = RelativePath::from_locator(locator)
             .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
-        let maximum = if self.blobs.is_some() {
-            MAX_SOURCE_POINTER_BYTES
-        } else {
-            file.byte_length
-        };
-        let persisted = self
-            .sources
-            .read_file_bounded_cancellable(OsStr::new(&file.id.to_string()), maximum, cancellation)
-            .map_err(map_private_read_error)?;
-        let bytes = if let Some(blobs) = &self.blobs {
-            let pointer = decode_source_pointer(&persisted)?;
-            if pointer.digest != file.content_hash || pointer.bytes != file.byte_length {
-                return Err(FirstSliceError::CatalogCorrupt);
+        let bytes = match &self.layout {
+            PersistedSourceLayout::Inline => self
+                .sources
+                .read_file_bounded_cancellable(
+                    OsStr::new(&file.id.to_string()),
+                    file.byte_length,
+                    cancellation,
+                )
+                .map_err(map_private_read_error)?,
+            PersistedSourceLayout::Blobs(blobs) => {
+                let persisted = self
+                    .sources
+                    .read_file_bounded_cancellable(
+                        OsStr::new(&file.id.to_string()),
+                        MAX_SOURCE_POINTER_BYTES,
+                        cancellation,
+                    )
+                    .map_err(map_private_read_error)?;
+                let pointer = decode_source_pointer(&persisted)?;
+                if pointer.digest != file.content_hash || pointer.bytes != file.byte_length {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+                let blob = PrivateDirectory::open(
+                    blobs.capability(),
+                    OsStr::new(&pointer.digest.to_string()),
+                )
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+                blob.read_file_bounded_cancellable(
+                    OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
+                    pointer.bytes,
+                    cancellation,
+                )
+                .map_err(map_private_read_error)?
             }
-            let blob =
-                PrivateDirectory::open(blobs.capability(), OsStr::new(&pointer.digest.to_string()))
-                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            blob.read_file_bounded_cancellable(
-                OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
-                pointer.bytes,
-                cancellation,
-            )
-            .map_err(map_private_read_error)?
-        } else {
-            persisted
+            PersistedSourceLayout::Packed { index, cached_pack } => {
+                self.read_packed_source(file, index, cached_pack, cancellation)?
+            }
         };
         if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         SourceSnapshot::from_persisted(self.repository, path, file.id, file.content_hash, bytes)
             .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))
+    }
+
+    fn read_packed_source(
+        &self,
+        file: &FileRecord,
+        index: &PackedSourceIndex,
+        cached_pack: &Mutex<Option<CachedSourcePack>>,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<u8>, FirstSliceError> {
+        let entry = index
+            .entries
+            .get(&file.id)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if entry.digest != file.content_hash || entry.bytes != file.byte_length {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let expected_pack_bytes = index
+            .pack_bytes
+            .get(usize::try_from(entry.pack).map_err(|_| FirstSliceError::Limits)?)
+            .copied()
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let mut cached = cached_pack.lock().map_err(|_| FirstSliceError::Catalog)?;
+        if cached.as_ref().map(|pack| pack.ordinal) != Some(entry.pack) {
+            let bytes = self
+                .sources
+                .read_file_bounded_cancellable(
+                    OsStr::new(&source_pack_name(entry.pack)),
+                    expected_pack_bytes,
+                    cancellation,
+                )
+                .map_err(map_private_read_error)?;
+            if u64::try_from(bytes.len()).ok() != Some(expected_pack_bytes) {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            verify_source_pack(&bytes, entry.pack, index)?;
+            *cached = Some(CachedSourcePack {
+                ordinal: entry.pack,
+                bytes,
+            });
+        }
+        let pack = cached.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?;
+        let start = usize::try_from(entry.offset).map_err(|_| FirstSliceError::Limits)?;
+        let end = entry
+            .offset
+            .checked_add(entry.bytes)
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or(FirstSliceError::Limits)?;
+        pack.bytes
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or(FirstSliceError::CatalogCorrupt)
     }
 }
 
@@ -6826,6 +7300,100 @@ mod tests {
             .expect("storage accounting remains available");
         assert_eq!(accounting.full_scan_count, 2);
         assert_eq!(accounting.repository_scan_count, 0);
+    }
+
+    #[test]
+    fn large_generation_uses_bounded_source_packs_and_restores_exact_content() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        for ordinal in 0..PACKED_SOURCE_MIN_FILES {
+            fs::write(
+                fixture.path().join(format!("source-{ordinal:04}.txt")),
+                format!("packed source {ordinal}\n"),
+            )
+            .expect("source fixture writes");
+        }
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .expect("deadline is representable"),
+        );
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("packed generation publishes")
+        };
+        let generation = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        let manifest: DurableGenerationManifest = serde_json::from_slice(
+            &fs::read(generation.join(MANIFEST_FILENAME)).expect("manifest reads"),
+        )
+        .expect("manifest decodes");
+        assert!(matches!(
+            source_storage_layout(manifest.version, manifest.source_storage),
+            Ok(DurableSourceLayout::Packed(_))
+        ));
+        let source_entries = fs::read_dir(generation.join(SOURCES_DIRECTORY))
+            .expect("packed source directory reads")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("packed source entries read");
+        assert!(
+            source_entries.len() < PACKED_SOURCE_MIN_FILES,
+            "large generations must not materialize one durable file per source"
+        );
+
+        let catalog = open_test_catalog(paths.state_dir(), 2).expect("durable catalog reopens");
+        let restored = catalog
+            .restore_active(&cancellation)
+            .expect("packed generation restores");
+        let generation = restored.first().expect("one generation restores");
+        assert_eq!(
+            generation.verified.document().files.len(),
+            PACKED_SOURCE_MIN_FILES
+        );
+        let file = generation
+            .verified
+            .document()
+            .files
+            .first()
+            .expect("one restored file exists");
+        let source = catalog
+            .read_source(receipt.repository, receipt.generation, file, &cancellation)
+            .expect("packed source reads");
+        assert_eq!(source.file(), file.id);
+        assert_eq!(source.content_hash(), file.content_hash);
+        catalog
+            .storage_inventory()
+            .expect("verified inventory checks packed content");
+        let pack_path = generation.receipt.generation.to_string();
+        let pack_path = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(pack_path)
+            .join(SOURCES_DIRECTORY)
+            .join(source_pack_name(0));
+        let mut corrupted = fs::read(&pack_path).expect("source pack reads");
+        corrupted[0] ^= 1;
+        fs::write(&pack_path, corrupted).expect("source pack corruption writes");
+        assert_eq!(
+            catalog.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(
+            catalog.read_source(receipt.repository, receipt.generation, file, &cancellation,),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
     }
 
     #[test]
