@@ -180,6 +180,9 @@ const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // headroom even when the encoded request remains below the hard input limit.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
 const PROJECT_ADAPTER_PARTITION_FILES: usize = 512;
+// One split doubles local syntax-fact headroom; bounded documents remain
+// valid, so further isolated-process retries must not grow recursively.
+const PROJECT_ADAPTER_SYNTAX_RECOVERY_DEPTH: u8 = 1;
 // Supplemental split bridges spend existing source headroom on direct include
 // pairs without changing the per-request source ceiling.
 const PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES: usize = 64 * 1024;
@@ -639,26 +642,33 @@ impl InstalledProjectAnalyzer {
         pending
             .try_reserve(1)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        pending.push(inputs);
-        while let Some(batch) = pending.pop() {
+        pending.push((inputs, 0_u8));
+        while let Some((batch, syntax_recovery_depth)) = pending.pop() {
             cancellation.check().map_err(|cancelled| {
                 FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
             })?;
             match self.execute_partition(request, session, batch, cancellation) {
                 Ok((document, isolated, analyzed)) => {
-                    if project_partition_needs_syntax_split(&document, analyzed.len()) {
+                    if project_partition_needs_syntax_split(
+                        &document,
+                        analyzed.len(),
+                        syntax_recovery_depth,
+                    ) {
                         let (left, right) =
                             split_project_adapter_partition(analyzed, cancellation)?
                                 .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
                         bridge_planner.scan_partition_pair(&left, &right, cancellation)?;
+                        let next_syntax_recovery_depth = syntax_recovery_depth
+                            .checked_add(1)
+                            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
                         pending
                             .try_reserve(2)
                             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
                         // LIFO preserves deterministic left-before-right
                         // execution; dependency groups retain canonical order
                         // internally even when they are not contiguous.
-                        pending.push(right);
-                        pending.push(left);
+                        pending.push((right, next_syntax_recovery_depth));
+                        pending.push((left, next_syntax_recovery_depth));
                         continue;
                     }
                     append(
@@ -682,8 +692,8 @@ impl InstalledProjectAnalyzer {
                     // LIFO preserves deterministic left-before-right
                     // execution; dependency groups retain canonical order
                     // internally even when they are not contiguous.
-                    pending.push(right);
-                    pending.push(left);
+                    pending.push((right, syntax_recovery_depth));
+                    pending.push((left, syntax_recovery_depth));
                 }
                 Err(ProjectPartitionError::Analysis(error)) => return Err(error),
             }
@@ -795,8 +805,10 @@ impl InstalledProjectAnalyzer {
 fn project_partition_needs_syntax_split(
     document: &NormalizedIrDocument,
     input_count: usize,
+    recovery_depth: u8,
 ) -> bool {
     input_count > 1
+        && recovery_depth < PROJECT_ADAPTER_SYNTAX_RECOVERY_DEPTH
         && document
             .diagnostics
             .iter()
@@ -16627,7 +16639,7 @@ mod tests {
     }
 
     #[test]
-    fn syntax_fact_limit_splits_only_multi_file_partitions() {
+    fn syntax_fact_recovery_stops_at_the_bounded_depth() {
         let repository = RepositoryId::from_bytes([31; 16]);
         let generation = GenerationId::from_bytes([32; 20]);
         let mut document = NormalizedIrDocument::empty(repository, generation);
@@ -16647,10 +16659,11 @@ mod tests {
             },
         });
 
-        assert!(project_partition_needs_syntax_split(&document, 2));
-        assert!(!project_partition_needs_syntax_split(&document, 1));
+        assert!(project_partition_needs_syntax_split(&document, 2, 0));
+        assert!(!project_partition_needs_syntax_split(&document, 2, 1));
+        assert!(!project_partition_needs_syntax_split(&document, 1, 0));
         document.diagnostics.clear();
-        assert!(!project_partition_needs_syntax_split(&document, 2));
+        assert!(!project_partition_needs_syntax_split(&document, 2, 0));
     }
 
     #[test]
