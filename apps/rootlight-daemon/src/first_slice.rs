@@ -211,6 +211,11 @@ enum ProjectPartitionRole {
     Primary,
     Supplemental,
 }
+#[derive(Clone, Copy)]
+enum ProjectBridgeScanScope {
+    CrossPartition,
+    BoundedPartition,
+}
 type ProjectPartitionAppender<'a> = dyn FnMut(
         NormalizedIrDocument,
         bool,
@@ -654,10 +659,12 @@ impl InstalledProjectAnalyzer {
                         analyzed.len(),
                         syntax_recovery_depth,
                     ) {
+                        // The bounded document is discarded before splitting. Plan its
+                        // direct dependencies now so either child can recover call evidence.
+                        bridge_planner.scan_bounded_partition(&analyzed, cancellation)?;
                         let (left, right) =
                             split_project_adapter_partition(analyzed, cancellation)?
                                 .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-                        bridge_planner.scan_partition_pair(&left, &right, cancellation)?;
                         let next_syntax_recovery_depth = syntax_recovery_depth
                             .checked_add(1)
                             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
@@ -1534,8 +1541,31 @@ impl ProjectIncludeBridgePlanner {
         right: &[adapter::ProjectInput],
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
-        self.scan(right, left, cancellation)?;
-        self.scan(left, right, cancellation)
+        self.scan(
+            right,
+            left,
+            ProjectBridgeScanScope::CrossPartition,
+            cancellation,
+        )?;
+        self.scan(
+            left,
+            right,
+            ProjectBridgeScanScope::CrossPartition,
+            cancellation,
+        )
+    }
+
+    fn scan_bounded_partition(
+        &mut self,
+        inputs: &[adapter::ProjectInput],
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        self.scan(
+            inputs,
+            inputs,
+            ProjectBridgeScanScope::BoundedPartition,
+            cancellation,
+        )
     }
 
     fn scan_top_level_partitions(
@@ -1689,6 +1719,7 @@ impl ProjectIncludeBridgePlanner {
         &mut self,
         consumers: &[adapter::ProjectInput],
         providers: &[adapter::ProjectInput],
+        scope: ProjectBridgeScanScope,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         if self.discovery_exhausted() || self.remaining_scan_bytes == 0 {
@@ -1719,13 +1750,26 @@ impl ProjectIncludeBridgePlanner {
                         let Some((include, relative_first)) = cpp_include_path(line) else {
                             continue;
                         };
-                        let Some(provider) = cross_partition_include_provider(
-                            &consumer.path,
-                            include,
-                            relative_first,
-                            &consumer_paths,
-                            &provider_paths,
-                        ) else {
+                        let provider = match scope {
+                            ProjectBridgeScanScope::CrossPartition => {
+                                cross_partition_include_provider(
+                                    &consumer.path,
+                                    include,
+                                    relative_first,
+                                    &consumer_paths,
+                                    &provider_paths,
+                                )
+                            }
+                            ProjectBridgeScanScope::BoundedPartition => {
+                                bounded_partition_include_provider(
+                                    &consumer.path,
+                                    include,
+                                    relative_first,
+                                    &provider_paths,
+                                )
+                            }
+                        };
+                        let Some(provider) = provider else {
                             continue;
                         };
                         self.consider_pair(consumer, provider)?;
@@ -1752,7 +1796,8 @@ impl ProjectIncludeBridgePlanner {
                                 &consumer.path,
                                 module,
                                 &module_providers,
-                            ) else {
+                            )
+                            .filter(|provider| provider.path != consumer.path) else {
                                 return Ok(());
                             };
                             self.consider_ecmascript_pair(
@@ -2796,6 +2841,27 @@ fn cross_partition_include_provider<'a>(
         return None;
     }
     providers.unique_suffix(include)
+}
+
+fn bounded_partition_include_provider<'a>(
+    consumer_path: &str,
+    include: &str,
+    relative_first: bool,
+    providers: &ProjectInputPathIndex<'a>,
+) -> Option<&'a adapter::ProjectInput> {
+    let include = if include.contains('\\') {
+        std::borrow::Cow::Owned(include.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(include)
+    };
+    let include = include.as_ref();
+    let provider = relative_first
+        .then(|| relative_include_path(consumer_path, include))
+        .flatten()
+        .and_then(|relative| providers.exact(&relative))
+        .or_else(|| providers.exact(include))
+        .or_else(|| providers.unique_suffix(include))?;
+    (provider.path != consumer_path).then_some(provider)
 }
 
 fn relative_include_path(consumer_path: &str, include: &str) -> Option<String> {
@@ -16324,6 +16390,112 @@ mod tests {
             pairs,
             [("src/zz_consumer.js", "src/provider.js")],
             "an explicit-extension import bridges the initial 512-file boundary"
+        );
+    }
+
+    #[test]
+    fn bounded_syntax_partition_emits_direct_ecmascript_bridge() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "typescript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = vec![
+            input(
+                1,
+                "src/consumer.ts",
+                b"import {target} from './provider';\nexport function caller() { target(); }\n",
+            ),
+            input(
+                2,
+                "src/provider.ts",
+                b"export function target() { return 1; }\n",
+            ),
+        ];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_bounded_partition(&inputs, &Cancellation::new())
+            .expect("bounded dependency discovery succeeds");
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("bounded dependency bridge finalizes");
+        let [bridge] = bridges.as_slice() else {
+            panic!("one direct import produces one supplemental bridge");
+        };
+
+        assert_eq!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/consumer.ts", "src/provider.ts"]
+        );
+    }
+
+    #[test]
+    fn bounded_syntax_partition_emits_direct_cpp_bridge() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "cpp".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = vec![
+            input(
+                1,
+                "include/provider.hpp",
+                b"struct Provider { int value; };\n",
+            ),
+            input(
+                2,
+                "src/consumer.cpp",
+                b"#include \"../include/provider.hpp\"\nProvider make_provider();\n",
+            ),
+        ];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_bounded_partition(&inputs, &Cancellation::new())
+            .expect("bounded dependency discovery succeeds");
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("bounded dependency bridge finalizes");
+        let [bridge] = bridges.as_slice() else {
+            panic!("one direct include produces one supplemental bridge");
+        };
+
+        assert_eq!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["include/provider.hpp", "src/consumer.cpp"]
         );
     }
 
