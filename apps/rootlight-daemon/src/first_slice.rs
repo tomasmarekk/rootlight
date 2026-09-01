@@ -1491,8 +1491,10 @@ struct ProjectIncludeBridgePlanner {
     max_candidates: usize,
     examined_pair_attempts: usize,
     max_pair_attempts: usize,
+    candidate_byte_limit: usize,
     remaining_candidate_bytes: usize,
     ecmascript_provider_identifiers: BTreeMap<FileId, BTreeMap<String, usize>>,
+    scanned_inputs: BTreeSet<FileId>,
     remaining_scan_bytes: usize,
     remaining_imports: usize,
 }
@@ -1528,8 +1530,10 @@ impl ProjectIncludeBridgePlanner {
             max_candidates: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES),
             examined_pair_attempts: 0,
             max_pair_attempts: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
+            candidate_byte_limit: enabled.saturating_mul(input_bytes),
             remaining_candidate_bytes: enabled.saturating_mul(input_bytes),
             ecmascript_provider_identifiers: BTreeMap::new(),
+            scanned_inputs: BTreeSet::new(),
             remaining_scan_bytes,
             remaining_imports: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
         })
@@ -1740,7 +1744,8 @@ impl ProjectIncludeBridgePlanner {
             };
             match consumer.language.as_str() {
                 "c" | "cpp" => {
-                    if !self.claim_scan_bytes(consumer.source.len()) {
+                    let file = adapter_project_input_file_id(consumer)?;
+                    if !self.claim_input_scan(file, consumer.source.len()) {
                         return Ok(());
                     }
                     for line in source.lines() {
@@ -1779,7 +1784,10 @@ impl ProjectIncludeBridgePlanner {
                     }
                 }
                 "javascript" | "typescript" => {
-                    if self.remaining_imports == 0 || !self.claim_scan_bytes(source.len()) {
+                    let file = adapter_project_input_file_id(consumer)?;
+                    if self.remaining_imports == 0
+                        || !self.claim_input_scan(file, consumer.source.len())
+                    {
                         return Ok(());
                     }
                     let observed = for_each_ecmascript_relative_import(
@@ -1879,7 +1887,7 @@ impl ProjectIncludeBridgePlanner {
         else {
             return Ok(());
         };
-        if preview_bytes > self.remaining_candidate_bytes {
+        if preview_bytes > self.candidate_byte_limit() {
             return Ok(());
         }
         let consumer = project_input_to_wire(request, consumer)?;
@@ -1940,7 +1948,7 @@ impl ProjectIncludeBridgePlanner {
         else {
             return Ok(());
         };
-        if preview_bytes > self.remaining_candidate_bytes {
+        if preview_bytes > self.candidate_byte_limit() {
             return Ok(());
         }
         let consumer = project_input_to_wire(request, consumer)?;
@@ -2080,7 +2088,7 @@ impl ProjectIncludeBridgePlanner {
     ) -> Result<Option<usize>, FirstSliceProjectAnalysisError> {
         let file = adapter_project_input_file_id(provider)?;
         if !self.ecmascript_provider_identifiers.contains_key(&file) {
-            if !self.claim_scan_bytes(provider.source.len()) {
+            if !self.claim_input_scan(file, provider.source.len()) {
                 return Ok(None);
             }
             let Ok(source) = std::str::from_utf8(&provider.source) else {
@@ -2123,14 +2131,43 @@ impl ProjectIncludeBridgePlanner {
             return Ok(());
         };
         candidate.owned_bytes = candidate.owned_bytes.max(actual_owned_bytes);
-        if candidate.owned_bytes > self.remaining_candidate_bytes
-            || self.retained_pairs.len() >= self.max_candidates
+        if candidate.owned_bytes > self.candidate_byte_limit()
+            || self.max_candidates == 0
             || !project_include_request_fits(
                 self.base_request_payload_bytes,
                 [&candidate.consumer, &candidate.provider],
             )
         {
             return Ok(());
+        }
+        // Discovery and retention have separate fixed ceilings: keep the best
+        // evidence seen across the full work envelope without storing more candidates.
+        while self.candidates.len() >= self.max_candidates
+            || candidate.owned_bytes > self.remaining_candidate_bytes
+        {
+            let Some((worst_index, worst)) = self
+                .candidates
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| project_include_candidate_order(left, right))
+            else {
+                return Ok(());
+            };
+            if !project_include_candidate_order(&candidate, worst).is_lt() {
+                return Ok(());
+            }
+            let removed = self.candidates.swap_remove(worst_index);
+            let removed_pair = (
+                adapter_project_input_file_id(&removed.consumer)?,
+                adapter_project_input_file_id(&removed.provider)?,
+            );
+            if !self.retained_pairs.remove(&removed_pair) {
+                return Err(FirstSliceProjectAnalysisError::Analysis);
+            }
+            self.remaining_candidate_bytes = self
+                .remaining_candidate_bytes
+                .checked_add(removed.owned_bytes)
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
         }
         self.candidates
             .try_reserve(1)
@@ -2140,14 +2177,14 @@ impl ProjectIncludeBridgePlanner {
         }
         self.remaining_candidate_bytes = self
             .remaining_candidate_bytes
-            .saturating_sub(candidate.owned_bytes);
+            .checked_sub(candidate.owned_bytes)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
         self.candidates.push(candidate);
         Ok(())
     }
 
     fn begin_pair_attempt(&mut self, pair: (FileId, FileId)) -> bool {
         if self.retained_pairs.contains(&pair)
-            || self.retained_pairs.len() >= self.max_candidates
             || self.examined_pair_attempts >= self.max_pair_attempts
         {
             return false;
@@ -2162,15 +2199,28 @@ impl ProjectIncludeBridgePlanner {
         provider: &adapter::ProjectInput,
         owned_bytes: usize,
     ) -> bool {
-        owned_bytes <= self.remaining_candidate_bytes
-            && self.retained_pairs.len() < self.max_candidates
+        owned_bytes <= self.candidate_byte_limit()
+            && self.max_candidates > 0
             && project_include_request_fits(self.base_request_payload_bytes, [consumer, provider])
     }
 
     fn discovery_exhausted(&self) -> bool {
-        self.retained_pairs.len() >= self.max_candidates
-            || self.examined_pair_attempts >= self.max_pair_attempts
-            || self.remaining_candidate_bytes == 0
+        self.examined_pair_attempts >= self.max_pair_attempts
+    }
+
+    fn candidate_byte_limit(&self) -> usize {
+        self.candidate_byte_limit
+    }
+
+    fn claim_input_scan(&mut self, file: FileId, bytes: usize) -> bool {
+        if self.scanned_inputs.contains(&file) {
+            return true;
+        }
+        if !self.claim_scan_bytes(bytes) {
+            return false;
+        }
+        self.scanned_inputs.insert(file);
+        true
     }
 
     fn claim_scan_bytes(&mut self, bytes: usize) -> bool {
@@ -16072,10 +16122,7 @@ mod tests {
             )
             .expect("bounded bridge scan succeeds");
 
-        assert_eq!(
-            planner.examined_pair_attempts,
-            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
-        );
+        assert_eq!(planner.examined_pair_attempts, provider_count);
         assert_eq!(
             planner.candidates.len(),
             PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
@@ -16444,6 +16491,110 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["src/consumer.ts", "src/provider.ts"]
         );
+    }
+
+    #[test]
+    fn bounded_ecmascript_scan_keeps_late_high_demand_bridge_with_fixed_capacity() {
+        use std::fmt::Write as _;
+
+        fn input(file_index: usize, path: String, source: Vec<u8>) -> adapter::ProjectInput {
+            let mut file = vec![0_u8; 20];
+            file[..8].copy_from_slice(
+                &u64::try_from(file_index)
+                    .expect("fixture index fits")
+                    .to_le_bytes(),
+            );
+            adapter::ProjectInput {
+                file: Some(common::FileId { value: file }),
+                path,
+                language: "typescript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let provider_count = PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES.saturating_add(1);
+        let mut consumer_source = String::new();
+        let mut inputs = Vec::new();
+        for index in 0..provider_count {
+            writeln!(
+                consumer_source,
+                "import {{value{index}}} from './module{index}';\nvalue{index}();"
+            )
+            .expect("fixture source is writable");
+            let provider_source =
+                format!("export function value{index}() {{ return {index}; }}\n").into_bytes();
+            inputs.push(input(
+                index.saturating_add(1),
+                format!("src/module{index}.ts"),
+                provider_source,
+            ));
+        }
+        consumer_source.push_str("export function run() {\n");
+        for _ in 0..16 {
+            writeln!(
+                consumer_source,
+                "  value{}();",
+                provider_count.saturating_sub(1)
+            )
+            .expect("fixture source is writable");
+        }
+        consumer_source.push_str("}\n");
+        inputs.insert(
+            0,
+            input(
+                provider_count.saturating_add(1),
+                "src/consumer.ts".to_owned(),
+                consumer_source.into_bytes(),
+            ),
+        );
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_bounded_partition(&inputs, &Cancellation::new())
+            .expect("bounded dependency discovery succeeds");
+
+        assert_eq!(
+            planner.candidates.len(),
+            PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES
+        );
+        assert!(
+            planner.candidates.iter().any(|candidate| {
+                candidate.provider.path
+                    == format!("src/module{}.ts", provider_count.saturating_sub(1))
+                    && candidate.demand >= 16
+            }),
+            "a late high-demand dependency displaces an earlier low-demand candidate"
+        );
+    }
+
+    #[test]
+    fn bounded_scan_charges_each_project_input_once() {
+        let source = b"export function target() { return 1; }\n";
+        let input = adapter::ProjectInput {
+            file: Some(common::FileId { value: vec![7; 20] }),
+            path: "src/provider.ts".to_owned(),
+            language: "typescript".to_owned(),
+            source_digest: Some(common::ContentHash {
+                value: content_hash(source).as_bytes().to_vec(),
+            }),
+            source: source.to_vec(),
+            generated: false,
+            origins: Vec::new(),
+        };
+        let file = adapter_project_input_file_id(&input).expect("fixture file identity is valid");
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        assert!(planner.claim_input_scan(file, input.source.len()));
+        let after_first_scan = planner.remaining_scan_bytes;
+        assert!(planner.claim_input_scan(file, input.source.len()));
+        assert_eq!(planner.remaining_scan_bytes, after_first_scan);
     }
 
     #[test]
