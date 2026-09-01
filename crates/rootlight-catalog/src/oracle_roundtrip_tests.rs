@@ -634,7 +634,7 @@ fn oracle_is_exactly_named_and_cannot_be_overwritten() {
 }
 
 #[test]
-fn payload_rows_are_loaded_before_secondary_indexes_are_rebuilt() {
+fn bulk_load_keeps_deferred_cycle_lookup_index() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     let OracleWriter {
         mut connection,
@@ -652,7 +652,10 @@ fn payload_rows_are_loaded_before_secondary_indexes_are_rebuilt() {
             .expect("secondary index count is readable"),
     )
     .expect("secondary index count fits memory");
-    assert!(expected_index_count > 0);
+    let expected_deferred_index_count = expected_index_count
+        .checked_sub(1)
+        .expect("the deferred-cycle lookup index exists");
+    assert!(expected_deferred_index_count > 0);
 
     let dropped_indexes = Arc::new(AtomicUsize::new(0));
     let payload_started = Arc::new(AtomicBool::new(false));
@@ -663,22 +666,28 @@ fn payload_rows_are_loaded_before_secondary_indexes_are_rebuilt() {
     connection
         .authorizer(Some(
             move |context: rusqlite::hooks::AuthContext<'_>| match context.action {
-                AuthAction::DropIndex { .. } => {
-                    observed_dropped.fetch_add(1, Ordering::Relaxed);
-                    Authorization::Allow
+                AuthAction::DropIndex { index_name, .. } => {
+                    if index_name == "source_refs_by_file_span" {
+                        Authorization::Deny
+                    } else {
+                        observed_dropped.fetch_add(1, Ordering::Relaxed);
+                        Authorization::Allow
+                    }
                 }
                 AuthAction::Insert {
                     table_name: "generation_meta",
                 } => {
-                    if observed_dropped.load(Ordering::Relaxed) == expected_index_count {
+                    if observed_dropped.load(Ordering::Relaxed) == expected_deferred_index_count {
                         observed_payload.store(true, Ordering::Relaxed);
                         Authorization::Allow
                     } else {
                         Authorization::Deny
                     }
                 }
-                AuthAction::CreateIndex { .. } => {
-                    if observed_payload.load(Ordering::Relaxed) {
+                AuthAction::CreateIndex { index_name, .. } => {
+                    if index_name == "source_refs_by_file_span" {
+                        Authorization::Deny
+                    } else if observed_payload.load(Ordering::Relaxed) {
                         observed_rebuilt.fetch_add(1, Ordering::Relaxed);
                         Authorization::Allow
                     } else {
@@ -701,11 +710,11 @@ fn payload_rows_are_loaded_before_secondary_indexes_are_rebuilt() {
     assert!(payload_started.load(Ordering::Relaxed));
     assert_eq!(
         dropped_indexes.load(Ordering::Relaxed),
-        expected_index_count
+        expected_deferred_index_count
     );
     assert_eq!(
         rebuilt_indexes.load(Ordering::Relaxed),
-        expected_index_count
+        expected_deferred_index_count
     );
     crate::schema::validate_oracle(&connection, &context)
         .expect("rebuilt oracle retains the exact sealed schema");

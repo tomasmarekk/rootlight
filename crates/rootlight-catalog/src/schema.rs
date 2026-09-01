@@ -489,14 +489,29 @@ const ORACLE_INDEXES: [NamedSql; 8] = [
     NamedSql::index("coverage_by_scope", COVERAGE_SCOPE_INDEX_SQL),
 ];
 
-const ORACLE_INDEX_DROPS: [&str; 8] = [
+const DEFERRED_ORACLE_INDEXES: [NamedSql; 7] = [
+    NamedSql::index("files_by_path", FILE_PATH_INDEX_SQL),
+    NamedSql::index(
+        "entities_by_canonical_name",
+        ENTITY_CANONICAL_NAME_INDEX_SQL,
+    ),
+    NamedSql::index(
+        "entities_by_qualified_name",
+        ENTITY_QUALIFIED_NAME_INDEX_SQL,
+    ),
+    NamedSql::index("occurrences_by_file", OCCURRENCE_FILE_INDEX_SQL),
+    NamedSql::index("relations_by_subject", RELATION_SUBJECT_INDEX_SQL),
+    NamedSql::index("relations_by_object", RELATION_OBJECT_INDEX_SQL),
+    NamedSql::index("coverage_by_scope", COVERAGE_SCOPE_INDEX_SQL),
+];
+
+const DEFERRED_ORACLE_INDEX_DROPS: [&str; 7] = [
     "DROP INDEX files_by_path",
     "DROP INDEX entities_by_canonical_name",
     "DROP INDEX entities_by_qualified_name",
     "DROP INDEX occurrences_by_file",
     "DROP INDEX relations_by_subject",
     "DROP INDEX relations_by_object",
-    "DROP INDEX source_refs_by_file_span",
     "DROP INDEX coverage_by_scope",
 ];
 
@@ -641,8 +656,10 @@ pub(crate) fn install_generation_cancellation(
         .map_err(CatalogError::sqlite)
 }
 
-pub(crate) fn drop_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
-    for sql in ORACLE_INDEX_DROPS {
+pub(crate) fn drop_deferred_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
+    // Source refs and files form a deferred foreign-key cycle. Keeping the
+    // child-key index avoids scanning every source ref for each inserted file.
+    for sql in DEFERRED_ORACLE_INDEX_DROPS {
         connection
             .execute_batch(sql)
             .map_err(CatalogError::sqlite)?;
@@ -650,8 +667,8 @@ pub(crate) fn drop_oracle_indexes(connection: &Connection) -> Result<(), Catalog
     Ok(())
 }
 
-pub(crate) fn create_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
-    for index in ORACLE_INDEXES {
+pub(crate) fn create_deferred_oracle_indexes(connection: &Connection) -> Result<(), CatalogError> {
+    for index in DEFERRED_ORACLE_INDEXES {
         connection
             .execute_batch(index.sql)
             .map_err(CatalogError::sqlite)?;

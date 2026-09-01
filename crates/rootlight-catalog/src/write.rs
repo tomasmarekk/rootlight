@@ -67,9 +67,9 @@ pub(crate) fn write_generation(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(CatalogError::sqlite)?;
 
-    // Rebuilding secondary indexes after the bulk load avoids per-row B-tree
+    // Rebuilding query-only indexes after the bulk load avoids per-row B-tree
     // maintenance while the enclosing transaction preserves exact rollback.
-    schema::drop_oracle_indexes(&transaction)?;
+    schema::drop_deferred_oracle_indexes(&transaction)?;
     insert_header(&transaction, generation, plan.stats, context)?;
     insert_identities(&transaction, &plan.identities, context)?;
     insert_sources(&transaction, &plan.source_ordinals, context)?;
@@ -110,7 +110,7 @@ pub(crate) fn write_generation(
         &plan.source_ordinals,
         context,
     )?;
-    schema::create_oracle_indexes(&transaction)?;
+    schema::create_deferred_oracle_indexes(&transaction)?;
     context.check().map_err(CatalogError::control)?;
     transaction.commit().map_err(CatalogError::sqlite)?;
     schema::validate_oracle(connection, context)?;
