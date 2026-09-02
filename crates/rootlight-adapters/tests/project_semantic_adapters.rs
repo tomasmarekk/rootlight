@@ -704,6 +704,60 @@ fn bounded_python_syntax_retains_late_local_call_relationship() {
 }
 
 #[test]
+fn bounded_javascript_syntax_retains_imported_call_before_local_call_fanout() {
+    let mut paths = vec![
+        "src/000_consumer.js".to_owned(),
+        "src/001_provider.js".to_owned(),
+    ];
+    let mut sources = vec![
+        String::from(concat!(
+            "import {provide} from './001_provider';\n",
+            "export function localValue() { return 1; }\n",
+            "export function run() {\n",
+            "  const local = localValue();\n",
+            "  return provide(local);\n",
+            "}\n",
+        )),
+        String::from("export function provide(value) { return value; }\n"),
+    ];
+    for index in 0..126 {
+        paths.push(format!("src/zz_filler_{index:03}.js"));
+        sources.push(format!(
+            "export function local{index}() {{ return {index}; }}\n\
+             export function run{index}() {{ return local{index}(); }}\n"
+        ));
+    }
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::JavaScript);
+    let limits = real_parser_limits_with_project_files(128);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let provider = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "provide")
+        .expect("import provider is materialized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == provider.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(provider.id)
+    }));
+}
+
+#[test]
 fn project_semantics_preserve_test_classification() {
     let fixture = ProjectFixture::new(
         ["src/lib.rs", "tests/semantic.rs"],

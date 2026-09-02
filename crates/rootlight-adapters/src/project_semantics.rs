@@ -306,10 +306,18 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
     let mut remaining_optional_facts = maximum_optional_facts;
     let mut remaining_inputs = parsed.len();
     for input in parsed {
-        let allowance = remaining_optional_facts
+        let fair_allowance = remaining_optional_facts
             .checked_add(remaining_inputs.saturating_sub(1))
             .and_then(|value| value.checked_div(remaining_inputs))
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+        // A cross-file call needs its import, call, and terminal capture together.
+        // Borrow from later bounded inputs rather than spend an equal share on a
+        // local fanout that cannot preserve any project-level relationship.
+        let preferred_allowance =
+            preferred_imported_call_allowance(&input.facts, input.input.source().bytes());
+        let allowance = fair_allowance
+            .max(preferred_allowance)
+            .min(remaining_optional_facts);
         let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
         let original_len = input.facts.len();
         retain_project_syntax_facts(&mut input.facts, input.input.source().bytes(), allowance);
@@ -366,41 +374,69 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, source: &[u8], allow
                 .map(|_| call.local_id())
         })
         .collect::<BTreeSet<_>>();
-    // Prefer calls that can resolve inside this file before unresolved optional
-    // occurrences consume the fixed relationship budget.
-    for declared in [true, false] {
-        if !declared {
-            for fact in facts
-                .iter()
-                .filter(|fact| fact.kind() == SyntaxFactKind::Import)
-            {
-                if remaining == 0 {
-                    break;
-                }
-                select_syntax_fact_group([fact], &facts_by_id, &mut selected, &mut remaining);
-            }
+    let imported_call_groups =
+        imported_call_syntax_fact_groups(facts, source, &facts_by_id, &call_names, &declared_calls);
+    for (import_id, call_id) in imported_call_groups {
+        if remaining == 0 {
+            break;
         }
-        for call in facts
-            .iter()
-            .filter(|fact| is_call_fact(fact))
-            .filter(|fact| declared_calls.contains(&fact.local_id()) == declared)
-        {
-            if remaining == 0 {
-                break;
-            }
-            // A call and its terminal name form one relationship-bearing unit.
-            // Admitting either capture alone spends budget without a resolvable site.
-            let terminal = call_names
-                .get(&call.local_id())
-                .and_then(|name| facts_by_id.get(name))
-                .copied();
-            select_syntax_fact_group(
-                std::iter::once(call).chain(terminal),
-                &facts_by_id,
-                &mut selected,
-                &mut remaining,
-            );
+        let Some(import) = facts_by_id.get(&import_id).copied() else {
+            continue;
+        };
+        let Some(call) = facts_by_id.get(&call_id).copied() else {
+            continue;
+        };
+        let terminal = call_names
+            .get(&call.local_id())
+            .and_then(|name| facts_by_id.get(name))
+            .copied();
+        select_syntax_fact_group(
+            [Some(import), Some(call), terminal].into_iter().flatten(),
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
+    }
+    for call in facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter(|fact| declared_calls.contains(&fact.local_id()))
+    {
+        if remaining == 0 {
+            break;
         }
+        select_call_syntax_fact_group(
+            call,
+            &call_names,
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
+    }
+    for fact in facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Import)
+    {
+        if remaining == 0 {
+            break;
+        }
+        select_syntax_fact_group([fact], &facts_by_id, &mut selected, &mut remaining);
+    }
+    for call in facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter(|fact| !declared_calls.contains(&fact.local_id()))
+    {
+        if remaining == 0 {
+            break;
+        }
+        select_call_syntax_fact_group(
+            call,
+            &call_names,
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
     }
     for kind in [
         SyntaxFactKind::Occurrence,
@@ -424,6 +460,112 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, source: &[u8], allow
         }
     }
     facts.retain(|fact| selected.contains(&fact.local_id()));
+}
+
+fn preferred_imported_call_allowance(facts: &[SyntaxFact], source: &[u8]) -> usize {
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let mandatory = mandatory_project_syntax_fact_ids(facts);
+    let call_names = terminal_call_names(facts);
+    let declared_names = facts
+        .iter()
+        .filter(|fact| is_definition_fact(fact))
+        .filter_map(|fact| source_text(source, fact.span()))
+        .collect::<BTreeSet<_>>();
+    let declared_calls = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter_map(|call| {
+            retained_call_name(source, call, &call_names, &facts_by_id)
+                .filter(|name| declared_names.contains(name))
+                .map(|_| call.local_id())
+        })
+        .collect::<BTreeSet<_>>();
+
+    imported_call_syntax_fact_groups(facts, source, &facts_by_id, &call_names, &declared_calls)
+        .into_iter()
+        .filter_map(|(import_id, call_id)| {
+            let import = facts_by_id.get(&import_id).copied()?;
+            let call = facts_by_id.get(&call_id).copied()?;
+            let terminal = call_names
+                .get(&call.local_id())
+                .and_then(|name| facts_by_id.get(name))
+                .copied();
+            Some(
+                syntax_fact_group_ids(
+                    [Some(import), Some(call), terminal].into_iter().flatten(),
+                    &facts_by_id,
+                )
+                .iter()
+                .filter(|local_id| !mandatory.contains(local_id))
+                .count(),
+            )
+        })
+        .min()
+        .unwrap_or(0)
+}
+
+fn imported_call_syntax_fact_groups(
+    facts: &[SyntaxFact],
+    source: &[u8],
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    call_names: &BTreeMap<u64, u64>,
+    declared_calls: &BTreeSet<u64>,
+) -> Vec<(u64, u64)> {
+    let calls = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter(|fact| !declared_calls.contains(&fact.local_id()))
+        .filter_map(|call| {
+            let identifiers = source_text(source, call.span())
+                .map(tokenize_identifiers)
+                .unwrap_or_default()
+                .into_iter()
+                .chain(retained_call_name(source, call, call_names, facts_by_id).map(str::to_owned))
+                .collect::<BTreeSet<_>>();
+            (!identifiers.is_empty()).then_some((call.local_id(), identifiers))
+        })
+        .collect::<Vec<_>>();
+    let mut groups = BTreeSet::new();
+    for import in facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Import)
+    {
+        let imported_identifiers = source_text(source, import.span())
+            .map(tokenize_identifiers)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for (call_id, call_identifiers) in &calls {
+            if !imported_identifiers.is_disjoint(call_identifiers) {
+                groups.insert((import.local_id(), *call_id));
+            }
+        }
+    }
+    groups.into_iter().collect()
+}
+
+fn select_call_syntax_fact_group(
+    call: &SyntaxFact,
+    call_names: &BTreeMap<u64, u64>,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    selected: &mut BTreeSet<u64>,
+    remaining: &mut usize,
+) {
+    // A call and its terminal name form one relationship-bearing unit.
+    // Admitting either capture alone spends budget without a resolvable site.
+    let terminal = call_names
+        .get(&call.local_id())
+        .and_then(|name| facts_by_id.get(name))
+        .copied();
+    select_syntax_fact_group(
+        std::iter::once(call).chain(terminal),
+        facts_by_id,
+        selected,
+        remaining,
+    );
 }
 
 fn retained_call_name<'a>(
@@ -497,6 +639,22 @@ fn select_syntax_fact_group<'fact>(
     selected: &mut BTreeSet<u64>,
     remaining: &mut usize,
 ) {
+    let required = syntax_fact_group_ids(facts, facts_by_id);
+    let additional = required
+        .iter()
+        .filter(|local_id| !selected.contains(local_id))
+        .count();
+    if additional > *remaining {
+        return;
+    }
+    selected.extend(required);
+    *remaining -= additional;
+}
+
+fn syntax_fact_group_ids<'fact>(
+    facts: impl IntoIterator<Item = &'fact SyntaxFact>,
+    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
+) -> BTreeSet<u64> {
     let mut required = BTreeSet::new();
     for fact in facts {
         let mut current = Some(fact);
@@ -511,15 +669,7 @@ fn select_syntax_fact_group<'fact>(
                 .and_then(|parent| facts_by_id.get(&parent).copied());
         }
     }
-    let additional = required
-        .iter()
-        .filter(|local_id| !selected.contains(local_id))
-        .count();
-    if additional > *remaining {
-        return;
-    }
-    selected.extend(required);
-    *remaining -= additional;
+    required
 }
 
 impl ProjectLanguageAnalyzer for SemanticProjectAnalyzer {
