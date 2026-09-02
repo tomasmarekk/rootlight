@@ -313,9 +313,9 @@ fn bound_project_syntax_facts(
             .checked_add(remaining_inputs.saturating_sub(1))
             .and_then(|value| value.checked_div(remaining_inputs))
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
-        // A relationship needs its complete syntax unit. Borrow only enough to
-        // retain one local edge and one highest-demand imported binding rather
-        // than let source-order fanout consume a bounded input's entire share.
+        // A relationship needs its complete syntax unit. Borrow enough to
+        // retain one local edge and one callable binding per import statement,
+        // so one dependency's fanout cannot hide every later dependency.
         let preferred_allowance =
             preferred_relationship_allowance(language, &input.facts, input.input.source().bytes());
         let allowance = fair_allowance
@@ -497,7 +497,11 @@ fn preferred_relationship_allowance(
         &call_names,
         &declared_calls,
     );
+    let mut represented_imports = BTreeSet::new();
     for group in groups {
+        if represented_imports.contains(&group.import_id) {
+            continue;
+        }
         let mut candidate = preferred.clone();
         candidate.extend(imported_call_syntax_fact_group_ids(
             &group,
@@ -510,7 +514,7 @@ fn preferred_relationship_allowance(
             .count();
         if optional <= MAX_OPTIONAL_PROJECT_SYNTAX_FACTS {
             preferred = candidate;
-            break;
+            represented_imports.insert(group.import_id);
         }
     }
     preferred
@@ -616,25 +620,44 @@ fn imported_call_syntax_fact_groups(
             }
         }
     }
-    let mut groups = grouped_calls
-        .into_iter()
-        .map(
-            |((import_id, binding), call_ids)| ImportedCallSyntaxFactGroup {
+    let mut groups_by_import = BTreeMap::<u64, Vec<ImportedCallSyntaxFactGroup>>::new();
+    for ((import_id, binding), call_ids) in grouped_calls {
+        groups_by_import
+            .entry(import_id)
+            .or_default()
+            .push(ImportedCallSyntaxFactGroup {
                 import_id,
                 binding,
                 call_ids: call_ids.into_iter().collect(),
-            },
-        )
+            });
+    }
+    let mut groups = groups_by_import
+        .into_values()
+        .map(|mut groups| {
+            groups.sort_unstable_by(|left, right| {
+                right
+                    .call_ids
+                    .len()
+                    .cmp(&left.call_ids.len())
+                    .then_with(|| left.binding.cmp(&right.binding))
+            });
+            groups.into_iter()
+        })
         .collect::<Vec<_>>();
-    groups.sort_unstable_by(|left, right| {
-        right
-            .call_ids
-            .len()
-            .cmp(&left.call_ids.len())
-            .then_with(|| left.binding.cmp(&right.binding))
-            .then_with(|| left.import_id.cmp(&right.import_id))
-    });
-    groups
+    let mut interleaved = Vec::new();
+    loop {
+        let mut retained = false;
+        for groups in &mut groups {
+            if let Some(group) = groups.next() {
+                interleaved.push(group);
+                retained = true;
+            }
+        }
+        if !retained {
+            break;
+        }
+    }
+    interleaved
 }
 
 fn imported_call_syntax_fact_group_ids(

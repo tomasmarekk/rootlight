@@ -704,17 +704,25 @@ fn bounded_python_syntax_retains_late_local_call_relationship() {
 }
 
 #[test]
-fn bounded_javascript_syntax_retains_local_and_high_demand_imported_calls() {
+fn bounded_javascript_syntax_retains_local_and_import_diverse_calls() {
     let mut paths = vec![
         "src/000_consumer.js".to_owned(),
         "src/001_provider.js".to_owned(),
+        "src/002_provider.js".to_owned(),
+        "src/003_provider.js".to_owned(),
     ];
     let mut sources = vec![
         String::from(concat!(
+            "import {earlyBusy} from './002_provider';\n",
+            "import {middleBusy} from './003_provider';\n",
             "import {frequent, occasional} from './001_provider';\n",
             "export function localValue() { return 1; }\n",
             "export function firstCaller() {\n",
             "  const local = localValue();\n",
+            "  earlyBusy(1); earlyBusy(2); earlyBusy(3); earlyBusy(4);\n",
+            "  earlyBusy(5); earlyBusy(6); earlyBusy(7);\n",
+            "  middleBusy(1); middleBusy(2); middleBusy(3);\n",
+            "  middleBusy(4); middleBusy(5);\n",
             "  occasional(local);\n",
             "  return frequent(local);\n",
             "}\n",
@@ -725,8 +733,10 @@ fn bounded_javascript_syntax_retains_local_and_high_demand_imported_calls() {
             "export function frequent(value) { return value; }\n",
             "export function occasional(value) { return value; }\n",
         )),
+        String::from("export function earlyBusy(value) { return value; }\n"),
+        String::from("export function middleBusy(value) { return value; }\n"),
     ];
-    for index in 0..126 {
+    for index in 0..124 {
         paths.push(format!("src/zz_filler_{index:03}.js"));
         sources.push(format!(
             "export function local{index}() {{ return {index}; }}\n\
