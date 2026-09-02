@@ -651,21 +651,24 @@ fn python_same_module_calls_resolve_to_the_declared_function() {
 
 #[test]
 fn bounded_python_syntax_retains_late_local_call_relationship() {
-    let mut source = String::from(
-        "def choose(values):\n\
-             return 0\n\n\
-         def insert(values):\n",
-    );
-    for _ in 0..300 {
-        source.push_str("    len(values)\n");
+    let mut paths = vec!["Lib/search.py".to_owned()];
+    let mut sources = vec![String::from(concat!(
+        "from dependency import helper\n\n",
+        "def choose(values):\n",
+        "    return 0\n\n",
+        "def insert(values):\n",
+        "    return choose(values)\n",
+    ))];
+    for index in 0..127 {
+        paths.push(format!("Lib/filler_{index:03}.py"));
+        sources.push(format!(
+            "from dependency import helper\n{}",
+            "helper()\n".repeat(10)
+        ));
     }
-    source.push_str("    return choose(values)\n");
-    let fixture = ProjectFixture::new(
-        ["Lib/search.py"],
-        [source.as_str()],
-        SemanticProjectLanguage::Python,
-    );
-    let output = analyze_with_real_parser(&fixture);
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::Python);
+    let limits = real_parser_limits_with_project_files(128);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
     let caller = output
         .document()
         .entities
@@ -1324,6 +1327,13 @@ fn assert_real_parser_symbol_identity(
 fn analyze_with_real_parser(
     fixture: &ProjectFixture,
 ) -> rootlight_adapter_sdk::ProjectAnalysisOutput {
+    analyze_with_real_parser_limits(fixture, &real_parser_limits())
+}
+
+fn analyze_with_real_parser_limits(
+    fixture: &ProjectFixture,
+    limits: &AnalysisLimits,
+) -> rootlight_adapter_sdk::ProjectAnalysisOutput {
     let parser: Arc<dyn ParseProvider> = Arc::new(real_parser());
     let analyzer = SemanticProjectAnalyzer::new(
         fixture.language,
@@ -1335,7 +1345,7 @@ fn analyze_with_real_parser(
     .expect("project analyzer constructs");
     execute_project_analysis(
         &analyzer,
-        &fixture.request(&real_parser_limits(), AnalysisTier::TierB),
+        &fixture.request(limits, AnalysisTier::TierB),
         ExtensionSupport::default(),
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
@@ -2286,9 +2296,22 @@ impl ProjectFixture {
         sources: [&str; N],
         language: SemanticProjectLanguage,
     ) -> Self {
+        Self::new_owned(
+            paths.into_iter().map(str::to_owned).collect(),
+            sources.into_iter().map(str::to_owned).collect(),
+            language,
+        )
+    }
+
+    fn new_owned(
+        paths: Vec<String>,
+        sources: Vec<String>,
+        language: SemanticProjectLanguage,
+    ) -> Self {
+        assert_eq!(paths.len(), sources.len());
         let current = std::env::current_dir().expect("current directory is available");
         let temporary = tempdir_in(current).expect("temporary directory is available");
-        for (path, source) in paths.into_iter().zip(sources) {
+        for (path, source) in paths.iter().zip(&sources) {
             let full = temporary.path().join(path);
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent).expect("fixture directory is created");
@@ -2300,8 +2323,8 @@ impl ProjectFixture {
             RepositoryRoot::open(repository_id, temporary.path()).expect("fixture root opens");
         let generation = generation_id();
         let snapshots = paths
+            .iter()
             .map(|path| RelativePath::parse(Path::new(path)).expect("path is valid"))
-            .into_iter()
             .map(|path| {
                 repository
                     .snapshot(&path, 64 * 1024)
@@ -2455,6 +2478,10 @@ fn producer_identity() -> ProducerIdentity {
 }
 
 fn real_parser_limits() -> AnalysisLimits {
+    real_parser_limits_with_project_files(16)
+}
+
+fn real_parser_limits_with_project_files(max_files: usize) -> AnalysisLimits {
     let batch =
         BatchThresholds::new(256, 4 * 1024 * 1024, 128, 128 * 1024).expect("batch is valid");
     let stream = StreamLimits::new(
@@ -2479,7 +2506,7 @@ fn real_parser_limits() -> AnalysisLimits {
     )
     .expect("analysis limits are valid")
     .with_project_limits(
-        ProjectAnalysisLimits::new(16, 512 * 1024, 64 * 1024, 128, 128 * 1024, 256, 256)
+        ProjectAnalysisLimits::new(max_files, 512 * 1024, 64 * 1024, 128, 128 * 1024, 256, 256)
             .expect("project limits are valid"),
     )
 }

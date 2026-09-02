@@ -178,8 +178,10 @@ const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
+// The file ceiling also leaves at least two optional facts per file after the
+// one bounded syntax-recovery split, enough for a local call evidence unit.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
-const PROJECT_ADAPTER_PARTITION_FILES: usize = 512;
+const PROJECT_ADAPTER_PARTITION_FILES: usize = 256;
 // One split doubles local syntax-fact headroom; bounded documents remain
 // valid, so further isolated-process retries must not grow recursively.
 const PROJECT_ADAPTER_SYNTAX_RECOVERY_DEPTH: u8 = 1;
