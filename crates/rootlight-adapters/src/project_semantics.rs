@@ -312,7 +312,7 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
         let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
         let original_len = input.facts.len();
-        retain_project_syntax_facts(&mut input.facts, allowance);
+        retain_project_syntax_facts(&mut input.facts, input.input.source().bytes(), allowance);
         if input.facts.len() < original_len {
             input.diagnostics.push(AdapterDiagnostic::new(
                 code.clone(),
@@ -341,7 +341,7 @@ const fn project_optional_syntax_fact_limit(_input_count: usize) -> usize {
     MAX_OPTIONAL_PROJECT_SYNTAX_FACTS
 }
 
-fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
+fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, source: &[u8], allowance: usize) {
     let facts_by_id = facts
         .iter()
         .map(|fact| (fact.local_id(), fact))
@@ -361,22 +361,44 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
         select_syntax_fact_group([fact], &facts_by_id, &mut selected, &mut remaining);
     }
     let call_names = terminal_call_names(facts);
-    for call in facts.iter().filter(|fact| is_call_fact(fact)) {
-        if remaining == 0 {
-            break;
+    let declared_names = facts
+        .iter()
+        .filter(|fact| is_definition_fact(fact))
+        .filter_map(|fact| source_text(source, fact.span()))
+        .collect::<BTreeSet<_>>();
+    let declared_calls = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter_map(|call| {
+            retained_call_name(source, call, &call_names, &facts_by_id)
+                .filter(|name| declared_names.contains(name))
+                .map(|_| call.local_id())
+        })
+        .collect::<BTreeSet<_>>();
+    // Prefer calls that can resolve inside this file before unresolved optional
+    // occurrences consume the fixed relationship budget.
+    for declared in [true, false] {
+        for call in facts
+            .iter()
+            .filter(|fact| is_call_fact(fact))
+            .filter(|fact| declared_calls.contains(&fact.local_id()) == declared)
+        {
+            if remaining == 0 {
+                break;
+            }
+            // A call and its terminal name form one relationship-bearing unit.
+            // Admitting either capture alone spends budget without a resolvable site.
+            let terminal = call_names
+                .get(&call.local_id())
+                .and_then(|name| facts_by_id.get(name))
+                .copied();
+            select_syntax_fact_group(
+                std::iter::once(call).chain(terminal),
+                &facts_by_id,
+                &mut selected,
+                &mut remaining,
+            );
         }
-        // A call and its terminal name form one relationship-bearing unit.
-        // Admitting either capture alone spends budget without a resolvable site.
-        let terminal = call_names
-            .get(&call.local_id())
-            .and_then(|name| facts_by_id.get(name))
-            .copied();
-        select_syntax_fact_group(
-            std::iter::once(call).chain(terminal),
-            &facts_by_id,
-            &mut selected,
-            &mut remaining,
-        );
     }
     for kind in [
         SyntaxFactKind::Occurrence,
@@ -400,6 +422,23 @@ fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
         }
     }
     facts.retain(|fact| selected.contains(&fact.local_id()));
+}
+
+fn retained_call_name<'a>(
+    source: &'a [u8],
+    call: &SyntaxFact,
+    terminal_call_names: &BTreeMap<u64, u64>,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+) -> Option<&'a str> {
+    terminal_call_names
+        .get(&call.local_id())
+        .and_then(|terminal| facts_by_id.get(terminal))
+        .and_then(|terminal| source_text(source, terminal.span()))
+        .or_else(|| {
+            source_text(source, call.span())
+                .and_then(|text| occurrence_name(text, true))
+                .map(|parsed| parsed.name)
+        })
 }
 
 fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {

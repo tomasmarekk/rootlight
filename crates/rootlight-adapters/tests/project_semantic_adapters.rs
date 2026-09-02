@@ -650,6 +650,57 @@ fn python_same_module_calls_resolve_to_the_declared_function() {
 }
 
 #[test]
+fn bounded_python_syntax_retains_late_local_call_relationship() {
+    let mut source = String::from(
+        "def choose(values):\n\
+             return 0\n\n\
+         def insert(values):\n",
+    );
+    for _ in 0..300 {
+        source.push_str("    len(values)\n");
+    }
+    source.push_str("    return choose(values)\n");
+    let fixture = ProjectFixture::new(
+        ["Lib/search.py"],
+        [source.as_str()],
+        SemanticProjectLanguage::Python,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "insert")
+        .expect("caller function is materialized");
+    let callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "choose")
+        .expect("callee function is materialized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == callee.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(callee.id)
+    }));
+}
+
+#[test]
 fn project_semantics_preserve_test_classification() {
     let fixture = ProjectFixture::new(
         ["src/lib.rs", "tests/semantic.rs"],
