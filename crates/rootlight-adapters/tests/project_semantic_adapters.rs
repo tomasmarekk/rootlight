@@ -973,6 +973,75 @@ fn java_test_calls_require_annotation_and_exact_receiver_type() {
 }
 
 #[test]
+fn bounded_java_project_prioritizes_annotated_test_relationships() {
+    let mut paths = Vec::new();
+    let mut sources = Vec::new();
+    for index in 0..126 {
+        paths.push(format!("src/early/Filler{index:03}.java"));
+        sources.push(format!(
+            "class Filler{index:03} {{\n\
+               int value{index:03}() {{ return {index}; }}\n\
+               int exercise{index:03}() {{\n\
+                 if (true) {{ if (true) {{ return value{index:03}(); }} }}\n\
+                 return 0;\n\
+               }}\n\
+             }}\n"
+        ));
+    }
+    paths.extend([
+        "src/zzzzz/Worker.java".to_owned(),
+        "src/zzzzz/WorkerTest.java".to_owned(),
+    ]);
+    sources.extend([
+        "class Worker { int execute(int value) { return value; } }\n".to_owned(),
+        concat!(
+            "import org.junit.jupiter.api.Test;\n",
+            "class WorkerTest {\n",
+            "  @Test void exercisesReceiver() {\n",
+            "    Worker worker = new Worker();\n",
+            "    worker.execute(1);\n",
+            "    worker.execute(2);\n",
+            "    worker.execute(3);\n",
+            "  }\n",
+            "}\n",
+        )
+        .to_owned(),
+    ]);
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::Java);
+    let limits = real_parser_limits_with_project_files(128);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.display_name == "execute" && entity.qualified_name.contains("Worker::execute")
+        })
+        .expect("Java target is materialized");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "exercisesReceiver")
+        .expect("annotated Java test is materialized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
+    );
+    assert!(test.flags.contains(&EntityFlag::Test));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(test.id)
+            && relation.predicate == RelationPredicate::Tests
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+            && relation.evidence.source.is_some()
+    }));
+}
+
+#[test]
 fn cpp_gtest_calls_require_positive_macro_and_exact_local_type() {
     let fixture = ProjectFixture::new(
         ["src/raw_props.cpp", "src/raw_props_test.cpp"],

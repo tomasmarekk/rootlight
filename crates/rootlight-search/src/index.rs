@@ -1090,6 +1090,24 @@ impl Fields {
                 work,
             )?);
         }
+        if let Some(terminal) = qualified_symbol_terminal(normalized) {
+            // Explicit symbol paths already carry structural intent. Resolving
+            // their terminal identifier avoids charging common container
+            // tokens across the whole repository before a narrow scope applies.
+            clauses.push(work.term_clause(
+                self.identifier_normalized,
+                &terminal,
+                IndexRecordOption::Basic,
+                18.0,
+            )?);
+            clauses.push(work.term_clause(
+                self.source_identifier_normalized,
+                &terminal,
+                IndexRecordOption::Basic,
+                8.0,
+            )?);
+            return Ok(Box::new(BooleanQuery::new(clauses)));
+        }
         let mut token_clauses = Vec::with_capacity(tokens.len());
         for token in tokens {
             let alternatives = BooleanQuery::new(vec![
@@ -1630,6 +1648,31 @@ fn compile_literal_prefix(input: &str) -> Result<BoundedPattern, SearchError> {
         format!("{}.*", escape_regex_literal(input)),
         input.to_owned(),
     )
+}
+
+fn qualified_symbol_terminal(query: &str) -> Option<String> {
+    let canonical = query.replace("::", ".");
+    if (canonical == query && !query.contains('.')) || canonical.contains(':') {
+        return None;
+    }
+    let components = canonical.split('.').collect::<Vec<_>>();
+    if components.len() < 2
+        || !components
+            .iter()
+            .all(|component| symbol_component(component))
+    {
+        return None;
+    }
+    components.last().map(|component| (*component).to_owned())
+}
+
+fn symbol_component(component: &str) -> bool {
+    let mut characters = component.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character == '$' || character.is_alphabetic())
+        && characters
+            .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
 }
 
 fn boosted_term(term: Term, index_option: IndexRecordOption, boost: f32) -> QueryClause {
@@ -2385,6 +2428,44 @@ mod tests {
         assert_eq!(outcome.matched_candidates, 1);
         assert_eq!(outcome.hits.len(), 1);
         assert_eq!(outcome.hits[0].path, "src/scoped.rs");
+    }
+
+    #[test]
+    fn qualified_symbol_query_uses_bounded_terminal_fallback() {
+        let mut target = document(1, "targetCall", "src/target.java");
+        target.qualified_name = "src/target.java::PopularContainer::targetCall".to_owned();
+        let mut documents = vec![target];
+        for byte in 2..42 {
+            let identifier = format!("helper{byte}");
+            let mut filler = document(byte, &identifier, &format!("src/filler{byte}.java"));
+            filler.qualified_name =
+                format!("src/filler{byte}.java::PopularContainer::{identifier}");
+            documents.push(filler);
+        }
+        let (_directory, _manifest, index) = build(documents);
+
+        let outcome = index
+            .search_with_filters_and_stats(
+                &SearchRequest {
+                    query: "PopularContainer.targetCall".to_owned(),
+                    mode: SearchMode::Text,
+                    max_results: 10,
+                    page_offset: 0,
+                },
+                &[],
+                &["src/target.java".to_owned()],
+                SearchBudget {
+                    max_postings: 2,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new(),
+            )
+            .expect("qualified symbol lookup remains within the posting budget");
+
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].identifier, "targetCall");
+        assert_eq!(outcome.hits[0].path, "src/target.java");
     }
 
     #[test]

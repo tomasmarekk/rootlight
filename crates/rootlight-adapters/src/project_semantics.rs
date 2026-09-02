@@ -308,7 +308,35 @@ fn bound_project_syntax_facts(
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
     let mut remaining_optional_facts = maximum_optional_facts;
     let mut remaining_inputs = parsed.len();
-    for input in parsed {
+    // Allocate the fixed budget to positive test evidence first, then to the
+    // most repeated local relationship, independent of repository path order.
+    let priorities = parsed
+        .iter()
+        .map(|input| {
+            project_input_relationship_priority(
+                language,
+                &input.facts,
+                input.input.source().bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut selection_order = (0..parsed.len()).collect::<Vec<_>>();
+    selection_order.sort_unstable_by(|left, right| {
+        priorities[*right]
+            .is_test
+            .cmp(&priorities[*left].is_test)
+            .then_with(|| priorities[*right].demand.cmp(&priorities[*left].demand))
+            .then_with(|| {
+                parsed[*left]
+                    .input
+                    .source()
+                    .path()
+                    .as_str()
+                    .cmp(parsed[*right].input.source().path().as_str())
+            })
+    });
+    for input_index in selection_order {
+        let input = &mut parsed[input_index];
         let fair_allowance = remaining_optional_facts
             .checked_add(remaining_inputs.saturating_sub(1))
             .and_then(|value| value.checked_div(remaining_inputs))
@@ -374,9 +402,15 @@ fn retain_project_syntax_facts(
 
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
-    if let Some(call) = facts
-        .iter()
-        .find(|fact| is_call_fact(fact) && declared_calls.contains(&fact.local_id()))
+    if let Some(call) = preferred_local_call_syntax_fact_group(
+        language,
+        facts,
+        source,
+        &facts_by_id,
+        &call_names,
+        &declared_calls,
+    )
+    .and_then(|group| facts_by_id.get(&group.call_id).copied())
     {
         select_call_syntax_fact_group(
             call,
@@ -478,17 +512,22 @@ fn preferred_relationship_allowance(
     let mandatory = mandatory_project_syntax_fact_ids(facts);
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
-    let mut preferred = facts
-        .iter()
-        .filter(|fact| is_call_fact(fact))
-        .find(|call| declared_calls.contains(&call.local_id()))
-        .map_or_else(BTreeSet::new, |call| {
-            let terminal = call_names
-                .get(&call.local_id())
-                .and_then(|name| facts_by_id.get(name))
-                .copied();
-            syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id)
-        });
+    let mut preferred = preferred_local_call_syntax_fact_group(
+        language,
+        facts,
+        source,
+        &facts_by_id,
+        &call_names,
+        &declared_calls,
+    )
+    .and_then(|group| facts_by_id.get(&group.call_id).copied())
+    .map_or_else(BTreeSet::new, |call| {
+        let terminal = call_names
+            .get(&call.local_id())
+            .and_then(|name| facts_by_id.get(name))
+            .copied();
+        syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id)
+    });
     let groups = imported_call_syntax_fact_groups(
         language,
         facts,
@@ -521,6 +560,99 @@ fn preferred_relationship_allowance(
         .iter()
         .filter(|local_id| !mandatory.contains(local_id))
         .count()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PreferredLocalCallGroup {
+    call_id: u64,
+    is_test: bool,
+    demand: usize,
+}
+
+fn project_input_relationship_priority(
+    language: SemanticProjectLanguage,
+    facts: &[SyntaxFact],
+    source: &[u8],
+) -> PreferredLocalCallGroup {
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let call_names = terminal_call_names(facts);
+    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    preferred_local_call_syntax_fact_group(
+        language,
+        facts,
+        source,
+        &facts_by_id,
+        &call_names,
+        &declared_calls,
+    )
+    .unwrap_or_default()
+}
+
+fn preferred_local_call_syntax_fact_group(
+    language: SemanticProjectLanguage,
+    facts: &[SyntaxFact],
+    source: &[u8],
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    call_names: &BTreeMap<u64, u64>,
+    declared_calls: &BTreeSet<u64>,
+) -> Option<PreferredLocalCallGroup> {
+    let test_declarations = positive_test_declarations(language, facts);
+    let mut groups = BTreeMap::<(bool, String), Vec<&SyntaxFact>>::new();
+    for call in facts.iter().filter(|fact| is_call_fact(fact)) {
+        let is_test = fact_is_enclosed_by(call, facts_by_id, &test_declarations);
+        if !is_test && !declared_calls.contains(&call.local_id()) {
+            continue;
+        }
+        let Some(name) = retained_call_name(source, call, call_names, facts_by_id) else {
+            continue;
+        };
+        groups
+            .entry((is_test, name.to_owned()))
+            .or_default()
+            .push(call);
+    }
+    let ((is_test, _), calls) = groups.into_iter().max_by(
+        |((left_test, left_name), left_calls), ((right_test, right_name), right_calls)| {
+            left_test
+                .cmp(right_test)
+                .then_with(|| left_calls.len().cmp(&right_calls.len()))
+                .then_with(|| right_name.cmp(left_name))
+        },
+    )?;
+    let demand = calls.len();
+    let call = calls
+        .into_iter()
+        .min_by(|left, right| structural_syntax_fact_order(left, right))?;
+    Some(PreferredLocalCallGroup {
+        call_id: call.local_id(),
+        is_test,
+        demand,
+    })
+}
+
+fn fact_is_enclosed_by(
+    fact: &SyntaxFact,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    declarations: &BTreeSet<u64>,
+) -> bool {
+    let mut parent = fact.parent();
+    let mut remaining = facts_by_id.len();
+    while let Some(parent_id) = parent {
+        if declarations.contains(&parent_id) {
+            return true;
+        }
+        if remaining == 0 {
+            return false;
+        }
+        remaining -= 1;
+        parent = facts_by_id
+            .get(&parent_id)
+            .and_then(|candidate| candidate.parent());
+    }
+    false
 }
 
 fn declared_call_ids(
