@@ -704,21 +704,27 @@ fn bounded_python_syntax_retains_late_local_call_relationship() {
 }
 
 #[test]
-fn bounded_javascript_syntax_retains_imported_call_before_local_call_fanout() {
+fn bounded_javascript_syntax_retains_local_and_high_demand_imported_calls() {
     let mut paths = vec![
         "src/000_consumer.js".to_owned(),
         "src/001_provider.js".to_owned(),
     ];
     let mut sources = vec![
         String::from(concat!(
-            "import {provide} from './001_provider';\n",
+            "import {frequent, occasional} from './001_provider';\n",
             "export function localValue() { return 1; }\n",
-            "export function run() {\n",
+            "export function firstCaller() {\n",
             "  const local = localValue();\n",
-            "  return provide(local);\n",
+            "  occasional(local);\n",
+            "  return frequent(local);\n",
             "}\n",
+            "export function secondCaller() { return frequent(2); }\n",
+            "export function thirdCaller() { return frequent(3); }\n",
         )),
-        String::from("export function provide(value) { return value; }\n"),
+        String::from(concat!(
+            "export function frequent(value) { return value; }\n",
+            "export function occasional(value) { return value; }\n",
+        )),
     ];
     for index in 0..126 {
         paths.push(format!("src/zz_filler_{index:03}.js"));
@@ -730,12 +736,30 @@ fn bounded_javascript_syntax_retains_imported_call_before_local_call_fanout() {
     let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::JavaScript);
     let limits = real_parser_limits_with_project_files(128);
     let output = analyze_with_real_parser_limits(&fixture, &limits);
-    let provider = output
+    let local_callee = output
         .document()
         .entities
         .iter()
-        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "provide")
-        .expect("import provider is materialized");
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "localValue")
+        .expect("local callee is materialized");
+    let local_caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "firstCaller")
+        .expect("local caller is materialized");
+    let imported_callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "frequent")
+        .expect("imported callee is materialized");
+    let later_imported_caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "secondCaller")
+        .expect("later imported caller is materialized");
 
     assert!(
         output
@@ -746,14 +770,27 @@ fn bounded_javascript_syntax_retains_imported_call_before_local_call_fanout() {
     );
     assert!(output.document().occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(local_caller.id)
             && matches!(
                 occurrence.target,
-                OccurrenceTarget::Resolved { symbol } if symbol == provider.id
+                OccurrenceTarget::Resolved { symbol } if symbol == local_callee.id
             )
     }));
     assert!(output.document().relations.iter().any(|relation| {
         relation.predicate == RelationPredicate::Calls
-            && relation.object == rootlight_ir::RelationEndpoint::Entity(provider.id)
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(local_callee.id)
+    }));
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(later_imported_caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == imported_callee.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(imported_callee.id)
     }));
 }
 
