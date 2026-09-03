@@ -894,7 +894,9 @@ fn project_partition_assignment(
     let mut dependency_demand = BTreeMap::<(usize, usize), usize>::new();
     let mut remaining_scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
         .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-    let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES;
+    // Inspect bounded rejected imports with the existing discovery-work budget;
+    // only the highest-priority dependency set is retained below.
+    let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
     for (consumer, input) in inputs.iter().enumerate() {
         cancellation
             .check()
@@ -16381,6 +16383,63 @@ mod tests {
         assert_ne!(caller_partition, 2);
         assert_eq!(caller_partition, partition("src/provider.js"));
         assert!(left.len().max(right.len()) <= 3);
+    }
+
+    #[test]
+    fn adaptive_split_finds_dependency_after_rejected_imports() {
+        fn input(file_byte: u8, path: &str, source: Vec<u8>) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "javascript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let rejected_imports = (0..PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES)
+            .map(|index| format!("import {{missing{index}}} from './missing{index}';\n"))
+            .collect::<String>()
+            .into_bytes();
+        let batch = vec![
+            input(1, "src/noise.js", rejected_imports),
+            input(
+                2,
+                "src/consumer.js",
+                b"import {target} from './provider';\nexport function run() { target(); }\n"
+                    .to_vec(),
+            ),
+            input(
+                3,
+                "src/provider.js",
+                b"export function target() {}\n".to_vec(),
+            ),
+            input(4, "src/x.js", b"export const x = 1;\n".to_vec()),
+            input(5, "src/y.js", b"export const y = 1;\n".to_vec()),
+        ];
+        let (left, right) = split_project_adapter_partition(batch, &Cancellation::new())
+            .expect("adapter split planning succeeds")
+            .expect("adapter batch is splittable");
+        let partition = |path: &str| {
+            if left.iter().any(|input| input.path == path) {
+                0
+            } else if right.iter().any(|input| input.path == path) {
+                1
+            } else {
+                2
+            }
+        };
+
+        let consumer_partition = partition("src/consumer.js");
+        assert_ne!(consumer_partition, 2);
+        assert_eq!(consumer_partition, partition("src/provider.js"));
+        assert!(left.len().max(right.len()) <= 4);
     }
 
     #[test]
