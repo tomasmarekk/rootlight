@@ -178,10 +178,12 @@ const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
-// The file ceiling also leaves at least two optional facts per file after the
-// one bounded syntax-recovery split, enough for a local call evidence unit.
+// The general file ceiling leaves two optional facts per file after the one
+// bounded syntax-recovery split. Python uses one quarter of that width so its
+// fixed fact budget retains nested ancestry for a second local relationship.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
 const PROJECT_ADAPTER_PARTITION_FILES: usize = 256;
+const PYTHON_PROJECT_ADAPTER_PARTITION_FILES: usize = PROJECT_ADAPTER_PARTITION_FILES / 4;
 // One split doubles local syntax-fact headroom; bounded documents remain
 // valid, so further isolated-process retries must not grow recursively.
 const PROJECT_ADAPTER_SYNTAX_RECOVERY_DEPTH: u8 = 1;
@@ -363,10 +365,14 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             Vec::new(),
         );
         let base_request_payload_bytes = project_analysis_request_payload_bytes(&sizing_request);
+        let partition_files = project_adapter_partition_file_limit(
+            request.language(),
+            usize::try_from(files).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+        );
         let mut partition = ProjectPartitionBuffer::new(
             base_request_payload_bytes,
             request.context_manifest().len(),
-            usize::try_from(files).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+            partition_files,
         )?;
         let mut analysis: Option<FirstSliceProjectAnalysis> = None;
         let mut completed_files = 0_u64;
@@ -376,7 +382,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         let mut current_partition_paths = Vec::<&str>::new();
         let mut top_level_partition = 0_usize;
         current_partition_paths
-            .try_reserve(PROJECT_ADAPTER_PARTITION_FILES)
+            .try_reserve(partition_files)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         for input in &ordered_inputs {
             let wire_input = project_input_to_wire(&request, input)?;
@@ -3349,6 +3355,15 @@ struct ProjectPartitionBuffer {
     source_bytes: usize,
     context_bytes: usize,
     max_files: usize,
+}
+
+fn project_adapter_partition_file_limit(language: &str, admitted_files: usize) -> usize {
+    let ceiling = if language == "python" {
+        PYTHON_PROJECT_ADAPTER_PARTITION_FILES
+    } else {
+        PROJECT_ADAPTER_PARTITION_FILES
+    };
+    admitted_files.min(ceiling)
 }
 
 impl ProjectPartitionBuffer {
@@ -16219,6 +16234,19 @@ mod tests {
         assert_eq!(queued_deadline.code(), ErrorCode::Busy);
         assert!(queued_deadline.retryable());
         assert_eq!(queued_deadline.next_actions(), &[NextAction::Retry]);
+    }
+
+    #[test]
+    fn python_partition_width_reserves_a_second_local_call_unit() {
+        assert_eq!(
+            project_adapter_partition_file_limit("python", usize::MAX),
+            PYTHON_PROJECT_ADAPTER_PARTITION_FILES
+        );
+        assert_eq!(
+            project_adapter_partition_file_limit("javascript", usize::MAX),
+            PROJECT_ADAPTER_PARTITION_FILES
+        );
+        assert_eq!(project_adapter_partition_file_limit("python", 17), 17);
     }
 
     #[test]

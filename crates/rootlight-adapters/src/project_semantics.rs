@@ -44,7 +44,7 @@ const TYPESCRIPT_CALL_CONFIDENCE: u16 = 800;
 const DYNAMIC_CALL_CONFIDENCE: u16 = 650;
 const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
 const MAX_OPTIONAL_PROJECT_SYNTAX_FACTS: usize = 256;
-const MIN_OPTIONAL_PYTHON_LOCAL_CALL_FACTS_PER_INPUT: usize = 2;
+const MIN_OPTIONAL_PYTHON_LOCAL_CALL_FACTS_PER_INPUT: usize = 8;
 /// Diagnostic emitted when project analysis had to discard syntax facts.
 pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limit";
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
@@ -347,8 +347,8 @@ fn bound_project_syntax_facts(
         // so one dependency's fanout cannot hide every later dependency.
         let preferred_allowance =
             preferred_relationship_allowance(language, &input.facts, input.input.source().bytes());
-        // Python's same-module resolver needs only the call and terminal-name
-        // facts, so preserve that minimal unit for each later bounded input.
+        // Preserve enough Python syntax ancestry for one priority call and one
+        // distinct nested local relationship in every later bounded input.
         let reserved_for_remaining = if language == SemanticProjectLanguage::Python {
             remaining_inputs
                 .saturating_sub(1)
@@ -626,6 +626,27 @@ fn preferred_local_call_syntax_fact_group(
             .entry((is_test, name.to_owned()))
             .or_default()
             .push(call);
+    }
+    if language == SemanticProjectLanguage::Python {
+        return groups
+            .into_iter()
+            .filter_map(|((is_test, _), calls)| {
+                let demand = calls.len();
+                let call = calls
+                    .into_iter()
+                    .min_by(|left, right| structural_syntax_fact_order(left, right))?;
+                Some((is_test, demand, call))
+            })
+            .min_by(|(left_test, _, left_call), (right_test, _, right_call)| {
+                right_test
+                    .cmp(left_test)
+                    .then_with(|| structural_syntax_fact_order(left_call, right_call))
+            })
+            .map(|(is_test, demand, call)| PreferredLocalCallGroup {
+                call_id: call.local_id(),
+                is_test,
+                demand,
+            });
     }
     let call_nesting = call_span_nesting(facts);
     let ((is_test, _), calls) = groups.into_iter().max_by(

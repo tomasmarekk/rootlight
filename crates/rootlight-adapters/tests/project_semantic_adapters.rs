@@ -707,7 +707,7 @@ fn bounded_python_syntax_retains_late_local_call_relationship() {
 fn bounded_python_syntax_reserves_late_file_local_call_relationship() {
     let mut paths = Vec::new();
     let mut sources = Vec::new();
-    for index in 0..127 {
+    for index in 0..31 {
         paths.push(format!("Lib/noisy_{index:03}.py"));
         sources.push(format!(
             concat!(
@@ -728,11 +728,15 @@ fn bounded_python_syntax_reserves_late_file_local_call_relationship() {
     sources.push(String::from(concat!(
         "def choose(values):\n",
         "    return 0\n\n",
+        "def frequent(values):\n",
+        "    return 0\n\n",
         "def insert(values):\n",
-        "    return choose(values)\n",
+        "    values.insert(choose(values))\n",
+        "    frequent(values)\n",
+        "    frequent(values)\n",
     )));
     let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::Python);
-    let limits = real_parser_limits_with_project_files(128);
+    let limits = real_parser_limits_with_project_files(32);
     let output = analyze_with_real_parser_limits(&fixture, &limits);
     let caller = output
         .document()
