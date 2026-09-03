@@ -44,6 +44,7 @@ const TYPESCRIPT_CALL_CONFIDENCE: u16 = 800;
 const DYNAMIC_CALL_CONFIDENCE: u16 = 650;
 const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
 const MAX_OPTIONAL_PROJECT_SYNTAX_FACTS: usize = 256;
+const MIN_OPTIONAL_PYTHON_LOCAL_CALL_FACTS_PER_INPUT: usize = 2;
 /// Diagnostic emitted when project analysis had to discard syntax facts.
 pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limit";
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
@@ -346,8 +347,20 @@ fn bound_project_syntax_facts(
         // so one dependency's fanout cannot hide every later dependency.
         let preferred_allowance =
             preferred_relationship_allowance(language, &input.facts, input.input.source().bytes());
+        // Python's same-module resolver needs only the call and terminal-name
+        // facts, so preserve that minimal unit for each later bounded input.
+        let reserved_for_remaining = if language == SemanticProjectLanguage::Python {
+            remaining_inputs
+                .saturating_sub(1)
+                .saturating_mul(MIN_OPTIONAL_PYTHON_LOCAL_CALL_FACTS_PER_INPUT)
+        } else {
+            0
+        };
+        let preferred_ceiling = remaining_optional_facts
+            .saturating_sub(reserved_for_remaining)
+            .max(fair_allowance);
         let allowance = fair_allowance
-            .max(preferred_allowance)
+            .max(preferred_allowance.min(preferred_ceiling))
             .min(remaining_optional_facts);
         let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
         let original_len = input.facts.len();

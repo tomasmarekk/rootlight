@@ -704,6 +704,71 @@ fn bounded_python_syntax_retains_late_local_call_relationship() {
 }
 
 #[test]
+fn bounded_python_syntax_reserves_late_file_local_call_relationship() {
+    let mut paths = Vec::new();
+    let mut sources = Vec::new();
+    for index in 0..127 {
+        paths.push(format!("Lib/noisy_{index:03}.py"));
+        sources.push(format!(
+            concat!(
+                "from dependency import imported_a, imported_b, imported_c\n\n",
+                "def local_{index}():\n",
+                "    return 0\n\n",
+                "def consume_{index}():\n",
+                "    local_{index}()\n",
+                "    local_{index}()\n",
+                "    imported_a()\n",
+                "    imported_b()\n",
+                "    imported_c()\n",
+            ),
+            index = index,
+        ));
+    }
+    paths.push("Lib/zzzzz_999.py".to_owned());
+    sources.push(String::from(concat!(
+        "def choose(values):\n",
+        "    return 0\n\n",
+        "def insert(values):\n",
+        "    return choose(values)\n",
+    )));
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::Python);
+    let limits = real_parser_limits_with_project_files(128);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "insert")
+        .expect("late caller function is materialized");
+    let callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "choose")
+        .expect("late callee function is materialized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == callee.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(callee.id)
+    }));
+}
+
+#[test]
 fn bounded_javascript_syntax_retains_local_and_import_diverse_calls() {
     let mut paths = vec![
         "src/000_consumer.js".to_owned(),
