@@ -309,8 +309,9 @@ fn bound_project_syntax_facts(
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
     let mut remaining_optional_facts = maximum_optional_facts;
     let mut remaining_inputs = parsed.len();
-    // Allocate the fixed budget to positive test evidence first, then to the
-    // most repeated local relationship, independent of repository path order.
+    // Allocate the fixed budget to positive test evidence first, then to
+    // explicit import bindings and repeated local relationships, independent
+    // of repository path order.
     let priorities = parsed
         .iter()
         .map(|input| {
@@ -324,9 +325,20 @@ fn bound_project_syntax_facts(
     let mut selection_order = (0..parsed.len()).collect::<Vec<_>>();
     selection_order.sort_unstable_by(|left, right| {
         priorities[*right]
+            .local
             .is_test
-            .cmp(&priorities[*left].is_test)
-            .then_with(|| priorities[*right].demand.cmp(&priorities[*left].demand))
+            .cmp(&priorities[*left].local.is_test)
+            .then_with(|| {
+                priorities[*right]
+                    .imported_demand
+                    .cmp(&priorities[*left].imported_demand)
+            })
+            .then_with(|| {
+                priorities[*right]
+                    .local
+                    .demand
+                    .cmp(&priorities[*left].local.demand)
+            })
             .then_with(|| {
                 parsed[*left]
                     .input
@@ -582,18 +594,24 @@ struct PreferredLocalCallGroup {
     demand: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ProjectInputRelationshipPriority {
+    local: PreferredLocalCallGroup,
+    imported_demand: usize,
+}
+
 fn project_input_relationship_priority(
     language: SemanticProjectLanguage,
     facts: &[SyntaxFact],
     source: &[u8],
-) -> PreferredLocalCallGroup {
+) -> ProjectInputRelationshipPriority {
     let facts_by_id = facts
         .iter()
         .map(|fact| (fact.local_id(), fact))
         .collect::<BTreeMap<_, _>>();
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
-    preferred_local_call_syntax_fact_group(
+    let local = preferred_local_call_syntax_fact_group(
         language,
         facts,
         source,
@@ -601,7 +619,23 @@ fn project_input_relationship_priority(
         &call_names,
         &declared_calls,
     )
-    .unwrap_or_default()
+    .unwrap_or_default();
+    let imported_demand = imported_call_syntax_fact_groups(
+        language,
+        facts,
+        source,
+        &facts_by_id,
+        &call_names,
+        &declared_calls,
+    )
+    .into_iter()
+    .map(|group| group.call_ids.len())
+    .max()
+    .unwrap_or_default();
+    ProjectInputRelationshipPriority {
+        local,
+        imported_demand,
+    }
 }
 
 fn preferred_local_call_syntax_fact_group(
