@@ -1012,11 +1012,12 @@ fn bounded_java_project_prioritizes_annotated_test_relationships() {
             "  void assertResult(int actual, String message) {}\n",
             "  @Test void exercisesReceiver() {\n",
             "    Worker worker = new Worker();\n",
+            "    Worker alternate = new Worker();\n",
+            "    Worker fallback = new Worker();\n",
             "    Integer[] values = {1, 2, 3};\n",
             "    assertResult(worker.execute(values, values[0]), \"first\");\n",
             "    assertResult(worker.execute(values, values[1]), \"second\");\n",
             "    assertResult(worker.execute(values, values[2]), \"third\");\n",
-            "    worker.execute(values, values[0]);\n",
             "  }\n",
             "}\n",
         )

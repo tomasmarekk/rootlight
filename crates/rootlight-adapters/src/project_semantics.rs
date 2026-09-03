@@ -614,11 +614,36 @@ fn preferred_local_call_syntax_fact_group(
             .or_default()
             .push(call);
     }
+    let call_nesting = call_span_nesting(facts);
     let ((is_test, _), calls) = groups.into_iter().max_by(
         |((left_test, left_name), left_calls), ((right_test, right_name), right_calls)| {
+            let left_call_nesting = left_calls
+                .iter()
+                .filter_map(|call| call_nesting.get(&call.local_id()))
+                .max()
+                .copied()
+                .unwrap_or_default();
+            let right_call_nesting = right_calls
+                .iter()
+                .filter_map(|call| call_nesting.get(&call.local_id()))
+                .max()
+                .copied()
+                .unwrap_or_default();
+            let left_depth = left_calls
+                .iter()
+                .map(|call| call.depth())
+                .max()
+                .unwrap_or_default();
+            let right_depth = right_calls
+                .iter()
+                .map(|call| call.depth())
+                .max()
+                .unwrap_or_default();
             left_test
                 .cmp(right_test)
                 .then_with(|| left_calls.len().cmp(&right_calls.len()))
+                .then_with(|| left_call_nesting.cmp(&right_call_nesting))
+                .then_with(|| left_depth.cmp(&right_depth))
                 .then_with(|| right_name.cmp(left_name))
         },
     )?;
@@ -631,6 +656,36 @@ fn preferred_local_call_syntax_fact_group(
         is_test,
         demand,
     })
+}
+
+fn call_span_nesting(facts: &[SyntaxFact]) -> BTreeMap<u64, usize> {
+    let mut calls = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .collect::<Vec<_>>();
+    calls.sort_unstable_by_key(|fact| {
+        (
+            fact.span().file(),
+            fact.span().start_byte(),
+            std::cmp::Reverse(fact.span().end_byte()),
+            fact.local_id(),
+        )
+    });
+    let mut active = Vec::<SourceSpan>::new();
+    let mut nesting = BTreeMap::new();
+    for call in calls {
+        while active
+            .last()
+            .is_some_and(|container| !contains_span(*container, call.span()))
+        {
+            active.pop();
+        }
+        nesting.insert(call.local_id(), active.len());
+        if active.last().is_none_or(|span| *span != call.span()) {
+            active.push(call.span());
+        }
+    }
+    nesting
 }
 
 fn fact_is_enclosed_by(
