@@ -999,9 +999,10 @@ fn bounded_java_project_prioritizes_annotated_test_relationships() {
             "class WorkerTest {\n",
             "  @Test void exercisesReceiver() {\n",
             "    Worker worker = new Worker();\n",
-            "    worker.execute(1);\n",
-            "    worker.execute(2);\n",
-            "    worker.execute(3);\n",
+            "    int[] values = {1, 2, 3};\n",
+            "    worker.execute(values[0]);\n",
+            "    worker.execute(values[1]);\n",
+            "    worker.execute(values[2]);\n",
             "  }\n",
             "}\n",
         )

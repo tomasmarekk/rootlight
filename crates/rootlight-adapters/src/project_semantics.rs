@@ -2976,19 +2976,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             return None;
         }
         let candidates = definitions.get(&occurrence.name)?;
-        let caller_type = occurrence
+        let caller = occurrence
             .enclosing_declaration
             .and_then(|declaration| {
                 self.symbol_by_declaration
                     .get(&(occurrence.file, declaration))
             })
-            .and_then(|symbol| self.entities.iter().find(|entity| entity.symbol == *symbol))
-            .and_then(|entity| entity.declaring_type.as_deref());
+            .and_then(|symbol| self.entities.iter().find(|entity| entity.symbol == *symbol));
+        let caller_type = caller.and_then(|entity| entity.declaring_type.as_deref());
         let qualifier = occurrence.qualifier.as_deref();
         let receiver_type = qualifier.and_then(|qualifier| {
             self.input_for_file(occurrence.file).ok().and_then(|input| {
                 local_receiver_type(
                     input.source().bytes(),
+                    caller.map_or(0, |entity| entity.span.start_byte()),
                     occurrence.source.span().start_byte(),
                     qualifier,
                     definitions,
@@ -3892,6 +3893,7 @@ fn call_arity_matches(call: Option<usize>, declaration: Option<usize>) -> bool {
 
 fn local_receiver_type(
     bytes: &[u8],
+    scope_start: u64,
     call_start: u64,
     receiver: &str,
     definitions: &BTreeMap<String, Vec<SemanticEntity>>,
@@ -3899,9 +3901,15 @@ fn local_receiver_type(
     if !is_identifier(receiver) || receiver == "$this" {
         return None;
     }
+    let scope_start = usize::try_from(scope_start).ok()?;
     let call_start = usize::try_from(call_start).ok()?;
-    let prefix = std::str::from_utf8(bytes.get(..call_start)?).ok()?;
-    for statement in prefix.rsplit([';', '{', '}']) {
+    let prefix = std::str::from_utf8(bytes.get(scope_start..call_start)?).ok()?;
+    for statement in prefix.rsplit(';') {
+        // Balanced initializer braces do not end a lexical scope. An
+        // unmatched closing brace does, so do not bind through it.
+        if has_unmatched_closing_brace(statement) {
+            return None;
+        }
         let (declaration, initializer) = statement.split_once('=').unwrap_or((statement, ""));
         let tokens = tokenize_identifiers(declaration);
         let Some(pair) = tokens
@@ -3923,6 +3931,32 @@ fn local_receiver_type(
         }
     }
     None
+}
+
+fn has_unmatched_closing_brace(value: &str) -> bool {
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let mut escaped = false;
+    for character in value.chars() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' | '`' => quote = Some(character),
+            '{' => depth = depth.saturating_add(1),
+            '}' if depth == 0 => return true,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn is_declared_type(definitions: &BTreeMap<String, Vec<SemanticEntity>>, name: &str) -> bool {
