@@ -874,6 +874,99 @@ fn bounded_javascript_syntax_retains_local_and_import_diverse_calls() {
 }
 
 #[test]
+fn bounded_javascript_syntax_retains_each_called_grouped_import_binding() {
+    let mut paths = Vec::new();
+    let mut sources = Vec::new();
+    for index in 0..254 {
+        paths.push(format!("src/{index:03}_local.js"));
+        sources.push(format!(
+            "export function local{index}() {{ return {index}; }}\n\
+             export function run{index}() {{ return local{index}(); }}\n"
+        ));
+    }
+    paths.push("src/zzz_consumer.js".to_owned());
+    sources.push(
+        concat!(
+            "import {frequent, occasional} from './zzz_provider';\n",
+            "export function frequentCaller() {\n",
+            "  frequent(1); frequent(2); frequent(3); frequent(4);\n",
+            "  frequent(5); frequent(6); frequent(7);\n",
+            "}\n",
+            "export function secondaryFrequentCaller() { return frequent(8); }\n",
+            "export function occasionalCaller() { return occasional(9); }\n",
+        )
+        .to_owned(),
+    );
+    paths.push("src/zzz_provider.js".to_owned());
+    sources.push(
+        concat!(
+            "export function frequent(value) { return value; }\n",
+            "export function occasional(value) { return value; }\n",
+        )
+        .to_owned(),
+    );
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::JavaScript);
+    let limits = real_parser_limits_with_project_files(256);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Function && entity.display_name == "occasionalCaller"
+        })
+        .expect("less frequent imported caller is materialized");
+    let callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "occasional")
+        .expect("less frequent imported callee is materialized");
+    let secondary_caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Function && entity.display_name == "secondaryFrequentCaller"
+        })
+        .expect("second caller of a repeated imported binding is materialized");
+    let frequent_callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "frequent")
+        .expect("repeated imported callee is materialized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == callee.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(callee.id)
+    }));
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(secondary_caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == frequent_callee.id
+            )
+    }));
+}
+
+#[test]
 fn bounded_javascript_syntax_prioritizes_imported_calls_over_local_fanout() {
     let mut paths = Vec::new();
     let mut sources = Vec::new();

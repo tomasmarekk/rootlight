@@ -355,8 +355,8 @@ fn bound_project_syntax_facts(
             .and_then(|value| value.checked_div(remaining_inputs))
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
         // A relationship needs its complete syntax unit. Borrow enough to
-        // retain one local edge and one callable binding per import statement,
-        // so one dependency's fanout cannot hide every later dependency.
+        // retain one local edge and representative callable-owner edges for
+        // imported bindings, so repeated sites cannot hide distinct callers.
         let preferred_allowance =
             preferred_relationship_allowance(language, &input.facts, input.input.source().bytes());
         // Preserve enough Python syntax ancestry for one priority call and one
@@ -561,11 +561,7 @@ fn preferred_relationship_allowance(
         &call_names,
         &declared_calls,
     );
-    let mut represented_imports = BTreeSet::new();
     for group in groups {
-        if represented_imports.contains(&group.import_id) {
-            continue;
-        }
         let mut candidate = preferred.clone();
         candidate.extend(imported_call_syntax_fact_group_ids(
             &group,
@@ -578,7 +574,6 @@ fn preferred_relationship_allowance(
             .count();
         if optional <= MAX_OPTIONAL_PROJECT_SYNTAX_FACTS {
             preferred = candidate;
-            represented_imports.insert(group.import_id);
         }
     }
     preferred
@@ -629,7 +624,7 @@ fn project_input_relationship_priority(
         &declared_calls,
     )
     .into_iter()
-    .map(|group| group.call_ids.len())
+    .map(|group| group.demand)
     .max()
     .unwrap_or_default();
     ProjectInputRelationshipPriority {
@@ -812,6 +807,7 @@ struct ImportedCallSyntaxFactGroup {
     import_id: u64,
     binding: ImportedCallBinding,
     call_ids: Vec<u64>,
+    demand: usize,
 }
 
 fn imported_call_syntax_fact_groups(
@@ -837,7 +833,11 @@ fn imported_call_syntax_fact_groups(
             ))
         })
         .collect::<Vec<_>>();
-    let mut grouped_calls = BTreeMap::<(u64, ImportedCallBinding), BTreeSet<u64>>::new();
+    let declaration_kinds = facts
+        .iter()
+        .filter_map(|fact| structural_entity_kind(fact).map(|kind| (fact.local_id(), kind)))
+        .collect::<BTreeMap<_, _>>();
+    let mut grouped_calls = BTreeMap::<(u64, ImportedCallBinding, Option<u64>), Vec<u64>>::new();
     for import in facts
         .iter()
         .filter(|fact| fact.kind() == SyntaxFactKind::Import)
@@ -867,23 +867,42 @@ fn imported_call_syntax_fact_groups(
                         | ImportBinding::Wildcard
                         | ImportBinding::SideEffect => continue,
                     };
+                    let owner = facts_by_id.get(call_id).and_then(|call| {
+                        enclosing_callable_declaration(call, facts_by_id, &declaration_kinds)
+                    });
                     grouped_calls
-                        .entry((import.local_id(), binding))
+                        .entry((import.local_id(), binding, owner))
                         .or_default()
-                        .insert(*call_id);
+                        .push(*call_id);
                 }
             }
         }
     }
     let mut groups_by_import = BTreeMap::<u64, Vec<ImportedCallSyntaxFactGroup>>::new();
-    for ((import_id, binding), call_ids) in grouped_calls {
+    for ((import_id, binding, _), call_ids) in grouped_calls {
+        let demand = call_ids.len();
+        // Repeated sites in one callable produce the same semantic call edge.
+        // Keep one deterministic site so the fixed project budget represents
+        // more distinct caller-to-imported-callee relationships.
+        let Some(call_id) = call_ids.into_iter().min_by(|left, right| {
+            let left = facts_by_id
+                .get(left)
+                .expect("grouped imported call references a parsed fact");
+            let right = facts_by_id
+                .get(right)
+                .expect("grouped imported call references a parsed fact");
+            structural_syntax_fact_order(left, right)
+        }) else {
+            continue;
+        };
         groups_by_import
             .entry(import_id)
             .or_default()
             .push(ImportedCallSyntaxFactGroup {
                 import_id,
                 binding,
-                call_ids: call_ids.into_iter().collect(),
+                call_ids: vec![call_id],
+                demand,
             });
     }
     let mut groups = groups_by_import
@@ -891,10 +910,10 @@ fn imported_call_syntax_fact_groups(
         .map(|mut groups| {
             groups.sort_unstable_by(|left, right| {
                 right
-                    .call_ids
-                    .len()
-                    .cmp(&left.call_ids.len())
+                    .demand
+                    .cmp(&left.demand)
                     .then_with(|| left.binding.cmp(&right.binding))
+                    .then_with(|| left.call_ids.cmp(&right.call_ids))
             });
             groups.into_iter()
         })
