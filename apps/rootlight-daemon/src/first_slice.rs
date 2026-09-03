@@ -1587,6 +1587,33 @@ impl ProjectIncludeBridgePlanner {
         partitions: &BTreeMap<&str, usize>,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if request.language() == "java" {
+            let mut remaining_scan_bytes = self.remaining_scan_bytes;
+            let mut remaining_references = self.remaining_imports;
+            scan_partitioned_java_receivers(
+                inputs,
+                partitions,
+                &mut remaining_scan_bytes,
+                &mut remaining_references,
+                ProjectPartitionDependencyScope::All,
+                cancellation,
+                |consumer, provider, demand, test_context| {
+                    if self.discovery_exhausted() {
+                        return Ok(false);
+                    }
+                    self.consider_request_pair(
+                        request,
+                        consumer,
+                        provider,
+                        Some((test_context, demand)),
+                    )?;
+                    Ok(!self.discovery_exhausted())
+                },
+            )?;
+            self.remaining_scan_bytes = remaining_scan_bytes;
+            self.remaining_imports = remaining_references;
+            return Ok(());
+        }
         if !matches!(request.language(), "c" | "cpp") {
             if !matches!(request.language(), "javascript" | "typescript") {
                 return Ok(());
@@ -1641,7 +1668,7 @@ impl ProjectIncludeBridgePlanner {
                 if self.discovery_exhausted() {
                     return Ok(false);
                 }
-                self.consider_request_pair(request, consumer, provider)?;
+                self.consider_request_pair(request, consumer, provider, None)?;
                 Ok(!self.discovery_exhausted())
             },
         )?;
@@ -1752,6 +1779,12 @@ impl ProjectIncludeBridgePlanner {
         let consumer_paths = ProjectInputPathSet::new(consumers);
         let provider_paths = ProjectInputPathIndex::new(providers);
         let module_providers = project_module_provider_index(providers);
+        let java_providers = if consumers.iter().any(|consumer| consumer.language == "java") {
+            let provider_inputs = providers.iter().collect::<Vec<_>>();
+            project_java_provider_index(&provider_inputs)
+        } else {
+            BTreeMap::new()
+        };
         for consumer in consumers {
             cancellation.check().map_err(|cancelled| {
                 FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
@@ -1797,7 +1830,7 @@ impl ProjectIncludeBridgePlanner {
                         let Some(provider) = provider else {
                             continue;
                         };
-                        self.consider_pair(consumer, provider)?;
+                        self.consider_pair(consumer, provider, None)?;
                         if self.discovery_exhausted() {
                             return Ok(());
                         }
@@ -1843,6 +1876,36 @@ impl ProjectIncludeBridgePlanner {
                     )?;
                     self.remaining_imports = self.remaining_imports.saturating_sub(observed);
                 }
+                "java" => {
+                    let file = adapter_project_input_file_id(consumer)?;
+                    if self.remaining_imports == 0
+                        || !self.claim_input_scan(file, consumer.source.len())
+                    {
+                        return Ok(());
+                    }
+                    let test_context = java_positive_test_context(source);
+                    let observed = for_each_java_receiver_dependency(
+                        source,
+                        self.remaining_imports,
+                        cancellation,
+                        |receiver_type, demand| {
+                            if self.discovery_exhausted() {
+                                return Ok(false);
+                            }
+                            let Some(provider) = java_providers
+                                .get(receiver_type)
+                                .copied()
+                                .flatten()
+                                .filter(|provider| provider.path != consumer.path)
+                            else {
+                                return Ok(true);
+                            };
+                            self.consider_pair(consumer, provider, Some((test_context, demand)))?;
+                            Ok(!self.discovery_exhausted())
+                        },
+                    )?;
+                    self.remaining_imports = self.remaining_imports.saturating_sub(observed);
+                }
                 _ => {}
             }
         }
@@ -1853,6 +1916,7 @@ impl ProjectIncludeBridgePlanner {
         &mut self,
         consumer: &adapter::ProjectInput,
         provider: &adapter::ProjectInput,
+        priority: Option<(bool, usize)>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         let pair = (
             adapter_project_input_file_id(consumer)?,
@@ -1875,13 +1939,23 @@ impl ProjectIncludeBridgePlanner {
         if !self.can_materialize_pair(consumer, provider, owned_bytes) {
             return Ok(());
         }
-        self.consider_owned_pair(
-            pair,
-            consumer.clone(),
-            provider.clone(),
-            source_bytes,
-            owned_bytes,
-        )
+        match priority {
+            Some(priority) => self.consider_owned_ranked_pair(
+                pair,
+                consumer.clone(),
+                provider.clone(),
+                source_bytes,
+                owned_bytes,
+                priority,
+            ),
+            None => self.consider_owned_pair(
+                pair,
+                consumer.clone(),
+                provider.clone(),
+                source_bytes,
+                owned_bytes,
+            ),
+        }
     }
 
     fn consider_request_pair(
@@ -1889,6 +1963,7 @@ impl ProjectIncludeBridgePlanner {
         request: &FirstSliceProjectAnalysisRequest<'_>,
         consumer: &rootlight_service::FirstSliceProjectInput<'_>,
         provider: &rootlight_service::FirstSliceProjectInput<'_>,
+        priority: Option<(bool, usize)>,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         let pair = (consumer.file(), provider.file());
         if !self.begin_pair_attempt(pair) {
@@ -1918,13 +1993,18 @@ impl ProjectIncludeBridgePlanner {
         if !self.can_materialize_pair(&consumer, &provider, owned_bytes.max(preview_bytes)) {
             return Ok(());
         }
-        self.consider_owned_pair(
-            pair,
-            consumer,
-            provider,
-            source_bytes,
-            owned_bytes.max(preview_bytes),
-        )
+        let owned_bytes = owned_bytes.max(preview_bytes);
+        match priority {
+            Some(priority) => self.consider_owned_ranked_pair(
+                pair,
+                consumer,
+                provider,
+                source_bytes,
+                owned_bytes,
+                priority,
+            ),
+            None => self.consider_owned_pair(pair, consumer, provider, source_bytes, owned_bytes),
+        }
     }
 
     fn consider_owned_pair(
@@ -1937,6 +2017,26 @@ impl ProjectIncludeBridgePlanner {
     ) -> Result<(), FirstSliceProjectAnalysisError> {
         let test_context = cpp_positive_test_context(&consumer.source);
         let demand = cpp_include_provider_demand(&consumer, &provider);
+        self.consider_owned_ranked_pair(
+            pair,
+            consumer,
+            provider,
+            source_bytes,
+            owned_bytes,
+            (test_context, demand),
+        )
+    }
+
+    fn consider_owned_ranked_pair(
+        &mut self,
+        pair: (FileId, FileId),
+        consumer: adapter::ProjectInput,
+        provider: adapter::ProjectInput,
+        source_bytes: usize,
+        owned_bytes: usize,
+        priority: (bool, usize),
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let (test_context, demand) = priority;
         self.consider_ranked_pair(
             pair,
             project_include_bridge_candidate(
@@ -2524,6 +2624,284 @@ impl ProjectIncludeSource for rootlight_service::FirstSliceProjectInput<'_> {
     fn include_source(&self) -> &[u8] {
         self.source()
     }
+}
+
+fn project_java_provider_index<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+) -> BTreeMap<String, Option<&'a T>> {
+    let mut providers = BTreeMap::new();
+    for input in inputs {
+        let Some(file_name) = input.include_path().rsplit('/').next() else {
+            continue;
+        };
+        let Some(type_name) = file_name
+            .strip_suffix(".java")
+            .filter(|name| java_bridge_identifier(name))
+        else {
+            continue;
+        };
+        providers
+            .entry(type_name.to_owned())
+            .and_modify(|provider| *provider = None)
+            .or_insert(Some(*input));
+    }
+    providers
+}
+
+fn scan_partitioned_java_receivers<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+    partitions: &BTreeMap<&str, usize>,
+    remaining_scan_bytes: &mut usize,
+    remaining_references: &mut usize,
+    scope: ProjectPartitionDependencyScope,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&'a T, &'a T, usize, bool) -> Result<bool, FirstSliceProjectAnalysisError>,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if inputs
+        .windows(2)
+        .any(|pair| pair[0].include_path() >= pair[1].include_path())
+        || inputs
+            .iter()
+            .any(|input| !partitions.contains_key(input.include_path()))
+    {
+        return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    let providers = project_java_provider_index(inputs);
+    let preferred = |input: &T| {
+        java_test_provider_type(input.include_path())
+            .and_then(|receiver_type| providers.get(receiver_type))
+            .copied()
+            .flatten()
+            .is_some_and(|provider| provider.include_path() != input.include_path())
+    };
+    let mut consumers = Vec::new();
+    consumers
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    consumers.extend_from_slice(inputs);
+    consumers.sort_unstable_by(|left, right| {
+        preferred(right)
+            .cmp(&preferred(left))
+            .then_with(|| left.include_path().cmp(right.include_path()))
+    });
+    let mut preferred_remaining = consumers.iter().filter(|input| preferred(input)).count();
+    for consumer in consumers
+        .into_iter()
+        .take(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK)
+    {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        if *remaining_references == 0 {
+            return Ok(());
+        }
+        let is_preferred = preferred(consumer);
+        let scan_limit = if is_preferred && preferred_remaining > 0 {
+            let fair_share = remaining_scan_bytes.div_ceil(preferred_remaining);
+            preferred_remaining = preferred_remaining.saturating_sub(1);
+            consumer.include_source().len().min(fair_share)
+        } else {
+            consumer.include_source().len().min(*remaining_scan_bytes)
+        };
+        if scan_limit == 0 {
+            return Ok(());
+        }
+        let Ok(source) = std::str::from_utf8(consumer.include_source()) else {
+            *remaining_scan_bytes = remaining_scan_bytes.saturating_sub(scan_limit);
+            continue;
+        };
+        let scan_limit = utf8_prefix_boundary(source, scan_limit)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        *remaining_scan_bytes = remaining_scan_bytes.saturating_sub(scan_limit);
+        let source = source
+            .get(..scan_limit)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let consumer_partition = partitions
+            .get(consumer.include_path())
+            .copied()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let test_context = java_positive_test_context(source);
+        let observed = for_each_java_receiver_dependency(
+            source,
+            *remaining_references,
+            cancellation,
+            |receiver_type, demand| {
+                let Some(provider) = providers
+                    .get(receiver_type)
+                    .copied()
+                    .flatten()
+                    .filter(|provider| provider.include_path() != consumer.include_path())
+                else {
+                    return Ok(true);
+                };
+                let provider_partition = partitions
+                    .get(provider.include_path())
+                    .copied()
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                if (matches!(scope, ProjectPartitionDependencyScope::All)
+                    || consumer_partition != provider_partition)
+                    && !visit(consumer, provider, demand, test_context)?
+                {
+                    return Ok(false);
+                }
+                Ok(true)
+            },
+        )?;
+        *remaining_references = remaining_references.saturating_sub(observed);
+    }
+    Ok(())
+}
+
+fn java_test_provider_type(path: &str) -> Option<&str> {
+    path.rsplit('/')
+        .next()?
+        .strip_suffix(".java")?
+        .strip_suffix("Test")
+        .filter(|name| !name.is_empty())
+}
+
+fn for_each_java_receiver_dependency(
+    source: &str,
+    maximum: usize,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&str, usize) -> Result<bool, FirstSliceProjectAnalysisError>,
+) -> Result<usize, FirstSliceProjectAnalysisError> {
+    let maximum = maximum.min(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES);
+    let mut observed = 0_usize;
+    let mut bindings = BTreeSet::new();
+    for (line_index, line) in source.lines().enumerate() {
+        if line_index.is_multiple_of(128) {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+        }
+        if observed >= maximum {
+            break;
+        }
+        let Some((receiver_type, receiver)) = java_constructor_receiver(line) else {
+            continue;
+        };
+        if !bindings.insert((receiver_type.to_owned(), receiver.to_owned())) {
+            continue;
+        }
+        observed = observed.saturating_add(1);
+        let demand = java_receiver_call_demand(source, receiver);
+        if demand > 0 && !visit(receiver_type, demand)? {
+            break;
+        }
+    }
+    Ok(observed)
+}
+
+fn java_constructor_receiver(line: &str) -> Option<(&str, &str)> {
+    let (declaration, initializer) = line.split_once('=')?;
+    let receiver = last_java_identifier(declaration)?;
+    let constructor = initializer.split_once('(')?.0;
+    let mut saw_new = false;
+    let mut receiver_type = None;
+    for_each_java_identifier(constructor, |identifier| {
+        if saw_new {
+            receiver_type = Some(identifier);
+        } else if identifier == "new" {
+            saw_new = true;
+        }
+    });
+    let receiver_type = receiver_type?;
+    (receiver != receiver_type
+        && identifier_occurrences(declaration, receiver_type) > 0
+        && java_bridge_identifier(receiver_type)
+        && java_bridge_identifier(receiver))
+    .then_some((receiver_type, receiver))
+}
+
+fn java_receiver_call_demand(source: &str, receiver: &str) -> usize {
+    source
+        .match_indices(receiver)
+        .filter(|(start, _)| {
+            let end = start.saturating_add(receiver.len());
+            let left = source
+                .as_bytes()
+                .get(start.saturating_sub(1))
+                .filter(|_| *start > 0)
+                .copied();
+            let right = source.as_bytes().get(end).copied();
+            if left.is_some_and(ecmascript_identifier_byte)
+                || right.is_some_and(ecmascript_identifier_byte)
+            {
+                return false;
+            }
+            source
+                .get(end..)
+                .map(str::trim_start)
+                .and_then(|tail| tail.strip_prefix('.'))
+                .map(str::trim_start)
+                .and_then(last_java_call_prefix)
+                .is_some()
+        })
+        .count()
+}
+
+fn last_java_call_prefix(value: &str) -> Option<&str> {
+    let end = value
+        .bytes()
+        .take_while(|byte| ecmascript_identifier_byte(*byte))
+        .count();
+    let identifier = value.get(..end)?;
+    (java_bridge_identifier(identifier)
+        && value
+            .get(end..)
+            .map(str::trim_start)
+            .is_some_and(|tail| tail.starts_with('(')))
+    .then_some(identifier)
+}
+
+fn java_bridge_identifier(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| *byte == b'_' || *byte == b'$' || byte.is_ascii_alphabetic())
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == b'_' || *byte == b'$' || byte.is_ascii_alphanumeric())
+}
+
+fn last_java_identifier(value: &str) -> Option<&str> {
+    let mut last = None;
+    for_each_java_identifier(value, |identifier| last = Some(identifier));
+    last
+}
+
+fn for_each_java_identifier<'a>(value: &'a str, mut visit: impl FnMut(&'a str)) {
+    let mut start = None;
+    for (index, byte) in value
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b' '))
+        .enumerate()
+    {
+        if ecmascript_identifier_byte(byte) {
+            start.get_or_insert(index);
+        } else if let Some(identifier_start) = start.take()
+            && let Some(identifier) = value.get(identifier_start..index)
+        {
+            visit(identifier);
+        }
+    }
+}
+
+fn java_positive_test_context(source: &str) -> bool {
+    source.match_indices("@Test").any(|(start, annotation)| {
+        let end = start.saturating_add(annotation.len());
+        source.get(end..).is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character == '(' || character.is_whitespace())
+        })
+    })
 }
 
 fn scan_partitioned_includes<'a, T: ProjectIncludeSource>(
@@ -16470,6 +16848,164 @@ mod tests {
     }
 
     #[test]
+    fn top_level_java_discovery_crosses_file_partition_boundary() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "java".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = [
+            input(
+                1,
+                "src/main/java/example/Worker.java",
+                b"class Worker { int execute() { return 1; } }\n",
+            ),
+            input(
+                2,
+                "src/test/java/example/WorkerTest.java",
+                b"class WorkerTest { @Test void run() { Worker worker = new Worker(); worker.execute(); } }\n",
+            ),
+        ];
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let partitions = BTreeMap::from([
+            ("src/main/java/example/Worker.java", 0),
+            ("src/test/java/example/WorkerTest.java", 1),
+        ]);
+        let mut scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .expect("scan budget fits usize");
+        let mut remaining_references = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+        let mut pairs = Vec::new();
+
+        scan_partitioned_java_receivers(
+            &ordered,
+            &partitions,
+            &mut scan_bytes,
+            &mut remaining_references,
+            ProjectPartitionDependencyScope::CrossPartition,
+            &Cancellation::new(),
+            |consumer, provider, demand, test_context| {
+                pairs.push((
+                    consumer.path.as_str(),
+                    provider.path.as_str(),
+                    demand,
+                    test_context,
+                ));
+                Ok(true)
+            },
+        )
+        .expect("top-level Java discovery succeeds");
+
+        assert_eq!(
+            pairs,
+            [(
+                "src/test/java/example/WorkerTest.java",
+                "src/main/java/example/Worker.java",
+                1,
+                true,
+            )]
+        );
+    }
+
+    #[test]
+    fn java_test_consumers_share_fixed_scan_budget_fairly() {
+        fn input(file_index: usize, path: String, source: Vec<u8>) -> adapter::ProjectInput {
+            let mut file = vec![0_u8; 20];
+            file[..8].copy_from_slice(
+                &u64::try_from(file_index)
+                    .expect("fixture index fits")
+                    .to_le_bytes(),
+            );
+            adapter::ProjectInput {
+                file: Some(common::FileId { value: file }),
+                path,
+                language: "java".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(&source).as_bytes().to_vec(),
+                }),
+                source,
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let pair_count = PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES.saturating_add(44);
+        let mut inputs = Vec::new();
+        for index in 0..pair_count {
+            let type_name = format!("Worker{index:03}");
+            inputs.push(input(
+                index,
+                format!("src/main/{type_name}.java"),
+                format!("class {type_name} {{ int execute() {{ return {index}; }} }}\n")
+                    .into_bytes(),
+            ));
+            let mut consumer = format!(
+                "class {type_name}Test {{ @Test void run() {{ {type_name} worker = new {type_name}(); worker.execute();"
+            );
+            if index + 1 == pair_count {
+                consumer.push_str(" worker.execute(); worker.execute(); worker.execute();");
+            }
+            consumer.push_str(" } }\n");
+            consumer.extend(std::iter::repeat_n(
+                ' ',
+                512_usize.saturating_sub(consumer.len()),
+            ));
+            inputs.push(input(
+                pair_count.saturating_add(index),
+                format!("src/test/{type_name}Test.java"),
+                consumer.into_bytes(),
+            ));
+        }
+        inputs.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let partitions = ordered
+            .iter()
+            .map(|input| {
+                (
+                    input.path.as_str(),
+                    usize::from(input.path.starts_with("src/test/")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut scan_bytes = pair_count.saturating_mul(256);
+        let mut remaining_references = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+        let mut pairs = Vec::new();
+
+        scan_partitioned_java_receivers(
+            &ordered,
+            &partitions,
+            &mut scan_bytes,
+            &mut remaining_references,
+            ProjectPartitionDependencyScope::CrossPartition,
+            &Cancellation::new(),
+            |consumer, provider, demand, _| {
+                pairs.push((consumer.path.clone(), provider.path.clone(), demand));
+                Ok(true)
+            },
+        )
+        .expect("fair Java discovery succeeds");
+
+        let last = pair_count.saturating_sub(1);
+        let expected_consumer = format!("src/test/Worker{last:03}Test.java");
+        let expected_provider = format!("src/main/Worker{last:03}.java");
+        assert_eq!(pairs.len(), pair_count);
+        assert!(pairs.iter().any(|(consumer, provider, demand)| {
+            consumer == &expected_consumer && provider == &expected_provider && *demand == 4
+        }));
+        assert_eq!(scan_bytes, 0);
+    }
+
+    #[test]
     fn top_level_ecmascript_discovery_crosses_initial_file_partition_boundary() {
         fn input(file_index: usize, path: String, source: Vec<u8>) -> adapter::ProjectInput {
             let mut file = vec![0_u8; 20];
@@ -16746,6 +17282,124 @@ mod tests {
         let after_first_scan = planner.remaining_scan_bytes;
         assert!(planner.claim_input_scan(file, input.source.len()));
         assert_eq!(planner.remaining_scan_bytes, after_first_scan);
+    }
+
+    #[test]
+    fn bounded_syntax_partition_emits_java_receiver_bridge() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "java".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = vec![
+            input(
+                1,
+                "src/main/java/example/Worker.java",
+                b"class Worker { int execute() { return 1; } }\n",
+            ),
+            input(
+                2,
+                "src/test/java/example/WorkerTest.java",
+                b"class WorkerTest {\n\
+                  @Test void exercisesWorker() {\n\
+                    Worker worker = new Worker();\n\
+                    assertEquals(1, worker.execute());\n\
+                    assertEquals(1, worker.execute());\n\
+                  }\n\
+                }\n",
+            ),
+        ];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_bounded_partition(&inputs, &Cancellation::new())
+            .expect("bounded Java dependency discovery succeeds");
+        assert_eq!(planner.candidates.len(), 1);
+        assert!(planner.candidates[0].test_context);
+        assert_eq!(planner.candidates[0].demand, 2);
+
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("bounded Java dependency bridge finalizes");
+        let [bridge] = bridges.as_slice() else {
+            panic!("one constructed receiver produces one supplemental bridge");
+        };
+        assert_eq!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "src/main/java/example/Worker.java",
+                "src/test/java/example/WorkerTest.java",
+            ]
+        );
+    }
+
+    #[test]
+    fn java_receiver_bridge_requires_unique_provider_and_constructor() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "java".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let providers = [
+            input(
+                1,
+                "src/first/Worker.java",
+                b"class Worker { int execute() { return 1; } }\n",
+            ),
+            input(
+                2,
+                "src/second/Worker.java",
+                b"class Worker { int execute() { return 2; } }\n",
+            ),
+        ];
+        let consumers = [
+            input(
+                3,
+                "src/test/AmbiguousTest.java",
+                b"class AmbiguousTest { void run() { Worker worker = new Worker(); worker.execute(); } }\n",
+            ),
+            input(
+                4,
+                "src/test/FactoryTest.java",
+                b"class FactoryTest { void run() { Worker worker = factory.create(); worker.execute(); } }\n",
+            ),
+        ];
+        let mut planner =
+            ProjectIncludeBridgePlanner::new(0, 0).expect("bridge planner accepts empty overhead");
+
+        planner
+            .scan_partition_pair(&providers, &consumers, &Cancellation::new())
+            .expect("ambiguous and uncorroborated receivers fail open");
+
+        assert!(planner.candidates.is_empty());
+        assert!(planner.retained_pairs.is_empty());
     }
 
     #[test]
