@@ -993,16 +993,30 @@ fn bounded_java_project_prioritizes_annotated_test_relationships() {
         "src/zzzzz/WorkerTest.java".to_owned(),
     ]);
     sources.extend([
-        "class Worker { int execute(int value) { return value; } }\n".to_owned(),
+        concat!(
+            "interface WorkerApi {\n",
+            "  <T extends Comparable<T>> int execute(T[] values, T target);\n",
+            "}\n",
+            "@SuppressWarnings({\"rawtypes\", \"unchecked\"})\n",
+            "class Worker implements WorkerApi {\n",
+            "  @Override\n",
+            "  public <T extends Comparable<T>> int execute(T[] values, T target) {\n",
+            "    return values.length;\n",
+            "  }\n",
+            "}\n",
+        )
+        .to_owned(),
         concat!(
             "import org.junit.jupiter.api.Test;\n",
             "class WorkerTest {\n",
+            "  void assertResult(int actual, String message) {}\n",
             "  @Test void exercisesReceiver() {\n",
             "    Worker worker = new Worker();\n",
-            "    int[] values = {1, 2, 3};\n",
-            "    worker.execute(values[0]);\n",
-            "    worker.execute(values[1]);\n",
-            "    worker.execute(values[2]);\n",
+            "    Integer[] values = {1, 2, 3};\n",
+            "    assertResult(worker.execute(values, values[0]), \"first\");\n",
+            "    assertResult(worker.execute(values, values[1]), \"second\");\n",
+            "    assertResult(worker.execute(values, values[2]), \"third\");\n",
+            "    worker.execute(values, values[0]);\n",
             "  }\n",
             "}\n",
         )

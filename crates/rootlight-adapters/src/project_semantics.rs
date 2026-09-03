@@ -2996,9 +2996,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 )
             })
         });
-        let symbols = candidates
+        let receiver_candidates = candidates
             .iter()
-            .filter(|entity| call_arity_matches(occurrence.arity, entity.arity))
             .filter(|entity| match self.analyzer.language {
                 SemanticProjectLanguage::Java => {
                     entity.kind == EntityKind::Method
@@ -3034,8 +3033,25 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 | SemanticProjectLanguage::Python
                 | SemanticProjectLanguage::Go => false,
             })
+            .collect::<Vec<_>>();
+        let mut symbols = receiver_candidates
+            .iter()
+            .copied()
+            .filter(|entity| call_arity_matches(occurrence.arity, entity.arity))
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
+        // A missing extracted declaration signature must not erase an otherwise
+        // unique receiver-bound call. Concrete arity mismatches still fail closed.
+        let receiver_arities = receiver_candidates
+            .iter()
+            .map(|candidate| candidate.arity)
+            .collect::<Vec<_>>();
+        if symbols.is_empty()
+            && permits_unique_unknown_arity_binding(occurrence.arity, &receiver_arities)
+            && let [candidate] = receiver_candidates.as_slice()
+        {
+            symbols.insert(candidate.symbol);
+        }
         Some(ResolutionCandidates {
             symbols: symbols.into_iter().collect(),
             kind: ResolutionKind::Binding,
@@ -3891,6 +3907,13 @@ fn call_arity_matches(call: Option<usize>, declaration: Option<usize>) -> bool {
     matches!((call, declaration), (Some(call), Some(declaration)) if call == declaration)
 }
 
+fn permits_unique_unknown_arity_binding(
+    call_arity: Option<usize>,
+    receiver_arities: &[Option<usize>],
+) -> bool {
+    call_arity.is_some() && receiver_arities == [None]
+}
+
 fn local_receiver_type(
     bytes: &[u8],
     scope_start: u64,
@@ -4727,7 +4750,7 @@ mod tests {
         ImportBinding, MAX_OPTIONAL_PROJECT_SYNTAX_FACTS, ParsedOccurrenceName,
         ResolutionCandidates, ResolutionKind, SemanticProjectLanguage, bound_resolution_candidates,
         enclosing_callable_declaration, infer_visibility, occurrence_name, occurrence_target,
-        parse_import, project_optional_syntax_fact_limit,
+        parse_import, permits_unique_unknown_arity_binding, project_optional_syntax_fact_limit,
     };
 
     #[test]
@@ -4738,6 +4761,17 @@ mod tests {
                 MAX_OPTIONAL_PROJECT_SYNTAX_FACTS
             );
         }
+    }
+
+    #[test]
+    fn unknown_arity_binds_only_one_receiver_candidate() {
+        assert!(permits_unique_unknown_arity_binding(Some(2), &[None]));
+        assert!(!permits_unique_unknown_arity_binding(None, &[None]));
+        assert!(!permits_unique_unknown_arity_binding(Some(2), &[Some(3)]));
+        assert!(!permits_unique_unknown_arity_binding(
+            Some(2),
+            &[None, None]
+        ));
     }
 
     #[test]
