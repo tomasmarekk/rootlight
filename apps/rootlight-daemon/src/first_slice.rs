@@ -1504,6 +1504,7 @@ struct ProjectIncludeBridgePlanner {
     retained_pairs: BTreeSet<(FileId, FileId)>,
     base_request_payload_bytes: usize,
     max_bytes: usize,
+    max_exact_bytes: usize,
     max_candidates: usize,
     examined_pair_attempts: usize,
     max_pair_attempts: usize,
@@ -1523,6 +1524,7 @@ struct ProjectIncludeBridgeCandidate {
     demand: usize,
     shared_path_components: usize,
     source_bytes: usize,
+    source_limit: usize,
     owned_bytes: usize,
 }
 
@@ -1543,6 +1545,7 @@ impl ProjectIncludeBridgePlanner {
             retained_pairs: BTreeSet::new(),
             base_request_payload_bytes,
             max_bytes,
+            max_exact_bytes: remaining_scan_bytes,
             max_candidates: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES),
             examined_pair_attempts: 0,
             max_pair_attempts: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
@@ -1706,6 +1709,7 @@ impl ProjectIncludeBridgePlanner {
             let mut selected_projected = false;
             let mut selected_consumer = None::<String>;
             let mut selected_bytes = 0_usize;
+            let mut selected_source_limit = self.max_bytes;
             let mut selected_request_payload_bytes = self.base_request_payload_bytes;
             // Unrelated consumers can exhaust the adapter's optional syntax
             // fact ceiling before their calls resolve. Keep one consumer per
@@ -1731,24 +1735,46 @@ impl ProjectIncludeBridgePlanner {
                             project_include_candidate_cost(candidate, &selected)?;
                         let request_payload_bytes =
                             selected_request_payload_bytes.checked_add(additional_payload_bytes)?;
-                        (selected_bytes.saturating_add(additional_bytes) <= self.max_bytes
+                        let source_limit = if selected.is_empty() {
+                            candidate.source_limit
+                        } else {
+                            selected_source_limit.min(candidate.source_limit)
+                        };
+                        (selected_bytes.saturating_add(additional_bytes) <= source_limit
                             && selected.len().saturating_add(additional_files)
                                 <= PROJECT_ADAPTER_PARTITION_CONTEXT_FILES
                             && project_analysis_frame_bytes(request_payload_bytes)
                                 .is_some_and(|bytes| bytes <= MAX_ADAPTER_FRAME_BYTES))
-                        .then_some((index, candidate, additional_bytes, request_payload_bytes))
+                        .then_some((
+                            index,
+                            candidate,
+                            additional_bytes,
+                            source_limit,
+                            request_payload_bytes,
+                        ))
                     })
-                    .max_by(|(_, left, left_bytes, _), (_, right, right_bytes, _)| {
-                        project_include_candidate_priority(left, *left_bytes, right, *right_bytes)
-                    })
-                    .map(|(index, _, additional_bytes, request_payload_bytes)| {
-                        (index, additional_bytes, request_payload_bytes)
-                    });
-                let Some((index, additional_bytes, request_payload_bytes)) = best else {
+                    .max_by(
+                        |(_, left, left_bytes, _, _), (_, right, right_bytes, _, _)| {
+                            project_include_candidate_priority(
+                                left,
+                                *left_bytes,
+                                right,
+                                *right_bytes,
+                            )
+                        },
+                    )
+                    .map(
+                        |(index, _, additional_bytes, source_limit, request_payload_bytes)| {
+                            (index, additional_bytes, source_limit, request_payload_bytes)
+                        },
+                    );
+                let Some((index, additional_bytes, source_limit, request_payload_bytes)) = best
+                else {
                     break;
                 };
                 let candidate = candidates.swap_remove(index);
                 selected_bytes = selected_bytes.saturating_add(additional_bytes);
+                selected_source_limit = source_limit;
                 selected_request_payload_bytes = request_payload_bytes;
                 selected_consumer.get_or_insert_with(|| candidate.consumer.path.clone());
                 if !candidate.prefixes.is_empty() {
@@ -2051,9 +2077,9 @@ impl ProjectIncludeBridgePlanner {
                 consumer,
                 provider,
                 source_bytes,
+                self.max_bytes,
                 Vec::new(),
-                test_context,
-                demand,
+                (test_context, demand),
                 owned_bytes,
             ),
         )
@@ -2144,65 +2170,75 @@ impl ProjectIncludeBridgePlanner {
                     consumer.clone(),
                     provider.clone(),
                     full_source_bytes,
+                    self.max_bytes,
                     Vec::new(),
-                    false,
-                    bridge.demand,
+                    (false, bridge.demand),
                     owned_bytes,
                 ),
             );
         }
         if ecmascript_bridge_consumer_minimum(bridge.consumer_source, bridge.occurrence_end)
-            .is_none()
+            .is_some()
+            && consumer.source.len() < self.max_bytes
+            && consumer.source.len().saturating_add(provider_minimum) <= self.max_bytes
         {
+            let remaining = self.max_bytes.saturating_sub(consumer.source.len());
+            if let Some(provider_projection) =
+                ecmascript_bridge_prefix(&provider.source, remaining, provider_minimum).filter(
+                    |projection| ecmascript_bridge_projection_is_equivalent(provider, projection),
+                )
+            {
+                let source_bytes = consumer
+                    .source
+                    .len()
+                    .checked_add(provider_projection.source.len())
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                let mut projected_provider = provider.clone();
+                // Consumer call sites retain exact full-source identity. Only provider
+                // provenance may use a parseable, semantically empty-suffix prefix.
+                projected_provider.source = provider_projection.source;
+                let mut prefixes = Vec::new();
+                prefixes
+                    .try_reserve_exact(1)
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+                if let Some(prefix) = apply_supplemental_prefix_identity(
+                    provider,
+                    &mut projected_provider,
+                    provider_projection.retained_prefix_bytes,
+                )? {
+                    prefixes.push(prefix);
+                }
+                if prefixes.is_empty() {
+                    return Err(FirstSliceProjectAnalysisError::Analysis);
+                }
+                return self.consider_ranked_pair(
+                    pair,
+                    project_include_bridge_candidate(
+                        consumer.clone(),
+                        projected_provider,
+                        source_bytes,
+                        self.max_bytes,
+                        prefixes,
+                        (false, bridge.demand),
+                        owned_bytes,
+                    ),
+                );
+            }
+        }
+        if full_source_bytes > self.max_exact_bytes {
             return Ok(());
         }
-        if consumer.source.len() >= self.max_bytes {
-            return Ok(());
-        }
-        if consumer.source.len().saturating_add(provider_minimum) > self.max_bytes {
-            return Ok(());
-        }
-        let remaining = self.max_bytes.saturating_sub(consumer.source.len());
-        let Some(provider_projection) =
-            ecmascript_bridge_prefix(&provider.source, remaining, provider_minimum)
-        else {
-            return Ok(());
-        };
-        if !ecmascript_bridge_projection_is_equivalent(provider, &provider_projection) {
-            return Ok(());
-        }
-        let source_bytes = consumer
-            .source
-            .len()
-            .checked_add(provider_projection.source.len())
-            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-        let mut projected_provider = provider.clone();
-        // Consumer call sites retain exact full-source identity. Only provider
-        // provenance may use a parseable, semantically empty-suffix prefix.
-        projected_provider.source = provider_projection.source;
-        let mut prefixes = Vec::new();
-        prefixes
-            .try_reserve_exact(1)
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        if let Some(prefix) = apply_supplemental_prefix_identity(
-            provider,
-            &mut projected_provider,
-            provider_projection.retained_prefix_bytes,
-        )? {
-            prefixes.push(prefix);
-        }
-        if prefixes.is_empty() {
-            return Err(FirstSliceProjectAnalysisError::Analysis);
-        }
+        // Exact full sources can use the existing primary-partition envelope when
+        // prefix recovery cannot safely represent a large consumer or provider.
         self.consider_ranked_pair(
             pair,
             project_include_bridge_candidate(
                 consumer.clone(),
-                projected_provider,
-                source_bytes,
-                prefixes,
-                false,
-                bridge.demand,
+                provider.clone(),
+                full_source_bytes,
+                self.max_exact_bytes,
+                Vec::new(),
+                (false, bridge.demand),
                 owned_bytes,
             ),
         )
@@ -2473,11 +2509,12 @@ fn project_include_bridge_candidate(
     consumer: adapter::ProjectInput,
     provider: adapter::ProjectInput,
     source_bytes: usize,
+    source_limit: usize,
     prefixes: Vec<FirstSliceSupplementalPrefix>,
-    test_context: bool,
-    demand: usize,
+    priority: (bool, usize),
     owned_bytes: usize,
 ) -> ProjectIncludeBridgeCandidate {
+    let (test_context, demand) = priority;
     ProjectIncludeBridgeCandidate {
         prefixes,
         test_context,
@@ -2486,6 +2523,7 @@ fn project_include_bridge_candidate(
         consumer,
         provider,
         source_bytes,
+        source_limit,
         owned_bytes,
     }
 }
@@ -16769,7 +16807,7 @@ mod tests {
     }
 
     #[test]
-    fn ecmascript_bridge_rejects_projection_when_omitted_suffix_can_change_binding() {
+    fn ecmascript_bridge_uses_full_source_when_projection_can_change_binding() {
         fn input(file_byte: u8, path: &str, source: Vec<u8>) -> adapter::ProjectInput {
             adapter::ProjectInput {
                 file: Some(common::FileId {
@@ -16805,11 +16843,42 @@ mod tests {
                 std::slice::from_ref(&consumer),
                 &Cancellation::new(),
             )
-            .expect("unsafe projection fails open");
+            .expect("unsafe projection falls back to exact sources");
 
         assert_eq!(planner.examined_pair_attempts, 1);
-        assert!(planner.retained_pairs.is_empty());
-        assert!(planner.candidates.is_empty());
+        assert_eq!(planner.retained_pairs.len(), 1);
+        let bridges = planner
+            .finish(&Cancellation::new())
+            .expect("exact-source bridge finalizes");
+        let [bridge] = bridges.as_slice() else {
+            panic!("one exact-source bridge is expected");
+        };
+        assert!(bridge.prefixes.is_empty());
+        assert_eq!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>(),
+            consumer.source.len().saturating_add(provider.source.len())
+        );
+        assert!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>()
+                > PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES
+        );
+        assert!(
+            bridge
+                .inputs
+                .iter()
+                .map(|input| input.source.len())
+                .sum::<usize>()
+                <= usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+                    .expect("partition source limit fits usize")
+        );
     }
 
     #[test]
