@@ -349,6 +349,16 @@ pub(super) struct DurableSourceWrite {
     pub(super) referenced_bytes: u64,
 }
 
+pub(super) struct DurablePackedSourceWriter<'prepared> {
+    prepared: &'prepared DurablePreparedGeneration,
+    sources_directory: PrivateDirectory<'prepared>,
+    entries: Vec<DurablePackedSourceEntry>,
+    pack_sizes: Vec<u64>,
+    pack: Vec<u8>,
+    payload_bytes: u64,
+    last_file: Option<FileId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableGenerationStorage {
     pub(super) repository: RepositoryId,
@@ -2828,10 +2838,6 @@ impl DurablePreparedGeneration {
         &self,
         sources: &[RustSourceInput],
     ) -> Result<DurableSourceWrite, FirstSliceError> {
-        let staging = self.staging();
-        let sources_directory = staging
-            .create_directory(OsStr::new(SOURCES_DIRECTORY))
-            .map_err(|_| FirstSliceError::Catalog)?;
         {
             let created = self
                 .created_source_blobs
@@ -2842,17 +2848,22 @@ impl DurablePreparedGeneration {
             }
         }
         if sources.len() >= PACKED_SOURCE_MIN_FILES {
-            let (storage, newly_written_bytes) = write_packed_sources(&sources_directory, sources)?;
-            sources_directory
-                .sync_all()
-                .map_err(|_| FirstSliceError::Catalog)?;
-            self.account_staging_bytes(newly_written_bytes)?;
-            self.set_source_storage(storage)?;
-            return Ok(DurableSourceWrite {
-                newly_written_bytes,
-                referenced_bytes: 0,
-            });
+            let mut ordered = Vec::new();
+            ordered
+                .try_reserve_exact(sources.len())
+                .map_err(|_| FirstSliceError::Retention)?;
+            ordered.extend(sources);
+            ordered.sort_unstable_by_key(|source| source.snapshot.file());
+            let mut writer = self.begin_packed_source_write()?;
+            for source in ordered {
+                writer.push(&source.snapshot)?;
+            }
+            return writer.finish();
         }
+        let staging = self.staging();
+        let sources_directory = staging
+            .create_directory(OsStr::new(SOURCES_DIRECTORY))
+            .map_err(|_| FirstSliceError::Catalog)?;
         let blobs = ensure_private_directory(
             self.repository().capability(),
             OsStr::new(SOURCE_BLOBS_DIRECTORY),
@@ -2909,6 +2920,38 @@ impl DurablePreparedGeneration {
         Ok(DurableSourceWrite {
             newly_written_bytes,
             referenced_bytes,
+        })
+    }
+
+    pub(super) fn begin_packed_source_write(
+        &self,
+    ) -> Result<DurablePackedSourceWriter<'_>, FirstSliceError> {
+        {
+            let created = self
+                .created_source_blobs
+                .lock()
+                .map_err(|_| FirstSliceError::Catalog)?;
+            if !created.is_empty() {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        let sources_directory = self
+            .staging()
+            .create_directory(OsStr::new(SOURCES_DIRECTORY))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut pack = Vec::new();
+        pack.try_reserve_exact(
+            usize::try_from(SOURCE_PACK_TARGET_BYTES).map_err(|_| FirstSliceError::Limits)?,
+        )
+        .map_err(|_| FirstSliceError::Retention)?;
+        Ok(DurablePackedSourceWriter {
+            prepared: self,
+            sources_directory,
+            entries: Vec::new(),
+            pack_sizes: Vec::new(),
+            pack,
+            payload_bytes: 0,
+            last_file: None,
         })
     }
 
@@ -3417,6 +3460,105 @@ impl DurablePreparedGeneration {
     }
 }
 
+impl DurablePackedSourceWriter<'_> {
+    pub(super) fn push(&mut self, snapshot: &SourceSnapshot) -> Result<(), FirstSliceError> {
+        let file = snapshot.file();
+        if self.entries.len() >= MAX_SOURCE_BLOB_ENTRIES
+            || self.last_file.is_some_and(|previous| previous >= file)
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let content = snapshot.content();
+        let digest = snapshot.content_hash();
+        if content_hash_bytes(content) != digest {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let bytes = u64::try_from(content.len()).map_err(|_| FirstSliceError::Limits)?;
+        if bytes > SOURCE_PACK_TARGET_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        let pack_len = u64::try_from(self.pack.len()).map_err(|_| FirstSliceError::Limits)?;
+        if !self.pack.is_empty()
+            && pack_len
+                .checked_add(bytes)
+                .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES)
+        {
+            write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
+            self.pack.clear();
+        }
+        let offset = u64::try_from(self.pack.len()).map_err(|_| FirstSliceError::Limits)?;
+        let pack_ordinal =
+            u32::try_from(self.pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
+        self.pack.extend_from_slice(content);
+        self.payload_bytes = self
+            .payload_bytes
+            .checked_add(bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        self.entries.push(DurablePackedSourceEntry {
+            file,
+            digest,
+            pack: pack_ordinal,
+            offset,
+            bytes,
+        });
+        self.last_file = Some(file);
+        Ok(())
+    }
+
+    pub(super) fn finish(mut self) -> Result<DurableSourceWrite, FirstSliceError> {
+        if self.entries.is_empty() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        if !self.pack.is_empty() {
+            write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
+        }
+        let index = DurablePackedSourceIndex {
+            version: SOURCE_PACK_INDEX_VERSION,
+            payload_bytes: self.payload_bytes,
+            pack_bytes: self.pack_sizes,
+            entries: self.entries,
+        };
+        let encoded = rmp_serde::to_vec_named(&index).map_err(|_| FirstSliceError::Catalog)?;
+        let index_bytes = u64::try_from(encoded.len()).map_err(|_| FirstSliceError::Limits)?;
+        if index_bytes == 0 || index_bytes > MAX_SOURCE_PACK_INDEX_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        let mut index_file = self
+            .sources_directory
+            .create_file(OsStr::new(SOURCE_PACK_INDEX_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        index_file
+            .write_all(&encoded)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        index_file
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        drop(index_file);
+        self.sources_directory
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let files = u64::try_from(index.entries.len()).map_err(|_| FirstSliceError::Limits)?;
+        let packs = u64::try_from(index.pack_bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+        let newly_written_bytes = self
+            .payload_bytes
+            .checked_add(index_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        self.prepared.account_staging_bytes(newly_written_bytes)?;
+        self.prepared.set_source_storage(DurableSourceStorage {
+            version: SOURCE_STORAGE_VERSION,
+            files: Some(files),
+            packs: Some(packs),
+            index_bytes: Some(index_bytes),
+            index_digest: Some(content_hash_bytes(&encoded)),
+            payload_bytes: Some(self.payload_bytes),
+        })?;
+        Ok(DurableSourceWrite {
+            newly_written_bytes,
+            referenced_bytes: 0,
+        })
+    }
+}
+
 impl DurableSealedGeneration {
     pub(super) const fn manifest_written_bytes(&self) -> u64 {
         self.manifest_written_bytes
@@ -3560,106 +3702,6 @@ fn ensure_private_directory(
         }
         Err(_) => Err(FirstSliceError::Catalog),
     }
-}
-
-fn write_packed_sources(
-    sources_directory: &PrivateDirectory<'_>,
-    sources: &[RustSourceInput],
-) -> Result<(DurableSourceStorage, u64), FirstSliceError> {
-    let mut ordered = Vec::new();
-    ordered
-        .try_reserve_exact(sources.len())
-        .map_err(|_| FirstSliceError::Retention)?;
-    ordered.extend(sources);
-    ordered.sort_unstable_by_key(|source| source.snapshot.file());
-    if ordered
-        .windows(2)
-        .any(|pair| pair[0].snapshot.file() == pair[1].snapshot.file())
-    {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
-
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(ordered.len())
-        .map_err(|_| FirstSliceError::Retention)?;
-    let mut pack_sizes = Vec::new();
-    let mut pack = Vec::new();
-    pack.try_reserve_exact(
-        usize::try_from(SOURCE_PACK_TARGET_BYTES).map_err(|_| FirstSliceError::Limits)?,
-    )
-    .map_err(|_| FirstSliceError::Retention)?;
-    let mut payload_bytes = 0_u64;
-    for source in ordered {
-        let content = source.snapshot.content();
-        let digest = source.snapshot.content_hash();
-        if content_hash_bytes(content) != digest {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        let bytes = u64::try_from(content.len()).map_err(|_| FirstSliceError::Limits)?;
-        let pack_len = u64::try_from(pack.len()).map_err(|_| FirstSliceError::Limits)?;
-        if !pack.is_empty()
-            && pack_len
-                .checked_add(bytes)
-                .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES)
-        {
-            write_source_pack(sources_directory, &pack, &mut pack_sizes)?;
-            pack.clear();
-        }
-        let offset = u64::try_from(pack.len()).map_err(|_| FirstSliceError::Limits)?;
-        let pack_ordinal = u32::try_from(pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
-        pack.extend_from_slice(content);
-        payload_bytes = payload_bytes
-            .checked_add(bytes)
-            .ok_or(FirstSliceError::Limits)?;
-        entries.push(DurablePackedSourceEntry {
-            file: source.snapshot.file(),
-            digest,
-            pack: pack_ordinal,
-            offset,
-            bytes,
-        });
-    }
-    if !pack.is_empty() || (!entries.is_empty() && pack_sizes.is_empty()) {
-        write_source_pack(sources_directory, &pack, &mut pack_sizes)?;
-    }
-
-    let index = DurablePackedSourceIndex {
-        version: SOURCE_PACK_INDEX_VERSION,
-        payload_bytes,
-        pack_bytes: pack_sizes,
-        entries,
-    };
-    let encoded = rmp_serde::to_vec_named(&index).map_err(|_| FirstSliceError::Catalog)?;
-    let index_bytes = u64::try_from(encoded.len()).map_err(|_| FirstSliceError::Limits)?;
-    if index_bytes == 0 || index_bytes > MAX_SOURCE_PACK_INDEX_BYTES {
-        return Err(FirstSliceError::Limits);
-    }
-    let mut index_file = sources_directory
-        .create_file(OsStr::new(SOURCE_PACK_INDEX_FILENAME))
-        .map_err(|_| FirstSliceError::Catalog)?;
-    index_file
-        .write_all(&encoded)
-        .map_err(|_| FirstSliceError::Catalog)?;
-    index_file
-        .sync_all()
-        .map_err(|_| FirstSliceError::Catalog)?;
-    let files = u64::try_from(index.entries.len()).map_err(|_| FirstSliceError::Limits)?;
-    let packs = u64::try_from(index.pack_bytes.len()).map_err(|_| FirstSliceError::Limits)?;
-    let newly_written_bytes = payload_bytes
-        .checked_add(index_bytes)
-        .ok_or(FirstSliceError::Limits)?;
-    Ok((
-        DurableSourceStorage {
-            version: SOURCE_STORAGE_VERSION,
-            files: Some(files),
-            packs: Some(packs),
-            index_bytes: Some(index_bytes),
-            index_digest: Some(content_hash_bytes(&encoded)),
-            payload_bytes: Some(payload_bytes),
-        },
-        newly_written_bytes,
-    ))
 }
 
 fn write_source_pack(
