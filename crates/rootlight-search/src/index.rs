@@ -31,7 +31,7 @@ use crate::{
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "4";
+const FORMAT_VERSION: &str = "5";
 const STORED_HIT_VERSION: u8 = 3;
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
@@ -418,9 +418,14 @@ impl LexicalIndex {
         validate_language_filter(languages)?;
         validate_path_filter(path_prefixes)?;
         let searcher = self.reader.searcher();
-        let query = self
-            .fields
-            .query(request, languages, &searcher, budget, &control)?;
+        let query = self.fields.query(
+            request,
+            languages,
+            path_prefixes,
+            &searcher,
+            budget,
+            &control,
+        )?;
         control.check()?;
         let weight = query
             .weight(EnableScoring::enabled_from_searcher(&searcher))
@@ -824,6 +829,7 @@ struct Fields {
     qualified_text: Field,
     path_normalized: Field,
     path_text: Field,
+    path_scope: Field,
     kind: Field,
     language: Field,
     tier: Field,
@@ -859,8 +865,9 @@ impl Fields {
         let identifier_text = builder.add_text_field("identifier_text", code.clone());
         let qualified_normalized = builder.add_text_field("qualified_normalized", raw.clone());
         let qualified_text = builder.add_text_field("qualified_text", code.clone());
-        let path_normalized = builder.add_text_field("path_normalized", raw);
+        let path_normalized = builder.add_text_field("path_normalized", raw.clone());
         let path_text = builder.add_text_field("path_text", code.clone());
+        let path_scope = builder.add_text_field("path_scope", raw);
         let raw = TextOptions::default().set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer("raw")
@@ -890,6 +897,7 @@ impl Fields {
             qualified_text,
             path_normalized,
             path_text,
+            path_scope,
             kind,
             language,
             tier,
@@ -924,6 +932,10 @@ impl Fields {
         document.add_text(self.qualified_text, &source.qualified_name);
         document.add_text(self.path_normalized, normalize_exact(&source.path));
         document.add_text(self.path_text, &source.path);
+        for (separator, _) in source.path.match_indices('/') {
+            document.add_text(self.path_scope, &source.path[..separator]);
+        }
+        document.add_text(self.path_scope, &source.path);
         document.add_text(self.kind, &source.kind);
         document.add_text(self.language, &source.language);
         document.add_text(self.tier, &source.tier);
@@ -959,6 +971,7 @@ impl Fields {
         &self,
         request: &SearchRequest,
         languages: &[String],
+        path_prefixes: &[String],
         searcher: &tantivy::Searcher,
         budget: SearchBudget,
         control: &SearchControl<'_>,
@@ -974,9 +987,8 @@ impl Fields {
             }
             SearchMode::Glob => self.pattern_query(&compile_safe_glob(&normalized)?, &mut work)?,
         };
-        let query = if languages.is_empty() {
-            lexical_query
-        } else {
+        let mut intersections = Vec::with_capacity(2);
+        if !languages.is_empty() {
             let mut language_clauses = Vec::with_capacity(languages.len());
             for language in languages {
                 language_clauses.push(intersection_filter_clause(
@@ -986,13 +998,31 @@ impl Fields {
                     1.0,
                 ));
             }
-            Box::new(BooleanQuery::new(vec![
-                (Occur::Must, lexical_query),
-                (
-                    Occur::Must,
-                    Box::new(BooleanQuery::new(language_clauses)) as Box<dyn Query>,
-                ),
-            ]))
+            intersections.push(Box::new(BooleanQuery::new(language_clauses)) as Box<dyn Query>);
+        }
+        if !path_prefixes.is_empty() {
+            let mut path_clauses = Vec::with_capacity(path_prefixes.len());
+            for path in path_prefixes {
+                path_clauses.push(intersection_filter_clause(
+                    self.path_scope,
+                    path,
+                    IndexRecordOption::Basic,
+                    1.0,
+                ));
+            }
+            intersections.push(Box::new(BooleanQuery::new(path_clauses)) as Box<dyn Query>);
+        }
+        let query = if intersections.is_empty() {
+            lexical_query
+        } else {
+            let mut clauses = Vec::with_capacity(intersections.len() + 1);
+            clauses.push((Occur::Must, lexical_query));
+            clauses.extend(
+                intersections
+                    .into_iter()
+                    .map(|filter| (Occur::Must, filter)),
+            );
+            Box::new(BooleanQuery::new(clauses))
         };
         control.check()?;
         Ok(query)
@@ -2428,6 +2458,49 @@ mod tests {
         assert_eq!(outcome.matched_candidates, 1);
         assert_eq!(outcome.hits.len(), 1);
         assert_eq!(outcome.hits[0].path, "src/scoped.rs");
+    }
+
+    #[test]
+    fn path_prefixes_intersect_the_backend_query_before_materialization() {
+        let outside_first = document(1, "shared_name", "a/outside.rs");
+        let outside_second = document(2, "shared_name", "b/outside.rs");
+        let scoped = document(3, "shared_name", "src/nested/scoped.rs");
+        let (_directory, _manifest, index) = build(vec![outside_first, outside_second, scoped]);
+        let searcher = index.reader.searcher();
+        let budget = SearchBudget::default();
+        let cancellation = Cancellation::new();
+        let control = SearchControl::new(&cancellation, budget.max_duration);
+        let query = index
+            .fields
+            .query(
+                &SearchRequest {
+                    query: "shared_name".to_owned(),
+                    mode: SearchMode::Exact,
+                    max_results: 10,
+                    page_offset: 0,
+                },
+                &[],
+                &["src".to_owned()],
+                &searcher,
+                budget,
+                &control,
+            )
+            .expect("scoped backend query builds");
+        let weight = query
+            .weight(EnableScoring::enabled_from_searcher(&searcher))
+            .expect("scoped backend query prepares");
+        let mut matched_documents = 0_u64;
+        for segment_reader in searcher.segment_readers() {
+            let mut scorer = weight
+                .scorer(segment_reader, 1.0)
+                .expect("scoped segment prepares");
+            while scorer.doc() != TERMINATED {
+                matched_documents += 1;
+                scorer.advance();
+            }
+        }
+
+        assert_eq!(matched_documents, 1);
     }
 
     #[test]
