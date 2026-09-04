@@ -10,7 +10,8 @@ use std::{
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FileId, GenerationId, SymbolId};
 use tantivy::{
-    DocAddress, DocSet, Index, IndexReader, ReloadPolicy, TERMINATED, TantivyDocument, Term,
+    DocAddress, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TERMINATED, TantivyDocument,
+    Term,
     indexer::NoMergePolicy,
     query::{BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, Occur, Query, TermQuery},
     schema::{
@@ -260,6 +261,136 @@ pub struct LexicalIndex {
     _artifact: Option<VerifiedLexicalArtifact>,
 }
 
+/// Incremental in-memory lexical builder for independently bounded partitions.
+///
+/// Each partition remains subject to the supplied build budget. Aggregate
+/// output remains subject to the existing backend hard document and text caps.
+pub struct EphemeralLexicalIndexBuilder {
+    generation: GenerationId,
+    fields: Fields,
+    index: Index,
+    writer: Option<IndexWriter>,
+    partition_budget: BuildBudget,
+    targets: BTreeSet<LexicalTarget>,
+    document_count: u64,
+    text_bytes: u64,
+}
+
+impl EphemeralLexicalIndexBuilder {
+    /// Creates an empty generation-pinned in-memory index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for an invalid partition budget, cancellation,
+    /// or unavailable backend writer.
+    pub fn new(
+        generation: GenerationId,
+        partition_budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, SearchError> {
+        cancellation.check()?;
+        validate_build_budget(partition_budget)?;
+        let fields = Fields::new();
+        let index = Index::create_in_ram(fields.schema.clone());
+        register_tokenizer(&index);
+        let writer = index
+            .writer_with_num_threads(1, partition_budget.indexer_memory_bytes)
+            .map_err(|_| operation("writer"))?;
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+        cancellation.check()?;
+        Ok(Self {
+            generation,
+            fields,
+            index,
+            writer: Some(writer),
+            partition_budget,
+            targets: BTreeSet::new(),
+            document_count: 0,
+            text_bytes: 0,
+        })
+    }
+
+    /// Validates and appends one independently bounded document partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid or duplicate documents, cancellation,
+    /// a partition-budget violation, or aggregate backend hard-cap exhaustion.
+    pub fn push_partition(
+        &mut self,
+        mut documents: Vec<LexicalDocument>,
+        cancellation: &Cancellation,
+    ) -> Result<(), SearchError> {
+        cancellation.check()?;
+        let (partition_documents, partition_text_bytes) =
+            prepare_documents(&mut documents, self.partition_budget, cancellation)?;
+        let document_count = self
+            .document_count
+            .checked_add(partition_documents)
+            .filter(|count| *count <= HARD_MAX_DOCUMENTS as u64)
+            .ok_or(SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            })?;
+        let text_bytes = self
+            .text_bytes
+            .checked_add(partition_text_bytes)
+            .filter(|bytes| *bytes <= HARD_MAX_TEXT_BYTES as u64)
+            .ok_or(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        if documents
+            .iter()
+            .map(document_target)
+            .any(|target| self.targets.contains(&target))
+        {
+            return Err(SearchError::DuplicateSymbol);
+        }
+        let writer = self.writer.as_mut().ok_or_else(|| operation("writer"))?;
+        for document in &documents {
+            cancellation.check()?;
+            writer
+                .add_document(self.fields.encode(document)?)
+                .map_err(|_| operation("add_document"))?;
+        }
+        self.targets.extend(documents.iter().map(document_target));
+        self.document_count = document_count;
+        self.text_bytes = text_bytes;
+        cancellation.check()?;
+        Ok(())
+    }
+
+    /// Commits all accepted partitions and opens their immutable reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for cancellation, commit failure, or inconsistent
+    /// generation metadata.
+    pub fn finish(mut self, cancellation: &Cancellation) -> Result<LexicalIndex, SearchError> {
+        cancellation.check()?;
+        let mut writer = self.writer.take().ok_or_else(|| operation("writer"))?;
+        let mut prepared = writer
+            .prepare_commit()
+            .map_err(|_| operation("prepare_commit"))?;
+        prepared.set_payload(&format_payload(self.generation, self.document_count));
+        prepared.commit().map_err(|_| operation("commit"))?;
+        cancellation.check()?;
+        drop(writer);
+        let (actual_generation, reader) = open_reader_checked(
+            &self.index,
+            &self.fields,
+            self.generation,
+            Some(self.document_count),
+            || cancellation.check().map_err(SearchError::from),
+        )?;
+        Ok(LexicalIndex {
+            generation: actual_generation,
+            fields: self.fields,
+            reader,
+            _artifact: None,
+        })
+    }
+}
+
 impl LexicalIndex {
     /// Consumes a verified artifact only when schema, metadata, count, and generation align.
     ///
@@ -312,35 +443,13 @@ impl LexicalIndex {
     /// failures.
     pub fn build_ephemeral(
         generation: GenerationId,
-        mut documents: Vec<LexicalDocument>,
+        documents: Vec<LexicalDocument>,
         budget: BuildBudget,
         cancellation: &Cancellation,
     ) -> Result<Self, SearchError> {
-        cancellation.check()?;
-        validate_build_budget(budget)?;
-        let (document_count, _) = prepare_documents(&mut documents, budget, cancellation)?;
-        let fields = Fields::new();
-        let index = Index::create_in_ram(fields.schema.clone());
-        register_tokenizer(&index);
-        populate_index(
-            &index,
-            &fields,
-            generation,
-            &documents,
-            document_count,
-            budget,
-            cancellation,
-        )?;
-        let (actual_generation, reader) =
-            open_reader_checked(&index, &fields, generation, Some(document_count), || {
-                cancellation.check().map_err(SearchError::from)
-            })?;
-        Ok(Self {
-            generation: actual_generation,
-            fields,
-            reader,
-            _artifact: None,
-        })
+        let mut builder = EphemeralLexicalIndexBuilder::new(generation, budget, cancellation)?;
+        builder.push_partition(documents, cancellation)?;
+        builder.finish(cancellation)
     }
 
     /// Returns the immutable generation encoded in the committed index.
@@ -2330,6 +2439,54 @@ mod tests {
         assert_eq!(
             search(&index, "query_budget", SearchMode::Exact)[0].symbol_id,
             Some(SymbolId::from_bytes([1; 20]))
+        );
+    }
+
+    #[test]
+    fn ephemeral_partitions_match_batch_queries_without_relaxing_partition_limits() {
+        let expected_generation = generation(20);
+        let first = document(1, "first_match", "src/first.rs");
+        let second = document(2, "second_match", "src/second.rs");
+        let batch = LexicalIndex::build_ephemeral(
+            expected_generation,
+            vec![first.clone(), second.clone()],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("batch index builds");
+        let partition_budget = BuildBudget {
+            max_documents: 1,
+            ..BuildBudget::default()
+        };
+        let mut builder = EphemeralLexicalIndexBuilder::new(
+            expected_generation,
+            partition_budget,
+            &Cancellation::new(),
+        )
+        .expect("partitioned index starts");
+        builder
+            .push_partition(vec![second], &Cancellation::new())
+            .expect("second partition is admitted");
+        builder
+            .push_partition(vec![first], &Cancellation::new())
+            .expect("first partition is admitted");
+        let partitioned = builder
+            .finish(&Cancellation::new())
+            .expect("partitioned index commits");
+        let request = SearchRequest {
+            query: "match".to_owned(),
+            mode: SearchMode::Text,
+            max_results: 10,
+            page_offset: 0,
+        };
+
+        assert_eq!(
+            partitioned
+                .search_with_stats(&request, SearchBudget::default(), &Cancellation::new())
+                .expect("partitioned query succeeds"),
+            batch
+                .search_with_stats(&request, SearchBudget::default(), &Cancellation::new())
+                .expect("batch query succeeds")
         );
     }
 
