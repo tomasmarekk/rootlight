@@ -9416,6 +9416,34 @@ impl FirstSliceService {
         self.support_inventory_snapshot_inner(storage, accounting_state)
     }
 
+    /// Reconciles cold durable accounting without reading immutable source payloads.
+    ///
+    /// Startup recovery can use this bounded physical scan after publishing its
+    /// active-generation read barrier. It establishes authoritative capacity
+    /// accounting while leaving content revalidation to
+    /// [`Self::support_inventory_snapshot`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a durable catalog, retention, or corruption failure when physical
+    /// storage cannot be accounted, or [`FirstSliceError::Limits`] when a retained
+    /// count cannot be represented by the support contract.
+    pub fn support_inventory_snapshot_reconciled(
+        &self,
+    ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        let storage = self
+            .durable
+            .as_ref()
+            .map(|durable| durable.reconcile_storage_inventory())
+            .transpose()?;
+        let accounting_state = if storage.is_some() {
+            FirstSliceStorageAccountingState::Reconciled
+        } else {
+            FirstSliceStorageAccountingState::Unavailable
+        };
+        self.support_inventory_snapshot_inner(storage, accounting_state)
+    }
+
     /// Returns bounded source-free indexing facts from reconciled storage accounting.
     ///
     /// This projection is intended for automatic refreshes after Rootlight-owned
@@ -17627,14 +17655,14 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
 }
 
 fn apply_bounded_resolution(
-    mut document: NormalizedIrDocument,
+    document: NormalizedIrDocument,
     limits: ResolutionLimits,
     context: ResolverFactContext,
     cancellation: &Cancellation,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
     let engine = ResolutionEngine::new(limits);
-    let estimate = engine
-        .estimate_work(&document, cancellation)
+    let (mut document, estimate) = engine
+        .apply_document_bounded(document, context, cancellation)
         .map_err(|error| map_resolution_error(error, cancellation))?;
     if !estimate.fits() {
         append_resolution_work_bounded_diagnostic(
@@ -17643,11 +17671,8 @@ fn apply_bounded_resolution(
             estimate.limit,
             &IrLimits::default(),
         )?;
-        return Ok(document);
     }
-    engine
-        .apply_document(document, context, cancellation)
-        .map_err(|error| map_resolution_error(error, cancellation))
+    Ok(document)
 }
 
 fn append_resolution_work_bounded_diagnostic(

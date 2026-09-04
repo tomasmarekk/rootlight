@@ -1590,6 +1590,19 @@ impl DurableCatalog {
     }
 
     pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
+        self.scan_storage_inventory(SourceBlobScan::VerifyContent)
+    }
+
+    pub(super) fn reconcile_storage_inventory(
+        &self,
+    ) -> Result<DurableStorageInventory, FirstSliceError> {
+        self.scan_storage_inventory(SourceBlobScan::AccountPhysicalBytes)
+    }
+
+    fn scan_storage_inventory(
+        &self,
+        source_blob_scan: SourceBlobScan,
+    ) -> Result<DurableStorageInventory, FirstSliceError> {
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
         let mut accounting = self
@@ -1602,7 +1615,7 @@ impl DurableCatalog {
             &self.quarantine,
             self.maximum_repositories,
             &mut accounting.verified_source_blobs,
-            SourceBlobScan::VerifyContent,
+            source_blob_scan,
         );
         let (repositories, quarantine_bytes) = match scanned {
             Ok(scanned) => scanned,

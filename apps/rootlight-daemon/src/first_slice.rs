@@ -4380,6 +4380,7 @@ pub(crate) struct FirstSliceDaemon {
     work: SyncSender<WorkerCommand>,
     read: SyncSender<WorkerCommand>,
     control: SyncSender<WorkerCommand>,
+    recovering_repositories: RecoveringRepositories,
 }
 
 impl FirstSliceDaemon {
@@ -4895,6 +4896,7 @@ impl FirstSliceDaemon {
             work: work.clone(),
             read: read.clone(),
             control: control.clone(),
+            recovering_repositories: Arc::clone(&lanes.recovering_repositories),
         };
         Ok((
             daemon,
@@ -4958,6 +4960,24 @@ impl FirstSliceDaemon {
         }
         let action = daemon::RepositoryOperationAction::try_from(request.action)
             .map_err(|_| invalid_argument())?;
+        if action == daemon::RepositoryOperationAction::RepositoryOperationGet {
+            let operation = parse_operation(request.operation.as_ref())?;
+            let recovery = self
+                .recovering_repositories
+                .read()
+                .map_err(|_| internal_error())?
+                .iter()
+                .find_map(|(repository, recovery)| {
+                    (recovery.operation == Some(operation)).then_some((*repository, *recovery))
+                });
+            if let Some((repository, recovery)) = recovery {
+                return Err(recovery_in_progress(
+                    Some(repository),
+                    Some(recovery),
+                    recovery.phase,
+                ));
+            }
+        }
         let after_revision = request.after_revision;
         // Waiting is owned by the asynchronous connection task. Each journal
         // observation remains short, so one long poll cannot monopolize the
@@ -6565,6 +6585,7 @@ fn durable_recovery_worker(
         // but mutation and watcher admission remain closed until the full batch
         // has either restored or reached a durable terminal result.
         publish_active_recovery_readiness(&lanes, degraded)?;
+        reconcile_recovery_support_inventory(&lanes)?;
         #[cfg(test)]
         if let Some(after_active_restore) = deferred.after_active_restore.take() {
             after_active_restore(&lanes, &cancellation)?;
@@ -6761,6 +6782,24 @@ fn refresh_recovery_support_inventory(
             .map_err(|_| FirstSliceHostError::ThreadPanicked)
             .and_then(|service| {
                 verified_index_support_inventory(&service).map_err(FirstSliceHostError::Service)
+            })?;
+        state
+            .replace_index_support_inventory(inventory)
+            .map_err(FirstSliceHostError::Journal)?;
+    }
+    Ok(())
+}
+
+fn reconcile_recovery_support_inventory(
+    lanes: &FirstSliceServiceLanes,
+) -> Result<(), FirstSliceHostError> {
+    if let Some(state) = lanes.support_state.as_deref() {
+        let inventory = lanes
+            .service
+            .read()
+            .map_err(|_| FirstSliceHostError::ThreadPanicked)
+            .and_then(|service| {
+                reconciled_index_support_inventory(&service).map_err(FirstSliceHostError::Service)
             })?;
         state
             .replace_index_support_inventory(inventory)
@@ -14141,6 +14180,13 @@ fn verified_index_support_inventory(
     Ok(map_index_support_inventory(snapshot))
 }
 
+fn reconciled_index_support_inventory(
+    service: &FirstSliceService,
+) -> Result<IndexSupportInventory, FirstSliceError> {
+    let snapshot = service.support_inventory_snapshot_reconciled()?;
+    Ok(map_index_support_inventory(snapshot))
+}
+
 fn accounted_index_support_inventory(
     service: &FirstSliceService,
 ) -> Result<Option<IndexSupportInventory>, FirstSliceError> {
@@ -16356,6 +16402,14 @@ mod tests {
 
         assert_eq!(accounted_index_support_inventory(&service), Ok(None));
 
+        let reconciled = reconciled_index_support_inventory(&service)
+            .expect("startup recovery reconciles physical storage accounting");
+        assert_eq!(reconciled.total_storage_bytes, Some(0));
+        assert_eq!(
+            reconciled.storage_accounting_state,
+            Some(SupportStorageAccountingState::Reconciled)
+        );
+
         let verified = verified_index_support_inventory(&service)
             .expect("recovery support inventory verifies durable storage");
         assert_eq!(verified.total_storage_bytes, Some(0));
@@ -16469,6 +16523,76 @@ mod tests {
             assert_eq!(repository_operation_stage(&record), stage);
             assert_eq!(repository_operation_retry_after_ms(&record), None);
         }
+    }
+
+    #[test]
+    fn active_recovery_status_returns_correlated_busy_without_worker_admission() {
+        let repository = RepositoryId::from_bytes([55; 16]);
+        let generation = GenerationId::from_bytes([56; 20]);
+        let operation = OperationId::from_bytes([57; 16]);
+        let (work, _work_receiver) = mpsc::sync_channel(1);
+        let (read, _read_receiver) = mpsc::sync_channel(1);
+        let (control, _control_receiver) = mpsc::sync_channel(1);
+        let daemon = FirstSliceDaemon {
+            work,
+            read,
+            control,
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::from([(
+                repository,
+                RepositoryRecoveryState {
+                    generation,
+                    operation: Some(operation),
+                    phase: RepositoryRecoveryPhase::RetainedHistory,
+                    current: true,
+                },
+            )]))),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([58; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+
+        let error = runtime
+            .block_on(daemon.dispatch_operation_status(
+                daemon::RepositoryOperationStatusRequest {
+                    schema_version: Some(schema_version()),
+                    operation: Some(operation_to_wire(operation)),
+                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                    wait_ms: Some(5_000),
+                    after_revision: None,
+                },
+                context,
+            ))
+            .expect_err("active recovery is reported as retryable contention");
+
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert_eq!(error.operation(), Some(operation));
+        assert_eq!(error.repository(), Some(repository));
+        assert_eq!(error.generation(), Some(generation));
+        assert_eq!(
+            error.details().get(&static_detail_key("recovery_stage")),
+            Some(&PublicValue::Label(static_safe_label("retained_history")))
+        );
+        assert_eq!(
+            error
+                .details()
+                .get(&static_detail_key("progress_completed")),
+            Some(&PublicValue::Unsigned(1))
+        );
+        assert!(error.retryable());
+        assert_eq!(
+            error.next_actions(),
+            &[NextAction::Retry, NextAction::InspectOperation]
+        );
     }
 
     #[test]
@@ -24161,12 +24285,17 @@ mod tests {
                                 == RepositoryRecoveryPhase::RetainedHistory)
                     );
                     drop(recoveries);
-                    let repositories = lanes
-                        .service
-                        .read()
-                        .expect("recovered service reads")
-                        .list_repositories();
+                    let service = lanes.service.read().expect("recovered service reads");
+                    let repositories = service.list_repositories();
                     assert_eq!(repositories.len(), 1);
+                    let inventory = service
+                        .support_inventory_snapshot_from_accounting()
+                        .expect("reconciled support inventory reads")
+                        .expect("active recovery publishes authoritative accounting");
+                    assert_eq!(
+                        inventory.storage_accounting_state,
+                        FirstSliceStorageAccountingState::Reconciled
+                    );
                     assert!(cancellation.cancel(CancellationReason::ClientRequest));
                     Ok(())
                 })),
