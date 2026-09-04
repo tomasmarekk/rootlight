@@ -7550,61 +7550,71 @@ impl FirstSliceService {
                 0,
             )?;
         }
-        let (oracle_allocated_bytes, verified, durable, mut written_bytes) =
-            if let Some(durable) = &self.durable {
-                let prepared = durable.begin_generation(repository, generation)?;
-                let source_write = prepared.write_sources(&retained_sources)?;
-                incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
-                let source_written_bytes = source_write.newly_written_bytes;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Persistence,
-                    4,
-                    fully_examined_files,
-                    fully_examined_bytes,
-                    source_written_bytes,
-                ));
-                let (allocated_bytes, verified, generation_written_bytes) = match representation {
-                    DurableGenerationRepresentation::Oracle => {
-                        let (oracle, verified) = OracleWriter::create_in(prepared.path())
-                            .map_err(|error| map_catalog_error(&error, cancellation))?
-                            .seal_preserving_verified(verified, &context)
-                            .map_err(|error| map_catalog_error(&error, cancellation))?;
-                        let allocated_bytes = oracle
-                            .allocated_bytes(&context)
-                            .map_err(|error| map_catalog_error(&error, cancellation))?;
-                        prepared.account_external_staging_bytes(allocated_bytes)?;
-                        (allocated_bytes, verified, allocated_bytes)
-                    }
-                    DurableGenerationRepresentation::RecoverySnapshot => {
-                        let recovery_bytes = prepared.write_recovery_snapshot(
-                            verified.snapshot(),
-                            serialized_document_bytes,
-                            cancellation,
-                        )?;
-                        (0, verified, recovery_bytes)
-                    }
-                };
-                let written_bytes = source_written_bytes
-                    .checked_add(generation_written_bytes)
-                    .ok_or(FirstSliceError::Limits)?;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Persistence,
-                    4,
-                    fully_examined_files,
-                    fully_examined_bytes,
-                    written_bytes,
-                ));
-                (allocated_bytes, verified, Some(prepared), written_bytes)
+        let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
+            &self.durable
+        {
+            let prepared = durable.begin_generation(repository, generation)?;
+            let source_write = prepared.write_sources(&retained_sources)?;
+            incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
+            let source_file_catalog_bytes = if verified.snapshot().source_files().is_empty() {
+                0
             } else {
-                let (oracle, verified) = EphemeralOracleWriter::create()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal_and_retain(verified, &context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let allocated_bytes = oracle
-                    .allocated_bytes()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                (allocated_bytes, verified, None, 0)
+                prepared
+                    .write_source_file_catalog(verified.snapshot().source_files(), cancellation)?
             };
+            let source_written_bytes = source_write
+                .newly_written_bytes
+                .checked_add(source_file_catalog_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                source_written_bytes,
+            ));
+            let (allocated_bytes, verified, generation_written_bytes) = match representation {
+                DurableGenerationRepresentation::Oracle => {
+                    let (oracle, verified) = OracleWriter::create_in(prepared.path())
+                        .map_err(|error| map_catalog_error(&error, cancellation))?
+                        .seal_preserving_verified(verified, &context)
+                        .map_err(|error| map_catalog_error(&error, cancellation))?;
+                    let allocated_bytes = oracle
+                        .allocated_bytes(&context)
+                        .map_err(|error| map_catalog_error(&error, cancellation))?;
+                    prepared.account_external_staging_bytes(allocated_bytes)?;
+                    (allocated_bytes, verified, allocated_bytes)
+                }
+                DurableGenerationRepresentation::RecoverySnapshot => {
+                    let recovery_bytes = prepared.write_recovery_snapshot(
+                        verified.snapshot(),
+                        serialized_document_bytes,
+                        cancellation,
+                    )?;
+                    (0, verified, recovery_bytes)
+                }
+            };
+            let written_bytes = source_written_bytes
+                .checked_add(generation_written_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                written_bytes,
+            ));
+            (allocated_bytes, verified, Some(prepared), written_bytes)
+        } else {
+            let (oracle, verified) = EphemeralOracleWriter::create()
+                .map_err(|error| map_catalog_error(&error, cancellation))?
+                .seal_and_retain(verified, &context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            let allocated_bytes = oracle
+                .allocated_bytes()
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            (allocated_bytes, verified, None, 0)
+        };
         if let Some(durable) = durable.as_ref() {
             let incremental_bytes = durable.write_incremental_state(&incremental, cancellation)?;
             written_bytes = written_bytes

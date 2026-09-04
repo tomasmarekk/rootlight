@@ -19,16 +19,20 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
-use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId};
 use rootlight_incremental::{
     BaselineFile, FileDescriptor, FileMetadata, InputFingerprint, InputKey, InputSnapshot,
     MetadataBaseline, MetadataReliability, PlanningLimits, PlatformFileIdentity, ReconcileLimits,
 };
-use rootlight_ir::{ExtensionSupport, FileRecord, IrLimits};
+use rootlight_ir::{
+    ExtensionSupport, FactEvidence, FileIdentityClaim, FilePathLocator, FilePathLocatorEncoding,
+    FileRecord, IrLimits, SourceRef, SourceSpan,
+};
 use rootlight_search::{BuildBudget, LexicalIndex};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
     GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
+    SourceFileCatalog, SourceFileCatalogEntry,
 };
 use rootlight_vfs::{
     MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
@@ -60,11 +64,13 @@ const RECOVERY_SNAPSHOT_GZIP_FILENAME: &str = "recovery.json.gz";
 const RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME: &str = "recovery.msgpack.gz";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const INCREMENTAL_STATE_FILENAME: &str = "incremental.json";
+const SOURCE_FILE_CATALOG_FILENAME: &str = "source-files.json";
 const LOGICAL_SNAPSHOT_FILENAME: &str = "logical-snapshot.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
 const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
-const GENERATION_MANIFEST_VERSION: u16 = 2;
+const PACKED_GENERATION_MANIFEST_VERSION: u16 = 2;
+const GENERATION_MANIFEST_VERSION: u16 = 3;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const LEGACY_SOURCE_STORAGE_VERSION: u16 = 1;
 const SOURCE_STORAGE_VERSION: u16 = 2;
@@ -73,6 +79,7 @@ const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
 const INCREMENTAL_STATE_VERSION: u16 = 1;
+const SOURCE_FILE_CATALOG_VERSION: u16 = 1;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
 const LOGICAL_SNAPSHOT_VERSION: u16 = 2;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
@@ -85,6 +92,7 @@ const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_RECOVERY_ENCODED_BYTES: u64 = MAX_RECOVERY_SNAPSHOT_BYTES + 1024 * 1024;
 const RECOVERY_DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SOURCE_FILE_CATALOG_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
 const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
@@ -233,6 +241,7 @@ pub(super) struct DurablePreparedGeneration {
     staging_bytes: Arc<AtomicU64>,
     accounted_bytes: AtomicU64,
     incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
+    source_file_catalog: Mutex<Option<DurableSidecarDescriptor>>,
     source_storage: Mutex<Option<DurableSourceStorage>>,
     created_source_blobs: Mutex<BTreeSet<ContentHash>>,
     storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
@@ -282,6 +291,8 @@ struct DurableGenerationManifest {
     receipt: FirstSliceIndexReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incremental_state: Option<DurableSidecarDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_file_catalog: Option<DurableSidecarDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_storage: Option<DurableSourceStorage>,
 }
@@ -542,6 +553,143 @@ struct DurableSidecarDescriptor {
     digest: ContentHash,
 }
 
+struct DurableSourceFileCatalogRef<'catalog> {
+    entries: &'catalog [SourceFileCatalogEntry],
+}
+
+impl Serialize for DurableSourceFileCatalogRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+
+        let mut state = serializer.serialize_struct("DurableSourceFileCatalog", 2)?;
+        state.serialize_field("version", &SOURCE_FILE_CATALOG_VERSION)?;
+        state.serialize_field("entries", &DurableSourceFileEntries(self.entries))?;
+        state.end()
+    }
+}
+
+struct DurableSourceFileEntries<'catalog>(&'catalog [SourceFileCatalogEntry]);
+
+impl Serialize for DurableSourceFileEntries<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq as _;
+
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for entry in self.0 {
+            let file = entry.file();
+            let locator = file
+                .path_locator
+                .as_ref()
+                .ok_or_else(|| serde::ser::Error::custom("source file locator is missing"))?;
+            sequence.serialize_element(&DurableSourceFileEntryRef {
+                claim: entry.claim(),
+                locator_encoding: locator.encoding().as_str(),
+                locator_components: locator.components(),
+                language: &file.language,
+                encoding: &file.encoding,
+                generated: file.generated,
+                provenance: file.provenance,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSourceFileEntryRef<'entry> {
+    claim: &'entry FileIdentityClaim,
+    locator_encoding: &'entry str,
+    locator_components: &'entry [String],
+    language: &'entry str,
+    encoding: &'entry str,
+    generated: bool,
+    provenance: FactId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSourceFileCatalog {
+    version: u16,
+    entries: Vec<DurableSourceFileEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSourceFileEntry {
+    claim: FileIdentityClaim,
+    locator_encoding: String,
+    locator_components: Vec<String>,
+    language: String,
+    encoding: String,
+    generated: bool,
+    provenance: FactId,
+}
+
+impl DurableSourceFileCatalog {
+    fn into_catalog(
+        self,
+        repository: RepositoryId,
+        generation: GenerationId,
+    ) -> Result<SourceFileCatalog, FirstSliceError> {
+        if self.version != SOURCE_FILE_CATALOG_VERSION
+            || self.entries.len() > MAX_SOURCE_BLOB_ENTRIES
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        for durable in self.entries {
+            if durable.claim.repository != repository {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            let locator_encoding = FilePathLocatorEncoding::parse(&durable.locator_encoding)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let path_locator = FilePathLocator::new(locator_encoding, durable.locator_components)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let span = SourceSpan::new(durable.claim.file, 0, durable.claim.byte_length)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let source = SourceRef::new(
+                repository,
+                generation,
+                span,
+                durable.claim.content_hash,
+                None,
+            );
+            let file = FileRecord {
+                id: durable.claim.file,
+                repository,
+                generation,
+                path: durable.claim.path.clone(),
+                path_locator: Some(path_locator),
+                content_hash: durable.claim.content_hash,
+                byte_length: durable.claim.byte_length,
+                language: durable.language,
+                encoding: durable.encoding,
+                generated: durable.generated,
+                provenance: durable.provenance,
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            entries.push(
+                SourceFileCatalogEntry::new(file, durable.claim)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?,
+            );
+        }
+        SourceFileCatalog::new(entries).map_err(|_| FirstSliceError::CatalogCorrupt)
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableIncrementalState {
@@ -682,6 +830,13 @@ struct GenerationRestoreRequest<'a> {
     published_generation_count: Option<u64>,
     repository_directory: &'a PrivateDirectory<'a>,
     repository_path: &'a Path,
+}
+
+struct OracleRestoreExpectation {
+    repository: RepositoryId,
+    generation: GenerationId,
+    parent: Option<GenerationId>,
+    allocated_bytes: u64,
 }
 
 struct PersistedSourceReader {
@@ -887,8 +1042,11 @@ fn source_storage_layout(
 ) -> Result<DurableSourceLayout, FirstSliceError> {
     match (manifest_version, storage) {
         (LEGACY_GENERATION_MANIFEST_VERSION, None) => Ok(DurableSourceLayout::Inline),
-        (GENERATION_MANIFEST_VERSION, Some(storage))
-            if storage.version == LEGACY_SOURCE_STORAGE_VERSION
+        (version, Some(storage))
+            if matches!(
+                version,
+                PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+            ) && storage.version == LEGACY_SOURCE_STORAGE_VERSION
                 && storage.files.is_none()
                 && storage.packs.is_none()
                 && storage.index_bytes.is_none()
@@ -897,8 +1055,11 @@ fn source_storage_layout(
         {
             Ok(DurableSourceLayout::Blobs)
         }
-        (GENERATION_MANIFEST_VERSION, Some(storage))
-            if storage.version == SOURCE_STORAGE_VERSION
+        (version, Some(storage))
+            if matches!(
+                version,
+                PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+            ) && storage.version == SOURCE_STORAGE_VERSION
                 && storage.files.is_some()
                 && storage.packs.is_some()
                 && storage.index_bytes.is_some()
@@ -1278,6 +1439,7 @@ impl DurableCatalog {
             staging_bytes: Arc::clone(&self.staging_bytes),
             accounted_bytes: AtomicU64::new(0),
             incremental_state: Mutex::new(None),
+            source_file_catalog: Mutex::new(None),
             source_storage: Mutex::new(None),
             created_source_blobs: Mutex::new(BTreeSet::new()),
             storage_accounting: Arc::clone(&self.storage_accounting),
@@ -2939,6 +3101,61 @@ impl DurablePreparedGeneration {
         Ok(writer.bytes)
     }
 
+    pub(super) fn write_source_file_catalog(
+        &self,
+        catalog: &SourceFileCatalog,
+        cancellation: &Cancellation,
+    ) -> Result<u64, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        if catalog.len() > MAX_SOURCE_BLOB_ENTRIES
+            || catalog.entries().iter().any(|entry| {
+                entry.file().repository != self.repository_id
+                    || entry.file().generation != self.generation
+            })
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let staging = self.staging();
+        let file = staging
+            .create_file(OsStr::new(SOURCE_FILE_CATALOG_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut writer =
+            buffered_recovery_writer(file, MAX_SOURCE_FILE_CATALOG_BYTES, cancellation);
+        let durable = DurableSourceFileCatalogRef {
+            entries: catalog.entries(),
+        };
+        if serde_json::to_writer(&mut writer, &durable).is_err() || writer.flush().is_err() {
+            return Err(recovery_writer_error(
+                [writer.failure],
+                FirstSliceError::Catalog,
+                FirstSliceError::Limits,
+            ));
+        }
+        check_cancellation(cancellation)?;
+        if writer.bytes == 0 || writer.bytes > MAX_SOURCE_FILE_CATALOG_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        writer
+            .inner
+            .get_ref()
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        check_cancellation(cancellation)?;
+        self.account_staging_bytes(writer.bytes)?;
+        let descriptor = DurableSidecarDescriptor {
+            bytes: writer.bytes,
+            digest: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+        };
+        let mut slot = self
+            .source_file_catalog
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if slot.replace(descriptor).is_some() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(writer.bytes)
+    }
+
     pub(super) fn write_logical_snapshot_identity(
         &self,
         snapshot: &GenerationSnapshot,
@@ -3009,6 +3226,10 @@ impl DurablePreparedGeneration {
             .incremental_state
             .lock()
             .map_err(|_| FirstSliceError::Catalog)?;
+        let source_file_catalog = *self
+            .source_file_catalog
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
         let source_storage = *self
             .source_storage
             .lock()
@@ -3023,6 +3244,7 @@ impl DurablePreparedGeneration {
                 root_path: Some(root_path.to_owned()),
                 receipt: receipt.clone(),
                 incremental_state,
+                source_file_catalog,
                 source_storage,
             };
             let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
@@ -4644,8 +4866,10 @@ fn read_generation_bootstrap_identity(
     }
     // Persisted U+FFFD may represent a lossy OS path, so only lossless root
     // spellings can provide the redundant identity binding.
-    if manifest.version == GENERATION_MANIFEST_VERSION
-        && let Some(root_path) = manifest.root_path.as_deref()
+    if matches!(
+        manifest.version,
+        PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+    ) && let Some(root_path) = manifest.root_path.as_deref()
         && !root_path.contains('\u{fffd}')
         && (!Path::new(root_path).is_absolute()
             || persisted_repository_path_hash(root_path)? != manifest.root_identity)
@@ -4961,6 +5185,9 @@ fn restore_generation(
     let mut manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
+    if manifest.version != GENERATION_MANIFEST_VERSION && manifest.source_file_catalog.is_some() {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
     if manifest.receipt.repository != repository
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
@@ -4976,6 +5203,13 @@ fn restore_generation(
         Err(FirstSliceError::CatalogCorrupt) => None,
         Err(error) => return Err(error),
     };
+    let source_file_catalog = restore_source_file_catalog(
+        &generation_directory,
+        manifest.source_file_catalog,
+        repository,
+        generation,
+        cancellation,
+    )?;
 
     let context = GenerationContext::new(cancellation, GenerationBudget::default());
     let generation_path = repository_path.join(&generation_name);
@@ -4984,6 +5218,7 @@ fn restore_generation(
         repository,
         generation,
         manifest.receipt.parent,
+        &source_file_catalog,
         &context,
         cancellation,
     );
@@ -5009,10 +5244,13 @@ fn restore_generation(
                 ),
                 Ok(None) | Err(FirstSliceError::CatalogCorrupt) => restore_oracle_generation(
                     &generation_path,
-                    repository,
-                    generation,
-                    manifest.receipt.parent,
-                    manifest.receipt.oracle_allocated_bytes,
+                    OracleRestoreExpectation {
+                        repository,
+                        generation,
+                        parent: manifest.receipt.parent,
+                        allocated_bytes: manifest.receipt.oracle_allocated_bytes,
+                    },
+                    source_file_catalog,
                     &context,
                     cancellation,
                 )
@@ -5053,11 +5291,8 @@ fn restore_generation(
     };
     while let Some(file_id) = projection.next_source_file() {
         let file = verified
-            .document()
-            .files
-            .binary_search_by_key(&file_id, |candidate| candidate.id)
-            .ok()
-            .and_then(|index| verified.document().files.get(index))
+            .snapshot()
+            .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         let snapshot = source_reader
             .as_ref()
@@ -5071,7 +5306,7 @@ fn restore_generation(
         .finish(cancellation)
         .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     let sources = Vec::new();
-    if u64::try_from(verified.document().files.len()).ok() != Some(manifest.receipt.indexed_files)
+    if u64::try_from(verified.snapshot().file_count()).ok() != Some(manifest.receipt.indexed_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || u64::try_from(documents.len()).ok() != Some(manifest.receipt.lexical_documents)
         || allocated_bytes != manifest.receipt.oracle_allocated_bytes
@@ -5127,6 +5362,38 @@ fn restore_incremental_state(
     let durable: DurableIncrementalState =
         serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     durable.into_prepared(cancellation).map(Some)
+}
+
+fn restore_source_file_catalog(
+    generation_directory: &PrivateDirectory<'_>,
+    descriptor: Option<DurableSidecarDescriptor>,
+    repository: RepositoryId,
+    generation: GenerationId,
+    cancellation: &Cancellation,
+) -> Result<SourceFileCatalog, FirstSliceError> {
+    let Some(descriptor) = descriptor else {
+        return Ok(SourceFileCatalog::default());
+    };
+    if descriptor.bytes == 0 || descriptor.bytes > MAX_SOURCE_FILE_CATALOG_BYTES {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    check_cancellation(cancellation)?;
+    let bytes = generation_directory
+        .read_file_bounded_cancellable(
+            OsStr::new(SOURCE_FILE_CATALOG_FILENAME),
+            descriptor.bytes,
+            cancellation,
+        )
+        .map_err(map_private_read_error)?;
+    if u64::try_from(bytes.len()).ok() != Some(descriptor.bytes)
+        || content_hash_bytes(&bytes) != descriptor.digest
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let durable: DurableSourceFileCatalog =
+        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    check_cancellation(cancellation)?;
+    durable.into_catalog(repository, generation)
 }
 
 fn reconcile_restored_serialized_document_bytes(
@@ -5231,6 +5498,7 @@ fn restore_recovery_generation(
     repository: RepositoryId,
     generation: GenerationId,
     parent: Option<GenerationId>,
+    source_files: &SourceFileCatalog,
     context: &GenerationContext<'_>,
     cancellation: &Cancellation,
 ) -> Result<Option<(IdentityVerifiedGeneration, u64)>, FirstSliceError> {
@@ -5348,20 +5616,24 @@ fn restore_recovery_generation(
     recovery_limits.max_document_bytes =
         usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?;
     let restored = match format {
-        RecoverySnapshotFormat::Json => IdentityVerifiedGeneration::restore_published_json(
-            metadata,
-            &encoded,
-            decoded_digest,
-            &recovery_limits,
-            &ExtensionSupport::default(),
-            context,
-        ),
+        RecoverySnapshotFormat::Json => {
+            IdentityVerifiedGeneration::restore_published_json_with_source_files(
+                metadata,
+                &encoded,
+                decoded_digest,
+                source_files.clone(),
+                &recovery_limits,
+                &ExtensionSupport::default(),
+                context,
+            )
+        }
         RecoverySnapshotFormat::JsonGzip => {
             let decoded = decode_recovery_snapshot(&encoded, decoded_bytes, cancellation)?;
-            IdentityVerifiedGeneration::restore_published_json(
+            IdentityVerifiedGeneration::restore_published_json_with_source_files(
                 metadata,
                 &decoded,
                 decoded_digest,
+                source_files.clone(),
                 &recovery_limits,
                 &ExtensionSupport::default(),
                 context,
@@ -5372,11 +5644,12 @@ fn restore_recovery_generation(
                 RECOVERY_WRITE_BUFFER_BYTES,
                 GzDecoder::new(encoded.as_slice()),
             );
-            IdentityVerifiedGeneration::restore_published_messagepack_reader(
+            IdentityVerifiedGeneration::restore_published_messagepack_reader_with_source_files(
                 metadata,
                 reader,
                 usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
                 decoded_digest,
+                source_files.clone(),
                 &recovery_limits,
                 &ExtensionSupport::default(),
                 context,
@@ -5392,10 +5665,8 @@ fn restore_recovery_generation(
 
 fn restore_oracle_generation(
     generation_path: &Path,
-    repository: RepositoryId,
-    generation: GenerationId,
-    parent: Option<GenerationId>,
-    expected_allocated_bytes: u64,
+    expectation: OracleRestoreExpectation,
+    source_files: SourceFileCatalog,
     context: &GenerationContext<'_>,
     cancellation: &Cancellation,
 ) -> Result<(IdentityVerifiedGeneration, u64), FirstSliceError> {
@@ -5408,13 +5679,16 @@ fn restore_oracle_generation(
         .read(context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;
     let metadata = persisted.metadata();
-    if metadata.repository() != repository
-        || metadata.generation() != generation
-        || metadata.parent() != parent
-        || allocated_bytes != expected_allocated_bytes
+    if metadata.repository() != expectation.repository
+        || metadata.generation() != expectation.generation
+        || metadata.parent() != expectation.parent
+        || allocated_bytes != expectation.allocated_bytes
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    let persisted = persisted
+        .with_source_files(source_files)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let verified = IdentityVerifiedGeneration::verify_snapshot(persisted, context)
         .map_err(|error| map_persisted_identity_error(error, cancellation))?;
     Ok((verified, allocated_bytes))
@@ -5748,7 +6022,10 @@ mod tests {
     use super::*;
     use crate::FirstSliceService;
     use rootlight_cancel::{Cancellation, CancellationReason};
-    use rootlight_ids::{GenerationIdentity, content_hash, derive_generation, derive_repository};
+    use rootlight_ids::{
+        FileIdentity, GenerationIdentity, content_hash, derive_file, derive_generation,
+        derive_repository,
+    };
     use rootlight_query::LocateMode;
     use rootlight_runtime::RuntimePaths;
     use std::{fs, io, time::Duration};
@@ -5867,6 +6144,112 @@ mod tests {
                 source_blobs: BTreeMap::new(),
             },
         }
+    }
+
+    fn test_source_file_catalog(
+        repository: RepositoryId,
+        generation: GenerationId,
+    ) -> SourceFileCatalog {
+        let path = "src/file.txt";
+        let path_identity = path.as_bytes().to_vec();
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: &path_identity,
+        })
+        .id();
+        let bytes = b"durable source file\n";
+        let byte_length = u64::try_from(bytes.len()).expect("fixture length is representable");
+        let content_hash = content_hash(bytes);
+        let claim = FileIdentityClaim {
+            file,
+            repository,
+            path: path.to_owned(),
+            path_identity,
+            content_hash,
+            byte_length,
+        };
+        let record = FileRecord {
+            id: file,
+            repository,
+            generation,
+            path: path.to_owned(),
+            path_locator: Some(
+                FilePathLocator::new(
+                    FilePathLocatorEncoding::UnixBytesV1,
+                    vec!["737263".to_owned(), "66696c652e747874".to_owned()],
+                )
+                .expect("fixture locator is valid"),
+            ),
+            content_hash,
+            byte_length,
+            language: "text".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: FactId::from_bytes([9; 20]),
+            evidence: FactEvidence {
+                source: Some(SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, 0, byte_length).expect("fixture span is valid"),
+                    content_hash,
+                    None,
+                )),
+                derivation: Vec::new(),
+            },
+        };
+        SourceFileCatalog::new(vec![
+            SourceFileCatalogEntry::new(record, claim).expect("fixture entry is valid"),
+        ])
+        .expect("fixture catalog is valid")
+    }
+
+    #[test]
+    fn source_file_catalog_sidecar_round_trips_and_rejects_corruption() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = open_test_catalog(paths.state_dir(), 2).expect("catalog opens");
+        let repository = derive_repository(b"source-file-catalog-sidecar").id();
+        let generation = GenerationId::from_bytes([7; 20]);
+        let catalog = test_source_file_catalog(repository, generation);
+        let cancellation = Cancellation::new();
+        let prepared = durable
+            .begin_generation(repository, generation)
+            .expect("staging generation opens");
+
+        let written = prepared
+            .write_source_file_catalog(&catalog, &cancellation)
+            .expect("source-file catalog writes");
+        let descriptor = prepared
+            .source_file_catalog
+            .lock()
+            .expect("source-file descriptor remains available")
+            .expect("source-file descriptor is present");
+        assert_eq!(written, descriptor.bytes);
+        assert_eq!(
+            restore_source_file_catalog(
+                prepared.staging(),
+                Some(descriptor),
+                repository,
+                generation,
+                &cancellation,
+            ),
+            Ok(catalog)
+        );
+
+        fs::write(prepared.path().join(SOURCE_FILE_CATALOG_FILENAME), b"{}")
+            .expect("catalog corruption writes");
+        assert_eq!(
+            restore_source_file_catalog(
+                prepared.staging(),
+                Some(descriptor),
+                repository,
+                generation,
+                &cancellation,
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
     }
 
     #[test]
