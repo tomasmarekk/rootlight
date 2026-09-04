@@ -85,12 +85,12 @@ impl ResolutionEngine {
         let mut decisions = Vec::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
-            work.consume()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
                 || !resolvable_role(occurrence.role)
             {
                 continue;
             }
+            work.consume()?;
             decisions.push(self.resolve_occurrence(occurrence, &index, &mut work, cancellation)?);
         }
         decisions.sort_unstable_by_key(|decision| decision.occurrence);
@@ -139,15 +139,14 @@ impl ResolutionEngine {
             .iter()
             .try_fold(0_usize, |required, occurrence| {
                 cancellation.check()?;
-                let required = required
-                    .checked_add(1)
-                    .ok_or(ResolutionError::CountOverflow)?;
                 if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
                     || !resolvable_role(occurrence.role)
                 {
                     return Ok(required);
                 }
                 required
+                    .checked_add(1)
+                    .ok_or(ResolutionError::CountOverflow)?
                     .checked_add(
                         entities_by_name
                             .get(&occurrence.syntactic_text_hash)
@@ -488,6 +487,25 @@ impl<'a> CandidateIndex<'a> {
             files,
             provenance,
         })
+    }
+
+    pub(crate) fn occurrence_work(
+        &self,
+        occurrence: &OccurrenceRecord,
+    ) -> Result<Option<usize>, ResolutionError> {
+        if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            || !resolvable_role(occurrence.role)
+        {
+            return Ok(None);
+        }
+        1_usize
+            .checked_add(
+                self.by_name_hash
+                    .get(&occurrence.syntactic_text_hash)
+                    .map_or(0, Vec::len),
+            )
+            .map(Some)
+            .ok_or(ResolutionError::CountOverflow)
     }
 }
 

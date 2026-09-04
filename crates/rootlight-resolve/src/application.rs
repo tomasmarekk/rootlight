@@ -135,10 +135,41 @@ impl ResolutionEngine {
     /// [`Self::apply`].
     pub fn apply_document(
         &self,
-        mut document: NormalizedIrDocument,
+        document: NormalizedIrDocument,
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<NormalizedIrDocument, ResolutionError> {
+        self.apply_document_with_work_selection(document, context, cancellation, false)
+            .map(|(document, _)| document)
+    }
+
+    /// Applies as many semantic decisions as fit the operation-wide work limit.
+    ///
+    /// Sites requiring fewer same-name candidate inspections are selected
+    /// first, with occurrence identity as the deterministic tie-breaker. The
+    /// returned estimate always describes the complete pass, so callers can
+    /// explicitly mark facts that remain bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolutionError`] when validation, bounded application,
+    /// provenance construction, identity remapping, or canonicalization fails.
+    pub fn apply_document_bounded(
+        &self,
+        document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        cancellation: &Cancellation,
+    ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
+        self.apply_document_with_work_selection(document, context, cancellation, true)
+    }
+
+    fn apply_document_with_work_selection(
+        &self,
+        mut document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        cancellation: &Cancellation,
+        bounded: bool,
+    ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
         cancellation.check()?;
         let ir_limits = IrLimits::default();
         validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
@@ -151,6 +182,41 @@ impl ResolutionEngine {
             &document.provenance,
             cancellation,
         )?;
+        let mut required = 0_usize;
+        let mut sites = Vec::new();
+        for occurrence in &document.occurrences {
+            cancellation.check()?;
+            let Some(site_work) = lookup.occurrence_work(occurrence)? else {
+                continue;
+            };
+            required = required
+                .checked_add(site_work)
+                .ok_or(ResolutionError::CountOverflow)?;
+            sites.push((site_work, occurrence.id));
+        }
+        let estimate = crate::ResolutionWorkEstimate {
+            required,
+            limit: self.limits.work_limit(),
+        };
+        let selected = if estimate.fits() {
+            None
+        } else if bounded {
+            sites.sort_unstable();
+            let mut remaining = estimate.limit;
+            let mut selected = BTreeSet::new();
+            for (site_work, occurrence) in sites {
+                if site_work > remaining {
+                    break;
+                }
+                remaining -= site_work;
+                selected.insert(occurrence);
+            }
+            Some(selected)
+        } else {
+            return Err(ResolutionError::WorkLimit {
+                maximum: estimate.limit,
+            });
+        };
         let repository = document.repository;
         let generation = document.generation;
         let producer = resolver_producer(self.limits, &self.policy)?;
@@ -165,12 +231,18 @@ impl ResolutionEngine {
 
         for occurrence in &mut document.occurrences {
             cancellation.check()?;
-            work.consume()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
                 || !resolvable_role(occurrence.role)
             {
                 continue;
             }
+            if selected
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(&occurrence.id))
+            {
+                continue;
+            }
+            work.consume()?;
             let decision = self.resolve_occurrence(occurrence, &lookup, &mut work, cancellation)?;
             if matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }) {
                 continue;
@@ -205,8 +277,9 @@ impl ResolutionEngine {
         let relation_remap =
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
-        canonicalize_ir_document(document, &ir_limits, &Default::default())
-            .map_err(ResolutionError::InvalidDocument)
+        let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
+            .map_err(ResolutionError::InvalidDocument)?;
+        Ok((document, estimate))
     }
 }
 

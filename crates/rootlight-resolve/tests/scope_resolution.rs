@@ -343,6 +343,87 @@ fn work_estimate_deduplicates_entity_name_aliases() {
 }
 
 #[test]
+fn bounded_application_prioritizes_low_cost_sites_deterministically() {
+    let mut fixture = Fixture::new();
+    for identity in [60, 61, 62] {
+        fixture.add_entity(
+            identity,
+            "crowded",
+            fixture.primary_file,
+            EntityKind::Function,
+            None,
+        );
+    }
+    fixture.add_occurrence(
+        63,
+        "crowded",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    let unique = fixture.add_entity(
+        64,
+        "unique",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        65,
+        "unique",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.validate();
+    let engine = ResolutionEngine::new(
+        ResolutionLimits::with_work_limit(3, 2).expect("fixture work limit is valid"),
+    );
+    assert!(matches!(
+        engine.apply_document(
+            fixture.document.clone(),
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        ),
+        Err(ResolutionError::WorkLimit { maximum: 2 })
+    ));
+
+    let (expected, estimate) = engine
+        .apply_document_bounded(
+            fixture.document.clone(),
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("bounded application retains affordable semantic facts");
+    let mut reordered = fixture.document;
+    reordered.occurrences.reverse();
+    let (actual, reordered_estimate) = engine
+        .apply_document_bounded(
+            reordered,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("producer order does not change bounded application");
+
+    assert_eq!(estimate.required, 6);
+    assert_eq!(estimate.limit, 2);
+    assert_eq!(reordered_estimate, estimate);
+    assert_eq!(actual, expected);
+    assert!(expected.occurrences.iter().any(|occurrence| {
+        occurrence.syntactic_text_hash == content_hash(b"crowded")
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    assert!(expected.occurrences.iter().any(|occurrence| {
+        occurrence.syntactic_text_hash == content_hash(b"unique")
+            && occurrence.target == OccurrenceTarget::Resolved { symbol: unique }
+    }));
+    assert!(expected.relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::RefersTo
+            && relation.object == RelationEndpoint::Entity(unique)
+    }));
+}
+
+#[test]
 fn decisions_are_independent_of_producer_order() {
     let mut fixture = Fixture::new();
     let second_file = fixture.add_file(51, "src/second.rs");
