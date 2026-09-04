@@ -396,9 +396,7 @@ impl<'a> SourceService<'a> {
         for prepared_file in &prepared.files {
             let file = self
                 .generation
-                .document()
-                .files
-                .get(prepared_file.file_index)
+                .find_file(prepared_file.file)
                 .ok_or(SourceError::FileNotFound)?;
             let snapshot = self.resolve_snapshot(prepared_file, file, cancellation, &control)?;
             let snapshot_ref = snapshot.as_ref();
@@ -428,9 +426,7 @@ impl<'a> SourceService<'a> {
                 .ok_or(SourceError::FileNotFound)?;
             let file = self
                 .generation
-                .document()
-                .files
-                .get(prepared_file.file_index)
+                .find_file(prepared_file.file)
                 .ok_or(SourceError::FileNotFound)?;
             let snapshot = snapshots
                 .get(file_slot)
@@ -527,17 +523,9 @@ impl<'a> SourceService<'a> {
         for reference in references {
             control.check()?;
             validate_reference(reference, repository, generation)?;
-            let file_index = self
-                .generation
-                .document()
-                .files
-                .binary_search_by_key(&reference.span().file(), |file| file.id)
-                .map_err(|_| SourceError::FileNotFound)?;
             let file = self
                 .generation
-                .document()
-                .files
-                .get(file_index)
+                .find_file(reference.span().file())
                 .ok_or(SourceError::FileNotFound)?;
             validate_file(file, reference)?;
             if matches!(options.encoding, SourceEncoding::Utf8) {
@@ -586,7 +574,6 @@ impl<'a> SourceService<'a> {
                     &mut files,
                     PreparedFile {
                         file: file.id,
-                        file_index,
                         path,
                     },
                     control,
@@ -666,7 +653,6 @@ struct PreparedRequest {
 
 struct PreparedFile {
     file: FileId,
-    file_index: usize,
     path: RelativePath,
 }
 

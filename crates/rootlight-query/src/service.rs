@@ -282,8 +282,10 @@ where
             if !hit.relevance_score.is_finite() {
                 return Err(QueryError::IndexDrift);
             }
-            let file =
-                find_file(self.generation.document(), hit.file_id).ok_or(QueryError::IndexDrift)?;
+            let file = self
+                .generation
+                .find_file(hit.file_id)
+                .ok_or(QueryError::IndexDrift)?;
             let (source, expected_identifier, expected_qualified, expected_kind, expected_tier) =
                 if let Some(symbol) = hit.symbol_id {
                     let entity = find_entity(self.generation.document(), symbol)

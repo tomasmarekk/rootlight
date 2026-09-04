@@ -122,7 +122,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
                 declaration_only: entity_is_declaration_only(document, entity, &file.path),
             });
         }
-        let unsupported_files = document
+        let mut unsupported_files = document
             .diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.code == "unsupported-language")
@@ -133,6 +133,13 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
                     .map(|source| source.span().file())
             })
             .collect::<BTreeSet<_>>();
+        unsupported_files.extend(
+            generation
+                .source_files()
+                .entries()
+                .iter()
+                .map(|entry| entry.file().id),
+        );
         if document
             .entities
             .len()
@@ -151,11 +158,8 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             cancellation
                 .check()
                 .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-            let file = document
-                .files
-                .binary_search_by_key(&file_id, |candidate| candidate.id)
-                .ok()
-                .and_then(|index| document.files.get(index))
+            let file = generation
+                .find_file(file_id)
                 .ok_or(QueryError::IndexDrift)?;
             if source_fallback_eligible(&file.path) {
                 required_source_files.push(file.id);
@@ -203,11 +207,9 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             return Err(QueryError::IndexDrift);
         }
         let document = self.generation.document();
-        let file = document
-            .files
-            .binary_search_by_key(&expected, |candidate| candidate.id)
-            .ok()
-            .and_then(|index| document.files.get(index))
+        let file = self
+            .generation
+            .find_file(expected)
             .ok_or(QueryError::IndexDrift)?;
         if source.content_hash() != file.content_hash
             || source.path().as_str() != file.path
