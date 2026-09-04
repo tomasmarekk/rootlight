@@ -58,7 +58,8 @@ use rootlight_discovery::{
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
     InputClass, LanguageEvidence, ManifestInput, canonical_language,
     correlate_incremental_manifest, discover_incremental_with_progress,
-    discover_with_snapshots_at_limit, extension_language, language_capabilities,
+    discover_manifest_streaming, discover_with_snapshots_at_limit, extension_language,
+    language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -6768,13 +6769,13 @@ impl FirstSliceService {
         let mut discovery_files_examined = 0_u64;
         let mut discovery_bytes_examined = 0_u64;
         let mut last_reported_files = 0_u64;
-        let mut incremental = discover_incremental_with_progress(
+        let incremental = discover_incremental_with_progress(
             &root,
             parent_baseline,
             incremental_context,
             &policy,
             IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
-                .with_maximum_retained_source_bytes(self.discovery_source_byte_limit),
+                .without_hashed_snapshot_retention(),
             cancellation,
             |progress| {
                 discovery_files_examined = progress.files_examined;
@@ -6815,22 +6816,14 @@ impl FirstSliceService {
             observe_planning(&planning).map_err(FirstSlicePreparationError::PlanningObserver)?;
             return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
         }
-        let cached_snapshots = if reuse_policy == FirstSliceReusePolicy::Incremental {
-            incremental.take_hashed_snapshots()
-        } else {
-            Default::default()
-        };
-        let (manifest, mut discovered_snapshots) = discover_with_snapshots_at_limit(
+        let manifest = discover_manifest_streaming(
             &root,
             &self.config,
             &policy,
             discovery_limits,
-            cached_snapshots,
-            self.discovery_source_byte_limit,
             cancellation,
         )
-        .map_err(|error| map_discovery_error(error, cancellation))?
-        .into_parts();
+        .map_err(|error| map_discovery_error(error, cancellation))?;
         let incremental = correlate_incremental_manifest(
             &incremental,
             parent_baseline,
@@ -6884,6 +6877,20 @@ impl FirstSliceService {
             estimated_disk_bytes,
             0,
         )?;
+        let (retained_manifest, mut discovered_snapshots) = discover_with_snapshots_at_limit(
+            &root,
+            &self.config,
+            &policy,
+            discovery_limits,
+            BTreeMap::new(),
+            self.discovery_source_byte_limit,
+            cancellation,
+        )
+        .map_err(|error| map_discovery_error(error, cancellation))?
+        .into_parts();
+        if retained_manifest != manifest {
+            return Err(FirstSliceError::DiscoveryDrift.into());
+        }
         let source_count = source_preflight.supported_file_count;
         let mut file_claims = Vec::new();
         file_claims
