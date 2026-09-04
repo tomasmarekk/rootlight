@@ -56,7 +56,7 @@ use rootlight_discovery::{
     DISCOVERY_MANIFEST_VERSION, DiscoveryError, DiscoveryLimits, DiscoveryManifest,
     DiscoveryPolicy, DiscoveryTruncation, DiscoveryTruncationResource, IncrementalDiscovery,
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
-    InputClass, LanguageEvidence, ManifestInput, canonical_language,
+    InputClass, LanguageEvidence, MAX_DISCOVERY_ENTRIES, ManifestInput, canonical_language,
     correlate_incremental_manifest, discover_incremental_with_progress,
     discover_manifest_streaming, discover_with_snapshots_at_limit, extension_language,
     language_capabilities,
@@ -204,7 +204,7 @@ const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structura
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
-const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/1";
+const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/2";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
 const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
@@ -6810,7 +6810,7 @@ impl FirstSliceService {
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
         let policy =
             DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
-        let discovery_limits = DiscoveryLimits::from_config(&self.config);
+        let mut discovery_limits = DiscoveryLimits::from_config(&self.config);
         let parser_provider_hash = first_slice_parser_provider_hash()?;
         let provider_set_hash = self.provider_set_hash(mode)?;
         let active = self.active_by_repository.get(&repository).copied();
@@ -6822,6 +6822,18 @@ impl FirstSliceService {
         } else {
             None
         };
+        let configured_discovery_max_entries = discovery_limits.max_entries;
+        // Normal analysis keeps the configured traversal budget. A durable
+        // file-only generation may rescan source-free metadata up to the
+        // process hard ceiling so an analysis bound does not become a silent
+        // source-inventory omission.
+        let mut resource_bounded_inventory_required = self.durable.is_some()
+            && parent_baseline.is_some_and(|baseline| {
+                baseline.metadata().files().count() > configured_discovery_max_entries
+            });
+        if resource_bounded_inventory_required {
+            discovery_limits.max_entries = MAX_DISCOVERY_ENTRIES;
+        }
         let incremental_context = IncrementalDiscoveryContext::new(
             self.config.hash(),
             derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
@@ -6830,7 +6842,7 @@ impl FirstSliceService {
         let mut discovery_files_examined = 0_u64;
         let mut discovery_bytes_examined = 0_u64;
         let mut last_reported_files = 0_u64;
-        let incremental = discover_incremental_with_progress(
+        let mut incremental = discover_incremental_with_progress(
             &root,
             parent_baseline,
             incremental_context,
@@ -6857,6 +6869,44 @@ impl FirstSliceService {
             },
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
+        if !incremental.is_complete() && self.durable.is_some() {
+            resource_bounded_inventory_required = true;
+        }
+        if resource_bounded_inventory_required
+            && discovery_limits.max_entries < MAX_DISCOVERY_ENTRIES
+        {
+            let replay_base_files = discovery_files_examined;
+            let replay_base_bytes = discovery_bytes_examined;
+            discovery_limits.max_entries = MAX_DISCOVERY_ENTRIES;
+            incremental = discover_incremental_with_progress(
+                &root,
+                parent_baseline,
+                incremental_context,
+                &policy,
+                IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
+                    .without_hashed_snapshot_retention(),
+                cancellation,
+                |progress| {
+                    discovery_files_examined =
+                        replay_base_files.saturating_add(progress.files_examined);
+                    discovery_bytes_examined =
+                        replay_base_bytes.saturating_add(progress.bytes_examined);
+                    if discovery_files_examined.saturating_sub(last_reported_files)
+                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
+                    {
+                        last_reported_files = discovery_files_examined;
+                        observe_progress(FirstSliceIndexProgress::observed(
+                            FirstSliceIndexStage::Discovery,
+                            0,
+                            discovery_files_examined,
+                            discovery_bytes_examined,
+                            0,
+                        ));
+                    }
+                },
+            )
+            .map_err(|error| map_discovery_error(error, cancellation))?;
+        }
         // A no-op authoritative reconcile already proves that every tracked
         // path and content fingerprint still matches the active baseline.
         // Reuse is valid only while the complete product configuration and
@@ -6978,16 +7028,14 @@ impl FirstSliceService {
             estimated_disk_bytes,
             0,
         )?;
-        let file_only_fallback_required = manifest.inputs.len()
-            > self.analysis_limits.ir().max_files
+        let file_only_fallback_required = (resource_bounded_inventory_required
+            && !manifest.inputs.is_empty())
+            || manifest.inputs.len() > self.analysis_limits.ir().max_files
             || source_preflight.source_bytes
                 > u64::try_from(self.source_snapshots.maximum_bytes)
                     .map_err(|_| FirstSliceError::Limits)?
             || ensure_generation_memory_preflight(source_preflight.source_bytes).is_err();
-        if file_only_fallback_required
-            && self.durable.is_some()
-            && representation == DurableGenerationRepresentation::Oracle
-        {
+        if file_only_fallback_required && self.durable.is_some() {
             return self.prepare_file_only_fallback(
                 FileOnlyFallbackPreparation {
                     root: &root,
@@ -8325,9 +8373,10 @@ impl FirstSliceService {
     /// parent.
     ///
     /// Unlike a caller-requested deep index, a semantic refinement must not
-    /// publish structural fallback output under a deep provider identity. The
-    /// returned preparation is therefore guaranteed to contain accepted
-    /// project-adapter output and to name `structural_generation` as its parent.
+    /// publish ordinary structural fallback output under a deep provider
+    /// identity. Resource-bounded repositories may instead publish the explicit
+    /// file-only representation, whose coverage remains unknown, while naming
+    /// `structural_generation` as its exact parent.
     ///
     /// # Errors
     ///
@@ -14923,7 +14972,7 @@ fn source_file_fallback_document_and_catalog(
         repository,
         generation,
         code: SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE.to_owned(),
-        message: "structural analysis exceeded a bounded repository resource - exact file bounded lexical and source retrieval remain available".to_owned(),
+        message: "repository analysis exceeded a bounded resource - exact file bounded lexical and source retrieval remain available".to_owned(),
         severity: DiagnosticSeverity::Warning,
         source: None,
         coverage_effect: CoverageStatus::Unknown,
@@ -24937,6 +24986,125 @@ mod tests {
                 .expect("unloaded file-only generation rehydrates with the same charge"),
         );
         assert_file_only_state(&restored, &receipt, &sources);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_file_only_inventory_completes_bounded_semantic_refinement() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        let sources = [
+            ("alpha.rs", "pub fn inventory_alpha() -> bool { true }\n"),
+            ("beta.css", ".inventoryBeta { display: block; }\n"),
+            ("gamma.lua", "local inventoryGamma = true\n"),
+        ];
+        for (path, content) in sources {
+            fs::write(fixture.path().join(path), content).expect("inventory fixture source writes");
+        }
+
+        let policy = FirstSliceStoragePolicy::resolve_user_config(
+            Some("version = \"1.3\"\n[analysis]\nmax_discovery_entries = 2\n"),
+            2,
+        )
+        .expect("bounded discovery configuration resolves");
+        let analyzer_calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"inventory-semantic-analyzer"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::clone(&analyzer_calls),
+        });
+        let (mut service, deferred) =
+            FirstSliceService::open_durable_deferred_with_project_analyzer_and_policy(
+                policy,
+                paths.state_dir(),
+                analyzer,
+            )
+            .expect("durable inventory service opens");
+        service
+            .install_complete_deferred_restore_progressively(&deferred, &deadline())
+            .expect("empty durable inventory state restores");
+
+        let structural = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("bounded structural inventory publishes");
+        assert!(structural.discovery_complete);
+        assert_eq!(structural.discovered_inputs, sources.len() as u64);
+        assert!(
+            structural
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE })
+        );
+
+        let semantic_preparation = service
+            .prepare_semantic_refinement(fixture.path(), structural.generation, &deadline())
+            .expect("bounded semantic inventory prepares without project analysis");
+        let semantic = service
+            .publish_prepared(semantic_preparation, &deadline())
+            .expect("bounded semantic inventory publishes");
+        assert_eq!(semantic.parent, Some(structural.generation));
+        assert_ne!(semantic.generation, structural.generation);
+        assert!(semantic.discovery_complete);
+        assert_eq!(semantic.discovered_inputs, sources.len() as u64);
+        assert_eq!(semantic.indexed_files, sources.len() as u64);
+        assert_eq!(semantic.entities, 0);
+        assert_eq!(analyzer_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            service
+                .active_generation_is_deep(semantic.repository)
+                .expect("bounded semantic provider identity resolves")
+        );
+        let freshness = service
+            .generation_freshness(semantic.repository, semantic.generation)
+            .expect("bounded semantic freshness resolves");
+        assert_eq!(
+            freshness.semantic,
+            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
+        );
+        let status = service
+            .repository_status(semantic.repository, Some(semantic.generation))
+            .expect("bounded semantic repository status resolves");
+        assert_eq!(status.coverage.len(), sources.len());
+        assert!(status.coverage.iter().all(|coverage| {
+            coverage.tier == "tier_d"
+                && coverage.status == "unknown"
+                && coverage.discovered_files == 1
+                && coverage.indexed_files == 0
+        }));
+
+        for (path, _) in sources {
+            let located = service
+                .code_locate(
+                    semantic.generation,
+                    path.to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .expect("inventory path lookup succeeds");
+            assert!(located.data.hits.iter().any(|hit| hit.path == path));
+        }
+        let absent = service
+            .code_locate(
+                semantic.generation,
+                "semanticInventoryNegativeControl".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &deadline(),
+            )
+            .expect("inventory negative control lookup succeeds");
+        assert!(absent.data.hits.is_empty());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
