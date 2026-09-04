@@ -20,7 +20,7 @@
           "semantic_operation_id": null,
           "state": "queued"
         },
-        "schema_version": "1.1"
+        "schema_version": "1.3"
       }
     },
     {
@@ -66,6 +66,7 @@
             "status": "complete",
             "total_files": 42
           },
+          "logical_snapshot": null,
           "operations": [],
           "publication_state": "published",
           "recommended_actions": [],
@@ -85,7 +86,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -162,6 +163,7 @@
           "error": null,
           "index_stage": "analysis",
           "operation": {
+            "deadline_unix_ms": null,
             "kind": "repository_index",
             "progress": {
               "completed_units": 1,
@@ -183,11 +185,12 @@
             "started_at": "2026-07-18T00:00:00Z",
             "state": "running"
           },
+          "planning": null,
           "published_generation": null,
           "retry_after_ms": null,
           "semantic_operation_id": null
         },
-        "schema_version": "1.2"
+        "schema_version": "1.6"
       }
     },
     {

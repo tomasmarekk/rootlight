@@ -9100,16 +9100,13 @@ where
 }
 
 fn serialize_source_read_success(
-    output: ReadEnvelope<SourceReadData>,
+    mut output: ReadEnvelope<SourceReadData>,
     profile: ResponseProfile,
     started_at: Instant,
     limits: BudgetLimits,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
-    match profile {
-        ResponseProfile::Compact | ResponseProfile::Standard | ResponseProfile::Evidence => {
-            serialize_measured_read_success(output, started_at, limits)
-        }
-    }
+    rootlight_agent::response_profile::shape_read_envelope(&mut output, profile);
+    serialize_measured_read_success(output, started_at, limits)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -33,7 +33,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 353,
       "o200k_tokens": 99,
-      "sha256": "b9000084190538db65e11881e6afc33d57eaf96a7bf6e5d8c56e57ecb2a624e1",
+      "sha256": "795d1df1e4a66516ea22227d69e5c8f17aa1845a585e74f691eef6f9d510ea63",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -42,9 +42,9 @@
       "tool": "repo.status",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1367,
-      "o200k_tokens": 392,
-      "sha256": "da764b353a244f29cff4dee5a38e5d359359d4698b788ea17a7eede9e6b13829",
+      "serialized_bytes": 1391,
+      "o200k_tokens": 397,
+      "sha256": "71617be5a987b86c493f5f99fa6bff2a00f492844b88f58b258357572539dafc",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -64,9 +64,9 @@
       "tool": "operation.status",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 542,
-      "o200k_tokens": 145,
-      "sha256": "1ccd4f094f78a12cb9ee8d4da5b9fa4d5c45e30c4bb5f9cb718e084cd75b4c1f",
+      "serialized_bytes": 582,
+      "o200k_tokens": 156,
+      "sha256": "d48105041627d2ec6a1e495f39b10bc0c008e77cd68b16792579429b85b25902",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -471,6 +471,28 @@
       "tool": "source.read",
       "profile": "compact",
       "framing": "compact_json_output_object",
+      "serialized_bytes": 1388,
+      "o200k_tokens": 464,
+      "sha256": "9a45e93625b534cd11c57d310804a26cc0014787ab29851ca814b25c4a8f1564",
+      "semantic_identity_equal": true,
+      "envelope_invariants_preserved": true,
+      "hard_budget_ceiling_unchanged": true
+    },
+    {
+      "tool": "source.read",
+      "profile": "standard",
+      "framing": "compact_json_output_object",
+      "serialized_bytes": 1416,
+      "o200k_tokens": 474,
+      "sha256": "8ca143724dcec441aefc6760c223e44fb466eae8e0786d5b110859bccfb26faa",
+      "semantic_identity_equal": true,
+      "envelope_invariants_preserved": true,
+      "hard_budget_ceiling_unchanged": true
+    },
+    {
+      "tool": "source.read",
+      "profile": "evidence",
+      "framing": "compact_json_output_object",
       "serialized_bytes": 1458,
       "o200k_tokens": 487,
       "sha256": "f0bca758cb646190e0ec90406c05b786aa29fddd0ac296f677301613c68c7b2b",
@@ -523,6 +545,6 @@
       "hard_budget_ceiling_unchanged": true
     }
   ],
-  "total_serialized_bytes": 98480,
-  "total_o200k_tokens": 31680
+  "total_serialized_bytes": 101348,
+  "total_o200k_tokens": 32634
 }

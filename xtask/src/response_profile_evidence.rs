@@ -929,12 +929,12 @@ fn analytical_batch_tool(tool: McpTool) -> Option<BatchTool> {
         McpTool::CodeDead => Some(BatchTool::CodeDead),
         McpTool::PlanChange => Some(BatchTool::PlanChange),
         McpTool::ContextPack => Some(BatchTool::ContextPack),
+        McpTool::SourceRead => Some(BatchTool::SourceRead),
         McpTool::RepoIndex
         | McpTool::RepoStatus
         | McpTool::RepoList
         | McpTool::OperationStatus
         | McpTool::HistoryCompare
-        | McpTool::SourceRead
         | McpTool::QueryAdvanced
         | McpTool::QueryBatch => None,
     }

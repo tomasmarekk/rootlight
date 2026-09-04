@@ -3176,8 +3176,10 @@ pub struct SourceChunk {
     /// Exclusive byte end.
     pub end_byte: u64,
     /// One-based first included line when line projection is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_line: Option<u64>,
     /// One-based last included line when line projection is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u64>,
     /// Exact UTF-8 or base64 text.
     #[schemars(length(max = 699_052))]
@@ -3237,13 +3239,10 @@ impl<'de> Deserialize<'de> for SourceChunk {
             (None, None) => true,
             _ => false,
         };
-        let line_hint_matches = match wire.source_ref.line_hint() {
-            Some(line_hint) => {
-                wire.start_line == Some(line_hint.start_line())
-                    && wire.end_line == Some(line_hint.end_line())
-            }
-            None => wire.start_line.is_none() && wire.end_line.is_none(),
-        };
+        let line_hint_matches = wire.source_ref.line_hint().is_none_or(|line_hint| {
+            wire.start_line == Some(line_hint.start_line())
+                && wire.end_line == Some(line_hint.end_line())
+        });
         if !lines_are_valid
             || represented_bytes != span_bytes
             || span.start_byte() != wire.start_byte
@@ -4533,6 +4532,14 @@ mod tests {
         let mut mismatched_line_hint = fixture.clone();
         mismatched_line_hint["data"]["chunks"][0]["source_ref"]["line_hint"]["end_line"] = json!(2);
         assert!(serde_json::from_value::<SourceReadOutput>(mismatched_line_hint).is_err());
+
+        let mut profiled_line_metadata = fixture.clone();
+        profiled_line_metadata["data"]["chunks"][0]["source_ref"]
+            .as_object_mut()
+            .expect("source reference is an object")
+            .remove("line_hint");
+        serde_json::from_value::<SourceReadOutput>(profiled_line_metadata)
+            .expect("profiled line metadata remains valid without a redundant reference hint");
 
         let mut mismatched_total = fixture;
         mismatched_total["data"]["total_source_bytes"] = json!(9);

@@ -9515,16 +9515,11 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
     let chunk = &output.data.chunks[0];
     assert_eq!(chunk.source_ref.span().start_byte(), 0);
     assert_eq!(chunk.source_ref.span().end_byte(), 15);
-    assert_eq!(
-        chunk
-            .source_ref
-            .line_hint()
-            .expect("line hint")
-            .start_line(),
-        1
-    );
+    assert_eq!(chunk.source_ref.line_hint(), None);
     assert_eq!(chunk.start_byte, 0);
     assert_eq!(chunk.end_byte, 15);
+    assert_eq!(chunk.start_line, None);
+    assert_eq!(chunk.end_line, None);
     assert_eq!(output.data.total_source_bytes, 15);
     assert_eq!(chunk.trust, TrustClassification::UntrustedRepositoryData);
     let ObservedCall::SourceRead(request) = harness.only_call() else {
@@ -9542,37 +9537,47 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
 }
 
 #[tokio::test]
-async fn source_read_evidence_profile_preserves_verified_source() {
-    let requested = source_reference(4, 12, 2, 2);
-    let harness = Harness::new(FakeOutcome::SourceRead(Ok(source_read_response(requested))));
-    let output: SourceReadOutput = decode(
-        execute(
-            &harness.executor,
-            VerticalTool::SourceRead,
-            json!({
-                "repository": {"repository_id": repository()},
-                "generation": generation(),
-                "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
-                "response_profile": "evidence"
-            }),
-        )
-        .await
-        .expect("evidence source read maps"),
-    );
+async fn source_read_profiles_preserve_verified_source_and_shape_line_metadata() {
+    for (profile, expected_lines, expected_hint) in [
+        ("compact", None, None),
+        ("standard", Some((2, 2)), None),
+        ("evidence", Some((2, 2)), Some((2, 2))),
+    ] {
+        let requested = source_reference(4, 12, 2, 2);
+        let harness = Harness::new(FakeOutcome::SourceRead(Ok(source_read_response(requested))));
+        let output: SourceReadOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::SourceRead,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "generation": generation(),
+                    "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
+                    "response_profile": profile
+                }),
+            )
+            .await
+            .expect("profiled source read maps"),
+        );
 
-    let ToolResponse::Success(output) = output else {
-        panic!("expected source read success");
-    };
-    assert_eq!(output.data.chunks.len(), 1);
-    assert_eq!(output.data.chunks[0].content, "xxxxxxxx");
-    assert_eq!(
-        output.data.chunks[0]
-            .source_ref
-            .line_hint()
-            .expect("evidence retains available line evidence")
-            .start_line(),
-        2
-    );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected source read success");
+        };
+        assert_eq!(output.data.chunks.len(), 1);
+        let chunk = &output.data.chunks[0];
+        assert_eq!(chunk.content, "xxxxxxxx");
+        assert_eq!(chunk.start_byte, 4);
+        assert_eq!(chunk.end_byte, 12);
+        assert_eq!(chunk.content_hash, content_hash());
+        assert_eq!(chunk.start_line.zip(chunk.end_line), expected_lines);
+        assert_eq!(
+            chunk
+                .source_ref
+                .line_hint()
+                .map(|hint| (hint.start_line(), hint.end_line())),
+            expected_hint
+        );
+    }
 }
 
 #[tokio::test]

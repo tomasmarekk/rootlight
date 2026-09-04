@@ -66,11 +66,11 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "755985c4b257053b003092c1d9478823ca173c7ae5e326c41150e2423a4b59c9"
+      "blake3": "61ccdb3940031c4caaa0459365c600de7179bec7676cd744c7b85a32bd9e2ec1"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "2f5683b482ff3d4f0da466b2dcc1f740474b723aa8244f9e8e5efecb27da9322"
+      "blake3": "f49ac7b49bbfb0443f6214a9b2643ff4abd1cb739c59b1505fd78f65cd7c12d1"
     },
     {
       "path": "proto/adapter_v1.proto",

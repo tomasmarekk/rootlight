@@ -352,22 +352,15 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
 
 fn source_symbol_selector_resolves_the_complete_definition(fixture: &mut RetrievalFixture) {
     let arguments = json!({
-        "references": [{"symbol_id": fixture.symbols[0].clone()}]
+        "references": [{"symbol_id": fixture.symbols[0].clone()}],
+        "response_profile": "evidence"
     });
     let standalone = fixture.standalone("source-symbol-selector", "source.read", arguments.clone());
-    let batch = fixture.mcp.call(
+    let batch = fixture.batch(
         "batch-source-symbol-selector",
-        "query.batch",
-        json!({
-            "repository": {"repository_id": fixture.repository_id},
-            "generation": "active",
-            "budget": {"max_tokens": 16_000},
-            "operations": [{
-                "id": "retrieval",
-                "tool": "source.read",
-                "arguments": arguments
-            }]
-        }),
+        "source.read",
+        arguments,
+        "evidence",
     );
     assert_standalone_batch_parity(&standalone, &batch, "source.read");
     let output = &standalone["result"]["structuredContent"];

@@ -201,7 +201,9 @@
         "mode": "selectable",
         "wire_field": "response_profile",
         "supported": [
-          "compact"
+          "compact",
+          "standard",
+          "evidence"
         ],
         "default": "compact"
       }

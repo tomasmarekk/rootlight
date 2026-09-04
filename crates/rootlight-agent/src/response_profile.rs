@@ -8,8 +8,6 @@ use crate::policy::{BudgetCharge, CancellationSignal, ExecutionContext, Executio
 use rootlight_ir::SourceRef;
 use rootlight_mcp_contract::{
     TrustClassification,
-    capability::{ResponseProfileSupport, capability_for},
-    catalog::McpTool,
     change::{
         ChangeImpactData, HistoryCompareData, PlanChangeData, TestCandidate, TestsSelectData,
     },
@@ -741,14 +739,6 @@ pub fn shape_batch_child_data(
             serde_json::to_value(typed).map_err(BatchProfileProjectionError::InvalidData)
         }};
     }
-    macro_rules! validate {
-        ($data_type:ty) => {{
-            let typed: $data_type = serde_json::from_value(canonical.clone())
-                .map_err(BatchProfileProjectionError::InvalidData)?;
-            serde_json::to_value(typed).map_err(BatchProfileProjectionError::InvalidData)
-        }};
-    }
-
     match tool {
         BatchTool::CodeLocate => project!(CodeLocateData),
         BatchTool::SymbolExplain => project!(SymbolExplainData),
@@ -761,20 +751,7 @@ pub fn shape_batch_child_data(
         BatchTool::CodeDead => project!(CodeDeadData),
         BatchTool::PlanChange => project!(PlanChangeData),
         BatchTool::ContextPack => project!(ContextPackData),
-        BatchTool::SourceRead => {
-            if supports_profile(McpTool::SourceRead, profile) {
-                validate!(SourceReadData)
-            } else {
-                Err(BatchProfileProjectionError::UnsupportedProfile)
-            }
-        }
-    }
-}
-
-fn supports_profile(tool: McpTool, profile: ResponseProfile) -> bool {
-    match capability_for(tool).response_profiles {
-        ResponseProfileSupport::Fixed { representation } => representation == profile,
-        ResponseProfileSupport::Selectable { supported, .. } => supported.contains(&profile),
+        BatchTool::SourceRead => project!(SourceReadData),
     }
 }
 
@@ -841,6 +818,18 @@ impl ProfileShape for SymbolExplainData {
             }
             shape_source_ref(&mut symbol.definition, profile);
             symbol.provenance.truncate(evidence_limit);
+        }
+    }
+}
+
+impl ProfileShape for SourceReadData {
+    fn shape_with_limits(&mut self, profile: ResponseProfile, _limits: ProfileLimits) {
+        for chunk in &mut self.chunks {
+            shape_source_ref(&mut chunk.source_ref, profile);
+            if matches!(profile, ResponseProfile::Compact) {
+                chunk.start_line = None;
+                chunk.end_line = None;
+            }
         }
     }
 }
@@ -1042,8 +1031,8 @@ mod tests {
         vertical::{
             CodeLocateData, DetailHandle, EntityKind as ContractEntityKind, LocateReason,
             LocatedItem, ProvenanceSummary, QueryInterpretation, RelationSummary, ResponseBudget,
-            SearchMode, SourceFreeMessage, SuggestedTool, SymbolExplainData, SymbolExplanation,
-            ToolSuggestion,
+            SearchMode, SourceChunk, SourceEncoding, SourceFreeMessage, SuggestedTool,
+            SymbolExplainData, SymbolExplanation, ToolSuggestion,
         },
     };
 
@@ -1166,6 +1155,7 @@ mod tests {
         assert_profile_shape::<HistoryCompareData>();
         assert_profile_shape::<PlanChangeData>();
         assert_profile_shape::<ContextPackData>();
+        assert_profile_shape::<SourceReadData>();
     }
 
     #[test]
@@ -1188,23 +1178,61 @@ mod tests {
             "canonical binding data must remain unchanged"
         );
 
-        let source_read = serde_json::json!({
-            "chunks": [],
-            "stale_references": [],
-            "elisions": [],
-            "total_source_bytes": 0
-        });
+        let source_read = serde_json::to_value(SourceReadData {
+            chunks: vec![SourceChunk {
+                source_ref: source_ref(1),
+                path: "src/lib.rs".to_owned(),
+                start_byte: 1,
+                end_byte: 9,
+                start_line: Some(2),
+                end_line: Some(3),
+                content: "abcdefgh".to_owned(),
+                encoding: SourceEncoding::Utf8,
+                content_hash: ContentHash::from_bytes([4; 32]),
+                language: "rust".to_owned(),
+                generated: false,
+                trust: TrustClassification::UntrustedRepositoryData,
+            }],
+            stale_references: Vec::new(),
+            elisions: Vec::new(),
+            total_source_bytes: 8,
+            explanation: None,
+        })
+        .expect("source-read data should serialize");
+        let mut projected = Vec::new();
         for profile in [
             ResponseProfile::Compact,
             ResponseProfile::Standard,
             ResponseProfile::Evidence,
         ] {
-            assert_eq!(
-                shape_batch_child_data(BatchTool::SourceRead, &source_read, profile)
-                    .expect("advertised source-read profile should validate"),
-                source_read
+            let value = shape_batch_child_data(BatchTool::SourceRead, &source_read, profile)
+                .expect("advertised source-read profile should project");
+            projected.push(
+                serde_json::from_value::<SourceReadData>(value)
+                    .expect("projected source-read data should remain typed"),
             );
         }
+        let compact = &projected[0].chunks[0];
+        let standard = &projected[1].chunks[0];
+        let evidence = &projected[2].chunks[0];
+        assert_eq!(compact.start_line, None);
+        assert_eq!(compact.end_line, None);
+        assert_eq!(compact.source_ref.line_hint(), None);
+        assert_eq!(standard.start_line, Some(2));
+        assert_eq!(standard.end_line, Some(3));
+        assert_eq!(standard.source_ref.line_hint(), None);
+        assert_eq!(evidence.start_line, Some(2));
+        assert_eq!(evidence.end_line, Some(3));
+        assert_eq!(evidence.source_ref.line_hint(), source_ref(1).line_hint());
+        for chunk in [compact, standard, evidence] {
+            assert_eq!(chunk.content, "abcdefgh");
+            assert_eq!(chunk.start_byte, 1);
+            assert_eq!(chunk.end_byte, 9);
+            assert_eq!(chunk.content_hash, ContentHash::from_bytes([4; 32]));
+            assert_source_semantics(&chunk.source_ref, &source_ref(1));
+        }
+        assert_eq!(source_read["chunks"][0]["start_line"], 2);
+        assert!(source_read["chunks"][0]["source_ref"]["line_hint"].is_object());
     }
 
     #[test]

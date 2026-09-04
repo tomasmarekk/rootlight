@@ -1541,7 +1541,8 @@ async fn source_read_resolves_an_advertised_symbol_selector_before_reading() {
         json!({
             "repository": {"repository_id": repository()},
             "generation": "active",
-            "references": [{"symbol_id": symbol()}]
+            "references": [{"symbol_id": symbol()}],
+            "response_profile": "evidence"
         }),
     )
     .await;

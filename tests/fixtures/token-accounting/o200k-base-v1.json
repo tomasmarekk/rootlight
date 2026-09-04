@@ -42,21 +42,21 @@
   "profiles": [
     {
       "profile": "scout",
-      "serialized_bytes": 227148,
-      "sha256": "2106f0e81efc87237178946c977afe8a480cb98a98b4feea8b6de93dee79d3e6",
-      "actual_tokens": 48906
+      "serialized_bytes": 227379,
+      "sha256": "39e9ec73f8cf7bd974edb53e5048f454a8c2826d823b92018e81d4475efbd266",
+      "actual_tokens": 48947
     },
     {
       "profile": "analysis",
-      "serialized_bytes": 495551,
-      "sha256": "e04e790d97dda756c9fb55aa7a45207065455c9b3f6e9651a973a94e3f41d8ce",
-      "actual_tokens": 106838
+      "serialized_bytes": 495782,
+      "sha256": "c6fa96f06441ddc09ea678080eedf4ba4aed0645fe9960a0cbd575e827e80d15",
+      "actual_tokens": 106879
     },
     {
       "profile": "developer",
-      "serialized_bytes": 696445,
-      "sha256": "d3fedbd3db3699788a7049fe01d9f0c3ced719cd4afa602419853c49e00476e7",
-      "actual_tokens": 150027
+      "serialized_bytes": 696753,
+      "sha256": "5442733433cf501d9e77150f2853bd766723cdf2369e6c7e37ca0e4b2eb9b26d",
+      "actual_tokens": 150084
     }
   ]
 }

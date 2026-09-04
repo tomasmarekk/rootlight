@@ -6638,7 +6638,7 @@
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "61c2dc41754b35809a808527e2fa15b8b93f9ea5755afacff558ea4eaa6aa8c4",
+            "inputShapeHash": "8fd4b5719532823bb5360388bbab0b025508350ea4b734e30e0db691a7d338ef",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -6819,6 +6819,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "route",
+                  "description": "Service route or endpoint.",
                   "type": "string"
                 },
                 {
@@ -7525,6 +7530,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "route",
+                  "description": "Service route or endpoint.",
                   "type": "string"
                 },
                 {
@@ -9592,6 +9602,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "route",
+                  "description": "Service route or endpoint.",
                   "type": "string"
                 },
                 {
@@ -34458,7 +34473,7 @@
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "2dbf557a4dbc11d056aadbc16b3200660ddf90e024a6f8e29103e9897dc3841a",
+            "inputShapeHash": "57627ac84b4102299f5cc78cc75866e2f6e0d73be836e8669bc29896cbaea6d2",
             "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
@@ -34627,6 +34642,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "route",
+                  "description": "Service route or endpoint.",
                   "type": "string"
                 },
                 {
