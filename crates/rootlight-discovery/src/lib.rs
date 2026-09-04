@@ -645,9 +645,7 @@ pub fn discover_manifest_streaming(
         config,
         policy,
         limits,
-        BTreeMap::new(),
-        MAX_RETAINED_SOURCE_BYTES,
-        false,
+        SnapshotRetentionOptions::manifest_only(),
         cancellation,
     )?;
     state.run()?;
@@ -709,9 +707,7 @@ pub fn discover_with_snapshots_at_limit(
         config,
         policy,
         limits,
-        cached_snapshots,
-        maximum_retained_source_bytes,
-        true,
+        SnapshotRetentionOptions::retained(cached_snapshots, maximum_retained_source_bytes),
         cancellation,
     )?;
     state.run()?;
@@ -736,21 +732,46 @@ struct DiscoveryState<'a> {
     retain_snapshots: bool,
 }
 
+struct SnapshotRetentionOptions {
+    cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
+    maximum_bytes: u64,
+    retain_snapshots: bool,
+}
+
+impl SnapshotRetentionOptions {
+    fn manifest_only() -> Self {
+        Self {
+            cached_snapshots: BTreeMap::new(),
+            maximum_bytes: MAX_RETAINED_SOURCE_BYTES,
+            retain_snapshots: false,
+        }
+    }
+
+    fn retained(cached_snapshots: BTreeMap<FileId, SourceSnapshot>, maximum_bytes: u64) -> Self {
+        Self {
+            cached_snapshots,
+            maximum_bytes,
+            retain_snapshots: true,
+        }
+    }
+}
+
 impl<'a> DiscoveryState<'a> {
     fn new(
         root: &'a RepositoryRoot,
         config: &'a ConfigSnapshot,
         policy: &'a DiscoveryPolicy,
         limits: DiscoveryLimits,
-        cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
-        maximum_retained_source_bytes: u64,
-        retain_snapshots: bool,
+        snapshot_options: SnapshotRetentionOptions,
         cancellation: &'a Cancellation,
     ) -> Result<Self, DiscoveryError> {
-        let snapshot_budget = RetainedSnapshotBudget::preflight(
-            maximum_retained_source_bytes,
-            cached_snapshots.values(),
-        )?;
+        let SnapshotRetentionOptions {
+            cached_snapshots,
+            maximum_bytes,
+            retain_snapshots,
+        } = snapshot_options;
+        let snapshot_budget =
+            RetainedSnapshotBudget::preflight(maximum_bytes, cached_snapshots.values())?;
         let mut queue = VecDeque::new();
         queue.push_back((None, 0));
         Ok(Self {
