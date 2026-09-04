@@ -18,7 +18,7 @@ pub use dependency::{
 };
 pub use equivalence::{
     EquivalenceMismatch, EquivalenceReport, EquivalenceSnapshot, LOGICAL_SNAPSHOT_SCHEMA_VERSION,
-    LogicalComponent, LogicalDomain,
+    LogicalComponent, LogicalDomain, LogicalSequenceBuilder,
 };
 pub use error::{IncrementalError, ResourceKind};
 pub use model::{

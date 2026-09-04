@@ -17,9 +17,9 @@ use rootlight_incremental::{
     DependencySource, EquivalenceSnapshot, FactDomain, FactDomainSet, FactNode, FallbackReason,
     FileChangeKind, FileDescriptor, FileMetadata, GenerationSummary, GraphLimits,
     HashDecisionReason, IncrementalError, InputFingerprint, InputKey, InputKind, InputSnapshot,
-    LogicalComponent, LogicalDomain, MetadataBaseline, PassDeclaration, PassId, PassObservation,
-    PlanningLimits, PlatformFileIdentity, ReconcileLimits, ReconcileMode, ResourceKind,
-    ScannedFile, TraceAction, plan_invalidation, plan_reconcile,
+    LogicalComponent, LogicalDomain, LogicalSequenceBuilder, MetadataBaseline, PassDeclaration,
+    PassId, PassObservation, PlanningLimits, PlatformFileIdentity, ReconcileLimits, ReconcileMode,
+    ResourceKind, ScannedFile, TraceAction, plan_invalidation, plan_reconcile,
 };
 
 fn cancellation() -> Cancellation {
@@ -939,6 +939,34 @@ fn clean_equivalence_is_exact_and_reports_domain_mismatch() {
     assert_ne!(
         incremental.logical_snapshot_hash(),
         divergent.logical_snapshot_hash()
+    );
+}
+
+#[test]
+fn streamed_logical_sequence_matches_batch_serialization_exactly() {
+    let cancellation = cancellation();
+    let values = [
+        serde_json::json!({"id": 1, "value": "first"}),
+        serde_json::json!({"id": 2, "value": "second"}),
+    ];
+    let batch = LogicalComponent::from_canonical_value(
+        LogicalDomain::QueryOutputs,
+        &values,
+        2,
+        1024,
+        &cancellation,
+    )
+    .expect("batch sequence hashes");
+    let mut streamed =
+        LogicalSequenceBuilder::new(LogicalDomain::QueryOutputs, 1024, &cancellation)
+            .expect("streaming sequence starts");
+    for value in &values {
+        streamed.push(value).expect("streaming item hashes");
+    }
+
+    assert_eq!(
+        streamed.finish().expect("streaming sequence finishes"),
+        batch
     );
 }
 

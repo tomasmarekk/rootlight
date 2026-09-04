@@ -4,6 +4,7 @@
 //! details removed; this module hashes them cooperatively under a byte ceiling.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::ContentHash;
@@ -195,6 +196,86 @@ impl LogicalComponent {
     #[must_use]
     pub const fn records(self) -> u64 {
         self.records
+    }
+}
+
+/// Incrementally hashes one canonical JSON sequence without retaining its items.
+///
+/// Pushing the same values in the same order produces the exact component
+/// digest as [`LogicalComponent::from_canonical_value`] over their slice.
+pub struct LogicalSequenceBuilder<'cancellation> {
+    writer: SingleLogicalHashWriter<'cancellation>,
+    records: u64,
+}
+
+impl<'cancellation> LogicalSequenceBuilder<'cancellation> {
+    /// Starts an empty canonical sequence under the streamed logical byte cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IncrementalError`] for an invalid byte limit, cancellation, or
+    /// an unavailable output boundary.
+    pub fn new(
+        domain: LogicalDomain,
+        max_bytes: usize,
+        cancellation: &'cancellation Cancellation,
+    ) -> Result<Self, IncrementalError> {
+        validate_streamed_limit(max_bytes)?;
+        cancellation.check()?;
+        let mut builder = Self {
+            writer: SingleLogicalHashWriter::new(domain, max_bytes, cancellation),
+            records: 0,
+        };
+        builder.write_delimiter(b"[")?;
+        Ok(builder)
+    }
+
+    /// Appends one canonical sequence item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IncrementalError`] when serialization, cancellation, record
+    /// accounting, or the logical byte cap prevents a complete item.
+    pub fn push(&mut self, value: &impl Serialize) -> Result<(), IncrementalError> {
+        self.writer.cancellation.check()?;
+        if self.records != 0 {
+            self.write_delimiter(b",")?;
+        }
+        if let Err(error) = serde_json::to_writer(&mut self.writer, value) {
+            return Err(self
+                .writer
+                .failure
+                .take()
+                .unwrap_or(IncrementalError::SerializeTrace(error)));
+        }
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or(IncrementalError::ResourceLimit {
+                resource: ResourceKind::LogicalBytes,
+                observed: usize::MAX,
+                limit: self.writer.max_bytes,
+            })?;
+        Ok(())
+    }
+
+    /// Closes the canonical sequence and returns its exact component digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IncrementalError`] for cancellation or a byte-limit failure.
+    pub fn finish(mut self) -> Result<LogicalComponent, IncrementalError> {
+        self.write_delimiter(b"]")?;
+        self.writer.finish(self.records)
+    }
+
+    fn write_delimiter(&mut self, delimiter: &[u8]) -> Result<(), IncrementalError> {
+        if let Err(error) = self.writer.write_all(delimiter) {
+            return Err(self.writer.failure.take().unwrap_or_else(|| {
+                IncrementalError::SerializeTrace(serde_json::Error::io(error))
+            }));
+        }
+        Ok(())
     }
 }
 
