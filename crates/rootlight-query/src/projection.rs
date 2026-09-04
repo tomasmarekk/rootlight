@@ -210,6 +210,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             self.generation,
             source,
             self.text_bytes,
+            SOURCE_FALLBACK_TEXT_BYTES,
             self.budget,
             cancellation,
         )?;
@@ -256,15 +257,48 @@ pub fn project_source_fallback_document(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<LexicalDocument, QueryError> {
+    project_source_fallback_document_with_text_limit(
+        generation,
+        source,
+        SOURCE_FALLBACK_TEXT_BYTES,
+        budget,
+        cancellation,
+    )
+}
+
+/// Projects one exact source with an optionally tighter text-prefix ceiling.
+///
+/// Values above [`SOURCE_FALLBACK_TEXT_BYTES`] are clamped to the existing
+/// hard fallback bound. A zero ceiling still produces exact file and path
+/// fields without retaining source text.
+///
+/// # Errors
+///
+/// Returns the same errors as [`project_source_fallback_document`].
+pub fn project_source_fallback_document_with_text_limit(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    maximum_source_text_bytes: usize,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<LexicalDocument, QueryError> {
     validate_build_admission(budget)?;
-    project_source_document(generation, source, 0, budget, cancellation)
-        .map(|(document, _)| document)
+    project_source_document(
+        generation,
+        source,
+        0,
+        maximum_source_text_bytes.min(SOURCE_FALLBACK_TEXT_BYTES),
+        budget,
+        cancellation,
+    )
+    .map(|(document, _)| document)
 }
 
 fn project_source_document(
     generation: &GenerationSnapshot,
     source: &SourceSnapshot,
     current_text_bytes: usize,
+    maximum_source_text_bytes: usize,
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<(LexicalDocument, usize), QueryError> {
@@ -281,7 +315,7 @@ fn project_source_document(
     {
         return Err(QueryError::IndexDrift);
     }
-    let source_prefix = bounded_utf8_prefix(source.content(), SOURCE_FALLBACK_TEXT_BYTES);
+    let source_prefix = bounded_utf8_prefix(source.content(), maximum_source_text_bytes);
     let (source_identifiers, source_text) = source_prefix
         .as_deref()
         .map(bounded_source_projection)
@@ -522,7 +556,16 @@ fn try_clone(value: &str) -> Result<String, QueryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_source_projection, source_fallback_eligible};
+    use super::{bounded_source_projection, bounded_utf8_prefix, source_fallback_eligible};
+
+    #[test]
+    fn fallback_prefix_respects_tighter_utf8_boundaries() {
+        let source = "abé".as_bytes();
+
+        assert_eq!(bounded_utf8_prefix(source, 0).as_deref(), Some(""));
+        assert_eq!(bounded_utf8_prefix(source, 3).as_deref(), Some("ab"));
+        assert_eq!(bounded_utf8_prefix(source, 4).as_deref(), Some("abé"));
+    }
 
     #[test]
     fn typescript_declaration_file_suffixes_are_unambiguous() {

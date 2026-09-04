@@ -50,7 +50,9 @@ const MAX_SOURCE_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PATTERN_WILDCARDS: usize = 4;
 const MIN_PATTERN_LITERALS: usize = 2;
 const HARD_MAX_DOCUMENTS: usize = 1_000_000;
-const HARD_MAX_TEXT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// Aggregate validated text ceiling for one incremental in-memory index.
+pub const EPHEMERAL_MAX_TEXT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const HARD_MAX_TEXT_BYTES: usize = EPHEMERAL_MAX_TEXT_BYTES;
 const HARD_MAX_WRITER_HEAP_BYTES: usize = 256 * 1024 * 1024;
 const HARD_MAX_QUERY_BYTES: usize = 4_096;
 const HARD_MAX_QUERY_CANDIDATES: usize = 100_000;
