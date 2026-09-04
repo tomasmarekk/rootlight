@@ -4,6 +4,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
+    fmt,
     io::{BufReader, BufWriter, Read as _, Write as _},
     path::{Path, PathBuf},
     str::FromStr as _,
@@ -19,7 +20,9 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
-use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId};
+use rootlight_ids::{
+    ContentHash, FactId, FileId, FileIdentity, GenerationId, RepositoryId, derive_file,
+};
 use rootlight_incremental::{
     BaselineFile, FileDescriptor, FileMetadata, InputFingerprint, InputKey, InputSnapshot,
     MetadataBaseline, MetadataReliability, PlanningLimits, PlatformFileIdentity, ReconcileLimits,
@@ -36,7 +39,7 @@ use rootlight_storage::{
     SourceFileCatalog, SourceFileCatalogEntry,
 };
 use rootlight_vfs::{
-    MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
+    MAX_PATH_BYTES, MAX_PATH_COMPONENTS, MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
     platform::{PlatformError, PrivateDirectory, PublishError, PublishedPrivateDirectory},
 };
 use serde::{Deserialize, Serialize};
@@ -45,9 +48,10 @@ use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
     LexicalProjectionBuilder, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PreparedIncrementalState,
-    RustSourceInput, SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE, check_cancellation, map_catalog_error,
-    map_identity_error, map_incremental_error, map_query_error, map_search_error, map_vfs_error,
-    repository_path_hash, source_fallback_text_limit,
+    RustSourceInput, SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE, check_cancellation,
+    fallible_copy_string, map_catalog_error, map_identity_error, map_incremental_error,
+    map_query_error, map_search_error, map_vfs_error, repository_path_hash,
+    source_fallback_text_limit,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -81,7 +85,8 @@ const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
 const INCREMENTAL_STATE_VERSION: u16 = 1;
-const SOURCE_FILE_CATALOG_VERSION: u16 = 1;
+const LEGACY_SOURCE_FILE_CATALOG_VERSION: u16 = 1;
+const SOURCE_FILE_CATALOG_VERSION: u16 = 2;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
 const LOGICAL_SNAPSHOT_VERSION: u16 = 2;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
@@ -596,16 +601,11 @@ impl Serialize for DurableSourceFileEntries<'_> {
         let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
         for entry in self.0 {
             let file = entry.file();
-            let locator = file
-                .path_locator
-                .as_ref()
-                .ok_or_else(|| serde::ser::Error::custom("source file locator is missing"))?;
             sequence.serialize_element(&DurableSourceFileEntryRef {
-                claim: entry.claim(),
-                locator_encoding: locator.encoding().as_str(),
-                locator_components: locator.components(),
+                path_identity: LowerHexBytes(entry.path_identity()),
+                content_hash: file.content_hash,
+                byte_length: file.byte_length,
                 language: &file.language,
-                encoding: &file.encoding,
                 generated: file.generated,
                 provenance: file.provenance,
             })?;
@@ -617,11 +617,84 @@ impl Serialize for DurableSourceFileEntries<'_> {
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableSourceFileEntryRef<'entry> {
-    claim: &'entry FileIdentityClaim,
-    locator_encoding: &'entry str,
-    locator_components: &'entry [String],
+    path_identity: LowerHexBytes<'entry>,
+    content_hash: ContentHash,
+    byte_length: u64,
     language: &'entry str,
-    encoding: &'entry str,
+    generated: bool,
+    provenance: FactId,
+}
+
+struct LowerHexBytes<'bytes>(&'bytes [u8]);
+
+impl fmt::Display for LowerHexBytes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for LowerHexBytes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+fn decode_path_identity(encoded: &str) -> Result<Vec<u8>, FirstSliceError> {
+    let maximum_bytes = MAX_PATH_BYTES
+        .checked_add(MAX_PATH_COMPONENTS.saturating_mul(5))
+        .ok_or(FirstSliceError::Limits)?;
+    let maximum_hex_bytes = maximum_bytes
+        .checked_mul(2)
+        .ok_or(FirstSliceError::Limits)?;
+    if encoded.is_empty() || !encoded.len().is_multiple_of(2) || encoded.len() > maximum_hex_bytes {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(encoded.len() / 2)
+        .map_err(|_| FirstSliceError::Limits)?;
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = decode_lower_hex_nibble(pair[0]).ok_or(FirstSliceError::CatalogCorrupt)?;
+        let low = decode_lower_hex_nibble(pair[1]).ok_or(FirstSliceError::CatalogCorrupt)?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+const fn decode_lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct DurableSourceFileCatalogHeader {
+    version: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDurableSourceFileCatalog {
+    version: u16,
+    entries: Vec<LegacyDurableSourceFileEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDurableSourceFileEntry {
+    claim: FileIdentityClaim,
+    locator_encoding: String,
+    locator_components: Vec<String>,
+    language: String,
+    encoding: String,
     generated: bool,
     provenance: FactId,
 }
@@ -636,22 +709,21 @@ struct DurableSourceFileCatalog {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableSourceFileEntry {
-    claim: FileIdentityClaim,
-    locator_encoding: String,
-    locator_components: Vec<String>,
+    path_identity: String,
+    content_hash: ContentHash,
+    byte_length: u64,
     language: String,
-    encoding: String,
     generated: bool,
     provenance: FactId,
 }
 
-impl DurableSourceFileCatalog {
+impl LegacyDurableSourceFileCatalog {
     fn into_catalog(
         self,
         repository: RepositoryId,
         generation: GenerationId,
     ) -> Result<SourceFileCatalog, FirstSliceError> {
-        if self.version != SOURCE_FILE_CATALOG_VERSION
+        if self.version != LEGACY_SOURCE_FILE_CATALOG_VERSION
             || self.entries.len() > MAX_SOURCE_BLOB_ENTRIES
         {
             return Err(FirstSliceError::CatalogCorrupt);
@@ -696,6 +768,73 @@ impl DurableSourceFileCatalog {
             };
             entries.push(
                 SourceFileCatalogEntry::new(file, durable.claim)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?,
+            );
+        }
+        SourceFileCatalog::new(entries).map_err(|_| FirstSliceError::CatalogCorrupt)
+    }
+}
+
+impl DurableSourceFileCatalog {
+    fn into_catalog(
+        self,
+        repository: RepositoryId,
+        generation: GenerationId,
+    ) -> Result<SourceFileCatalog, FirstSliceError> {
+        if self.version != SOURCE_FILE_CATALOG_VERSION
+            || self.entries.len() > MAX_SOURCE_BLOB_ENTRIES
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        for durable in self.entries {
+            let path_identity = decode_path_identity(&durable.path_identity)?;
+            let relative = RelativePath::from_identity_bytes(&path_identity)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let file = derive_file(FileIdentity {
+                repository,
+                path_identity: &path_identity,
+            })
+            .id();
+            let path = fallible_copy_string(relative.as_str())?;
+            let claim = FileIdentityClaim {
+                file,
+                repository,
+                path: path.clone(),
+                path_identity,
+                content_hash: durable.content_hash,
+                byte_length: durable.byte_length,
+            };
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, durable.byte_length)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?,
+                durable.content_hash,
+                None,
+            );
+            let record = FileRecord {
+                id: file,
+                repository,
+                generation,
+                path,
+                path_locator: Some(relative.to_locator()),
+                content_hash: durable.content_hash,
+                byte_length: durable.byte_length,
+                language: durable.language,
+                encoding: "utf-8".to_owned(),
+                generated: durable.generated,
+                provenance: durable.provenance,
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            entries.push(
+                SourceFileCatalogEntry::new(record, claim)
                     .map_err(|_| FirstSliceError::CatalogCorrupt)?,
             );
         }
@@ -5554,10 +5693,22 @@ fn restore_source_file_catalog(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let durable: DurableSourceFileCatalog =
-        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     check_cancellation(cancellation)?;
-    durable.into_catalog(repository, generation)
+    let header: DurableSourceFileCatalogHeader =
+        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    match header.version {
+        LEGACY_SOURCE_FILE_CATALOG_VERSION => {
+            let durable: LegacyDurableSourceFileCatalog =
+                serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            durable.into_catalog(repository, generation)
+        }
+        SOURCE_FILE_CATALOG_VERSION => {
+            let durable: DurableSourceFileCatalog =
+                serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            durable.into_catalog(repository, generation)
+        }
+        _ => Err(FirstSliceError::CatalogCorrupt),
+    }
 }
 
 fn reconcile_restored_serialized_document_bytes(
@@ -6315,7 +6466,8 @@ mod tests {
         generation: GenerationId,
     ) -> SourceFileCatalog {
         let path = "src/file.txt";
-        let path_identity = path.as_bytes().to_vec();
+        let relative = RelativePath::parse(Path::new(path)).expect("fixture path is canonical");
+        let path_identity = relative.identity_bytes().to_vec();
         let file = derive_file(FileIdentity {
             repository,
             path_identity: &path_identity,
@@ -6337,13 +6489,7 @@ mod tests {
             repository,
             generation,
             path: path.to_owned(),
-            path_locator: Some(
-                FilePathLocator::new(
-                    FilePathLocatorEncoding::UnixBytesV1,
-                    vec!["737263".to_owned(), "66696c652e747874".to_owned()],
-                )
-                .expect("fixture locator is valid"),
-            ),
+            path_locator: Some(relative.to_locator()),
             content_hash,
             byte_length,
             language: "text".to_owned(),
@@ -6391,10 +6537,81 @@ mod tests {
             .expect("source-file descriptor remains available")
             .expect("source-file descriptor is present");
         assert_eq!(written, descriptor.bytes);
+        let current_bytes = fs::read(prepared.path().join(SOURCE_FILE_CATALOG_FILENAME))
+            .expect("source-file catalog remains readable");
+        let current_json: serde_json::Value =
+            serde_json::from_slice(&current_bytes).expect("source-file catalog is JSON");
+        assert_eq!(
+            current_json
+                .get("version")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::from(SOURCE_FILE_CATALOG_VERSION))
+        );
+        let current_entry = &current_json["entries"][0];
+        assert!(current_entry.get("path_identity").is_some());
+        assert!(current_entry.get("claim").is_none());
+        assert!(current_entry.get("locator_components").is_none());
+        let encoded_identity = current_entry["path_identity"]
+            .as_str()
+            .expect("path identity is encoded as text");
+        let decoded_identity =
+            decode_path_identity(encoded_identity).expect("path identity decodes");
+        assert_eq!(decoded_identity, catalog.entries()[0].path_identity());
+        assert_eq!(
+            RelativePath::from_identity_bytes(&decoded_identity)
+                .expect("path identity reconstructs")
+                .as_str(),
+            catalog.entries()[0].file().path
+        );
+        let decoded: DurableSourceFileCatalog =
+            serde_json::from_slice(&current_bytes).expect("current catalog decodes");
+        assert_eq!(
+            decoded.into_catalog(repository, generation),
+            Ok(catalog.clone())
+        );
         assert_eq!(
             restore_source_file_catalog(
                 prepared.staging(),
                 Some(descriptor),
+                repository,
+                generation,
+                &cancellation,
+            ),
+            Ok(catalog.clone())
+        );
+
+        let entry = &catalog.entries()[0];
+        let file = entry.file();
+        let locator = file
+            .path_locator
+            .as_ref()
+            .expect("fixture locator is present");
+        let legacy = LegacyDurableSourceFileCatalog {
+            version: LEGACY_SOURCE_FILE_CATALOG_VERSION,
+            entries: vec![LegacyDurableSourceFileEntry {
+                claim: entry.identity_claim(),
+                locator_encoding: locator.encoding().as_str().to_owned(),
+                locator_components: locator.components().to_vec(),
+                language: file.language.clone(),
+                encoding: file.encoding.clone(),
+                generated: file.generated,
+                provenance: file.provenance,
+            }],
+        };
+        let legacy_bytes = serde_json::to_vec(&legacy).expect("legacy catalog serializes");
+        fs::write(
+            prepared.path().join(SOURCE_FILE_CATALOG_FILENAME),
+            &legacy_bytes,
+        )
+        .expect("legacy catalog writes");
+        let legacy_descriptor = DurableSidecarDescriptor {
+            bytes: u64::try_from(legacy_bytes.len()).expect("legacy catalog length is bounded"),
+            digest: content_hash_bytes(&legacy_bytes),
+        };
+        assert_eq!(
+            restore_source_file_catalog(
+                prepared.staging(),
+                Some(legacy_descriptor),
                 repository,
                 generation,
                 &cancellation,

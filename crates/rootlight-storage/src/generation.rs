@@ -49,7 +49,7 @@ pub const HARD_MAX_GENERATION_ROWS: u64 = 50_000_000;
 pub const HARD_MAX_GENERATION_SOURCE_REFS: u64 = 20_000_000;
 /// Hard ceiling for owned dynamic text crossing one generation operation.
 pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = 256 * 1024 * 1024;
-/// Hard ceiling for encoded UTF-8 persisted by one generation backend.
+/// Hard ceiling for lossless locator and backend-encoded UTF-8 bytes.
 pub const HARD_MAX_GENERATION_ENCODED_TEXT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const DEFAULT_MAX_GENERATION_ROWS: u64 = HARD_MAX_GENERATION_ROWS;
@@ -514,6 +514,7 @@ fn require_generation_budget<'snapshot>(
     rows = checked_add_resource(rows, logical_rows, GenerationResource::Rows, context)?;
     rows = checked_add_resource(rows, logical_rows, GenerationResource::Rows, context)?;
     let mut text_bytes = 0_u64;
+    let mut encoded_text_bytes = 0_u64;
     let mut sources = BTreeSet::new();
 
     for file in &document.files {
@@ -536,20 +537,19 @@ fn require_generation_budget<'snapshot>(
         observe_text(&file.path, &mut text_bytes, context)?;
         if let Some(locator) = &file.path_locator {
             for component in locator.components() {
-                observe_text(component, &mut text_bytes, context)?;
+                observe_encoded_text(component, &mut encoded_text_bytes, context)?;
             }
         }
         observe_text(&file.language, &mut text_bytes, context)?;
         observe_text(&file.encoding, &mut text_bytes, context)?;
-        observe_text(&entry.claim().path, &mut text_bytes, context)?;
-        text_bytes = checked_add_resource(
-            text_bytes,
+        encoded_text_bytes = checked_add_resource(
+            encoded_text_bytes,
             usize_to_budget_u64(
-                entry.claim().path_identity.len(),
-                GenerationResource::TextBytes,
+                entry.path_identity().len(),
+                GenerationResource::EncodedTextBytes,
                 context,
             )?,
-            GenerationResource::TextBytes,
+            GenerationResource::EncodedTextBytes,
             context,
         )?;
         context.check()?;
@@ -650,6 +650,7 @@ fn require_generation_budget<'snapshot>(
         usize_to_budget_u64(sources.len(), GenerationResource::SourceReferences, context)?,
     )?;
     context.require(GenerationResource::TextBytes, text_bytes)?;
+    context.require(GenerationResource::EncodedTextBytes, encoded_text_bytes)?;
     context.check()
 }
 
@@ -720,6 +721,21 @@ fn observe_text(
         *text_bytes,
         usize_to_budget_u64(value.len(), GenerationResource::TextBytes, context)?,
         GenerationResource::TextBytes,
+        context,
+    )?;
+    context.check()
+}
+
+fn observe_encoded_text(
+    value: &str,
+    encoded_text_bytes: &mut u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), GenerationControlError> {
+    context.check()?;
+    *encoded_text_bytes = checked_add_resource(
+        *encoded_text_bytes,
+        usize_to_budget_u64(value.len(), GenerationResource::EncodedTextBytes, context)?,
+        GenerationResource::EncodedTextBytes,
         context,
     )?;
     context.check()
@@ -1440,7 +1456,7 @@ fn verify_snapshot_identities(
                     IdentityMismatchComponent::FileClaim,
                 ))?;
         if file_claims
-            .insert(file.id, (entry.claim().clone(), source))
+            .insert(file.id, (entry.identity_claim(), source))
             .is_some()
         {
             return Err(IdentityVerificationError::DuplicateClaim);
@@ -1832,7 +1848,7 @@ pub enum GenerationResource {
     SourceReferences,
     /// Dynamic UTF-8 bytes owned by records.
     TextBytes,
-    /// Encoded UTF-8 bytes owned by a persisted backend representation.
+    /// Lossless locator and backend-encoded UTF-8 bytes.
     EncodedTextBytes,
 }
 
@@ -2490,6 +2506,69 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn file_only_locator_bytes_use_the_encoded_text_budget() {
+        let repository = RepositoryId::from_bytes([6; 16]);
+        let generation = GenerationId::from_bytes([8; 20]);
+        let path = "a".repeat(4_096);
+        let path_identity = path.as_bytes().to_vec();
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: &path_identity,
+        })
+        .id();
+        let source_hash = content_hash(b"source");
+        let claim = FileIdentityClaim {
+            file,
+            repository,
+            path: path.clone(),
+            path_identity,
+            content_hash: source_hash,
+            byte_length: 6,
+        };
+        let record = FileRecord {
+            id: file,
+            repository,
+            generation,
+            path,
+            path_locator: Some(
+                FilePathLocator::new(
+                    FilePathLocatorEncoding::UnixBytesV1,
+                    vec!["61".repeat(8_192)],
+                )
+                .expect("encoded locator remains within its hard bound"),
+            ),
+            content_hash: source_hash,
+            byte_length: 6,
+            language: "text".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: FactId::from_bytes([9; 20]),
+            evidence: FactEvidence {
+                source: Some(SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, 0, 6).expect("fixture span is valid"),
+                    source_hash,
+                    None,
+                )),
+                derivation: Vec::new(),
+            },
+        };
+        let catalog = SourceFileCatalog::new(vec![
+            crate::SourceFileCatalogEntry::new(record, claim)
+                .expect("file-only catalog entry is valid"),
+        ])
+        .expect("file-only catalog is valid");
+        let document = NormalizedIrDocument::empty(repository, generation);
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(64, 64, 8_192).expect("fixture budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+
+        require_generation_budget(GENERATION_CONTRACT_VERSION, &document, &catalog, &context)
+            .expect("lossless locator encoding does not consume semantic text capacity");
     }
 
     #[test]

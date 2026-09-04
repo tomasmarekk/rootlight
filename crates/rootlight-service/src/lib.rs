@@ -8034,7 +8034,7 @@ impl FirstSliceService {
             .iter()
             .try_fold(0_u64, |total, entry| {
                 let mut serialized = SerializedSizeCounter::default();
-                serde_json::to_writer(&mut serialized, &(entry.file(), entry.claim()))
+                serde_json::to_writer(&mut serialized, &(entry.file(), entry.path_identity()))
                     .map_err(|_| FirstSliceError::Limits)?;
                 total
                     .checked_add(serialized.bytes)
@@ -15119,9 +15119,9 @@ fn source_file_fallback_resident_memory_bytes(
             .entries()
             .iter()
             .try_fold(0_u64, |total, entry| {
-                let claim = entry.claim();
-                let path = u64::try_from(claim.path.len()).map_err(|_| FirstSliceError::Limits)?;
-                let identity = u64::try_from(claim.path_identity.len())
+                let path =
+                    u64::try_from(entry.file().path.len()).map_err(|_| FirstSliceError::Limits)?;
+                let identity = u64::try_from(entry.path_identity().len())
                     .map_err(|_| FirstSliceError::Limits)?;
                 total
                     .checked_add(path)

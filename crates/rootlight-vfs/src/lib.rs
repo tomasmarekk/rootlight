@@ -122,6 +122,61 @@ impl RelativePath {
         })
     }
 
+    /// Reconstructs a validated relative path from its canonical identity bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidRelativePath`] when the encoding is truncated,
+    /// non-canonical, uses an unknown component tag, or exceeds path bounds.
+    pub fn from_identity_bytes(encoded: &[u8]) -> Result<Self, VfsError> {
+        let maximum_encoded_bytes = MAX_PATH_BYTES
+            .checked_add(MAX_PATH_COMPONENTS.saturating_mul(5))
+            .ok_or(VfsError::InvalidRelativePath)?;
+        if encoded.is_empty() || encoded.len() > maximum_encoded_bytes {
+            return Err(VfsError::InvalidRelativePath);
+        }
+
+        let mut components = Vec::new();
+        let mut offset = 0usize;
+        while offset < encoded.len() {
+            if components.len() >= MAX_PATH_COMPONENTS || encoded.len() - offset < 4 {
+                return Err(VfsError::InvalidRelativePath);
+            }
+            let length = u32::from_be_bytes(
+                encoded[offset..offset + 4]
+                    .try_into()
+                    .map_err(|_| VfsError::InvalidRelativePath)?,
+            );
+            offset += 4;
+            let length = usize::try_from(length).map_err(|_| VfsError::InvalidRelativePath)?;
+            let end = offset
+                .checked_add(length)
+                .filter(|end| *end <= encoded.len())
+                .ok_or(VfsError::InvalidRelativePath)?;
+            let (tag, payload) = encoded[offset..end]
+                .split_first()
+                .ok_or(VfsError::InvalidRelativePath)?;
+            let component = match tag {
+                0 => OsString::from(
+                    std::str::from_utf8(payload).map_err(|_| VfsError::InvalidRelativePath)?,
+                ),
+                1 => platform_os_string(payload.to_vec())?,
+                _ => return Err(VfsError::InvalidRelativePath),
+            };
+            components
+                .try_reserve(1)
+                .map_err(|_| VfsError::MemoryUnavailable)?;
+            components.push(component);
+            offset = end;
+        }
+
+        let relative = Self::from_components(components)?;
+        if relative.identity != encoded {
+            return Err(VfsError::InvalidRelativePath);
+        }
+        Ok(relative)
+    }
+
     /// Reconstructs a validated relative path from a lossless IR locator.
     ///
     /// # Errors
@@ -141,20 +196,30 @@ impl RelativePath {
         components
             .try_reserve_exact(component_count)
             .map_err(|_| VfsError::MemoryUnavailable)?;
+        for encoded in locator.components() {
+            let raw = decode_lower_hex(encoded)?;
+            let component = platform_os_string(raw)?;
+            components.push(component);
+        }
+        Self::from_components(components)
+    }
+
+    fn from_components(components: Vec<OsString>) -> Result<Self, VfsError> {
+        if components.is_empty() || components.len() > MAX_PATH_COMPONENTS {
+            return Err(VfsError::InvalidRelativePath);
+        }
         let mut display_parts = Vec::new();
         display_parts
-            .try_reserve_exact(component_count)
+            .try_reserve_exact(components.len())
             .map_err(|_| VfsError::MemoryUnavailable)?;
         let mut identity = Vec::new();
         let mut path_bytes = 0usize;
-        for (index, encoded) in locator.components().iter().enumerate() {
-            let raw = decode_lower_hex(encoded)?;
-            let component = platform_os_string(raw)?;
-            if !is_single_normal_component(&component) {
+        for (index, component) in components.iter().enumerate() {
+            if !is_single_normal_component(component) {
                 return Err(VfsError::InvalidRelativePath);
             }
             let component_bytes =
-                platform_path_byte_len(&component).ok_or(VfsError::PathTooLong {
+                platform_path_byte_len(component).ok_or(VfsError::PathTooLong {
                     maximum: MAX_PATH_BYTES,
                 })?;
             if index > 0 {
@@ -174,12 +239,10 @@ impl RelativePath {
                     maximum: MAX_PATH_BYTES,
                 });
             }
-            let (display, identity_bytes) = canonical_component(&component);
+            let (display, identity_bytes) = canonical_component(component);
             append_identity_component(&mut identity, &identity_bytes)?;
             display_parts.push(display);
-            components.push(component);
         }
-
         Ok(Self {
             components,
             display: display_parts.join("/"),
@@ -2532,8 +2595,29 @@ mod tests {
             RelativePath::from_locator(&path.to_locator()).expect("locator reconstructs");
 
         assert_eq!(reconstructed, path);
+        assert_eq!(
+            RelativePath::from_identity_bytes(path.identity_bytes())
+                .expect("identity bytes reconstruct"),
+            path
+        );
         let (_, root) = fixture();
         assert_eq!(root.file_id(&reconstructed), root.file_id(&path));
+    }
+
+    #[test]
+    fn identity_bytes_reject_truncation_and_noncanonical_components() {
+        assert!(matches!(
+            RelativePath::from_identity_bytes(&[0, 0, 0]),
+            Err(VfsError::InvalidRelativePath)
+        ));
+        assert!(matches!(
+            RelativePath::from_identity_bytes(&[0, 0, 0, 1, 2]),
+            Err(VfsError::InvalidRelativePath)
+        ));
+        assert!(matches!(
+            RelativePath::from_identity_bytes(&[0, 0, 0, 2, 0, 0xff]),
+            Err(VfsError::InvalidRelativePath)
+        ));
     }
 
     #[cfg(unix)]

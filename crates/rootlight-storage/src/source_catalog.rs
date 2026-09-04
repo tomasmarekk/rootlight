@@ -5,11 +5,15 @@ use std::collections::BTreeSet;
 use rootlight_ids::{FileId, GenerationId, RepositoryId};
 use rootlight_ir::{FileIdentityClaim, FileRecord};
 
-/// One exact file record and the independent identity inputs that derive it.
+/// One exact file record and the lossless path identity that derives it.
+///
+/// The presentation path is owned only by the file record. Identity claims are
+/// reconstructed on demand so large file-only catalogs do not retain a second
+/// copy of every repository-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFileCatalogEntry {
     file: FileRecord,
-    claim: FileIdentityClaim,
+    path_identity: Vec<u8>,
 }
 
 impl SourceFileCatalogEntry {
@@ -52,7 +56,10 @@ impl SourceFileCatalogEntry {
         {
             return Err(SourceFileCatalogError::SourceEvidenceMismatch);
         }
-        Ok(Self { file, claim })
+        Ok(Self {
+            file,
+            path_identity: claim.path_identity,
+        })
     }
 
     /// Returns the canonical file-only record.
@@ -61,16 +68,37 @@ impl SourceFileCatalogEntry {
         &self.file
     }
 
-    /// Returns the independent file-identity inputs.
+    /// Returns the lossless platform path identity used to derive the file ID.
     #[must_use]
-    pub const fn claim(&self) -> &FileIdentityClaim {
-        &self.claim
+    pub fn path_identity(&self) -> &[u8] {
+        &self.path_identity
+    }
+
+    /// Reconstructs the independent file-identity inputs.
+    #[must_use]
+    pub fn identity_claim(&self) -> FileIdentityClaim {
+        FileIdentityClaim {
+            file: self.file.id,
+            repository: self.file.repository,
+            path: self.file.path.clone(),
+            path_identity: self.path_identity.clone(),
+            content_hash: self.file.content_hash,
+            byte_length: self.file.byte_length,
+        }
     }
 
     /// Consumes the entry into its record and identity claim.
     #[must_use]
     pub fn into_parts(self) -> (FileRecord, FileIdentityClaim) {
-        (self.file, self.claim)
+        let claim = FileIdentityClaim {
+            file: self.file.id,
+            repository: self.file.repository,
+            path: self.file.path.clone(),
+            path_identity: self.path_identity,
+            content_hash: self.file.content_hash,
+            byte_length: self.file.byte_length,
+        };
+        (self.file, claim)
     }
 }
 
@@ -137,11 +165,11 @@ impl SourceFileCatalog {
         repository: RepositoryId,
         generation: GenerationId,
     ) -> Result<(), SourceFileCatalogError> {
-        if self.entries.iter().any(|entry| {
-            entry.file.repository != repository
-                || entry.file.generation != generation
-                || entry.claim.repository != repository
-        }) {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.file.repository != repository || entry.file.generation != generation)
+        {
             return Err(SourceFileCatalogError::OwnershipMismatch);
         }
         Ok(())
@@ -265,6 +293,24 @@ mod tests {
             SourceFileCatalog::new(vec![duplicate_path, other_identity]),
             Err(SourceFileCatalogError::DuplicatePath)
         );
+    }
+
+    #[test]
+    fn entry_reconstructs_the_exact_identity_claim() {
+        let entry = entry("src/lib.txt", b"src/lib.txt");
+        let file = entry.file().clone();
+        let expected = FileIdentityClaim {
+            file: file.id,
+            repository: file.repository,
+            path: file.path.clone(),
+            path_identity: b"src/lib.txt".to_vec(),
+            content_hash: file.content_hash,
+            byte_length: file.byte_length,
+        };
+
+        assert_eq!(entry.path_identity(), expected.path_identity);
+        assert_eq!(entry.identity_claim(), expected);
+        assert_eq!(entry.into_parts(), (file, expected));
     }
 
     #[test]
