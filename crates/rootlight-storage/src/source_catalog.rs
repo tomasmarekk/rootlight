@@ -179,6 +179,9 @@ pub enum SourceFileCatalogError {
     /// A catalog record named no generation-owned provenance record.
     #[error("source file catalog provenance is unavailable")]
     MissingProvenance,
+    /// A caller attempted to replace an already attached catalog.
+    #[error("generation already carries a source file catalog")]
+    AlreadyAttached,
 }
 
 #[cfg(test)]

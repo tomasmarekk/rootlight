@@ -387,6 +387,27 @@ impl GenerationSnapshot {
             .saturating_add(self.source_files.len())
     }
 
+    /// Attaches a restored file-only catalog before identity verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenerationValidationError`] when the snapshot already carries
+    /// a catalog or restored records disagree with its ownership and provenance.
+    pub fn with_source_files(
+        mut self,
+        source_files: SourceFileCatalog,
+    ) -> Result<Self, GenerationValidationError> {
+        if !self.source_files.is_empty() {
+            return Err(GenerationValidationError::InvalidSourceCatalog(
+                SourceFileCatalogError::AlreadyAttached,
+            ));
+        }
+        validate_source_file_catalog(self.metadata, self.document(), &source_files)
+            .map_err(GenerationValidationError::InvalidSourceCatalog)?;
+        self.source_files = source_files;
+        Ok(self)
+    }
+
     /// Consumes the snapshot into its canonical normalized document.
     #[must_use]
     pub fn into_document(self) -> NormalizedIrDocument {
@@ -1032,6 +1053,31 @@ impl IdentityVerifiedGeneration {
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
     ) -> Result<Self, IdentityVerificationError> {
+        Self::restore_published_json_with_source_files(
+            metadata,
+            encoded,
+            expected_digest,
+            SourceFileCatalog::default(),
+            limits,
+            extensions,
+            context,
+        )
+    }
+
+    /// Restores normalized JSON and a separately checksummed file-only catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::restore_published_json`].
+    pub fn restore_published_json_with_source_files(
+        metadata: GenerationMetadata,
+        encoded: &[u8],
+        expected_digest: ContentHash,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
         verify_published_digest(encoded, expected_digest, context)?;
         let document =
             decode_normalized_ir_document_with_checkpoint(encoded, limits, extensions, || {
@@ -1044,7 +1090,14 @@ impl IdentityVerifiedGeneration {
                 ),
                 _ => IdentityVerificationError::InvalidGeneration,
             })?;
-        Self::restore_decoded_published(metadata, document, limits, extensions, context)
+        Self::restore_decoded_published(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+            context,
+        )
     }
 
     /// Restores a published snapshot from an exact-length MessagePack stream.
@@ -1061,6 +1114,37 @@ impl IdentityVerifiedGeneration {
         reader: R,
         encoded_bytes: usize,
         expected_digest: ContentHash,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        Self::restore_published_messagepack_reader_with_source_files(
+            metadata,
+            reader,
+            encoded_bytes,
+            expected_digest,
+            SourceFileCatalog::default(),
+            limits,
+            extensions,
+            context,
+        )
+    }
+
+    /// Restores MessagePack normalized IR and a checksummed file-only catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::restore_published_messagepack_reader`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the encoded stream and independently persisted catalog have separate integrity inputs"
+    )]
+    pub fn restore_published_messagepack_reader_with_source_files<R: Read>(
+        metadata: GenerationMetadata,
+        reader: R,
+        encoded_bytes: usize,
+        expected_digest: ContentHash,
+        source_files: SourceFileCatalog,
         limits: &IrLimits,
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
@@ -1086,12 +1170,20 @@ impl IdentityVerifiedGeneration {
         if digest.finish()? != expected_digest {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
-        Self::restore_decoded_published(metadata, document, limits, extensions, context)
+        Self::restore_decoded_published(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+            context,
+        )
     }
 
     fn restore_decoded_published(
         metadata: GenerationMetadata,
         document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
         limits: &IrLimits,
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
@@ -1102,8 +1194,14 @@ impl IdentityVerifiedGeneration {
         {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
-        let snapshot = GenerationSnapshot::new(metadata, document, limits, extensions)
-            .map_err(|_| IdentityVerificationError::InvalidGeneration)?;
+        let snapshot = GenerationSnapshot::new_with_source_files(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+        )
+        .map_err(|_| IdentityVerificationError::InvalidGeneration)?;
         Self::verify_snapshot(snapshot, context)
     }
 
