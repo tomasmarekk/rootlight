@@ -2380,6 +2380,8 @@ pub enum EntityKind {
     Variable,
     /// Configuration record.
     Configuration,
+    /// Service route or endpoint.
+    Route,
     /// A symbol whose definition is outside the indexed repository.
     ExternalSymbol,
 }

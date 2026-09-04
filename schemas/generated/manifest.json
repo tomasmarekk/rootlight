@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "f1df8d381a0af1c1ff5669270684cbf37f8fb09c43a271e865209a002c27438c"
+      "blake3": "a59281d2bce7d9c956c959a2d0e5d13e95504d00960551e06afa0911b648631a"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "63582740afffd412f2330b63c3df09f476409195b8178984b875288287f88890"
+      "blake3": "755985c4b257053b003092c1d9478823ca173c7ae5e326c41150e2423a4b59c9"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -344,11 +344,11 @@
     },
     {
       "path": "schemas/generated/json/mcp-code-locate-input-1.0.schema.json",
-      "blake3": "598addb8b8f0eb430dae4264933a7913a31027732247ec2dfd1ec853bdf3b0c2"
+      "blake3": "9a999083e545c71fe2dbb10df5902b1842b40ed65681143659f2fe83bcc26dc6"
     },
     {
       "path": "schemas/generated/json/mcp-code-locate-output-1.0.schema.json",
-      "blake3": "eea2789736aca76d1c61a33e2c9714a490b93dc450fe1a01de661c2523fb9ea9"
+      "blake3": "afea86f046092a9f6eec5b0da6c35531eb0e33b8378b2f10ceff22833f37da74"
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-input-1.0.schema.json",
@@ -468,7 +468,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-query-advanced-input-1.0.schema.json",
-      "blake3": "635290937d96d431b9ee3e7d87562e97a234426a8a869129a8d429f3685bee33"
+      "blake3": "e3a17695528661098b6ca50cedba850afe7a6f6721c7f691c3337ec397d87008"
     },
     {
       "path": "schemas/generated/json/mcp-query-advanced-output-1.0.schema.json",
@@ -580,7 +580,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.1.schema.json",
-      "blake3": "614ef34cee55e646e1e691c4384eef644cf1ef443e30ed49b93954a7fbac7345"
+      "blake3": "3eb4d52b8bb0b286e79378ff5b0528ad7c0e9fb11058bff3b5d659edd1983e88"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json",

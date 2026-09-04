@@ -205,6 +205,11 @@
           "const": "configuration"
         },
         {
+          "description": "Service route or endpoint.",
+          "type": "string",
+          "const": "route"
+        },
+        {
           "description": "A symbol whose definition is outside the indexed repository.",
           "type": "string",
           "const": "external_symbol"
