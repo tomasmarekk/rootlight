@@ -21111,17 +21111,21 @@ mod tests {
         assert_eq!(recovery_context.repository, receipt.repository);
         assert_eq!(recovery_context.parent_generation, Some(receipt.generation));
         let recovery_status = loop {
-            let recovery_status = execute(
+            let recovery_status = execute_retrying_busy(
                 &daemon,
-                FirstSliceIpcRequest::RepositoryOperationStatus(
-                    daemon::RepositoryOperationStatusRequest {
-                        schema_version: Some(schema_version()),
-                        operation: Some(operation_to_wire(recovery_context.operation)),
-                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                        wait_ms: None,
-                        after_revision: None,
-                    },
-                ),
+                || {
+                    FirstSliceIpcRequest::RepositoryOperationStatus(
+                        daemon::RepositoryOperationStatusRequest {
+                            schema_version: Some(schema_version()),
+                            operation: Some(operation_to_wire(recovery_context.operation)),
+                            action: daemon::RepositoryOperationAction::RepositoryOperationGet
+                                as i32,
+                            wait_ms: None,
+                            after_revision: None,
+                        },
+                    )
+                },
+                "retained-generation recovery status becomes readable",
             );
             let FirstSliceIpcResponse::RepositoryOperationStatus(recovery_status) = recovery_status
             else {
