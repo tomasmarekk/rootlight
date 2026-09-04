@@ -178,14 +178,14 @@ const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
-// The general file ceiling leaves two optional facts per file after the one
-// bounded syntax-recovery split. Python uses one quarter of that width so its
-// fixed fact budget retains nested ancestry for a second local relationship.
+// The general file ceiling leaves room for representative optional facts per
+// file. Python uses one quarter of that width so its fixed fact budget retains
+// nested ancestry for a second local relationship.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
 const PROJECT_ADAPTER_PARTITION_FILES: usize = 256;
 const PYTHON_PROJECT_ADAPTER_PARTITION_FILES: usize = PROJECT_ADAPTER_PARTITION_FILES / 4;
-// One split doubles local syntax-fact headroom; bounded documents remain
-// valid, so further isolated-process retries must not grow recursively.
+// One split doubles local syntax-fact headroom before a single exact file is
+// selected for representative relationship recovery.
 const PROJECT_ADAPTER_SYNTAX_RECOVERY_DEPTH: u8 = 1;
 // Supplemental split bridges spend existing source headroom on direct include
 // pairs without changing the per-request source ceiling.
@@ -223,7 +223,6 @@ enum ProjectBridgeScanScope {
 #[derive(Clone, Copy)]
 enum ProjectPartitionDependencyScope {
     All,
-    #[cfg(test)]
     CrossPartition,
 }
 type ProjectPartitionAppender<'a> = dyn FnMut(
@@ -685,13 +684,13 @@ impl InstalledProjectAnalyzer {
                         pending
                             .try_reserve(2)
                             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-                        // LIFO preserves deterministic left-before-right
-                        // execution; dependency groups retain canonical order
-                        // internally even when they are not contiguous.
+                        // LIFO preserves deterministic left-before-right execution;
+                        // dependency groups retain canonical order internally.
                         pending.push((right, next_syntax_recovery_depth));
                         pending.push((left, next_syntax_recovery_depth));
                         continue;
                     }
+                    let syntax_recovery = project_syntax_recovery_input(&document, &analyzed)?;
                     append(
                         document,
                         isolated,
@@ -699,6 +698,30 @@ impl InstalledProjectAnalyzer {
                         ProjectPartitionRole::Primary,
                         &[],
                     )?;
+                    if let Some(input) = syntax_recovery {
+                        cancellation.check().map_err(|cancelled| {
+                            FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+                        })?;
+                        match self.execute_partition(request, session, vec![input], cancellation) {
+                            Ok((document, isolated, supplemental_inputs)) => {
+                                append_supplemental_project_partition(
+                                    append,
+                                    document,
+                                    isolated,
+                                    &supplemental_inputs,
+                                    &[],
+                                )?;
+                            }
+                            Err(ProjectPartitionError::OutputLimit(_)) => {}
+                            Err(ProjectPartitionError::Analysis(
+                                error @ (FirstSliceProjectAnalysisError::Cancelled(_)
+                                | FirstSliceProjectAnalysisError::Identity
+                                | FirstSliceProjectAnalysisError::Protocol
+                                | FirstSliceProjectAnalysisError::Isolation),
+                            )) => return Err(error),
+                            Err(ProjectPartitionError::Analysis(_)) => {}
+                        }
+                    }
                 }
                 Err(ProjectPartitionError::OutputLimit(oversized)) => {
                     let Some((left, right)) =
@@ -834,6 +857,74 @@ fn project_partition_needs_syntax_split(
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
+}
+
+fn project_syntax_recovery_input(
+    document: &NormalizedIrDocument,
+    inputs: &[adapter::ProjectInput],
+) -> Result<Option<adapter::ProjectInput>, FirstSliceProjectAnalysisError> {
+    if inputs.len() <= 1 {
+        return Ok(None);
+    }
+    let mut limited_files = BTreeSet::new();
+    let mut unscoped = false;
+    for diagnostic in document
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
+    {
+        let source = diagnostic
+            .source
+            .as_ref()
+            .or(diagnostic.evidence.source.as_ref());
+        match source {
+            Some(source) => {
+                limited_files.insert(source.span().file());
+            }
+            None => unscoped = true,
+        }
+    }
+    if limited_files.is_empty() && !unscoped {
+        return Ok(None);
+    }
+    inputs
+        .iter()
+        .filter_map(|input| {
+            let file = adapter_project_input_file_id(input).ok()?;
+            (unscoped || limited_files.contains(&file)).then_some(input)
+        })
+        .max_by(|left, right| {
+            // Production sources carry the durable relationship graph. A large
+            // test can otherwise narrowly outrank its implementation sibling.
+            (!project_test_like_path(&left.path))
+                .cmp(&!project_test_like_path(&right.path))
+                .then_with(|| {
+                    project_relationship_syntax_demand(&left.source)
+                        .cmp(&project_relationship_syntax_demand(&right.source))
+                })
+                .then_with(|| left.source.len().cmp(&right.source.len()))
+                .then_with(|| right.path.cmp(&left.path))
+        })
+        .cloned()
+        .map(Some)
+        .ok_or(FirstSliceProjectAnalysisError::Analysis)
+}
+
+fn project_relationship_syntax_demand(source: &[u8]) -> usize {
+    source.iter().filter(|byte| **byte == b'(').count()
+}
+
+fn project_test_like_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    normalized
+        .split('/')
+        .any(|component| matches!(component, "test" | "tests" | "spec" | "specs" | "fixtures"))
+        || file_name.ends_with("_test.go")
+        || file_name.ends_with("_test.rs")
+        || file_name.ends_with("_test.py")
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.")
 }
 
 enum ProjectPartitionError {
@@ -1625,6 +1716,28 @@ impl ProjectIncludeBridgePlanner {
             self.remaining_imports = remaining_references;
             return Ok(());
         }
+        if request.language() == "rust" {
+            let mut remaining_scan_bytes = self.remaining_scan_bytes;
+            let mut remaining_imports = self.remaining_imports;
+            scan_partitioned_rust_crate_uses(
+                inputs,
+                partitions,
+                &mut remaining_scan_bytes,
+                &mut remaining_imports,
+                ProjectPartitionDependencyScope::CrossPartition,
+                cancellation,
+                |consumer, provider, demand| {
+                    if self.discovery_exhausted() {
+                        return Ok(false);
+                    }
+                    self.consider_request_exact_pair(request, consumer, provider, (false, demand))?;
+                    Ok(!self.discovery_exhausted())
+                },
+            )?;
+            self.remaining_scan_bytes = remaining_scan_bytes;
+            self.remaining_imports = remaining_imports;
+            return Ok(());
+        }
         if !matches!(request.language(), "c" | "cpp") {
             if !matches!(request.language(), "javascript" | "typescript") {
                 return Ok(());
@@ -1819,6 +1932,8 @@ impl ProjectIncludeBridgePlanner {
         } else {
             BTreeMap::new()
         };
+        let mut rust_providers = providers.iter().collect::<Vec<_>>();
+        rust_providers.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         for consumer in consumers {
             cancellation.check().map_err(|cancelled| {
                 FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
@@ -1940,6 +2055,44 @@ impl ProjectIncludeBridgePlanner {
                     )?;
                     self.remaining_imports = self.remaining_imports.saturating_sub(observed);
                 }
+                "rust" => {
+                    let file = adapter_project_input_file_id(consumer)?;
+                    if self.remaining_imports == 0 {
+                        return Ok(());
+                    }
+                    let prefix_limit = source
+                        .len()
+                        .min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES / 16);
+                    let prefix_limit = utf8_prefix_boundary(source, prefix_limit)
+                        .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                    if !self.claim_input_scan(file, prefix_limit) {
+                        return Ok(());
+                    }
+                    let prefix = source
+                        .get(..prefix_limit)
+                        .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                    let observed = for_each_rust_crate_use(
+                        prefix,
+                        self.remaining_imports,
+                        cancellation,
+                        |module, local, _| {
+                            let demand = identifier_occurrences(prefix, local).saturating_sub(1);
+                            if demand == 0 || self.discovery_exhausted() {
+                                return Ok(());
+                            }
+                            let Some(provider) = project_rust_crate_provider(
+                                &consumer.path,
+                                module,
+                                &rust_providers,
+                            )
+                            .filter(|provider| provider.path != consumer.path) else {
+                                return Ok(());
+                            };
+                            self.consider_exact_pair(consumer, provider, (false, demand))
+                        },
+                    )?;
+                    self.remaining_imports = self.remaining_imports.saturating_sub(observed);
+                }
                 _ => {}
             }
         }
@@ -2039,6 +2192,97 @@ impl ProjectIncludeBridgePlanner {
             ),
             None => self.consider_owned_pair(pair, consumer, provider, source_bytes, owned_bytes),
         }
+    }
+
+    fn consider_request_exact_pair(
+        &mut self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        consumer: &rootlight_service::FirstSliceProjectInput<'_>,
+        provider: &rootlight_service::FirstSliceProjectInput<'_>,
+        priority: (bool, usize),
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let pair = (consumer.file(), provider.file());
+        if !self.begin_pair_attempt(pair) || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        let source_bytes = consumer
+            .source()
+            .len()
+            .checked_add(provider.source().len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if source_bytes > self.max_exact_bytes {
+            return Ok(());
+        }
+        let Some(preview_bytes) =
+            project_request_include_pair_owned_bytes(request, consumer, provider)
+        else {
+            return Ok(());
+        };
+        if preview_bytes > self.candidate_byte_limit() {
+            return Ok(());
+        }
+        let consumer = project_input_to_wire(request, consumer)?;
+        let provider = project_input_to_wire(request, provider)?;
+        let Some(owned_bytes) = project_include_pair_owned_bytes(&consumer, &provider) else {
+            return Ok(());
+        };
+        let owned_bytes = owned_bytes.max(preview_bytes);
+        if !self.can_materialize_pair(&consumer, &provider, owned_bytes) {
+            return Ok(());
+        }
+        self.consider_ranked_pair(
+            pair,
+            project_include_bridge_candidate(
+                consumer,
+                provider,
+                source_bytes,
+                self.max_exact_bytes,
+                Vec::new(),
+                priority,
+                owned_bytes,
+            ),
+        )
+    }
+
+    fn consider_exact_pair(
+        &mut self,
+        consumer: &adapter::ProjectInput,
+        provider: &adapter::ProjectInput,
+        priority: (bool, usize),
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let pair = (
+            adapter_project_input_file_id(consumer)?,
+            adapter_project_input_file_id(provider)?,
+        );
+        if !self.begin_pair_attempt(pair) || PROJECT_ADAPTER_PARTITION_CONTEXT_FILES < 2 {
+            return Ok(());
+        }
+        let source_bytes = consumer
+            .source
+            .len()
+            .checked_add(provider.source.len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        if source_bytes > self.max_exact_bytes {
+            return Ok(());
+        }
+        let Some(owned_bytes) = project_include_pair_owned_bytes(consumer, provider) else {
+            return Ok(());
+        };
+        if !self.can_materialize_pair(consumer, provider, owned_bytes) {
+            return Ok(());
+        }
+        self.consider_ranked_pair(
+            pair,
+            project_include_bridge_candidate(
+                consumer.clone(),
+                provider.clone(),
+                source_bytes,
+                self.max_exact_bytes,
+                Vec::new(),
+                priority,
+                owned_bytes,
+            ),
+        )
     }
 
     fn consider_owned_pair(
@@ -2948,6 +3192,285 @@ fn java_positive_test_context(source: &str) -> bool {
                     .is_some_and(|character| character == '(' || character.is_whitespace())
         })
     })
+}
+
+fn scan_partitioned_rust_crate_uses<'a, T: ProjectIncludeSource>(
+    inputs: &[&'a T],
+    partitions: &BTreeMap<&str, usize>,
+    remaining_scan_bytes: &mut usize,
+    remaining_references: &mut usize,
+    scope: ProjectPartitionDependencyScope,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&'a T, &'a T, usize) -> Result<bool, FirstSliceProjectAnalysisError>,
+) -> Result<(), FirstSliceProjectAnalysisError> {
+    if inputs
+        .windows(2)
+        .any(|pair| pair[0].include_path() >= pair[1].include_path())
+        || inputs
+            .iter()
+            .any(|input| !partitions.contains_key(input.include_path()))
+    {
+        return Err(FirstSliceProjectAnalysisError::Analysis);
+    }
+    for consumer in inputs.iter().take(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK) {
+        cancellation
+            .check()
+            .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
+        if *remaining_references == 0 || *remaining_scan_bytes == 0 {
+            return Ok(());
+        }
+        let Ok(source) = std::str::from_utf8(consumer.include_source()) else {
+            continue;
+        };
+        // Rust imports conventionally precede declarations. Charging only the
+        // existing exact-prefix envelope lets large workspaces expose direct
+        // crate dependencies without an unbounded whole-source scan.
+        let prefix_limit = consumer
+            .include_source()
+            .len()
+            .min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES / 16)
+            .min(*remaining_scan_bytes);
+        let prefix_limit = utf8_prefix_boundary(source, prefix_limit)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        *remaining_scan_bytes = remaining_scan_bytes.saturating_sub(prefix_limit);
+        let prefix = source
+            .get(..prefix_limit)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let consumer_partition = partitions
+            .get(consumer.include_path())
+            .copied()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let mut continue_scanning = true;
+        let observed = for_each_rust_crate_use(
+            prefix,
+            *remaining_references,
+            cancellation,
+            |module, local, demand| {
+                if !continue_scanning {
+                    return Ok(());
+                }
+                let demand = demand.max(identifier_occurrences(prefix, local).saturating_sub(1));
+                if demand == 0 {
+                    return Ok(());
+                }
+                let Some(provider) =
+                    project_rust_crate_provider(consumer.include_path(), module, inputs)
+                else {
+                    return Ok(());
+                };
+                let provider_partition = partitions
+                    .get(provider.include_path())
+                    .copied()
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                if matches!(scope, ProjectPartitionDependencyScope::All)
+                    || consumer_partition != provider_partition
+                {
+                    continue_scanning = visit(consumer, provider, demand)?;
+                }
+                Ok(())
+            },
+        )?;
+        *remaining_references = remaining_references.saturating_sub(observed);
+        if !continue_scanning {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn for_each_rust_crate_use(
+    source: &str,
+    maximum: usize,
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&str, &str, usize) -> Result<(), FirstSliceProjectAnalysisError>,
+) -> Result<usize, FirstSliceProjectAnalysisError> {
+    let maximum = maximum.min(PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES);
+    let mut observed = 0_usize;
+    for (line_index, line) in source.lines().enumerate() {
+        if line_index.is_multiple_of(128) {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+        }
+        if observed >= maximum {
+            break;
+        }
+        let line = line.trim_start();
+        let line = line.strip_prefix("pub ").unwrap_or(line);
+        let Some(tree) = line
+            .strip_prefix("use crate::")
+            .and_then(|tree| tree.strip_suffix(';'))
+        else {
+            continue;
+        };
+        let mut bindings = Vec::new();
+        parse_rust_bridge_use_tree("", tree, &mut bindings);
+        for (module, local) in bindings {
+            if observed >= maximum {
+                break;
+            }
+            observed = observed.saturating_add(1);
+            visit(&module, &local, 0)?;
+        }
+    }
+    Ok(observed)
+}
+
+fn parse_rust_bridge_use_tree(prefix: &str, tree: &str, bindings: &mut Vec<(String, String)>) {
+    let tree = tree.trim();
+    if let Some((group_prefix, items)) = rust_bridge_use_group(tree) {
+        let prefix = join_rust_bridge_path(prefix, group_prefix);
+        for item in split_rust_bridge_group(items) {
+            parse_rust_bridge_use_tree(&prefix, item, bindings);
+        }
+        return;
+    }
+    let (path, alias) = tree
+        .split_once(" as ")
+        .map_or((tree, None), |(path, alias)| {
+            (path.trim(), Some(alias.trim()))
+        });
+    let full_path = join_rust_bridge_path(prefix, path);
+    let mut components = full_path
+        .split("::")
+        .filter(|component| rust_bridge_identifier(component))
+        .collect::<Vec<_>>();
+    let Some(imported) = components.pop() else {
+        return;
+    };
+    if imported == "self" {
+        let Some(local) = alias.or_else(|| components.last().copied()) else {
+            return;
+        };
+        if !components.is_empty() && rust_bridge_identifier(local) {
+            bindings.push((components.join("/"), local.to_owned()));
+        }
+        return;
+    }
+    let local = alias.unwrap_or(imported);
+    if local == "_" || !rust_bridge_identifier(local) {
+        return;
+    }
+    let module = if components.is_empty() {
+        imported.to_owned()
+    } else {
+        components.join("/")
+    };
+    if !module.is_empty() {
+        bindings.push((module, local.to_owned()));
+    }
+}
+
+fn rust_bridge_use_group(tree: &str) -> Option<(&str, &str)> {
+    let tree = tree.strip_suffix('}')?;
+    tree.strip_prefix('{')
+        .map(|items| ("", items))
+        .or_else(|| tree.split_once("::{"))
+}
+
+fn split_rust_bridge_group(value: &str) -> Vec<&str> {
+    let mut depth = 0_u32;
+    let mut start = 0_usize;
+    let mut parts = Vec::new();
+    for (offset, character) in value.char_indices() {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if let Some(part) = value.get(start..offset).map(str::trim)
+                    && !part.is_empty()
+                {
+                    parts.push(part);
+                }
+                start = offset.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    if let Some(part) = value.get(start..).map(str::trim)
+        && !part.is_empty()
+    {
+        parts.push(part);
+    }
+    parts
+}
+
+fn join_rust_bridge_path(prefix: &str, suffix: &str) -> String {
+    if prefix.is_empty() {
+        suffix.trim().to_owned()
+    } else if suffix.trim().is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}::{}", suffix.trim())
+    }
+}
+
+fn rust_bridge_identifier(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| *byte == b'_' || byte.is_ascii_alphabetic())
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn project_rust_crate_provider<'a, T: ProjectIncludeSource>(
+    consumer_path: &str,
+    module: &str,
+    inputs: &[&'a T],
+) -> Option<&'a T> {
+    let source_root = rust_crate_source_root(consumer_path, inputs)?;
+    let module = module.trim_matches('/');
+    if module.is_empty() {
+        return None;
+    }
+    let stem = if source_root.is_empty() {
+        module.to_owned()
+    } else {
+        format!("{source_root}/{module}")
+    };
+    let mut provider = None;
+    for path in [format!("{stem}.rs"), format!("{stem}/mod.rs")] {
+        let Some(candidate) = exact_project_include(inputs, &path) else {
+            continue;
+        };
+        if provider.is_some() {
+            return None;
+        }
+        provider = Some(candidate);
+    }
+    provider
+}
+
+fn rust_crate_source_root<T: ProjectIncludeSource>(
+    consumer_path: &str,
+    inputs: &[&T],
+) -> Option<String> {
+    let mut directory = consumer_path.rsplit_once('/').map_or("", |(path, _)| path);
+    loop {
+        let root_file = |name: &str| {
+            if directory.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{directory}/{name}")
+            }
+        };
+        if exact_project_include(inputs, &root_file("lib.rs")).is_some()
+            || exact_project_include(inputs, &root_file("main.rs")).is_some()
+        {
+            return Some(directory.to_owned());
+        }
+        let Some((parent, _)) = directory.rsplit_once('/') else {
+            if directory.is_empty() {
+                return None;
+            }
+            directory = "";
+            continue;
+        };
+        directory = parent;
+    }
 }
 
 fn scan_partitioned_includes<'a, T: ProjectIncludeSource>(
@@ -17284,6 +17807,96 @@ mod tests {
     }
 
     #[test]
+    fn rust_crate_use_bridge_resolves_within_the_nearest_source_root() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "rust".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let inputs = [
+            input(
+                1,
+                "apps/actions/run.rs",
+                b"use crate::engine::Engine;\npub fn run() { Engine::open(); }\n",
+            ),
+            input(
+                2,
+                "apps/engine.rs",
+                b"pub struct Engine; impl Engine { pub fn open() -> Self { Self } }\n",
+            ),
+            input(3, "apps/lib.rs", b"pub mod actions; pub mod engine;\n"),
+            input(4, "libs/runtime/engine.rs", b"pub struct Engine;\n"),
+        ];
+        let ordered = inputs.iter().collect::<Vec<_>>();
+        let partitions = BTreeMap::from([
+            ("apps/actions/run.rs", 1),
+            ("apps/engine.rs", 0),
+            ("apps/lib.rs", 0),
+            ("libs/runtime/engine.rs", 1),
+        ]);
+        let mut scan_bytes = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .expect("scan budget fits usize");
+        let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+        let mut pairs = Vec::new();
+
+        scan_partitioned_rust_crate_uses(
+            &ordered,
+            &partitions,
+            &mut scan_bytes,
+            &mut remaining_imports,
+            ProjectPartitionDependencyScope::CrossPartition,
+            &Cancellation::new(),
+            |consumer, provider, demand| {
+                pairs.push((consumer.path.as_str(), provider.path.as_str(), demand));
+                Ok(true)
+            },
+        )
+        .expect("Rust crate-use discovery succeeds");
+
+        assert_eq!(
+            pairs,
+            [("apps/actions/run.rs", "apps/engine.rs", 1)],
+            "crate-root resolution must not bind a same-name module from another crate"
+        );
+    }
+
+    #[test]
+    fn rust_crate_use_parser_preserves_grouped_modules_and_aliases() {
+        let mut bindings = Vec::new();
+        let observed = for_each_rust_crate_use(
+            "pub use crate::{alpha::{First, second::Third as LocalThird}, beta::self};\n",
+            8,
+            &Cancellation::new(),
+            |module, local, _| {
+                bindings.push((module.to_owned(), local.to_owned()));
+                Ok(())
+            },
+        )
+        .expect("grouped Rust use parsing succeeds");
+
+        assert_eq!(observed, 3);
+        assert_eq!(
+            bindings,
+            [
+                ("alpha".to_owned(), "First".to_owned()),
+                ("alpha/second".to_owned(), "LocalThird".to_owned()),
+                ("beta".to_owned(), "beta".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn bounded_syntax_partition_emits_direct_ecmascript_bridge() {
         fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
             adapter::ProjectInput {
@@ -17925,9 +18538,23 @@ mod tests {
     }
 
     #[test]
-    fn syntax_fact_recovery_stops_at_the_bounded_depth() {
+    fn syntax_fact_recovery_splits_once_then_selects_a_scoped_file() {
         let repository = RepositoryId::from_bytes([31; 16]);
         let generation = GenerationId::from_bytes([32; 20]);
+        let input = |file_byte: u8, path: &str| adapter::ProjectInput {
+            file: Some(common::FileId {
+                value: vec![file_byte; 20],
+            }),
+            path: path.to_owned(),
+            language: "php".to_owned(),
+            source_digest: Some(common::ContentHash {
+                value: vec![file_byte; 32],
+            }),
+            source: b"<?php\n".to_vec(),
+            generated: false,
+            origins: Vec::new(),
+        };
+        let inputs = vec![input(1, "src/first.php"), input(2, "src/second.php")];
         let mut document = NormalizedIrDocument::empty(repository, generation);
         document.diagnostics.push(DiagnosticRecord {
             id: FactId::from_bytes([33; 20]),
@@ -17936,7 +18563,13 @@ mod tests {
             code: PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC.to_owned(),
             message: "bounded syntax fixture".to_owned(),
             severity: DiagnosticSeverity::Warning,
-            source: None,
+            source: Some(SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(FileId::from_bytes([2; 20]), 0, 6).expect("fixture span is valid"),
+                ContentHash::from_bytes([2; 32]),
+                None,
+            )),
             coverage_effect: CoverageStatus::Bounded,
             provenance: FactId::from_bytes([34; 20]),
             evidence: FactEvidence {
@@ -17947,9 +18580,35 @@ mod tests {
 
         assert!(project_partition_needs_syntax_split(&document, 2, 0));
         assert!(!project_partition_needs_syntax_split(&document, 2, 1));
-        assert!(!project_partition_needs_syntax_split(&document, 1, 0));
+        let limited = project_syntax_recovery_input(&document, &inputs)
+            .expect("scoped recovery selection succeeds");
+        assert_eq!(
+            limited.as_ref().map(|input| input.path.as_str()),
+            Some("src/second.php")
+        );
+        document.diagnostics[0].source = None;
+        document.diagnostics[0].evidence.source = None;
+        let mut implementation = input(3, "web/endpoints.go");
+        implementation.source = b"func route() { handler() }\n".to_vec();
+        let mut test = input(4, "web/endpoints_test.go");
+        test.source = b"func test() { handler(); handler(); handler() }\n".to_vec();
+        let limited = project_syntax_recovery_input(&document, &[implementation, test])
+            .expect("unscoped recovery selection succeeds");
+        assert_eq!(
+            limited.as_ref().map(|input| input.path.as_str()),
+            Some("web/endpoints.go")
+        );
+        assert!(
+            project_syntax_recovery_input(&document, &inputs[1..])
+                .expect("single input does not retry")
+                .is_none()
+        );
         document.diagnostics.clear();
-        assert!(!project_partition_needs_syntax_split(&document, 2, 0));
+        assert!(
+            project_syntax_recovery_input(&document, &inputs)
+                .expect("complete partitions do not retry")
+                .is_none()
+        );
     }
 
     #[test]

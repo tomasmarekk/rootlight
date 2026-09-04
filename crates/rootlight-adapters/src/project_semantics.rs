@@ -325,9 +325,14 @@ fn bound_project_syntax_facts(
     let mut selection_order = (0..parsed.len()).collect::<Vec<_>>();
     selection_order.sort_unstable_by(|left, right| {
         priorities[*right]
-            .local
-            .is_test
-            .cmp(&priorities[*left].local.is_test)
+            .domain_demand
+            .cmp(&priorities[*left].domain_demand)
+            .then_with(|| {
+                priorities[*right]
+                    .local
+                    .is_test
+                    .cmp(&priorities[*left].local.is_test)
+            })
             .then_with(|| {
                 priorities[*right]
                     .imported_demand
@@ -427,6 +432,14 @@ fn retain_project_syntax_facts(
 
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    for group in
+        preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
+    {
+        if remaining == 0 {
+            break;
+        }
+        select_syntax_fact_ids(group, &mut selected, &mut remaining);
+    }
     if let Some(call) = preferred_local_call_syntax_fact_group(
         language,
         facts,
@@ -537,7 +550,14 @@ fn preferred_relationship_allowance(
     let mandatory = mandatory_project_syntax_fact_ids(facts);
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
-    let mut preferred = preferred_local_call_syntax_fact_group(
+    let mut preferred = mandatory.clone();
+    let mut remaining = MAX_OPTIONAL_PROJECT_SYNTAX_FACTS;
+    for group in
+        preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
+    {
+        select_syntax_fact_ids(group, &mut preferred, &mut remaining);
+    }
+    if let Some(call) = preferred_local_call_syntax_fact_group(
         language,
         facts,
         source,
@@ -546,13 +566,14 @@ fn preferred_relationship_allowance(
         &declared_calls,
     )
     .and_then(|group| facts_by_id.get(&group.call_id).copied())
-    .map_or_else(BTreeSet::new, |call| {
+    {
         let terminal = call_names
             .get(&call.local_id())
             .and_then(|name| facts_by_id.get(name))
             .copied();
-        syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id)
-    });
+        let group = syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id);
+        select_syntax_fact_ids(group, &mut preferred, &mut remaining);
+    }
     let groups = imported_call_syntax_fact_groups(
         language,
         facts,
@@ -562,24 +583,109 @@ fn preferred_relationship_allowance(
         &declared_calls,
     );
     for group in groups {
-        let mut candidate = preferred.clone();
-        candidate.extend(imported_call_syntax_fact_group_ids(
-            &group,
-            &facts_by_id,
-            &call_names,
-        ));
-        let optional = candidate
-            .iter()
-            .filter(|local_id| !mandatory.contains(local_id))
-            .count();
-        if optional <= MAX_OPTIONAL_PROJECT_SYNTAX_FACTS {
-            preferred = candidate;
-        }
+        let required = imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names);
+        select_syntax_fact_ids(required, &mut preferred, &mut remaining);
     }
     preferred
         .iter()
         .filter(|local_id| !mandatory.contains(local_id))
         .count()
+}
+
+fn preferred_domain_syntax_fact_groups(
+    language: SemanticProjectLanguage,
+    facts: &[SyntaxFact],
+    source: &[u8],
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    call_names: &BTreeMap<u64, u64>,
+) -> Vec<BTreeSet<u64>> {
+    if language != SemanticProjectLanguage::Go {
+        return Vec::new();
+    }
+
+    let gin_imports = facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Import)
+        .filter_map(|fact| {
+            let imports = parse_import(language, source_text(source, fact.span())?);
+            imports
+                .iter()
+                .any(|(module, _)| module == "github.com/gin-gonic/gin")
+                .then_some(fact)
+        })
+        .collect::<Vec<_>>();
+    if gin_imports.is_empty() {
+        return Vec::new();
+    }
+    let gin_aliases = gin_imports
+        .iter()
+        .filter_map(|fact| source_text(source, fact.span()))
+        .flat_map(|text| parse_import(language, text))
+        .filter(|(module, _)| module == "github.com/gin-gonic/gin")
+        .flat_map(|(_, bindings)| bindings)
+        .filter_map(|binding| match binding {
+            ImportBinding::Namespace { local } => Some(local),
+            ImportBinding::Named { .. } | ImportBinding::Wildcard | ImportBinding::SideEffect => {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    if gin_aliases.is_empty() {
+        return Vec::new();
+    }
+
+    let initializers = facts
+        .iter()
+        .filter(|fact| is_call_fact(fact))
+        .filter(|call| {
+            let Some(name) = retained_call_name(source, call, call_names, facts_by_id) else {
+                return false;
+            };
+            matches!(name, "Default" | "New")
+                && source_text(source, call.span())
+                    .and_then(|text| call_receiver(text, name))
+                    .is_some_and(|receiver| gin_aliases.contains(receiver))
+        })
+        .collect::<Vec<_>>();
+    if initializers.is_empty() {
+        return Vec::new();
+    }
+
+    let prelude = gin_imports
+        .iter()
+        .copied()
+        .chain(initializers.iter().copied())
+        .flat_map(|fact| {
+            let terminal = is_call_fact(fact)
+                .then(|| call_names.get(&fact.local_id()))
+                .flatten()
+                .and_then(|name| facts_by_id.get(name))
+                .copied();
+            std::iter::once(fact).chain(terminal)
+        });
+    let mut groups = vec![syntax_fact_group_ids(prelude, facts_by_id)];
+    groups.extend(
+        facts
+            .iter()
+            .filter(|fact| is_call_fact(fact))
+            .filter_map(|call| {
+                let name = retained_call_name(source, call, call_names, facts_by_id)?;
+                gin_http_verb(name)?;
+                let text = source_text(source, call.span())?;
+                call_arguments(text)?
+                    .first()
+                    .and_then(|argument| literal_route_path(argument))?;
+                let terminal = call_names
+                    .get(&call.local_id())
+                    .and_then(|name| facts_by_id.get(name))
+                    .copied();
+                Some(syntax_fact_group_ids(
+                    std::iter::once(call).chain(terminal),
+                    facts_by_id,
+                ))
+            }),
+    );
+    groups
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -592,6 +698,7 @@ struct PreferredLocalCallGroup {
 #[derive(Debug, Clone, Copy, Default)]
 struct ProjectInputRelationshipPriority {
     local: PreferredLocalCallGroup,
+    domain_demand: usize,
     imported_demand: usize,
 }
 
@@ -606,6 +713,9 @@ fn project_input_relationship_priority(
         .collect::<BTreeMap<_, _>>();
     let call_names = terminal_call_names(facts);
     let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    let domain_demand =
+        preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
+            .len();
     let local = preferred_local_call_syntax_fact_group(
         language,
         facts,
@@ -629,6 +739,7 @@ fn project_input_relationship_priority(
     .unwrap_or_default();
     ProjectInputRelationshipPriority {
         local,
+        domain_demand,
         imported_demand,
     }
 }
@@ -2260,29 +2371,28 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         else {
             return self.push_go_route_diagnostic(occurrence);
         };
-        let handler_symbols = arguments
+        // Gin executes a variadic handler chain in order, so the final locally
+        // resolvable callable is the endpoint behind any wrapper or middleware.
+        let handler = arguments
             .iter()
             .skip(1)
             .flat_map(|argument| tokenize_identifiers(argument))
-            .filter_map(|name| definitions.get(&name))
-            .flatten()
-            .filter(|entity| {
-                matches!(entity.kind, EntityKind::Function | EntityKind::Method)
-                    && self
-                        .package_by_file
-                        .get(&entity.file)
-                        .zip(self.package_by_file.get(&occurrence.file))
-                        .is_some_and(|(candidate, current)| candidate == current)
+            .filter_map(|name| {
+                let mut candidates = definitions.get(&name)?.iter().filter(|entity| {
+                    matches!(entity.kind, EntityKind::Function | EntityKind::Method)
+                        && self
+                            .package_by_file
+                            .get(&entity.file)
+                            .zip(self.package_by_file.get(&occurrence.file))
+                            .is_some_and(|(candidate, current)| candidate == current)
+                });
+                let candidate = candidates.next()?;
+                candidates.next().is_none().then_some(candidate.symbol)
             })
-            .map(|entity| entity.symbol)
-            .collect::<BTreeSet<_>>();
-        if handler_symbols.len() != 1 {
+            .next_back();
+        let Some(handler) = handler else {
             return self.push_go_route_diagnostic(occurrence);
-        }
-        let handler = handler_symbols
-            .first()
-            .copied()
-            .ok_or_else(|| provider_failure("go-gin-handler"))?;
+        };
         let route_name = format!("{verb} {path}");
         let module = self
             .module_by_file

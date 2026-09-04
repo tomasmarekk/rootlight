@@ -1586,6 +1586,71 @@ fn go_gin_literal_route_requires_reviewed_import_receiver_path_and_handler() {
 }
 
 #[test]
+fn bounded_go_syntax_retains_reviewed_literal_route_relationship() {
+    let mut tests = String::from("package routes\nfunc TestNoise() {\n");
+    for index in 0..400 {
+        tests.push_str(&format!("  testNoise{index}()\n"));
+    }
+    tests.push_str("}\n");
+    let mut routes = String::from(concat!(
+        "package routes\n",
+        "import (\n",
+        "  \"net/http\"\n",
+        "  \"github.com/gin-gonic/gin\"\n",
+        ")\n",
+        "func PublishReport() {}\n",
+        "func Wrap(path string, handler func()) func() { return handler }\n",
+        "func Register() {\n",
+    ));
+    for index in 0..400 {
+        routes.push_str(&format!("  unresolved{index}()\n"));
+    }
+    routes.push_str(concat!(
+        "  router := gin.Default()\n",
+        "  router.POST(\"/reports/publish\", Wrap(\"/reports/publish\", PublishReport))\n",
+        "  _ = http.StatusOK\n",
+        "}\n",
+    ));
+    let fixture = ProjectFixture::new_owned(
+        vec![
+            "web/endpoints.go".to_owned(),
+            "web/endpoints_test.go".to_owned(),
+        ],
+        vec![routes, tests],
+        SemanticProjectLanguage::Go,
+    );
+    let limits = real_parser_limits_with_project_files(2);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let handler = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "PublishReport")
+        .expect("bounded Gin handler is materialized");
+    let route = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Route && entity.display_name == "POST /reports/publish"
+        })
+        .expect("bounded literal Gin route is synthesized");
+
+    assert!(
+        output
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Entity(handler.id)
+            && relation.predicate == RelationPredicate::ServesRoute
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(route.id)
+    }));
+}
+
+#[test]
 fn reviewed_csharp_php_and_c_calls_resolve_only_through_static_rules() {
     for (language, paths, sources, caller_name) in [
         (
