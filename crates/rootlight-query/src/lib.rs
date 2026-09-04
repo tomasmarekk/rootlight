@@ -43,7 +43,7 @@ pub use model::{
 };
 pub use projection::{
     LexicalProjectionBuilder, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents,
-    project_lexical_documents_with_sources,
+    project_lexical_documents_with_sources, project_source_fallback_document,
 };
 pub use service::QueryService;
 pub use store::{GenerationLease, GenerationSet};

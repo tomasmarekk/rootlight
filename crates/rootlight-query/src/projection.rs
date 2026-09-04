@@ -206,72 +206,13 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
         if source.file() != expected {
             return Err(QueryError::IndexDrift);
         }
-        let document = self.generation.document();
-        let file = self
-            .generation
-            .find_file(expected)
-            .ok_or(QueryError::IndexDrift)?;
-        if source.content_hash() != file.content_hash
-            || source.path().as_str() != file.path
-            || u64::try_from(source.content().len()).ok() != Some(file.byte_length)
-        {
-            return Err(QueryError::IndexDrift);
-        }
-        let source_prefix = bounded_utf8_prefix(source.content(), SOURCE_FALLBACK_TEXT_BYTES);
-        let (source_identifiers, source_text) = source_prefix
-            .as_deref()
-            .map(bounded_source_projection)
-            .map(|(identifiers, text)| {
-                let text = (!text.is_empty()).then_some(text);
-                (identifiers, text)
-            })
-            .unwrap_or_default();
-        let identifier = file
-            .path
-            .rsplit('/')
-            .next()
-            .filter(|name| !name.is_empty() && name.len() <= 512)
-            .unwrap_or("file");
-        let tier = serialized_label(&analysis_tier_for_file(document, file)?)?;
-        let next_text_bytes = [
-            identifier.len(),
-            identifier.len(),
-            file.path.len(),
-            "file".len(),
-            file.language.len(),
-            tier.len(),
-            source_text.as_deref().map_or(0, str::len),
-            source_identifiers.iter().map(String::len).sum(),
-        ]
-        .into_iter()
-        .try_fold(self.text_bytes, |total, length| {
-            total
-                .checked_add(length)
-                .filter(|value| *value <= self.budget.max_text_bytes)
-                .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
-                    resource: "text_bytes",
-                }))
-        })?;
-        let projected = LexicalDocument {
-            symbol_id: None,
-            file_id: file.id,
-            identifier: try_clone(identifier)?,
-            qualified_name: try_clone(identifier)?,
-            path: try_clone(&file.path)?,
-            kind: "file".to_owned(),
-            language: try_clone(&file.language)?,
-            tier,
-            package: None,
-            build_target: None,
-            signature: None,
-            type_names: Vec::new(),
-            documentation: None,
-            source_identifiers,
-            source_text,
-            generated: file.generated,
-            test: false,
-            declaration_only: false,
-        };
+        let (projected, next_text_bytes) = project_source_document(
+            self.generation,
+            source,
+            self.text_bytes,
+            self.budget,
+            cancellation,
+        )?;
         let next_source = self
             .next_source
             .checked_add(1)
@@ -297,6 +238,107 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
         Ok(self.projected)
     }
+}
+
+/// Projects one exact source snapshot into a bounded file-only lexical document.
+///
+/// This streaming primitive admits one document at a time, so callers can
+/// release the full source body immediately after handing the document to an
+/// incremental index builder.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] for source or generation drift, invalid build limits,
+/// cancellation, bounded text overflow, or allocation failure.
+pub fn project_source_fallback_document(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<LexicalDocument, QueryError> {
+    validate_build_admission(budget)?;
+    project_source_document(generation, source, 0, budget, cancellation)
+        .map(|(document, _)| document)
+}
+
+fn project_source_document(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    current_text_bytes: usize,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<(LexicalDocument, usize), QueryError> {
+    cancellation
+        .check()
+        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+    let document = generation.document();
+    let file = generation
+        .find_file(source.file())
+        .ok_or(QueryError::IndexDrift)?;
+    if source.content_hash() != file.content_hash
+        || source.path().as_str() != file.path
+        || u64::try_from(source.content().len()).ok() != Some(file.byte_length)
+    {
+        return Err(QueryError::IndexDrift);
+    }
+    let source_prefix = bounded_utf8_prefix(source.content(), SOURCE_FALLBACK_TEXT_BYTES);
+    let (source_identifiers, source_text) = source_prefix
+        .as_deref()
+        .map(bounded_source_projection)
+        .map(|(identifiers, text)| {
+            let text = (!text.is_empty()).then_some(text);
+            (identifiers, text)
+        })
+        .unwrap_or_default();
+    let identifier = file
+        .path
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty() && name.len() <= 512)
+        .unwrap_or("file");
+    let tier = serialized_label(&analysis_tier_for_file(document, file)?)?;
+    let next_text_bytes = [
+        identifier.len(),
+        identifier.len(),
+        file.path.len(),
+        "file".len(),
+        file.language.len(),
+        tier.len(),
+        source_text.as_deref().map_or(0, str::len),
+        source_identifiers.iter().map(String::len).sum(),
+    ]
+    .into_iter()
+    .try_fold(current_text_bytes, |total, length| {
+        total
+            .checked_add(length)
+            .filter(|value| *value <= budget.max_text_bytes)
+            .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            }))
+    })?;
+    Ok((
+        LexicalDocument {
+            symbol_id: None,
+            file_id: file.id,
+            identifier: try_clone(identifier)?,
+            qualified_name: try_clone(identifier)?,
+            path: try_clone(&file.path)?,
+            kind: "file".to_owned(),
+            language: try_clone(&file.language)?,
+            tier,
+            package: None,
+            build_target: None,
+            signature: None,
+            type_names: Vec::new(),
+            documentation: None,
+            source_identifiers,
+            source_text,
+            generated: file.generated,
+            test: false,
+            declaration_only: false,
+        },
+        next_text_bytes,
+    ))
 }
 
 /// Projects normalized entities into bounded source-free lexical documents.
