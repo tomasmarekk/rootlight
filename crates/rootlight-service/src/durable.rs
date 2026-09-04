@@ -28,7 +28,8 @@ use rootlight_ir::{
     ExtensionSupport, FactEvidence, FileIdentityClaim, FilePathLocator, FilePathLocatorEncoding,
     FileRecord, IrLimits, SourceRef, SourceSpan,
 };
-use rootlight_search::{BuildBudget, LexicalIndex};
+use rootlight_query::project_source_fallback_document_with_text_limit;
+use rootlight_search::{BuildBudget, EphemeralLexicalIndexBuilder, LexicalIndex};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
     GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
@@ -44,8 +45,9 @@ use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
     FirstSliceLogicalSnapshotIdentity, FirstSliceOperationContext, FirstSliceRecoveryTarget,
     LexicalProjectionBuilder, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PreparedIncrementalState,
-    RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
-    map_incremental_error, map_query_error, map_search_error, map_vfs_error, repository_path_hash,
+    RustSourceInput, SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE, check_cancellation, map_catalog_error,
+    map_identity_error, map_incremental_error, map_query_error, map_search_error, map_vfs_error,
+    repository_path_hash, source_fallback_text_limit,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -98,6 +100,7 @@ const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
 const SOURCE_PACK_TARGET_BYTES: u64 = DEFAULT_MAX_SOURCE_FILE_BYTES;
 const PACKED_SOURCE_MIN_FILES: usize = 256;
+const STREAMED_SOURCE_PARTITION_FILES: usize = 4_096;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const RECOVERY_SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
@@ -5316,41 +5319,30 @@ fn restore_generation(
     if manifest.receipt.logical_snapshot.is_some() && incremental.is_none() {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let mut projection =
-        LexicalProjectionBuilder::new(verified.snapshot(), BuildBudget::default(), cancellation)
-            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
-    // Retaining the validated directory capabilities avoids reopening the same
-    // private parents for every unsupported file in a large generation.
-    let source_reader = if projection.next_source_file().is_none() {
-        None
+    let (search, lexical_documents) = if verified.snapshot().source_files().is_empty() {
+        restore_normalized_search(
+            verified.snapshot(),
+            repository_directory,
+            &generation_directory,
+            repository,
+            generation,
+            source_layout,
+            cancellation,
+        )?
     } else {
-        Some(PersistedSourceReader::open(
+        restore_file_only_search(
+            verified.snapshot(),
             repository_directory,
             &generation_directory,
             repository,
             source_layout,
-        )?)
+            cancellation,
+        )?
     };
-    while let Some(file_id) = projection.next_source_file() {
-        let file = verified
-            .snapshot()
-            .find_file(file_id)
-            .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let snapshot = source_reader
-            .as_ref()
-            .ok_or(FirstSliceError::CatalogCorrupt)?
-            .read(file, cancellation)?;
-        projection
-            .push_source(&snapshot, cancellation)
-            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
-    }
-    let documents = projection
-        .finish(cancellation)
-        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     let sources = Vec::new();
     if u64::try_from(verified.snapshot().file_count()).ok() != Some(manifest.receipt.indexed_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
-        || u64::try_from(documents.len()).ok() != Some(manifest.receipt.lexical_documents)
+        || lexical_documents != manifest.receipt.lexical_documents
         || allocated_bytes != manifest.receipt.oracle_allocated_bytes
     {
         return Err(FirstSliceError::CatalogCorrupt);
@@ -5359,9 +5351,6 @@ fn restore_generation(
     // the query authorities. Rehashing every canonical logical component here
     // only revalidates source-free observability evidence and can turn a bounded
     // active-generation open into minutes of hidden startup work.
-    let search =
-        LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
-            .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
     Ok(RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
@@ -5379,6 +5368,139 @@ fn restore_generation(
         incremental,
         operations: Vec::new(),
     })
+}
+
+fn restore_normalized_search(
+    verified: &GenerationSnapshot,
+    repository_directory: &PrivateDirectory<'_>,
+    generation_directory: &PrivateDirectory<'_>,
+    repository: RepositoryId,
+    generation: GenerationId,
+    source_layout: DurableSourceLayout,
+    cancellation: &Cancellation,
+) -> Result<(LexicalIndex, u64), FirstSliceError> {
+    let mut projection =
+        LexicalProjectionBuilder::new(verified, BuildBudget::default(), cancellation)
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    // Retaining the validated directory capabilities avoids reopening the same
+    // private parents for every unsupported file in a large generation.
+    let source_reader = if projection.next_source_file().is_none() {
+        None
+    } else {
+        Some(PersistedSourceReader::open(
+            repository_directory,
+            generation_directory,
+            repository,
+            source_layout,
+        )?)
+    };
+    while let Some(file_id) = projection.next_source_file() {
+        let file = verified
+            .find_file(file_id)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let snapshot = source_reader
+            .as_ref()
+            .ok_or(FirstSliceError::CatalogCorrupt)?
+            .read(file, cancellation)?;
+        projection
+            .push_source(&snapshot, cancellation)
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    }
+    let documents = projection
+        .finish(cancellation)
+        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    let lexical_documents = u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
+    let search =
+        LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
+            .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+    Ok((search, lexical_documents))
+}
+
+fn restore_file_only_search(
+    verified: &GenerationSnapshot,
+    repository_directory: &PrivateDirectory<'_>,
+    generation_directory: &PrivateDirectory<'_>,
+    repository: RepositoryId,
+    source_layout: DurableSourceLayout,
+    cancellation: &Cancellation,
+) -> Result<(LexicalIndex, u64), FirstSliceError> {
+    if !verified
+        .document()
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let source_reader = PersistedSourceReader::open(
+        repository_directory,
+        generation_directory,
+        repository,
+        source_layout,
+    )?;
+    let text_limit = source_fallback_text_limit(verified)?;
+    let budget = BuildBudget::default();
+    let mut builder =
+        EphemeralLexicalIndexBuilder::new(verified.metadata().generation(), budget, cancellation)
+            .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+    let mut file_ids = Vec::new();
+    file_ids
+        .try_reserve_exact(verified.file_count())
+        .map_err(|_| FirstSliceError::Retention)?;
+    file_ids.extend(verified.document().files.iter().map(|file| file.id));
+    file_ids.extend(
+        verified
+            .source_files()
+            .entries()
+            .iter()
+            .map(|entry| entry.file().id),
+    );
+    file_ids.sort_unstable();
+    if file_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let partition_files = STREAMED_SOURCE_PARTITION_FILES.min(budget.max_documents);
+    let mut partition = Vec::new();
+    partition
+        .try_reserve_exact(partition_files)
+        .map_err(|_| FirstSliceError::Retention)?;
+    let mut lexical_documents = 0_u64;
+    for file_id in file_ids {
+        check_cancellation(cancellation)?;
+        let file = verified
+            .find_file(file_id)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let snapshot = source_reader.read(file, cancellation)?;
+        let document = project_source_fallback_document_with_text_limit(
+            verified,
+            &snapshot,
+            text_limit,
+            budget,
+            cancellation,
+        )
+        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+        partition.push(document);
+        lexical_documents = lexical_documents
+            .checked_add(1)
+            .ok_or(FirstSliceError::Limits)?;
+        if partition.len() == partition_files {
+            builder
+                .push_partition(std::mem::take(&mut partition), cancellation)
+                .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+            partition
+                .try_reserve_exact(partition_files)
+                .map_err(|_| FirstSliceError::Retention)?;
+        }
+    }
+    if !partition.is_empty() {
+        builder
+            .push_partition(partition, cancellation)
+            .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+    }
+    let search = builder
+        .finish(cancellation)
+        .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+    Ok((search, lexical_documents))
 }
 
 fn restore_incremental_state(

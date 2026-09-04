@@ -117,7 +117,9 @@ use rootlight_resolve::{
     RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolutionLimits,
     ResolverFactContext,
 };
-use rootlight_search::{BuildBudget, LexicalDocument, LexicalIndex, SearchBudget, SearchError};
+use rootlight_search::{
+    BuildBudget, EPHEMERAL_MAX_TEXT_BYTES, LexicalDocument, LexicalIndex, SearchBudget, SearchError,
+};
 use rootlight_source::{SourceBudget, SourceError, SourceService};
 pub use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
@@ -141,6 +143,7 @@ const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
 const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
 const RECOVERY_SMOKE_QUERY: &str = "__rootlight_startup_recovery_smoke__";
+const SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE: &str = "source-file-fallback-resource-bounded";
 // Divide the generation-wide syntax-fact allowance across every admitted
 // source so large repositories degrade per file instead of exhausting memory.
 const MAX_FIRST_SLICE_STRUCTURAL_FACTS: usize = 1_048_576;
@@ -17023,6 +17026,41 @@ fn logical_snapshot_identity(
     Ok(FirstSliceLogicalSnapshotIdentity::new(
         snapshot.logical_snapshot_hash(),
     ))
+}
+
+fn source_fallback_text_limit(
+    snapshot: &rootlight_storage::GenerationSnapshot,
+) -> Result<usize, FirstSliceError> {
+    let file_count = snapshot.file_count();
+    if file_count == 0 {
+        return Ok(0);
+    }
+    let mut fixed_text_bytes = 0usize;
+    for file in snapshot.document().files.iter().chain(
+        snapshot
+            .source_files()
+            .entries()
+            .iter()
+            .map(|entry| entry.file()),
+    ) {
+        let identifier = file
+            .path
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty() && name.len() <= 512)
+            .unwrap_or("file");
+        fixed_text_bytes = fixed_text_bytes
+            .checked_add(identifier.len().saturating_mul(2))
+            .and_then(|bytes| bytes.checked_add(file.path.len()))
+            .and_then(|bytes| bytes.checked_add("file".len()))
+            .and_then(|bytes| bytes.checked_add(file.language.len()))
+            .and_then(|bytes| bytes.checked_add("tier_d".len()))
+            .ok_or(FirstSliceError::Limits)?;
+    }
+    let variable_text_bytes = EPHEMERAL_MAX_TEXT_BYTES
+        .checked_sub(fixed_text_bytes)
+        .ok_or(FirstSliceError::Search)?;
+    Ok((variable_text_bytes / file_count / 2).min(SOURCE_FALLBACK_TEXT_BYTES))
 }
 
 fn normalized_fact_work(
