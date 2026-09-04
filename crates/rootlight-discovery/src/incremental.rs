@@ -126,6 +126,7 @@ pub struct IncrementalDiscoveryOptions {
     mode: ReconcileMode,
     limits: DiscoveryLimits,
     maximum_retained_source_bytes: u64,
+    retain_hashed_snapshots: bool,
 }
 
 impl IncrementalDiscoveryOptions {
@@ -136,6 +137,7 @@ impl IncrementalDiscoveryOptions {
             mode,
             limits,
             maximum_retained_source_bytes: MAX_RETAINED_SOURCE_BYTES,
+            retain_hashed_snapshots: true,
         }
     }
 
@@ -150,6 +152,17 @@ impl IncrementalDiscoveryOptions {
         } else {
             MAX_RETAINED_SOURCE_BYTES
         };
+        self
+    }
+
+    /// Avoids retaining hashed source bodies after their fingerprints are recorded.
+    ///
+    /// Each source remains bounded by the discovery file limit. This option is
+    /// intended for callers that will rehydrate exact bytes through a durable or
+    /// otherwise staged consumer after the source-free baseline is complete.
+    #[must_use]
+    pub const fn without_hashed_snapshot_retention(mut self) -> Self {
+        self.retain_hashed_snapshots = false;
         self
     }
 }
@@ -255,6 +268,7 @@ pub fn discover_incremental_with_progress(
         mode,
         limits,
         maximum_retained_source_bytes,
+        retain_hashed_snapshots,
     } = options;
     let reconcile_limits =
         ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
@@ -264,7 +278,7 @@ pub fn discover_incremental_with_progress(
         policy,
         limits,
         reconcile_limits,
-        maximum_retained_source_bytes,
+        retain_hashed_snapshots.then_some(maximum_retained_source_bytes),
         cancellation,
     )?;
     let empty_metadata =
@@ -282,14 +296,16 @@ pub fn discover_incremental_with_progress(
     )
     .map_err(map_incremental_error)?;
     let hashed_files: Vec<_> = plan.files_to_hash().collect();
-    let mut snapshot_budget = RetainedSnapshotBudget::new(maximum_retained_source_bytes);
-    for file in &hashed_files {
-        let expected = candidate_scan
-            .descriptors
-            .get(file)
-            .copied()
-            .ok_or(DiscoveryError::IncrementalDrift)?;
-        snapshot_budget.reserve(expected.metadata().length())?;
+    if retain_hashed_snapshots {
+        let mut snapshot_budget = RetainedSnapshotBudget::new(maximum_retained_source_bytes);
+        for file in &hashed_files {
+            let expected = candidate_scan
+                .descriptors
+                .get(file)
+                .copied()
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            snapshot_budget.reserve(expected.metadata().length())?;
+        }
     }
     let mut hashes = BTreeMap::new();
     let mut hashed_snapshots = BTreeMap::new();
@@ -335,7 +351,7 @@ pub fn discover_incremental_with_progress(
             bytes_examined,
         });
         hashes.insert(*file, snapshot.content_hash());
-        if hashed_snapshots.insert(*file, snapshot).is_some() {
+        if retain_hashed_snapshots && hashed_snapshots.insert(*file, snapshot).is_some() {
             return Err(DiscoveryError::IncrementalDrift);
         }
     }
@@ -514,7 +530,7 @@ fn scan_candidates(
     policy: &DiscoveryPolicy,
     limits: DiscoveryLimits,
     reconcile_limits: ReconcileLimits,
-    maximum_retained_source_bytes: u64,
+    maximum_retained_source_bytes: Option<u64>,
     cancellation: &Cancellation,
 ) -> Result<CandidateScan, DiscoveryError> {
     let mut queue = VecDeque::from([(None, 0_usize)]);
@@ -572,21 +588,23 @@ fn scan_candidates(
                         && entry.metadata.volume.is_some()
                         && entry.metadata.file_index.is_some() =>
                 {
-                    let Some(observed_source_bytes) =
-                        retained_source_bytes.checked_add(entry.metadata.length)
-                    else {
-                        complete = false;
-                        queue.clear();
-                        break 'directories;
-                    };
-                    if observed_source_bytes > maximum_retained_source_bytes {
-                        // Preserve the deterministic traversal prefix instead
-                        // of selecting later files by their relative size.
-                        complete = false;
-                        queue.clear();
-                        break 'directories;
+                    if let Some(maximum_retained_source_bytes) = maximum_retained_source_bytes {
+                        let Some(observed_source_bytes) =
+                            retained_source_bytes.checked_add(entry.metadata.length)
+                        else {
+                            complete = false;
+                            queue.clear();
+                            break 'directories;
+                        };
+                        if observed_source_bytes > maximum_retained_source_bytes {
+                            // Preserve the deterministic traversal prefix instead
+                            // of selecting later files by their relative size.
+                            complete = false;
+                            queue.clear();
+                            break 'directories;
+                        }
+                        retained_source_bytes = observed_source_bytes;
                     }
-                    retained_source_bytes = observed_source_bytes;
                     let file = root.file_id(&path);
                     let descriptor = FileDescriptor::new(
                         file,
@@ -852,6 +870,7 @@ mod tests {
                 mode: ReconcileMode::Normal,
                 limits,
                 maximum_retained_source_bytes: 5,
+                retain_hashed_snapshots: true,
             },
             &Cancellation::new(),
             |_| {},
@@ -875,6 +894,7 @@ mod tests {
                 mode: ReconcileMode::Normal,
                 limits,
                 maximum_retained_source_bytes: 4,
+                retain_hashed_snapshots: true,
             },
             &Cancellation::new(),
             |_| {},
@@ -890,6 +910,31 @@ mod tests {
                 .sum::<usize>(),
             2
         );
+
+        let mut progress = IncrementalDiscoveryProgress {
+            files_examined: 0,
+            bytes_examined: 0,
+        };
+        let streaming = discover_incremental_with_progress(
+            &root,
+            None,
+            context,
+            &policy,
+            IncrementalDiscoveryOptions {
+                mode: ReconcileMode::Normal,
+                limits,
+                maximum_retained_source_bytes: 4,
+                retain_hashed_snapshots: false,
+            },
+            &Cancellation::new(),
+            |observed| progress = observed,
+        )
+        .expect("source-free hashing crosses the snapshot retention boundary");
+        assert!(streaming.is_complete());
+        assert_eq!(streaming.hashed_files.len(), 2);
+        assert!(streaming.hashed_snapshots.is_empty());
+        assert_eq!(progress.files_examined, 2);
+        assert_eq!(progress.bytes_examined, 5);
     }
 
     #[test]

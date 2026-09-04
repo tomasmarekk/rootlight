@@ -620,8 +620,38 @@ pub fn discover(
     limits: DiscoveryLimits,
     cancellation: &Cancellation,
 ) -> Result<DiscoveryManifest, DiscoveryError> {
-    discover_with_snapshots(root, config, policy, limits, BTreeMap::new(), cancellation)
-        .map(|result| result.manifest)
+    discover_manifest_streaming(root, config, policy, limits, cancellation)
+}
+
+/// Runs deterministic discovery while retaining only manifest metadata.
+///
+/// Source contents are captured, classified, and hashed one file at a time.
+/// The per-file limit still bounds resident bytes, while repositories whose
+/// aggregate text exceeds [`MAX_RETAINED_SOURCE_BYTES`] can produce a complete
+/// manifest for a later staged or streaming consumer.
+///
+/// # Errors
+///
+/// Returns the same typed discovery failures as [`discover`].
+pub fn discover_manifest_streaming(
+    root: &RepositoryRoot,
+    config: &ConfigSnapshot,
+    policy: &DiscoveryPolicy,
+    limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+) -> Result<DiscoveryManifest, DiscoveryError> {
+    let mut state = DiscoveryState::new(
+        root,
+        config,
+        policy,
+        limits,
+        BTreeMap::new(),
+        MAX_RETAINED_SOURCE_BYTES,
+        false,
+        cancellation,
+    )?;
+    state.run()?;
+    Ok(state.finish().manifest)
 }
 
 /// Runs deterministic discovery while retaining the exact classified snapshots.
@@ -681,6 +711,7 @@ pub fn discover_with_snapshots_at_limit(
         limits,
         cached_snapshots,
         maximum_retained_source_bytes,
+        true,
         cancellation,
     )?;
     state.run()?;
@@ -702,6 +733,7 @@ struct DiscoveryState<'a> {
     cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
     snapshots: BTreeMap<FileId, SourceSnapshot>,
     snapshot_budget: RetainedSnapshotBudget,
+    retain_snapshots: bool,
 }
 
 impl<'a> DiscoveryState<'a> {
@@ -712,6 +744,7 @@ impl<'a> DiscoveryState<'a> {
         limits: DiscoveryLimits,
         cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
         maximum_retained_source_bytes: u64,
+        retain_snapshots: bool,
         cancellation: &'a Cancellation,
     ) -> Result<Self, DiscoveryError> {
         let snapshot_budget = RetainedSnapshotBudget::preflight(
@@ -735,6 +768,7 @@ impl<'a> DiscoveryState<'a> {
             cached_snapshots,
             snapshots: BTreeMap::new(),
             snapshot_budget,
+            retain_snapshots,
         })
     }
 
@@ -945,7 +979,7 @@ impl<'a> DiscoveryState<'a> {
             language_signals,
             decisive_rule,
         });
-        if self.snapshots.insert(file, snapshot).is_some() {
+        if self.retain_snapshots && self.snapshots.insert(file, snapshot).is_some() {
             return Err(DiscoveryError::IncrementalDrift);
         }
         self.coverage.included = self.coverage.included.saturating_add(1);
@@ -972,7 +1006,9 @@ impl<'a> DiscoveryState<'a> {
                 maximum: self.limits.max_file_bytes,
             }));
         }
-        self.snapshot_budget.reserve(observed_metadata.length)?;
+        if self.retain_snapshots {
+            self.snapshot_budget.reserve(observed_metadata.length)?;
+        }
         // The traversal metadata is the aggregate reservation. Restricting the
         // capture to that size prevents a racing growth from bypassing it.
         let capture_limit = observed_metadata.length.max(1);
@@ -1799,6 +1835,20 @@ mod tests {
                 observed: 5,
                 limit: 4,
             })
+        );
+
+        let streaming =
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .expect("source-free discovery crosses the snapshot retention boundary");
+        assert!(streaming.coverage.complete);
+        assert_eq!(streaming.coverage.included, 2);
+        assert_eq!(
+            streaming
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["first.rs", "second.rs"]
         );
     }
 
