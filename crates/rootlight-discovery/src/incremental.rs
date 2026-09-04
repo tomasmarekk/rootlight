@@ -35,6 +35,32 @@ pub struct IncrementalDiscoveryContext {
     provider_revision: ContentHash,
 }
 
+/// Parent baseline and immutable identities for manifest reconciliation.
+#[derive(Debug, Clone, Copy)]
+pub struct ManifestReconcileInputs<'a> {
+    parent: Option<&'a IncrementalDiscoveryBaseline>,
+    context: IncrementalDiscoveryContext,
+}
+
+impl<'a> ManifestReconcileInputs<'a> {
+    /// Binds an optional parent generation to the current discovery identities.
+    #[must_use]
+    pub const fn new(
+        parent: Option<&'a IncrementalDiscoveryBaseline>,
+        context: IncrementalDiscoveryContext,
+    ) -> Self {
+        Self { parent, context }
+    }
+
+    pub(crate) const fn parent(self) -> Option<&'a IncrementalDiscoveryBaseline> {
+        self.parent
+    }
+
+    pub(crate) const fn context(self) -> IncrementalDiscoveryContext {
+        self.context
+    }
+}
+
 impl IncrementalDiscoveryContext {
     /// Creates a complete discovery context.
     ///
@@ -446,8 +472,6 @@ pub fn correlate_incremental_manifest(
         return Err(DiscoveryError::IncrementalDrift);
     }
 
-    let reconcile_limits =
-        ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
     let planning_limits = planning_limits(limits)?;
     let expected_observed_inputs = build_inputs(
         observed.baseline().metadata(),
@@ -465,38 +489,110 @@ pub fn correlate_incremental_manifest(
         .files()
         .map(|file| (file.descriptor().file(), file))
         .collect();
-    let mut included = BTreeSet::new();
-    let mut included_paths = BTreeSet::new();
     let mut scanned = Vec::with_capacity(manifest.inputs.len());
-    let mut manifest_hashes = BTreeMap::new();
     for input in &manifest.inputs {
         cancellation.check()?;
-        if !included.insert(input.file) {
-            return Err(DiscoveryError::Incremental(
-                IncrementalError::DuplicateFile { file: input.file },
-            ));
-        }
-        if !included_paths.insert(input.path.as_str()) {
-            return Err(DiscoveryError::IncrementalDrift);
-        }
-        let path = RelativePath::parse(Path::new(&input.path))?;
         let observed_file = observed_files
             .get(&input.file)
             .copied()
             .ok_or(DiscoveryError::IncrementalDrift)?;
-        let descriptor = observed_file.descriptor();
-        if descriptor.path_hash() != content_hash(path.identity_bytes())
-            || descriptor.metadata().length() != input.bytes
-            || observed_file.content_hash() != input.content_hash
-        {
+        if observed_file.content_hash() != input.content_hash {
             return Err(DiscoveryError::IncrementalDrift);
         }
-        scanned.push(ScannedFile::new(descriptor));
-        manifest_hashes.insert(input.file, input.content_hash);
+        scanned.push(ScannedFile::new(observed_file.descriptor()));
     }
 
+    reconcile_manifest_scan(
+        ManifestScanReconcile {
+            repository: observed.repository(),
+            observed_complete: observed.is_complete(),
+            scanned,
+            reconcile: ManifestReconcileInputs::new(parent, context),
+            observed_hashed_files: Some(observed.hashed_files()),
+            observed_hashed_snapshots: &observed.hashed_snapshots,
+        },
+        manifest,
+        limits,
+        cancellation,
+    )
+}
+
+pub(crate) struct ManifestScanReconcile<'a> {
+    pub(crate) repository: RepositoryId,
+    pub(crate) observed_complete: bool,
+    pub(crate) scanned: Vec<ScannedFile>,
+    pub(crate) reconcile: ManifestReconcileInputs<'a>,
+    pub(crate) observed_hashed_files: Option<&'a [FileId]>,
+    pub(crate) observed_hashed_snapshots: &'a BTreeMap<FileId, SourceSnapshot>,
+}
+
+pub(crate) fn reconcile_manifest_scan(
+    observation: ManifestScanReconcile<'_>,
+    manifest: &DiscoveryManifest,
+    limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+) -> Result<IncrementalDiscovery, DiscoveryError> {
+    let ManifestScanReconcile {
+        repository,
+        observed_complete,
+        scanned,
+        reconcile,
+        observed_hashed_files,
+        observed_hashed_snapshots,
+    } = observation;
+    let parent = reconcile.parent();
+    let context = reconcile.context();
+    cancellation.check()?;
+    if manifest.repository != repository
+        || manifest.configuration_hash != context.configuration_revision()
+        || (manifest.coverage.complete && !observed_complete)
+        || u64::try_from(manifest.inputs.len()).ok() != Some(manifest.coverage.included)
+        || scanned.len() != manifest.inputs.len()
+    {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+
+    let reconcile_limits =
+        ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
+    let planning_limits = planning_limits(limits)?;
+    let mut included_paths = BTreeSet::new();
+    let mut manifest_files = BTreeMap::new();
+    for input in &manifest.inputs {
+        cancellation.check()?;
+        if !included_paths.insert(input.path.as_str()) {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        let path = RelativePath::parse(Path::new(&input.path))?;
+        if manifest_files
+            .insert(
+                input.file,
+                (
+                    input.content_hash,
+                    content_hash(path.identity_bytes()),
+                    input.bytes,
+                ),
+            )
+            .is_some()
+        {
+            return Err(DiscoveryError::Incremental(
+                IncrementalError::DuplicateFile { file: input.file },
+            ));
+        }
+    }
     let scan = AuthoritativeScan::new(scanned, reconcile_limits, cancellation)
         .map_err(map_incremental_error)?;
+    for scanned_file in scan.files() {
+        cancellation.check()?;
+        let descriptor = scanned_file.descriptor();
+        let (_, path_hash, bytes) = manifest_files
+            .get(&descriptor.file())
+            .copied()
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        if descriptor.path_hash() != path_hash || descriptor.metadata().length() != bytes {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+    }
+
     let empty_metadata =
         MetadataBaseline::new([], reconcile_limits, cancellation).map_err(map_incremental_error)?;
     let empty_inputs =
@@ -514,12 +610,13 @@ pub fn correlate_incremental_manifest(
     let mut requested_hashes = BTreeMap::new();
     for file in plan.files_to_hash() {
         cancellation.check()?;
-        let hash = manifest_hashes
+        let hash = manifest_files
             .get(&file)
-            .copied()
+            .map(|(hash, _, _)| *hash)
             .ok_or(DiscoveryError::IncrementalDrift)?;
         requested_hashes.insert(file, hash);
     }
+    let reconciled_hashed_files = requested_hashes.keys().copied().collect::<Vec<_>>();
     let outcome = plan
         .finish(&requested_hashes, reconcile_limits, cancellation)
         .map_err(map_incremental_error)?;
@@ -528,16 +625,20 @@ pub fn correlate_incremental_manifest(
         .changes_to(&current_inputs, planning_limits, cancellation)
         .map_err(map_incremental_error)?;
     let file_changes = outcome.changes().to_vec();
-    let hashed_files = observed
-        .hashed_files()
+    let hashed_files = observed_hashed_files.map_or(reconciled_hashed_files, |files| {
+        files
+            .iter()
+            .copied()
+            .filter(|file| manifest_files.contains_key(file))
+            .collect()
+    });
+    let hashed_snapshots = observed_hashed_snapshots
         .iter()
-        .copied()
-        .filter(|file| included.contains(file))
-        .collect();
-    let hashed_snapshots = observed
-        .hashed_snapshots
-        .iter()
-        .filter_map(|(file, snapshot)| included.contains(file).then_some((*file, snapshot.clone())))
+        .filter_map(|(file, snapshot)| {
+            manifest_files
+                .contains_key(file)
+                .then_some((*file, snapshot.clone()))
+        })
         .collect();
     let baseline = IncrementalDiscoveryBaseline {
         metadata: outcome.baseline().clone(),
@@ -545,8 +646,8 @@ pub fn correlate_incremental_manifest(
     };
 
     Ok(IncrementalDiscovery {
-        repository: observed.repository(),
-        complete: observed.is_complete() && manifest.coverage.complete,
+        repository,
+        complete: observed_complete && manifest.coverage.complete,
         baseline,
         changes,
         file_changes,
@@ -711,7 +812,7 @@ fn load_incremental_scoped_ignore(
     Ok(())
 }
 
-fn incremental_metadata(metadata: SnapshotMetadata) -> FileMetadata {
+pub(crate) fn incremental_metadata(metadata: SnapshotMetadata) -> FileMetadata {
     let identity = metadata
         .volume
         .zip(metadata.file_index)

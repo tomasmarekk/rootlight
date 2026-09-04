@@ -12,8 +12,9 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_config::ConfigSnapshot;
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscoveryContext,
-    IncrementalDiscoveryOptions, correlate_incremental_manifest, discover, discover_incremental,
-    discover_incremental_with_progress, discover_with_snapshots,
+    IncrementalDiscoveryOptions, ManifestReconcileInputs, correlate_incremental_manifest, discover,
+    discover_incremental, discover_incremental_with_progress,
+    discover_manifest_and_reconcile_with_progress, discover_with_snapshots,
 };
 use rootlight_ids::{FactId, RepositoryId, content_hash, derive_repository};
 use rootlight_incremental::{ChangeClass, FileChangeKind, ReconcileMode};
@@ -124,6 +125,198 @@ fn cold_incremental_discovery_reports_monotonic_file_and_byte_progress() {
     assert!(progress[0].bytes_examined > 0);
     assert!(progress[1].bytes_examined >= progress[0].bytes_examined);
     assert_eq!(progress[1].bytes_examined, 6);
+}
+
+#[test]
+fn clean_manifest_reconcile_matches_independent_correlation() {
+    let temporary = local_tempdir();
+    fs::write(temporary.path().join("first.rs"), b"pub fn first() {}\n")
+        .expect("first fixture source is written");
+    fs::write(temporary.path().join("second.rs"), b"pub fn second() {}\n")
+        .expect("second fixture source is written");
+    let root = root(&temporary, b"manifest-reconcile");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"provider-v1"),
+    );
+    let policy = policy();
+    let cancellation = Cancellation::new();
+    let mut progress = Vec::new();
+
+    let (manifest, combined) = discover_manifest_and_reconcile_with_progress(
+        &root,
+        &config,
+        ManifestReconcileInputs::new(None, context),
+        &policy,
+        limits(),
+        &cancellation,
+        |observed| progress.push(observed),
+    )
+    .expect("combined cold discovery succeeds");
+    let independently_observed = discover_incremental_with_progress(
+        &root,
+        None,
+        context,
+        &policy,
+        IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits())
+            .without_hashed_snapshot_retention(),
+        &cancellation,
+        |_| {},
+    )
+    .expect("independent cold reconcile succeeds");
+    let independent_manifest = discover(&root, &config, &policy, limits(), &cancellation)
+        .expect("independent clean manifest succeeds");
+    let independently_correlated = correlate_incremental_manifest(
+        &independently_observed,
+        None,
+        context,
+        &independent_manifest,
+        limits(),
+        &cancellation,
+    )
+    .expect("independent cold observations correlate");
+
+    assert_eq!(manifest, independent_manifest);
+    assert_eq!(combined, independently_correlated);
+    assert_eq!(progress.len(), 2);
+    assert_eq!(progress.last().map(|item| item.files_examined), Some(2));
+
+    let (no_op_manifest, no_op) = discover_manifest_and_reconcile_with_progress(
+        &root,
+        &config,
+        ManifestReconcileInputs::new(Some(combined.baseline()), context),
+        &policy,
+        limits(),
+        &cancellation,
+        |_| {},
+    )
+    .expect("combined no-op discovery succeeds");
+    let no_op_observed = discover_incremental_with_progress(
+        &root,
+        Some(combined.baseline()),
+        context,
+        &policy,
+        IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits())
+            .without_hashed_snapshot_retention(),
+        &cancellation,
+        |_| {},
+    )
+    .expect("independent no-op reconcile succeeds");
+    let independent_no_op_manifest = discover(&root, &config, &policy, limits(), &cancellation)
+        .expect("independent no-op manifest succeeds");
+    let independently_correlated_no_op = correlate_incremental_manifest(
+        &no_op_observed,
+        Some(combined.baseline()),
+        context,
+        &independent_no_op_manifest,
+        limits(),
+        &cancellation,
+    )
+    .expect("independent no-op observations correlate");
+
+    assert_eq!(no_op_manifest, independent_no_op_manifest);
+    assert_eq!(no_op, independently_correlated_no_op);
+    assert!(no_op.changes().is_empty());
+
+    fs::write(
+        temporary.path().join("first.rs"),
+        b"pub fn changed() { dbg!(); }\n",
+    )
+    .expect("fixture source mutation succeeds");
+    let (changed_manifest, changed) = discover_manifest_and_reconcile_with_progress(
+        &root,
+        &config,
+        ManifestReconcileInputs::new(Some(no_op.baseline()), context),
+        &policy,
+        limits(),
+        &cancellation,
+        |_| {},
+    )
+    .expect("combined changed discovery succeeds");
+    let changed_observed = discover_incremental_with_progress(
+        &root,
+        Some(no_op.baseline()),
+        context,
+        &policy,
+        IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits())
+            .without_hashed_snapshot_retention(),
+        &cancellation,
+        |_| {},
+    )
+    .expect("independent changed reconcile succeeds");
+    let independent_changed_manifest = discover(&root, &config, &policy, limits(), &cancellation)
+        .expect("independent changed manifest succeeds");
+    let independently_correlated_change = correlate_incremental_manifest(
+        &changed_observed,
+        Some(no_op.baseline()),
+        context,
+        &independent_changed_manifest,
+        limits(),
+        &cancellation,
+    )
+    .expect("independent changed observations correlate");
+
+    assert_eq!(changed_manifest, independent_changed_manifest);
+    assert_eq!(changed, independently_correlated_change);
+    assert!(!changed.changes().is_empty());
+}
+
+#[test]
+fn clean_manifest_reconcile_does_not_promote_excluded_sources() {
+    let temporary = local_tempdir();
+    fs::write(temporary.path().join(".gitignore"), b"ignored.rs\n")
+        .expect("ignore fixture is written");
+    fs::write(
+        temporary.path().join("visible.rs"),
+        b"pub fn visible() {}\n",
+    )
+    .expect("visible fixture is written");
+    fs::write(
+        temporary.path().join("ignored.rs"),
+        b"pub fn ignored() {}\n",
+    )
+    .expect("ignored fixture is written");
+    fs::write(temporary.path().join("binary.rs"), [0, 1, 2, 3]).expect("binary fixture is written");
+    let root = root(&temporary, b"manifest-reconcile-exclusions");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"provider-v1"),
+    );
+
+    let (manifest, discovery) = discover_manifest_and_reconcile_with_progress(
+        &root,
+        &config,
+        ManifestReconcileInputs::new(None, context),
+        &policy(),
+        limits(),
+        &Cancellation::new(),
+        |_| {},
+    )
+    .expect("combined discovery succeeds");
+    let ignored = root.file_id(
+        &RelativePath::parse(std::path::Path::new("ignored.rs"))
+            .expect("ignored fixture path is valid"),
+    );
+    let binary = root.file_id(
+        &RelativePath::parse(std::path::Path::new("binary.rs"))
+            .expect("binary fixture path is valid"),
+    );
+    let baseline_files = discovery
+        .baseline()
+        .metadata()
+        .files()
+        .map(|file| file.descriptor().file())
+        .collect::<Vec<_>>();
+
+    assert!(!manifest.inputs.iter().any(|input| input.file == ignored));
+    assert!(!manifest.inputs.iter().any(|input| input.file == binary));
+    assert!(!baseline_files.contains(&ignored));
+    assert!(!baseline_files.contains(&binary));
+    assert_eq!(baseline_files.len(), manifest.inputs.len());
 }
 
 #[test]

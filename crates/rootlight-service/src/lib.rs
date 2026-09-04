@@ -56,10 +56,10 @@ use rootlight_discovery::{
     DISCOVERY_MANIFEST_VERSION, DiscoveryError, DiscoveryLimits, DiscoveryManifest,
     DiscoveryPolicy, DiscoveryTruncation, DiscoveryTruncationResource, IncrementalDiscovery,
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
-    InputClass, LanguageEvidence, MAX_DISCOVERY_ENTRIES, ManifestInput, canonical_language,
-    correlate_incremental_manifest, discover_incremental_with_progress,
-    discover_manifest_streaming, discover_with_snapshots_at_limit, extension_language,
-    language_capabilities,
+    InputClass, LanguageEvidence, MAX_DISCOVERY_ENTRIES, ManifestInput, ManifestReconcileInputs,
+    canonical_language, correlate_incremental_manifest, discover_incremental_with_progress,
+    discover_manifest_and_reconcile_with_progress, discover_manifest_streaming,
+    discover_with_snapshots_at_limit, extension_language, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -6842,15 +6842,8 @@ impl FirstSliceService {
         let mut discovery_files_examined = 0_u64;
         let mut discovery_bytes_examined = 0_u64;
         let mut last_reported_files = 0_u64;
-        let incremental = discover_incremental_with_progress(
-            &root,
-            parent_baseline,
-            incremental_context,
-            &policy,
-            IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
-                .without_hashed_snapshot_retention(),
-            cancellation,
-            |progress| {
+        let mut report_discovery_progress =
+            |progress: rootlight_discovery::IncrementalDiscoveryProgress| {
                 discovery_files_examined = progress.files_examined;
                 discovery_bytes_examined = progress.bytes_examined;
                 if progress.files_examined == 1
@@ -6866,28 +6859,43 @@ impl FirstSliceService {
                         0,
                     ));
                 }
-            },
-        )
-        .map_err(|error| map_discovery_error(error, cancellation))?;
-        let mut resource_bounded_inventory_required = self.durable.is_some()
-            && (parent_baseline.is_some_and(|baseline| {
-                baseline.metadata().files().count() > configured_discovery_max_entries
-            }) || !incremental.is_complete()
-                || incremental.baseline().metadata().files().count()
-                    > configured_discovery_max_entries);
+            };
+        // A parent can prove a no-op from metadata alone. A cold generation has
+        // no such shortcut, so its clean manifest also supplies the reconcile
+        // baseline instead of opening and hashing the same files twice.
+        let observed_incremental = parent_baseline
+            .map(|parent_baseline| {
+                discover_incremental_with_progress(
+                    &root,
+                    Some(parent_baseline),
+                    incremental_context,
+                    &policy,
+                    IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
+                        .without_hashed_snapshot_retention(),
+                    cancellation,
+                    &mut report_discovery_progress,
+                )
+            })
+            .transpose()
+            .map_err(|error| map_discovery_error(error, cancellation))?;
         // A no-op authoritative reconcile already proves that every tracked
         // path and content fingerprint still matches the active baseline.
         // Reuse is valid only while the complete product configuration and
         // provider-set identities also match the published generation.
         if reuse_policy == FirstSliceReusePolicy::Incremental
-            && incremental.changes().is_empty()
+            && observed_incremental
+                .as_ref()
+                .is_some_and(|incremental| incremental.changes().is_empty())
             && let Some(active) = active
             && let Ok(metadata) = self.generation_metadata(active)
             && metadata.repository() == repository
             && metadata.configuration_hash() == self.config.hash()
             && metadata.provider_set_hash() == provider_set_hash
             && let Some(receipt) = self.receipts.get(&active).cloned()
-            && receipt.discovery_complete == incremental.is_complete()
+            && receipt.discovery_complete
+                == observed_incremental
+                    .as_ref()
+                    .is_some_and(IncrementalDiscovery::is_complete)
         {
             check_cancellation(cancellation)?;
             let planning =
@@ -6895,27 +6903,48 @@ impl FirstSliceService {
             observe_planning(&planning).map_err(FirstSlicePreparationError::PlanningObserver)?;
             return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
         }
-        let manifest = discover_manifest_streaming(
-            &root,
-            &self.config,
-            &policy,
-            discovery_limits,
-            cancellation,
-        )
-        .map_err(|error| map_discovery_error(error, cancellation))?;
+        let (manifest, incremental) = match observed_incremental {
+            Some(observed) => {
+                let manifest = discover_manifest_streaming(
+                    &root,
+                    &self.config,
+                    &policy,
+                    discovery_limits,
+                    cancellation,
+                )
+                .map_err(|error| map_discovery_error(error, cancellation))?;
+                let incremental = correlate_incremental_manifest(
+                    &observed,
+                    parent_baseline,
+                    incremental_context,
+                    &manifest,
+                    discovery_limits,
+                    cancellation,
+                )
+                .map_err(|error| map_discovery_error(error, cancellation))?;
+                (manifest, incremental)
+            }
+            None => discover_manifest_and_reconcile_with_progress(
+                &root,
+                &self.config,
+                ManifestReconcileInputs::new(None, incremental_context),
+                &policy,
+                discovery_limits,
+                cancellation,
+                &mut report_discovery_progress,
+            )
+            .map_err(|error| map_discovery_error(error, cancellation))?,
+        };
+        let mut resource_bounded_inventory_required = self.durable.is_some()
+            && (parent_baseline.is_some_and(|baseline| {
+                baseline.metadata().files().count() > configured_discovery_max_entries
+            }) || !incremental.is_complete()
+                || incremental.baseline().metadata().files().count()
+                    > configured_discovery_max_entries);
         resource_bounded_inventory_required |= self.durable.is_some()
             && (usize::try_from(manifest.coverage.visited)
                 .map_or(true, |visited| visited > configured_discovery_max_entries)
                 || !manifest.coverage.complete);
-        let incremental = correlate_incremental_manifest(
-            &incremental,
-            parent_baseline,
-            incremental_context,
-            &manifest,
-            discovery_limits,
-            cancellation,
-        )
-        .map_err(|error| map_discovery_error(error, cancellation))?;
         if !manifest.coverage.complete
             && let Some(active) = active
             && self

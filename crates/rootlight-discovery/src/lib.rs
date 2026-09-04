@@ -18,7 +18,7 @@ use ignore::{
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_config::{CONFIG_VERSION_1_0, ConfigSnapshot};
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
-use rootlight_incremental::IncrementalError;
+use rootlight_incremental::{FileDescriptor, IncrementalError, ScannedFile};
 use rootlight_vfs::{
     BoundedDirectoryEntries, DirectoryEntry, EntryKind, MAX_SNAPSHOT_BATCH_BYTES,
     MAX_SNAPSHOT_BATCH_FILES, RelativePath, RepositoryRoot, SourceSnapshot, VfsError,
@@ -29,8 +29,8 @@ mod incremental;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
-    IncrementalDiscoveryOptions, IncrementalDiscoveryProgress, correlate_incremental_manifest,
-    discover_incremental, discover_incremental_with_progress,
+    IncrementalDiscoveryOptions, IncrementalDiscoveryProgress, ManifestReconcileInputs,
+    correlate_incremental_manifest, discover_incremental, discover_incremental_with_progress,
 };
 
 /// Current deterministic discovery-manifest version.
@@ -646,10 +646,60 @@ pub fn discover_manifest_streaming(
         policy,
         limits,
         SnapshotRetentionOptions::manifest_only(),
+        None,
         cancellation,
     )?;
     state.run()?;
     Ok(state.finish().manifest)
+}
+
+/// Discovers one clean manifest and reconciles its exact observation.
+///
+/// Unlike a separate incremental scan followed by clean discovery, this path
+/// derives the metadata baseline and content changes from the stable snapshots
+/// that already produced the manifest. Callers with a parent may still prefer
+/// [`discover_incremental_with_progress`] first when a metadata-only no-op can
+/// avoid clean content discovery altogether.
+///
+/// # Errors
+///
+/// Returns a typed discovery, VFS, incremental-contract, resource-limit,
+/// cancellation, or scan/snapshot drift error.
+pub fn discover_manifest_and_reconcile_with_progress(
+    root: &RepositoryRoot,
+    config: &ConfigSnapshot,
+    reconcile: ManifestReconcileInputs<'_>,
+    policy: &DiscoveryPolicy,
+    limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+    mut observe_progress: impl FnMut(IncrementalDiscoveryProgress),
+) -> Result<(DiscoveryManifest, IncrementalDiscovery), DiscoveryError> {
+    let mut state = DiscoveryState::new(
+        root,
+        config,
+        policy,
+        limits,
+        SnapshotRetentionOptions::manifest_only(),
+        Some(&mut observe_progress),
+        cancellation,
+    )?;
+    state.run()?;
+    let (result, scanned) = state.finish_with_scan();
+    let empty_hashed_snapshots = BTreeMap::new();
+    let incremental = incremental::reconcile_manifest_scan(
+        incremental::ManifestScanReconcile {
+            repository: root.repository(),
+            observed_complete: result.manifest.coverage.complete,
+            scanned,
+            reconcile,
+            observed_hashed_files: None,
+            observed_hashed_snapshots: &empty_hashed_snapshots,
+        },
+        &result.manifest,
+        limits,
+        cancellation,
+    )?;
+    Ok((result.manifest, incremental))
 }
 
 /// Runs deterministic discovery while retaining the exact classified snapshots.
@@ -708,6 +758,7 @@ pub fn discover_with_snapshots_at_limit(
         policy,
         limits,
         SnapshotRetentionOptions::retained(cached_snapshots, maximum_retained_source_bytes),
+        None,
         cancellation,
     )?;
     state.run()?;
@@ -728,8 +779,12 @@ struct DiscoveryState<'a> {
     scoped_ignores: ScopedIgnores,
     cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
     snapshots: BTreeMap<FileId, SourceSnapshot>,
+    scanned: Vec<ScannedFile>,
     snapshot_budget: RetainedSnapshotBudget,
     retain_snapshots: bool,
+    observe_progress: Option<&'a mut dyn FnMut(IncrementalDiscoveryProgress)>,
+    files_examined: u64,
+    bytes_examined: u64,
     pending_files: Vec<PendingDiscoveryFile>,
     pending_source_bytes: u64,
 }
@@ -771,6 +826,7 @@ impl<'a> DiscoveryState<'a> {
         policy: &'a DiscoveryPolicy,
         limits: DiscoveryLimits,
         snapshot_options: SnapshotRetentionOptions,
+        observe_progress: Option<&'a mut dyn FnMut(IncrementalDiscoveryProgress)>,
         cancellation: &'a Cancellation,
     ) -> Result<Self, DiscoveryError> {
         let SnapshotRetentionOptions {
@@ -796,8 +852,12 @@ impl<'a> DiscoveryState<'a> {
             scoped_ignores: ScopedIgnores::default(),
             cached_snapshots,
             snapshots: BTreeMap::new(),
+            scanned: Vec::new(),
             snapshot_budget,
             retain_snapshots,
+            observe_progress,
+            files_examined: 0,
+            bytes_examined: 0,
             pending_files: Vec::new(),
             pending_source_bytes: 0,
         })
@@ -1083,12 +1143,35 @@ impl<'a> DiscoveryState<'a> {
             }
             Err(error) => return Err(error),
         };
+        self.files_examined = self
+            .files_examined
+            .checked_add(1)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        self.bytes_examined = self
+            .bytes_examined
+            .checked_add(snapshot.metadata().length)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        if let Some(observe_progress) = self.observe_progress.as_mut() {
+            observe_progress(IncrementalDiscoveryProgress {
+                files_examined: self.files_examined,
+                bytes_examined: self.bytes_examined,
+            });
+        }
         if looks_binary(snapshot.content()) {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         }
         let (class, language_signals) = classify(&path, snapshot.content());
         let file = snapshot.file();
+        let descriptor = FileDescriptor::new(
+            file,
+            content_hash(path.identity_bytes()),
+            incremental::incremental_metadata(snapshot.metadata()),
+        );
+        self.scanned
+            .try_reserve(1)
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        self.scanned.push(ScannedFile::new(descriptor));
         self.inputs.push(ManifestInput {
             file,
             path: path.as_str().to_owned(),
@@ -1162,7 +1245,11 @@ impl<'a> DiscoveryState<'a> {
         }
     }
 
-    fn finish(mut self) -> DiscoveryResult {
+    fn finish(self) -> DiscoveryResult {
+        self.finish_with_scan().0
+    }
+
+    fn finish_with_scan(mut self) -> (DiscoveryResult, Vec<ScannedFile>) {
         self.inputs.sort_by(|left, right| {
             left.path
                 .cmp(&right.path)
@@ -1187,10 +1274,13 @@ impl<'a> DiscoveryState<'a> {
             diagnostics: self.diagnostics,
             coverage: self.coverage,
         };
-        DiscoveryResult {
-            manifest,
-            snapshots: self.snapshots,
-        }
+        (
+            DiscoveryResult {
+                manifest,
+                snapshots: self.snapshots,
+            },
+            self.scanned,
+        )
     }
 }
 
