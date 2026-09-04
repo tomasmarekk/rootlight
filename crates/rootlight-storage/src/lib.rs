@@ -11,6 +11,7 @@ mod migration;
 mod publication;
 mod reader;
 mod sharing;
+mod source_catalog;
 
 pub use generation::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationBudgetError, GenerationContext,
@@ -51,3 +52,4 @@ pub use sharing::{
     SharedGenerationImport, SharedGenerationLimits, export_shared_generation,
     import_shared_generation, shared_generation_source_set_hash,
 };
+pub use source_catalog::{SourceFileCatalog, SourceFileCatalogEntry, SourceFileCatalogError};

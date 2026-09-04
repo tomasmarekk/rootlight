@@ -15,7 +15,7 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedIrDocument, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, IdentityClaimError,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, FileRecord, IdentityClaimError,
     IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
     NormalizedRebindError, OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
@@ -29,6 +29,8 @@ use rootlight_ir::{
     derive_source_mapping_record_id_with_checkpoint, validate_lexical_evidence_envelope,
 };
 use serde::Serialize;
+
+use crate::source_catalog::{SourceFileCatalog, SourceFileCatalogError};
 
 /// Current backend-neutral generation contract version.
 pub const GENERATION_CONTRACT_VERSION: GenerationContractVersion =
@@ -229,6 +231,7 @@ const fn generation_format_version(version: GenerationContractVersion) -> u32 {
 pub struct GenerationSnapshot {
     metadata: GenerationMetadata,
     document: CanonicalNormalizedIrDocument,
+    source_files: SourceFileCatalog,
 }
 
 impl GenerationSnapshot {
@@ -244,6 +247,28 @@ impl GenerationSnapshot {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, GenerationValidationError> {
+        Self::new_with_source_files(
+            metadata,
+            document,
+            SourceFileCatalog::default(),
+            limits,
+            extensions,
+        )
+    }
+
+    /// Validates normalized IR together with an exact file-only source catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenerationValidationError`] for invalid IR, ownership drift,
+    /// ambiguous file identities, or unavailable provenance.
+    pub fn new_with_source_files(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+    ) -> Result<Self, GenerationValidationError> {
         let document = CanonicalNormalizedIrDocument::new(document, limits, extensions)
             .map_err(GenerationValidationError::InvalidIr)?;
         if document.document().repository != metadata.repository()
@@ -251,7 +276,13 @@ impl GenerationSnapshot {
         {
             return Err(GenerationValidationError::OwnershipMismatch);
         }
-        Ok(Self { metadata, document })
+        validate_source_file_catalog(metadata, document.document(), &source_files)
+            .map_err(GenerationValidationError::InvalidSourceCatalog)?;
+        Ok(Self {
+            metadata,
+            document,
+            source_files,
+        })
     }
 
     /// Validates and canonicalizes IR with cooperative collection checkpoints.
@@ -270,15 +301,46 @@ impl GenerationSnapshot {
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
     ) -> Result<Self, GenerationSnapshotError> {
-        require_document_budget(metadata.contract_version(), &document, context)
-            .map_err(GenerationSnapshotError::Control)?;
+        Self::new_with_source_files_and_context(
+            metadata,
+            document,
+            SourceFileCatalog::default(),
+            limits,
+            extensions,
+            context,
+        )
+    }
+
+    /// Validates normalized and file-only records with cooperative checkpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::new_with_context`], including the
+    /// source-catalog rows, source references, and text in the same budget.
+    pub fn new_with_source_files_and_context(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, GenerationSnapshotError> {
+        require_generation_budget(
+            metadata.contract_version(),
+            &document,
+            &source_files,
+            context,
+        )
+        .map_err(GenerationSnapshotError::Control)?;
         context.check().map_err(GenerationSnapshotError::Control)?;
-        let snapshot = Self::new(metadata, document, limits, extensions)
-            .map_err(GenerationSnapshotError::Validation)?;
+        let snapshot =
+            Self::new_with_source_files(metadata, document, source_files, limits, extensions)
+                .map_err(GenerationSnapshotError::Validation)?;
         context.check().map_err(GenerationSnapshotError::Control)?;
-        require_document_budget(
+        require_generation_budget(
             snapshot.metadata().contract_version(),
             snapshot.document(),
+            snapshot.source_files(),
             context,
         )
         .map_err(GenerationSnapshotError::Control)?;
@@ -295,6 +357,34 @@ impl GenerationSnapshot {
     #[must_use]
     pub const fn document(&self) -> &NormalizedIrDocument {
         self.document.document()
+    }
+
+    /// Returns the canonical file-only source catalog.
+    #[must_use]
+    pub const fn source_files(&self) -> &SourceFileCatalog {
+        &self.source_files
+    }
+
+    /// Finds a normalized or file-only record by stable identity.
+    #[must_use]
+    pub fn find_file(&self, file: rootlight_ids::FileId) -> Option<&FileRecord> {
+        self.document
+            .document()
+            .files
+            .binary_search_by_key(&file, |record| record.id)
+            .ok()
+            .and_then(|index| self.document.document().files.get(index))
+            .or_else(|| self.source_files.find(file))
+    }
+
+    /// Returns the total number of normalized and file-only records.
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.document
+            .document()
+            .files
+            .len()
+            .saturating_add(self.source_files.len())
     }
 
     /// Consumes the snapshot into its canonical normalized document.
@@ -332,9 +422,42 @@ impl GenerationSnapshot {
     }
 }
 
-fn require_document_budget(
-    contract_version: GenerationContractVersion,
+fn validate_source_file_catalog(
+    metadata: GenerationMetadata,
     document: &NormalizedIrDocument,
+    source_files: &SourceFileCatalog,
+) -> Result<(), SourceFileCatalogError> {
+    source_files.validate_ownership(metadata.repository(), metadata.generation())?;
+    let normalized_paths = document
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    for entry in source_files.entries() {
+        let file = entry.file();
+        if document
+            .files
+            .binary_search_by_key(&file.id, |candidate| candidate.id)
+            .is_ok()
+            || normalized_paths.contains(file.path.as_str())
+        {
+            return Err(SourceFileCatalogError::NormalizedFileOverlap);
+        }
+        if document
+            .provenance
+            .binary_search_by_key(&file.provenance, |record| record.id)
+            .is_err()
+        {
+            return Err(SourceFileCatalogError::MissingProvenance);
+        }
+    }
+    Ok(())
+}
+
+fn require_generation_budget<'snapshot>(
+    contract_version: GenerationContractVersion,
+    document: &'snapshot NormalizedIrDocument,
+    source_files: &'snapshot SourceFileCatalog,
     context: &GenerationContext<'_>,
 ) -> Result<(), GenerationControlError> {
     context.check()?;
@@ -349,6 +472,8 @@ fn require_document_budget(
         document.skipped_regions.len(),
         document.diagnostics.len(),
         document.extensions.len(),
+        source_files.len(),
+        source_files.len(),
     ]
     .into_iter()
     .try_fold(0_u64, |total, length| {
@@ -381,6 +506,31 @@ fn require_document_budget(
         }
         observe_text(&file.language, &mut text_bytes, context)?;
         observe_text(&file.encoding, &mut text_bytes, context)?;
+        context.check()?;
+    }
+    for entry in source_files.entries() {
+        context.check()?;
+        let file = entry.file();
+        observe_evidence(&file.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&file.path, &mut text_bytes, context)?;
+        if let Some(locator) = &file.path_locator {
+            for component in locator.components() {
+                observe_text(component, &mut text_bytes, context)?;
+            }
+        }
+        observe_text(&file.language, &mut text_bytes, context)?;
+        observe_text(&file.encoding, &mut text_bytes, context)?;
+        observe_text(&entry.claim().path, &mut text_bytes, context)?;
+        text_bytes = checked_add_resource(
+            text_bytes,
+            usize_to_budget_u64(
+                entry.claim().path_identity.len(),
+                GenerationResource::TextBytes,
+                context,
+            )?,
+            GenerationResource::TextBytes,
+            context,
+        )?;
         context.check()?;
     }
     for entity in &document.entities {
@@ -795,9 +945,39 @@ impl IdentityVerifiedGeneration {
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
     ) -> Result<Self, IdentityVerificationError> {
-        let snapshot =
-            GenerationSnapshot::new_with_context(metadata, document, limits, extensions, context)
-                .map_err(IdentityVerificationError::from_snapshot)?;
+        Self::verify_with_source_files(
+            metadata,
+            document,
+            SourceFileCatalog::default(),
+            limits,
+            extensions,
+            context,
+        )
+    }
+
+    /// Verifies normalized facts and exact file-only retrieval records together.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::verify`]. Every catalog claim also
+    /// participates in the generation manifest identity check.
+    pub fn verify_with_source_files(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        let snapshot = GenerationSnapshot::new_with_source_files_and_context(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+            context,
+        )
+        .map_err(IdentityVerificationError::from_snapshot)?;
         Self::verify_snapshot(snapshot, context)
     }
 
@@ -816,9 +996,10 @@ impl IdentityVerifiedGeneration {
         if snapshot.metadata().contract_version() != GENERATION_CONTRACT_VERSION {
             return Err(IdentityVerificationError::LegacyContract);
         }
-        require_document_budget(
+        require_generation_budget(
             snapshot.metadata().contract_version(),
             snapshot.document(),
+            snapshot.source_files(),
             context,
         )
         .map_err(IdentityVerificationError::Control)?;
@@ -1143,6 +1324,28 @@ fn verify_snapshot_identities(
             return Err(IdentityVerificationError::IdentityMismatch(
                 IdentityMismatchComponent::FileClaim,
             ));
+        }
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+    }
+    for entry in snapshot.source_files().entries() {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        let file = entry.file();
+        let source =
+            file.evidence
+                .source
+                .clone()
+                .ok_or(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::FileClaim,
+                ))?;
+        if file_claims
+            .insert(file.id, (entry.claim().clone(), source))
+            .is_some()
+        {
+            return Err(IdentityVerificationError::DuplicateClaim);
         }
         context
             .check()
@@ -1871,6 +2074,9 @@ pub enum GenerationValidationError {
     /// Normalized IR failed its existing bounded validation contract.
     #[error("generation normalized IR is invalid")]
     InvalidIr(#[source] IrDocumentValidationError),
+    /// File-only retrieval records failed their exact source contract.
+    #[error("generation source file catalog is invalid")]
+    InvalidSourceCatalog(#[source] SourceFileCatalogError),
     /// Cardinality addition overflowed.
     #[error("generation statistics overflowed")]
     StatisticsOverflow,
@@ -1884,9 +2090,14 @@ mod tests {
     use super::*;
     use rootlight_cancel::CancellationReason;
     use rootlight_ids::{
-        FileId, GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
+        FactId, FileId, FileIdentity, GenerationId, GenerationIdentity, RepositoryId, content_hash,
+        derive_file, derive_generation,
     };
-    use rootlight_ir::SourceSpan;
+    use rootlight_ir::{
+        AnalysisTier, BuildContextIdentity, FactEvidence, FilePathLocator, FilePathLocatorEncoding,
+        ProducerIdentity, ProducerKind, ProvenanceRecord, SourceSpan, derive_provenance_record_id,
+        new_file_identity_claim_envelope,
+    };
     use serde::ser::SerializeSeq;
 
     fn metadata(repository: RepositoryId) -> GenerationMetadata {
@@ -1941,6 +2152,163 @@ mod tests {
         .expect("verified fixture metadata is valid")
     }
 
+    fn file_only_generation(
+        bind_manifest_claim: bool,
+    ) -> (GenerationMetadata, NormalizedIrDocument, SourceFileCatalog) {
+        let repository = RepositoryId::from_bytes([4; 16]);
+        let configuration_hash = content_hash(b"configuration");
+        let provider_set_hash = content_hash(b"providers");
+        let path = "src/file.txt";
+        let path_identity = b"src/file.txt".to_vec();
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: &path_identity,
+        })
+        .id();
+        let file_content_hash = content_hash(b"source");
+        let claim = FileIdentityClaim {
+            file,
+            repository,
+            path: path.to_owned(),
+            path_identity,
+            content_hash: file_content_hash,
+            byte_length: 6,
+        };
+        let anchor_path = "src/anchor.txt";
+        let anchor_path_identity = b"src/anchor.txt".to_vec();
+        let anchor_file = derive_file(FileIdentity {
+            repository,
+            path_identity: &anchor_path_identity,
+        })
+        .id();
+        let anchor_content_hash = content_hash(b"anchor");
+        let anchor_claim = FileIdentityClaim {
+            file: anchor_file,
+            repository,
+            path: anchor_path.to_owned(),
+            path_identity: anchor_path_identity,
+            content_hash: anchor_content_hash,
+            byte_length: 6,
+        };
+        let mut manifest_claims = vec![anchor_claim.clone()];
+        if bind_manifest_claim {
+            manifest_claims.push(claim.clone());
+        }
+        let manifest_hash =
+            GenerationManifestRecipe::new(repository, configuration_hash, manifest_claims)
+                .expect("fixture manifest is valid")
+                .canonical_hash()
+                .expect("fixture manifest is encodable");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash,
+            config_hash: configuration_hash,
+            provider_set_hash,
+            format_version: generation_format_version(GENERATION_CONTRACT_VERSION),
+        })
+        .id();
+        let metadata = GenerationMetadata::new(
+            repository,
+            generation,
+            None,
+            manifest_hash,
+            configuration_hash,
+            provider_set_hash,
+        )
+        .expect("fixture metadata is valid");
+        let anchor_source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(anchor_file, 0, 6).expect("fixture span is valid"),
+            anchor_content_hash,
+            None,
+        );
+        let mut provenance = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Rule,
+            producer: ProducerIdentity::new("fixture-file-fallback", "1.0", configuration_hash)
+                .expect("fixture producer is valid"),
+            binary_digest: content_hash(b"fixture-binary"),
+            frontend_version: Some("fixture-1".to_owned()),
+            language: "text".to_owned(),
+            tier: AnalysisTier::TierD,
+            build_context: BuildContextIdentity::new(configuration_hash),
+            input_sources: vec![anchor_source.clone()],
+            evidence_sources: vec![anchor_source.clone()],
+            derivation_parents: Vec::new(),
+            rule: Some("file-only-fallback".to_owned()),
+        };
+        provenance.id =
+            derive_provenance_record_id(&provenance).expect("fixture provenance derives");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 6).expect("fixture span is valid"),
+            file_content_hash,
+            None,
+        );
+        let record = FileRecord {
+            id: file,
+            repository,
+            generation,
+            path: path.to_owned(),
+            path_locator: Some(
+                FilePathLocator::new(FilePathLocatorEncoding::UnixBytesV1, vec!["61".to_owned()])
+                    .expect("fixture locator is valid"),
+            ),
+            content_hash: file_content_hash,
+            byte_length: 6,
+            language: "text".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        let catalog = SourceFileCatalog::new(vec![
+            crate::SourceFileCatalogEntry::new(record, claim)
+                .expect("fixture catalog entry is valid"),
+        ])
+        .expect("fixture catalog is valid");
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.files.push(FileRecord {
+            id: anchor_file,
+            repository,
+            generation,
+            path: anchor_path.to_owned(),
+            path_locator: Some(
+                FilePathLocator::new(FilePathLocatorEncoding::UnixBytesV1, vec!["62".to_owned()])
+                    .expect("fixture locator is valid"),
+            ),
+            content_hash: anchor_content_hash,
+            byte_length: 6,
+            language: "text".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: Some(anchor_source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        document.provenance.push(provenance);
+        document.extensions.push(
+            new_file_identity_claim_envelope(
+                &anchor_claim,
+                generation,
+                document.provenance[0].id,
+                anchor_source,
+            )
+            .expect("fixture file claim envelope is valid"),
+        );
+        (metadata, document, catalog)
+    }
+
     struct CancelDuringSerialization<'a> {
         cancellation: &'a Cancellation,
     }
@@ -1987,6 +2355,43 @@ mod tests {
         );
 
         assert_eq!(result, Err(GenerationValidationError::OwnershipMismatch));
+    }
+
+    #[test]
+    fn file_only_catalog_participates_in_manifest_identity_and_lookup() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        let file = catalog.entries()[0].file().id;
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document,
+            catalog,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("file-only catalog verifies");
+
+        assert_eq!(verified.snapshot().document().files.len(), 1);
+        assert_eq!(verified.snapshot().file_count(), 2);
+        assert_eq!(
+            verified.snapshot().find_file(file).map(|record| record.id),
+            Some(file)
+        );
+
+        let (metadata, document, catalog) = file_only_generation(false);
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document,
+                catalog,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+            ),
+            Err(IdentityVerificationError::ManifestMismatch)
+        );
     }
 
     #[test]
