@@ -20,8 +20,8 @@ use rootlight_config::{CONFIG_VERSION_1_0, ConfigSnapshot};
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
 use rootlight_incremental::IncrementalError;
 use rootlight_vfs::{
-    BoundedDirectoryEntries, DirectoryEntry, EntryKind, RelativePath, RepositoryRoot,
-    SourceSnapshot, VfsError,
+    BoundedDirectoryEntries, DirectoryEntry, EntryKind, MAX_SNAPSHOT_BATCH_BYTES,
+    MAX_SNAPSHOT_BATCH_FILES, RelativePath, RepositoryRoot, SourceSnapshot, VfsError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -730,6 +730,14 @@ struct DiscoveryState<'a> {
     snapshots: BTreeMap<FileId, SourceSnapshot>,
     snapshot_budget: RetainedSnapshotBudget,
     retain_snapshots: bool,
+    pending_files: Vec<PendingDiscoveryFile>,
+    pending_source_bytes: u64,
+}
+
+struct PendingDiscoveryFile {
+    path: RelativePath,
+    metadata: rootlight_vfs::SnapshotMetadata,
+    decisive_rule: Option<DecisiveRule>,
 }
 
 struct SnapshotRetentionOptions {
@@ -790,6 +798,8 @@ impl<'a> DiscoveryState<'a> {
             snapshots: BTreeMap::new(),
             snapshot_budget,
             retain_snapshots,
+            pending_files: Vec::new(),
+            pending_source_bytes: 0,
         })
     }
 
@@ -842,6 +852,9 @@ impl<'a> DiscoveryState<'a> {
                 self.queue.clear();
             }
         }
+        if let Err(error) = self.flush_pending_files() {
+            self.finish_at_source_byte_limit(error)?;
+        }
         Ok(())
     }
 
@@ -858,6 +871,8 @@ impl<'a> DiscoveryState<'a> {
                 });
                 self.diagnostic(None, DISCOVERY_SOURCE_BYTE_LIMIT_DIAGNOSTIC_CODE);
                 self.queue.clear();
+                self.pending_files.clear();
+                self.pending_source_bytes = 0;
                 Ok(())
             }
             error => Err(error),
@@ -941,12 +956,86 @@ impl<'a> DiscoveryState<'a> {
             EntryKind::Special => {
                 self.exclude(&path, ExclusionReason::Special, decision.decisive_rule);
             }
-            EntryKind::File => self.visit_file(
+            EntryKind::File => self.visit_or_queue_file(
                 path,
                 entry.metadata,
                 decision.decisive_rule,
                 cached_snapshot,
             )?,
+        }
+        Ok(())
+    }
+
+    fn visit_or_queue_file(
+        &mut self,
+        path: RelativePath,
+        observed_metadata: rootlight_vfs::SnapshotMetadata,
+        decisive_rule: Option<DecisiveRule>,
+        cached_snapshot: Option<SourceSnapshot>,
+    ) -> Result<(), DiscoveryError> {
+        if self.retain_snapshots
+            || cached_snapshot.is_some()
+            || observed_metadata.length > self.limits.max_file_bytes
+        {
+            return self.visit_file(path, observed_metadata, decisive_rule, cached_snapshot);
+        }
+        let capture_bytes = observed_metadata.length.max(1);
+        let next_bytes = self.pending_source_bytes.checked_add(capture_bytes);
+        if !self.pending_files.is_empty()
+            && (self.pending_files.len() >= MAX_SNAPSHOT_BATCH_FILES
+                || next_bytes.is_none_or(|bytes| bytes > MAX_SNAPSHOT_BATCH_BYTES))
+        {
+            self.flush_pending_files()?;
+        }
+        self.pending_source_bytes = self.pending_source_bytes.checked_add(capture_bytes).ok_or(
+            DiscoveryError::RetainedSnapshotByteLimit {
+                observed: u64::MAX,
+                maximum: MAX_SNAPSHOT_BATCH_BYTES,
+            },
+        )?;
+        self.pending_files
+            .try_reserve(1)
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        self.pending_files.push(PendingDiscoveryFile {
+            path,
+            metadata: observed_metadata,
+            decisive_rule,
+        });
+        if self.pending_files.len() >= MAX_SNAPSHOT_BATCH_FILES
+            || self.pending_source_bytes >= MAX_SNAPSHOT_BATCH_BYTES
+        {
+            self.flush_pending_files()?;
+        }
+        Ok(())
+    }
+
+    fn flush_pending_files(&mut self) -> Result<(), DiscoveryError> {
+        if self.pending_files.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_files);
+        self.pending_source_bytes = 0;
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(pending.len())
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        requests.extend(
+            pending
+                .iter()
+                .map(|file| (file.path.clone(), file.metadata.length.max(1))),
+        );
+        let snapshots = self
+            .root
+            .snapshot_batch_with_cancellation(&requests, self.cancellation)?;
+        if snapshots.len() != pending.len() {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        for (file, snapshot) in pending.into_iter().zip(snapshots) {
+            self.record_file_snapshot(
+                file.path,
+                file.decisive_rule,
+                snapshot.map_err(DiscoveryError::from),
+            )?;
         }
         Ok(())
     }
@@ -972,6 +1061,15 @@ impl<'a> DiscoveryState<'a> {
             ),
             None => self.snapshot_for_path(&path, observed_metadata),
         };
+        self.record_file_snapshot(path, decisive_rule, snapshot_result)
+    }
+
+    fn record_file_snapshot(
+        &mut self,
+        path: RelativePath,
+        decisive_rule: Option<DecisiveRule>,
+        snapshot_result: Result<SourceSnapshot, DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
         let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(DiscoveryError::Vfs(VfsError::FileTooLarge { .. })) => {
@@ -1828,7 +1926,7 @@ mod tests {
             &Cancellation::new(),
         )
         .expect("exact aggregate snapshot bytes are admitted");
-        let (_, snapshots) = exact.into_parts();
+        let (exact_manifest, snapshots) = exact.into_parts();
         assert_eq!(
             snapshots
                 .values()
@@ -1861,6 +1959,7 @@ mod tests {
         let streaming =
             discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
                 .expect("source-free discovery crosses the snapshot retention boundary");
+        assert_eq!(streaming, exact_manifest);
         assert!(streaming.coverage.complete);
         assert_eq!(streaming.coverage.included, 2);
         assert_eq!(

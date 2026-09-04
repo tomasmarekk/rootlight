@@ -14,6 +14,8 @@ use std::{
     fmt,
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    thread,
     time::Instant,
 };
 
@@ -37,6 +39,11 @@ pub mod platform;
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const SNAPSHOT_READ_CHUNK_BYTES: usize = 64 * 1024;
+/// Hard file-count ceiling for one bounded parallel source-capture batch.
+pub const MAX_SNAPSHOT_BATCH_FILES: usize = 4_096;
+/// Hard aggregate byte ceiling for one bounded parallel source-capture batch.
+pub const MAX_SNAPSHOT_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_BATCH_WORKERS: usize = 8;
 const RETAINED_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 /// Maximum number of relative path components accepted by the VFS.
 pub const MAX_PATH_COMPONENTS: usize = 256;
@@ -1052,6 +1059,135 @@ impl RepositoryRoot {
         })
     }
 
+    /// Captures a bounded batch of stable regular files concurrently.
+    ///
+    /// The returned slots preserve request order even when captures complete in
+    /// another order. Each slot retains its ordinary per-file VFS result so a
+    /// caller can apply the same unreadable-file policy as serial discovery.
+    /// Aggregate bytes, file count, and worker count are hard bounded before any
+    /// worker starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::SnapshotBatchLimit`] when the requested batch exceeds
+    /// a hard aggregate ceiling, [`VfsError::MemoryUnavailable`] when bounded
+    /// result storage cannot be reserved,
+    /// [`VfsError::SnapshotWorkerUnavailable`] when a worker cannot be created
+    /// or terminates unexpectedly, or [`VfsError::Cancelled`] when cancellation
+    /// wins before the batch starts.
+    pub fn snapshot_batch_with_cancellation(
+        &self,
+        requests: &[(RelativePath, u64)],
+        cancellation: &Cancellation,
+    ) -> Result<Vec<Result<SourceSnapshot, VfsError>>, VfsError> {
+        cancellation
+            .check()
+            .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))?;
+        if requests.len() > MAX_SNAPSHOT_BATCH_FILES {
+            return Err(VfsError::SnapshotBatchLimit {
+                maximum_files: MAX_SNAPSHOT_BATCH_FILES,
+                maximum_bytes: MAX_SNAPSHOT_BATCH_BYTES,
+            });
+        }
+        let requested_bytes = requests.iter().try_fold(0_u64, |total, (_, maximum)| {
+            if *maximum == 0 || *maximum > MAX_SNAPSHOT_BYTES {
+                return None;
+            }
+            total.checked_add(*maximum)
+        });
+        if requested_bytes.is_none_or(|bytes| bytes > MAX_SNAPSHOT_BATCH_BYTES) {
+            return Err(VfsError::SnapshotBatchLimit {
+                maximum_files: MAX_SNAPSHOT_BATCH_FILES,
+                maximum_bytes: MAX_SNAPSHOT_BATCH_BYTES,
+            });
+        }
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let worker_count = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(MAX_SNAPSHOT_BATCH_WORKERS)
+            .min(requests.len());
+        let next = AtomicUsize::new(0);
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(requests.len())
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        ordered.extend(std::iter::repeat_with(|| None).take(requests.len()));
+        let captured_batches = thread::scope(|scope| {
+            let mut workers = Vec::new();
+            workers
+                .try_reserve_exact(worker_count)
+                .map_err(|_| VfsError::MemoryUnavailable)?;
+            for _ in 0..worker_count {
+                let worker = thread::Builder::new()
+                    .name("rootlight-vfs-snapshot".to_owned())
+                    .spawn_scoped(scope, || {
+                        let mut captured = Vec::new();
+                        captured
+                            .try_reserve_exact(requests.len().div_ceil(worker_count))
+                            .map_err(|_| VfsError::MemoryUnavailable)?;
+                        loop {
+                            let index = next.fetch_add(1, AtomicOrdering::Relaxed);
+                            let Some((path, maximum_bytes)) = requests.get(index) else {
+                                break;
+                            };
+                            if captured.len() == captured.capacity() {
+                                captured
+                                    .try_reserve(1)
+                                    .map_err(|_| VfsError::MemoryUnavailable)?;
+                            }
+                            captured.push((
+                                index,
+                                self.snapshot_with_cancellation(path, *maximum_bytes, cancellation),
+                            ));
+                        }
+                        Ok::<_, VfsError>(captured)
+                    })
+                    .map_err(|_| VfsError::SnapshotWorkerUnavailable)?;
+                workers.push(worker);
+            }
+            let mut captured_batches = Vec::new();
+            captured_batches
+                .try_reserve_exact(worker_count)
+                .map_err(|_| VfsError::MemoryUnavailable)?;
+            let mut worker_error = None;
+            for worker in workers {
+                match worker.join() {
+                    Ok(Ok(captured)) if worker_error.is_none() => {
+                        captured_batches.push(captured);
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        worker_error.get_or_insert(error);
+                    }
+                    Err(_) => {
+                        worker_error.get_or_insert(VfsError::SnapshotWorkerUnavailable);
+                    }
+                }
+            }
+            if let Some(error) = worker_error {
+                return Err(error);
+            }
+            Ok::<_, VfsError>(captured_batches)
+        })?;
+        for captured in captured_batches {
+            for (index, result) in captured {
+                let slot = ordered
+                    .get_mut(index)
+                    .ok_or(VfsError::SnapshotWorkerUnavailable)?;
+                if slot.replace(result).is_some() {
+                    return Err(VfsError::SnapshotWorkerUnavailable);
+                }
+            }
+        }
+        ordered
+            .into_iter()
+            .map(|result| result.ok_or(VfsError::SnapshotWorkerUnavailable))
+            .collect()
+    }
+
     /// Captures one stable regular file with cooperative cancellation.
     ///
     /// The absolute monotonic deadline is checked before and after every
@@ -1967,6 +2103,17 @@ pub enum VfsError {
     /// A bounded source capture could not reserve its admitted memory.
     #[error("repository snapshot memory is unavailable")]
     MemoryUnavailable,
+    /// A parallel source-capture batch exceeded its hard aggregate ceiling.
+    #[error("repository snapshot batch exceeds {maximum_files} files or {maximum_bytes} bytes")]
+    SnapshotBatchLimit {
+        /// Maximum files admitted in one batch.
+        maximum_files: usize,
+        /// Maximum aggregate capture bytes admitted in one batch.
+        maximum_bytes: u64,
+    },
+    /// A bounded source-capture worker could not start or terminated unexpectedly.
+    #[error("repository snapshot worker is unavailable")]
+    SnapshotWorkerUnavailable,
     /// Cooperative cancellation or a monotonic deadline stopped the capture.
     #[error("repository snapshot was cancelled: {0:?}")]
     Cancelled(CancellationReason),
@@ -2459,6 +2606,60 @@ mod tests {
 
         assert_ne!(first.content_hash(), second.content_hash());
         assert_eq!(first.metadata().length, second.metadata().length);
+    }
+
+    #[test]
+    fn bounded_snapshot_batches_preserve_request_order_and_per_file_errors() {
+        let (temporary, root) = fixture();
+        let mut requests = Vec::new();
+        for index in (0..32).rev() {
+            let name = format!("source-{index:02}.rs");
+            let content = format!("pub const VALUE_{index}: usize = {index};\n");
+            fs::write(temporary.path().join(&name), &content).expect("batch fixture source writes");
+            requests.push((
+                RelativePath::parse(Path::new(&name)).expect("batch fixture path is valid"),
+                u64::try_from(content.len()).expect("fixture length fits u64"),
+            ));
+        }
+        requests.insert(
+            11,
+            (
+                RelativePath::parse(Path::new("missing.rs"))
+                    .expect("missing fixture path is valid"),
+                1,
+            ),
+        );
+
+        let snapshots = root
+            .snapshot_batch_with_cancellation(&requests, &Cancellation::new())
+            .expect("bounded batch starts");
+        assert_eq!(snapshots.len(), requests.len());
+        for (index, ((path, _), snapshot)) in requests.iter().zip(snapshots).enumerate() {
+            if index == 11 {
+                assert!(matches!(snapshot, Err(VfsError::OpenFile { .. })));
+            } else {
+                let snapshot = snapshot.expect("batch fixture snapshot succeeds");
+                assert_eq!(snapshot.path(), path);
+                assert_eq!(snapshot.file(), root.file_id(path));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_batches_reject_aggregate_limits_before_capture() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("missing.rs")).expect("fixture path is valid");
+
+        assert!(matches!(
+            root.snapshot_batch_with_cancellation(
+                &[(path, MAX_SNAPSHOT_BATCH_BYTES + 1)],
+                &Cancellation::new(),
+            ),
+            Err(VfsError::SnapshotBatchLimit {
+                maximum_files: MAX_SNAPSHOT_BATCH_FILES,
+                maximum_bytes: MAX_SNAPSHOT_BATCH_BYTES,
+            })
+        ));
     }
 
     #[test]

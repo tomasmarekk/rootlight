@@ -17,7 +17,10 @@ use rootlight_incremental::{
     InputFingerprint, InputKey, InputSnapshot, MetadataBaseline, PlanningLimits,
     PlatformFileIdentity, ReconcileLimits, ReconcileMode, ScannedFile, plan_reconcile,
 };
-use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata, SourceSnapshot};
+use rootlight_vfs::{
+    EntryKind, MAX_SNAPSHOT_BATCH_BYTES, MAX_SNAPSHOT_BATCH_FILES, RelativePath, RepositoryRoot,
+    SnapshotMetadata, SourceSnapshot, VfsError,
+};
 
 use crate::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, MAX_RETAINED_SOURCE_BYTES,
@@ -311,49 +314,83 @@ pub fn discover_incremental_with_progress(
     let mut hashed_snapshots = BTreeMap::new();
     let mut files_examined = 0_u64;
     let mut bytes_examined = 0_u64;
-    for file in &hashed_files {
+    let mut offset = 0;
+    while offset < hashed_files.len() {
         cancellation.check()?;
-        let path = candidate_scan
-            .paths
-            .get(file)
-            .ok_or(DiscoveryError::IncrementalDrift)?;
-        let expected = candidate_scan
-            .descriptors
-            .get(file)
-            .copied()
-            .ok_or(DiscoveryError::IncrementalDrift)?;
-        // The complete scan supplied the aggregate reservation. A smaller
-        // capture ceiling keeps a racing file growth outside that reservation.
-        let capture_limit = expected.metadata().length().max(1);
-        let snapshot = root.snapshot_with_cancellation(path, capture_limit, cancellation)?;
-        if snapshot.file() != *file
-            || incremental_metadata(snapshot.metadata()) != expected.metadata()
-        {
-            return Err(DiscoveryError::IncrementalDrift);
-        }
-        files_examined = files_examined
-            .checked_add(1)
-            .ok_or(DiscoveryError::IncrementalDrift)?;
-        let snapshot_bytes = u64::try_from(snapshot.content().len()).map_err(|_| {
-            DiscoveryError::RetainedSnapshotByteLimit {
-                observed: u64::MAX,
-                maximum: maximum_retained_source_bytes,
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(MAX_SNAPSHOT_BATCH_FILES.min(hashed_files.len() - offset))
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        let mut batch_bytes = 0_u64;
+        let mut end = offset;
+        while end < hashed_files.len() && requests.len() < MAX_SNAPSHOT_BATCH_FILES {
+            let file = hashed_files[end];
+            let path = candidate_scan
+                .paths
+                .get(&file)
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            let expected = candidate_scan
+                .descriptors
+                .get(&file)
+                .copied()
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            // The complete scan supplied the aggregate reservation. A smaller
+            // capture ceiling keeps a racing file growth outside that reservation.
+            let capture_limit = expected.metadata().length().max(1);
+            let next_bytes = batch_bytes.checked_add(capture_limit);
+            if !requests.is_empty()
+                && next_bytes.is_none_or(|bytes| bytes > MAX_SNAPSHOT_BATCH_BYTES)
+            {
+                break;
             }
-        })?;
-        bytes_examined = bytes_examined.checked_add(snapshot_bytes).ok_or(
-            DiscoveryError::RetainedSnapshotByteLimit {
+            batch_bytes = next_bytes.ok_or(DiscoveryError::RetainedSnapshotByteLimit {
                 observed: u64::MAX,
-                maximum: maximum_retained_source_bytes,
-            },
-        )?;
-        observe_progress(IncrementalDiscoveryProgress {
-            files_examined,
-            bytes_examined,
-        });
-        hashes.insert(*file, snapshot.content_hash());
-        if retain_hashed_snapshots && hashed_snapshots.insert(*file, snapshot).is_some() {
+                maximum: MAX_SNAPSHOT_BATCH_BYTES,
+            })?;
+            requests.push((path.clone(), capture_limit));
+            end += 1;
+        }
+        let snapshots = root.snapshot_batch_with_cancellation(&requests, cancellation)?;
+        if snapshots.len() != end - offset {
             return Err(DiscoveryError::IncrementalDrift);
         }
+        for (file, snapshot) in hashed_files[offset..end].iter().zip(snapshots) {
+            let snapshot = snapshot?;
+            let expected = candidate_scan
+                .descriptors
+                .get(file)
+                .copied()
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            if snapshot.file() != *file
+                || incremental_metadata(snapshot.metadata()) != expected.metadata()
+            {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            files_examined = files_examined
+                .checked_add(1)
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            let snapshot_bytes = u64::try_from(snapshot.content().len()).map_err(|_| {
+                DiscoveryError::RetainedSnapshotByteLimit {
+                    observed: u64::MAX,
+                    maximum: maximum_retained_source_bytes,
+                }
+            })?;
+            bytes_examined = bytes_examined.checked_add(snapshot_bytes).ok_or(
+                DiscoveryError::RetainedSnapshotByteLimit {
+                    observed: u64::MAX,
+                    maximum: maximum_retained_source_bytes,
+                },
+            )?;
+            observe_progress(IncrementalDiscoveryProgress {
+                files_examined,
+                bytes_examined,
+            });
+            hashes.insert(*file, snapshot.content_hash());
+            if retain_hashed_snapshots && hashed_snapshots.insert(*file, snapshot).is_some() {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+        }
+        offset = end;
     }
     let outcome = plan
         .finish(&hashes, reconcile_limits, cancellation)

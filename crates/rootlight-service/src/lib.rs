@@ -137,7 +137,10 @@ use rootlight_storage::{
 pub use rootlight_storage::{
     SharedGenerationExpectation, SharedGenerationImport, SharedGenerationLimits,
 };
-use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
+use rootlight_vfs::{
+    MAX_SNAPSHOT_BATCH_BYTES, MAX_SNAPSHOT_BATCH_FILES, RelativePath, RepositoryRoot,
+    SourceSnapshot, VfsError,
+};
 use serde::{Deserialize, Serialize, ser::SerializeSeq};
 
 const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
@@ -6823,15 +6826,12 @@ impl FirstSliceService {
             None
         };
         let configured_discovery_max_entries = discovery_limits.max_entries;
-        // Normal analysis keeps the configured traversal budget. A durable
-        // file-only generation may rescan source-free metadata up to the
-        // process hard ceiling so an analysis bound does not become a silent
-        // source-inventory omission.
-        let mut resource_bounded_inventory_required = self.durable.is_some()
-            && parent_baseline.is_some_and(|baseline| {
-                baseline.metadata().files().count() > configured_discovery_max_entries
-            });
-        if resource_bounded_inventory_required {
+        // Durable publication must account for every path admitted below the
+        // process hard ceiling. Starting directly at that ceiling avoids
+        // hashing the configured prefix twice when the complete inventory later
+        // selects the resource-bounded file-only representation. Non-durable
+        // analysis retains the caller-configured partial traversal behavior.
+        if self.durable.is_some() {
             discovery_limits.max_entries = MAX_DISCOVERY_ENTRIES;
         }
         let incremental_context = IncrementalDiscoveryContext::new(
@@ -6842,7 +6842,7 @@ impl FirstSliceService {
         let mut discovery_files_examined = 0_u64;
         let mut discovery_bytes_examined = 0_u64;
         let mut last_reported_files = 0_u64;
-        let mut incremental = discover_incremental_with_progress(
+        let incremental = discover_incremental_with_progress(
             &root,
             parent_baseline,
             incremental_context,
@@ -6869,44 +6869,12 @@ impl FirstSliceService {
             },
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
-        if !incremental.is_complete() && self.durable.is_some() {
-            resource_bounded_inventory_required = true;
-        }
-        if resource_bounded_inventory_required
-            && discovery_limits.max_entries < MAX_DISCOVERY_ENTRIES
-        {
-            let replay_base_files = discovery_files_examined;
-            let replay_base_bytes = discovery_bytes_examined;
-            discovery_limits.max_entries = MAX_DISCOVERY_ENTRIES;
-            incremental = discover_incremental_with_progress(
-                &root,
-                parent_baseline,
-                incremental_context,
-                &policy,
-                IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits)
-                    .without_hashed_snapshot_retention(),
-                cancellation,
-                |progress| {
-                    discovery_files_examined =
-                        replay_base_files.saturating_add(progress.files_examined);
-                    discovery_bytes_examined =
-                        replay_base_bytes.saturating_add(progress.bytes_examined);
-                    if discovery_files_examined.saturating_sub(last_reported_files)
-                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
-                    {
-                        last_reported_files = discovery_files_examined;
-                        observe_progress(FirstSliceIndexProgress::observed(
-                            FirstSliceIndexStage::Discovery,
-                            0,
-                            discovery_files_examined,
-                            discovery_bytes_examined,
-                            0,
-                        ));
-                    }
-                },
-            )
-            .map_err(|error| map_discovery_error(error, cancellation))?;
-        }
+        let mut resource_bounded_inventory_required = self.durable.is_some()
+            && (parent_baseline.is_some_and(|baseline| {
+                baseline.metadata().files().count() > configured_discovery_max_entries
+            }) || !incremental.is_complete()
+                || incremental.baseline().metadata().files().count()
+                    > configured_discovery_max_entries);
         // A no-op authoritative reconcile already proves that every tracked
         // path and content fingerprint still matches the active baseline.
         // Reuse is valid only while the complete product configuration and
@@ -6935,6 +6903,10 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
+        resource_bounded_inventory_required |= self.durable.is_some()
+            && (usize::try_from(manifest.coverage.visited)
+                .map_or(true, |visited| visited > configured_discovery_max_entries)
+                || !manifest.coverage.complete);
         let incremental = correlate_incremental_manifest(
             &incremental,
             parent_baseline,
@@ -8124,74 +8096,118 @@ impl FirstSliceService {
         let mut streamed_files = 0_u64;
         let mut streamed_bytes = 0_u64;
         let mut last_reported_files = 0_u64;
-        for file_id in file_ids {
+        let mut file_offset = 0;
+        while file_offset < file_ids.len() {
             check_cancellation(cancellation)?;
-            let file = verified
-                .snapshot()
-                .find_file(file_id)
-                .ok_or(FirstSliceError::Identity)?;
-            let locator = file
-                .path_locator
-                .as_ref()
-                .ok_or(FirstSliceError::Identity)?;
-            let relative = RelativePath::from_locator(locator)
+            let mut requests = Vec::new();
+            requests
+                .try_reserve_exact(MAX_SNAPSHOT_BATCH_FILES.min(file_ids.len() - file_offset))
+                .map_err(|_| FirstSliceError::Retention)?;
+            let mut batch_bytes = 0_u64;
+            let mut batch_end = file_offset;
+            while batch_end < file_ids.len() && requests.len() < MAX_SNAPSHOT_BATCH_FILES {
+                let file = verified
+                    .snapshot()
+                    .find_file(file_ids[batch_end])
+                    .ok_or(FirstSliceError::Identity)?;
+                let locator = file
+                    .path_locator
+                    .as_ref()
+                    .ok_or(FirstSliceError::Identity)?;
+                let relative = RelativePath::from_locator(locator)
+                    .map_err(|error| map_vfs_error(error, cancellation))?;
+                let capture_limit = file.byte_length.max(1).min(source_file_max_bytes);
+                let next_bytes = batch_bytes.checked_add(capture_limit);
+                if !requests.is_empty()
+                    && next_bytes.is_none_or(|bytes| bytes > MAX_SNAPSHOT_BATCH_BYTES)
+                {
+                    break;
+                }
+                batch_bytes = next_bytes.ok_or(FirstSliceError::Limits)?;
+                requests.push((relative, capture_limit));
+                batch_end += 1;
+            }
+            let snapshots = root
+                .snapshot_batch_with_cancellation(&requests, cancellation)
                 .map_err(|error| map_vfs_error(error, cancellation))?;
-            let snapshot = root
-                .snapshot_with_cancellation(&relative, source_file_max_bytes, cancellation)
-                .map_err(|error| map_vfs_error(error, cancellation))?;
-            let snapshot_bytes =
-                u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?;
-            if snapshot.file() != file.id
-                || snapshot.path().to_locator() != *locator
-                || snapshot.content_hash() != file.content_hash
-                || snapshot_bytes != file.byte_length
-            {
+            if snapshots.len() != batch_end - file_offset {
                 return Err(FirstSliceError::DiscoveryDrift.into());
             }
-            source_writer.push(&snapshot)?;
-            let lexical = project_source_fallback_document_with_text_limit(
-                verified.snapshot(),
-                &snapshot,
-                text_limit,
-                budget,
-                cancellation,
-            )
-            .map_err(|error| map_query_error(error, cancellation))?;
-            logical_builder
-                .push(&LogicalLexicalDocument::from(&lexical))
-                .map_err(|error| map_incremental_error(error, cancellation))?;
-            partition.push(lexical);
-            if partition.len() == partition_files {
-                search_builder
-                    .push_partition(std::mem::take(&mut partition), cancellation)
-                    .map_err(|error| map_search_error(error, cancellation))?;
-                partition
-                    .try_reserve_exact(partition_files)
-                    .map_err(|_| FirstSliceError::Retention)?;
-            }
-            streamed_files = streamed_files
-                .checked_add(1)
-                .ok_or(FirstSliceError::Limits)?;
-            streamed_bytes = streamed_bytes
-                .checked_add(snapshot_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            if streamed_files == 1
-                || streamed_files.saturating_sub(last_reported_files)
-                    >= DISCOVERY_PROGRESS_INTERVAL_FILES
+            for (file_id, snapshot) in file_ids[file_offset..batch_end]
+                .iter()
+                .copied()
+                .zip(snapshots)
             {
-                last_reported_files = streamed_files;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Persistence,
-                    4,
-                    files_examined
-                        .checked_add(streamed_files)
-                        .ok_or(FirstSliceError::Limits)?,
-                    bytes_examined
-                        .checked_add(streamed_bytes)
-                        .ok_or(FirstSliceError::Limits)?,
-                    catalog_written_bytes,
-                ));
+                let snapshot = match snapshot {
+                    Ok(snapshot) => snapshot,
+                    Err(VfsError::FileTooLarge { .. }) => {
+                        return Err(FirstSliceError::DiscoveryDrift.into());
+                    }
+                    Err(error) => return Err(map_vfs_error(error, cancellation).into()),
+                };
+                let file = verified
+                    .snapshot()
+                    .find_file(file_id)
+                    .ok_or(FirstSliceError::Identity)?;
+                let locator = file
+                    .path_locator
+                    .as_ref()
+                    .ok_or(FirstSliceError::Identity)?;
+                let snapshot_bytes =
+                    u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?;
+                if snapshot.file() != file.id
+                    || snapshot.path().to_locator() != *locator
+                    || snapshot.content_hash() != file.content_hash
+                    || snapshot_bytes != file.byte_length
+                {
+                    return Err(FirstSliceError::DiscoveryDrift.into());
+                }
+                source_writer.push(&snapshot)?;
+                let lexical = project_source_fallback_document_with_text_limit(
+                    verified.snapshot(),
+                    &snapshot,
+                    text_limit,
+                    budget,
+                    cancellation,
+                )
+                .map_err(|error| map_query_error(error, cancellation))?;
+                logical_builder
+                    .push(&LogicalLexicalDocument::from(&lexical))
+                    .map_err(|error| map_incremental_error(error, cancellation))?;
+                partition.push(lexical);
+                if partition.len() == partition_files {
+                    search_builder
+                        .push_partition(std::mem::take(&mut partition), cancellation)
+                        .map_err(|error| map_search_error(error, cancellation))?;
+                    partition
+                        .try_reserve_exact(partition_files)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                }
+                streamed_files = streamed_files
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                streamed_bytes = streamed_bytes
+                    .checked_add(snapshot_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                if streamed_files == 1
+                    || streamed_files.saturating_sub(last_reported_files)
+                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
+                {
+                    last_reported_files = streamed_files;
+                    observe_progress(FirstSliceIndexProgress::observed(
+                        FirstSliceIndexStage::Persistence,
+                        4,
+                        files_examined
+                            .checked_add(streamed_files)
+                            .ok_or(FirstSliceError::Limits)?,
+                        bytes_examined
+                            .checked_add(streamed_bytes)
+                            .ok_or(FirstSliceError::Limits)?,
+                        catalog_written_bytes,
+                    ));
+                }
             }
+            file_offset = batch_end;
         }
         if streamed_files
             != u64::try_from(verified.snapshot().file_count())
@@ -18628,9 +18644,12 @@ fn map_vfs_error(error: VfsError, cancellation: &Cancellation) -> FirstSliceErro
             maximum.saturating_add(1),
             maximum,
         ),
-        VfsError::InvalidByteLimit => FirstSliceError::Limits,
+        VfsError::InvalidByteLimit | VfsError::SnapshotBatchLimit { .. } => FirstSliceError::Limits,
         VfsError::MemoryUnavailable => FirstSliceError::ResourceUnavailable {
             resource: FirstSliceResource::MemoryBytes,
+        },
+        VfsError::SnapshotWorkerUnavailable => FirstSliceError::ResourceUnavailable {
+            resource: FirstSliceResource::ProcessResources,
         },
         VfsError::OpenRoot { .. }
         | VfsError::OpenDirectory { .. }
@@ -25029,13 +25048,26 @@ mod tests {
             .install_complete_deferred_restore_progressively(&deferred, &deadline())
             .expect("empty durable inventory state restores");
 
-        let structural = service
-            .index_repository_with_mode(
+        let mut structural_progress = Vec::new();
+        let structural_preparation = service
+            .prepare_repository_with_mode_and_progress(
                 fixture.path(),
                 FirstSliceIndexMode::Structural,
                 &deadline(),
+                |progress| structural_progress.push(progress),
             )
+            .expect("bounded structural inventory prepares");
+        let structural = service
+            .publish_prepared(structural_preparation, &deadline())
             .expect("bounded structural inventory publishes");
+        assert_eq!(
+            structural_progress
+                .iter()
+                .filter(|progress| progress.stage == FirstSliceIndexStage::Discovery)
+                .map(|progress| progress.files_examined)
+                .max(),
+            Some(sources.len() as u64),
+        );
         assert!(structural.discovery_complete);
         assert_eq!(structural.discovered_inputs, sources.len() as u64);
         assert!(
