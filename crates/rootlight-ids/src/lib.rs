@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{fmt, str::FromStr};
+use std::{fmt, str::FromStr, sync::LazyLock};
 
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -18,6 +18,8 @@ const SYMBOL_CONTEXT: &str = "rootlight/symbol/v1";
 const FILE_CONTEXT: &str = "rootlight/file/v1";
 const FACT_CONTEXT: &str = "rootlight/fact/v1";
 const TEXT_CHECKSUM_CONTEXT: &str = "rootlight/id-text-checksum/v1";
+static TEXT_CHECKSUM_HASHER: LazyLock<blake3::Hasher> =
+    LazyLock::new(|| blake3::Hasher::new_derive_key(TEXT_CHECKSUM_CONTEXT));
 
 /// The complete digest retained to detect collisions in compact public IDs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -536,11 +538,26 @@ fn classify_prefix(expected: &str, input: &str) -> IdParseError {
 }
 
 fn text_checksum(prefix: &str, raw: &[u8]) -> [u8; CHECKSUM_BYTES] {
-    let mut encoder = CanonicalEncoder::default();
-    encoder.text(prefix).bytes(raw);
-    let digest = blake3::derive_key(TEXT_CHECKSUM_CONTEXT, encoder.as_bytes());
+    // Recovery formats many references. Reuse only the immutable derivation
+    // context and stream the existing length framing without a per-ID buffer.
+    let mut hasher = TEXT_CHECKSUM_HASHER.clone();
+    for value in [prefix.as_bytes(), raw] {
+        match u32::try_from(value.len()) {
+            Ok(length) if length < u32::MAX => {
+                hasher.update(&length.to_be_bytes());
+            }
+            _ => {
+                hasher.update(&u32::MAX.to_be_bytes());
+                let length = u64::try_from(value.len())
+                    .expect("supported Rust targets have at most 64-bit usize");
+                hasher.update(&length.to_be_bytes());
+            }
+        }
+        hasher.update(value);
+    }
+    let digest = hasher.finalize();
     let mut checksum = [0_u8; CHECKSUM_BYTES];
-    checksum.copy_from_slice(&digest[..CHECKSUM_BYTES]);
+    checksum.copy_from_slice(&digest.as_bytes()[..CHECKSUM_BYTES]);
     checksum
 }
 
@@ -657,6 +674,35 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    fn uncached_text_checksum(prefix: &str, raw: &[u8]) -> [u8; CHECKSUM_BYTES] {
+        let mut encoder = CanonicalEncoder::default();
+        encoder.text(prefix).bytes(raw);
+        let digest = blake3::derive_key(TEXT_CHECKSUM_CONTEXT, encoder.as_bytes());
+        let mut checksum = [0; CHECKSUM_BYTES];
+        checksum.copy_from_slice(&digest[..CHECKSUM_BYTES]);
+        checksum
+    }
+
+    #[test]
+    fn checksum_calls_do_not_share_message_state() {
+        std::thread::scope(|scope| {
+            for worker in 0_u8..8 {
+                scope.spawn(move || {
+                    for value in 0_u8..=255 {
+                        let mut raw = [value; 20];
+                        raw[0] = worker;
+                        for prefix in ["sym1_", "fact1_", "file1_"] {
+                            assert_eq!(
+                                text_checksum(prefix, &raw),
+                                uncached_text_checksum(prefix, &raw)
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    }
 
     fn repository() -> DerivedId<RepositoryId> {
         derive_repository(b"01914f58-0bd1-7f65-b52c-73aebd98c4a1")
@@ -797,6 +843,25 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn text_checksum_matches_uncached_canonical_recipe(
+            short in any::<[u8; 16]>(),
+            medium in any::<[u8; 20]>(),
+            long in any::<[u8; 32]>(),
+        ) {
+            for (prefix, raw) in [
+                ("repo1_", short.as_slice()),
+                ("op1_", short.as_slice()),
+                ("gen1_", medium.as_slice()),
+                ("sym1_", medium.as_slice()),
+                ("file1_", medium.as_slice()),
+                ("fact1_", medium.as_slice()),
+                ("b3_", long.as_slice()),
+            ] {
+                prop_assert_eq!(text_checksum(prefix, raw), uncached_text_checksum(prefix, raw));
+            }
+        }
+
         #[test]
         fn fixed_buffer_decoder_matches_reference_errors(
             short in any::<[u8; 16]>(),
