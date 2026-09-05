@@ -1748,6 +1748,30 @@ fn bounded_go_syntax_retains_reviewed_literal_route_relationship() {
 }
 
 #[test]
+fn c_function_prototypes_preserve_structural_and_project_identity() {
+    let fixture = ProjectFixture::new(
+        ["include/reader.h"],
+        [
+            "#define PUBLIC_API\nPUBLIC_API const char* describe_status(int status);\nint read_value(void);\nint (*callback_slot)(int);\nint data_value;\n",
+        ],
+        SemanticProjectLanguage::C,
+    );
+    assert_real_parser_symbol_identity(
+        &fixture,
+        "c",
+        &[
+            (EntityKind::Function, "describe_status"),
+            (EntityKind::Function, "read_value"),
+        ],
+    );
+    let output = analyze_with_real_parser(&fixture);
+    assert!(!output.document().entities.iter().any(|entity| {
+        entity.kind == EntityKind::Function
+            && matches!(entity.display_name.as_str(), "callback_slot" | "data_value")
+    }));
+}
+
+#[test]
 fn reviewed_csharp_php_and_c_calls_resolve_only_through_static_rules() {
     for (language, paths, sources, caller_name) in [
         (

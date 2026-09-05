@@ -580,6 +580,11 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Declaration
+            if family == GrammarFamily::C && is_c_function_prototype(capture.node) =>
+        {
+            "c.function"
+        }
         StructuralRole::ScopeTrait => "rust.impl_trait",
         StructuralRole::ScopeType => "rust.impl_type",
         StructuralRole::TestAttribute => match family {
@@ -621,6 +626,27 @@ fn candidate_for_capture(
         syntax,
         required: false,
     })
+}
+
+fn is_c_function_prototype(node: tree_sitter::Node<'_>) -> bool {
+    if node.kind() != "declaration" {
+        return false;
+    }
+    let mut declarator = node.child_by_field_name("declarator");
+    while let Some(node) = declarator {
+        match node.kind() {
+            "pointer_declarator" => declarator = node.child_by_field_name("declarator"),
+            // Outer pointers change the return type. Require a direct function
+            // name so a parenthesized function-pointer variable is not promoted.
+            "function_declarator" => {
+                return node
+                    .child_by_field_name("declarator")
+                    .is_some_and(|name| name.kind() == "identifier");
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 const fn supports_terminal_call_name(family: GrammarFamily) -> bool {

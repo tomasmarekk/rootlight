@@ -135,6 +135,45 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
 }
 
 #[test]
+fn c_prototype_captures_distinguish_pointer_returns_from_pointer_variables() {
+    const SOURCE: &[u8] = b"extern void flush_output(void);\nconst unsigned char **load_buffer(int count);\nlong (*dispatch)(long);\nlong counter;\n";
+    let fixture = Fixture::new("declarations.h", SOURCE);
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(&fixture.snapshot, &fixture.source, &limits, "c", Vec::new());
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("C declarations parse");
+    let functions = output
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "c.function.declaration")
+        .map(|fact| {
+            let start = usize::try_from(fact.span().start_byte()).expect("span start fits");
+            let end = usize::try_from(fact.span().end_byte()).expect("span end fits");
+            SOURCE
+                .get(start..end)
+                .expect("declaration span is in source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        functions,
+        [
+            b"extern void flush_output(void);".as_slice(),
+            b"const unsigned char **load_buffer(int count);".as_slice(),
+        ]
+    );
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
 fn rust_impl_scopes_parent_same_named_methods() {
     const SOURCE: &[u8] =
         b"struct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
