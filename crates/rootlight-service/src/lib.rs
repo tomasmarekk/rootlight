@@ -1019,7 +1019,8 @@ pub struct FirstSliceSupportInventory {
     pub generations: Vec<FirstSliceSupportGeneration>,
     /// Stable normalized generation format.
     pub generation_format: String,
-    /// Total allocated bytes reported by retained generation receipts.
+    /// Physical generation-tree bytes when accounting is available, otherwise
+    /// allocated bytes reported by restored generation receipts.
     pub generation_disk_bytes: u64,
     /// Total physical bytes retained by immutable generation trees, when measured.
     pub total_storage_bytes: Option<u64>,
@@ -10439,7 +10440,11 @@ impl FirstSliceService {
                 GENERATION_CONTRACT_VERSION.major(),
                 GENERATION_CONTRACT_VERSION.minor()
             ),
-            generation_disk_bytes,
+            // Physical accounting includes retained trees before their payloads
+            // are restored, so its total must not depend on receipt installation.
+            generation_disk_bytes: storage.as_ref().map_or(generation_disk_bytes, |inventory| {
+                inventory.generation_unique_bytes
+            }),
             total_storage_bytes,
             shared_bytes,
             reclaimable_bytes,
@@ -28477,10 +28482,15 @@ mod tests {
         assert_eq!(inventory.effective_retention_generations, 3);
         assert_eq!(
             inventory.generation_disk_bytes,
-            first
-                .retained_durable_bytes
-                .checked_add(second.retained_durable_bytes)
-                .expect("fixture retained-byte total fits")
+            inventory
+                .active_generation_bytes
+                .expect("active storage is measured")
+                + inventory
+                    .predecessor_generation_bytes
+                    .expect("predecessor storage is measured")
+                + inventory
+                    .other_retained_generation_bytes
+                    .expect("retained storage is measured")
         );
         assert!(
             inventory
@@ -28497,6 +28507,34 @@ mod tests {
         assert_eq!(active.generation, second.generation);
         assert_eq!(active.parent, Some(first.generation));
         assert_eq!(active.disk_bytes, second.retained_durable_bytes);
+
+        drop(service);
+        let (mut restored, deferred) =
+            FirstSliceService::open_durable_deferred(3, paths.state_dir())
+                .expect("catalog reopens with deferred payload recovery");
+        let active_state = deferred
+            .restore_active(&cancellation)
+            .expect("active generation restores independently");
+        restored
+            .install_deferred_restore(active_state, &cancellation)
+            .expect("active generation installs before retained history");
+        let reconciled = restored
+            .support_inventory_snapshot_reconciled()
+            .expect("physical accounting reconciles before retained history");
+        assert_eq!(reconciled.generations.len(), 1);
+        let classified_generation_bytes = reconciled
+            .active_generation_bytes
+            .expect("active storage is measured")
+            + reconciled
+                .predecessor_generation_bytes
+                .expect("predecessor storage is measured")
+            + reconciled
+                .other_retained_generation_bytes
+                .expect("other retained storage is measured");
+        assert!(
+            reconciled.generation_disk_bytes >= classified_generation_bytes,
+            "physical generation accounting must cover history whose payload is not yet restored"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
