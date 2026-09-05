@@ -6602,8 +6602,10 @@ fn durable_recovery_worker(
                 let _ = recovery.cancellation().cancel(reason);
             }
             if stopping.load(Ordering::Acquire) {
-                recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-                continue;
+                // No retained work began for the remaining batch. Let direct
+                // finalization preserve journal outcomes without resampling
+                // resources or submitting metadata to the draining actor.
+                return Ok(());
             }
             let resource_sampler =
                 recovery.start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
@@ -24065,6 +24067,27 @@ mod tests {
         bool,
         HealthStatus,
     ) {
+        run_recovery_worker_with_shutdown_hook(
+            repository_count,
+            after_start,
+            after_active_restore,
+            None,
+        )
+    }
+
+    fn run_recovery_worker_with_shutdown_hook(
+        repository_count: usize,
+        after_start: RecoveryWorkerStartHook,
+        after_active_restore: Option<RecoveryWorkerCheckpointHook>,
+        shutdown_interrupt_count: Option<usize>,
+    ) -> (
+        Result<(), FirstSliceHostError>,
+        Vec<OperationRecord>,
+        Vec<RepositoryOperationContext>,
+        bool,
+        bool,
+        HealthStatus,
+    ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -24137,6 +24160,38 @@ mod tests {
             assert_eq!(starting_state.lifecycle(), DaemonLifecycle::Starting);
             after_start(cancellation, stopping)
         });
+        let stopping = Arc::new(AtomicBool::new(false));
+        if shutdown_interrupt_count.is_some() {
+            let target = targets.first().expect("shutdown fixture has active work");
+            lanes
+                .recovery_demand
+                .lock()
+                .expect("demand queue locks")
+                .insert(target.repository());
+        }
+        let handle = actor.handle();
+        let mut actor = Some(actor);
+        let after_active_restore = if let Some(count) = shutdown_interrupt_count {
+            assert!(after_active_restore.is_none());
+            let shutdown_actor = actor.take().expect("shutdown owns the actor");
+            let shutdown_journal = Arc::clone(&journal);
+            let shutdown_stopping = Arc::clone(&stopping);
+            Some(Box::new(
+                move |_: &FirstSliceServiceLanes, cancellation: &Cancellation| {
+                    shutdown_stopping.store(true, Ordering::Release);
+                    assert!(cancellation.cancel(CancellationReason::Shutdown));
+                    shutdown_journal
+                        .interrupt_nonterminal(count)
+                        .expect("bounded shutdown interruption succeeds");
+                    shutdown_actor
+                        .join()
+                        .expect("journal closes before recovery cleanup");
+                    Ok(())
+                },
+            ) as RecoveryWorkerCheckpointHook)
+        } else {
+            after_active_restore
+        };
         let result = durable_recovery_worker(
             DeferredRecoveryWork {
                 restore,
@@ -24147,9 +24202,9 @@ mod tests {
                 after_active_restore,
             },
             lanes,
-            actor.handle(),
+            handle,
             Arc::new(Mutex::new(OperationMetadataSet::new(4))),
-            Arc::new(AtomicBool::new(false)),
+            stopping,
             runtime,
             Cancellation::with_deadline(Instant::now() + Duration::from_secs(30)),
         );
@@ -24173,7 +24228,9 @@ mod tests {
         )
         .health()
         .generation_status;
-        actor.join().expect("journal actor joins");
+        if let Some(actor) = actor {
+            actor.join().expect("journal actor joins");
+        }
         (
             result,
             records,
@@ -24258,6 +24315,44 @@ mod tests {
                 && record.state == OperationState::Cancelled
                 && record.cancellation_reason == Some(CancellationReason::Shutdown)
         }));
+    }
+
+    #[test]
+    fn shutdown_finalizes_unstarted_retained_work_without_actor_admission() {
+        for interrupted in 0..=2 {
+            let (result, records, contexts, ready, complete, _) =
+                run_recovery_worker_with_shutdown_hook(
+                    2,
+                    Box::new(|_, _| Ok(())),
+                    None,
+                    Some(interrupted),
+                );
+            result.expect("unstarted retained work uses direct terminalization after shutdown");
+            assert!(ready);
+            assert!(!complete);
+            assert_eq!(records.len(), 2);
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record.state == OperationState::Interrupted)
+                    .count(),
+                interrupted
+            );
+            assert!(records.iter().all(|record| {
+                record.state == OperationState::Interrupted
+                    || (record.state == OperationState::Cancelled
+                        && record.cancellation_reason == Some(CancellationReason::Shutdown))
+            }));
+            assert!(records.iter().all(|record| {
+                record.peak_rss_bytes > 0
+                    && record.progress == Progress::new(1, 2).expect("active phase completed")
+            }));
+            assert!(
+                contexts
+                    .iter()
+                    .all(|context| context.files_examined == 1 && context.bytes_examined > 0)
+            );
+        }
     }
 
     #[test]
