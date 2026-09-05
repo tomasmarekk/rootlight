@@ -8,6 +8,7 @@
 
 pub mod catalog;
 mod durable;
+mod refinement;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8714,12 +8715,28 @@ impl FirstSliceService {
                                             }
                                         });
                                     } else {
-                                        match append_project_document_with_capacity(
+                                        let append_result = preflight_normalized_document_append(
                                             target,
-                                            document,
+                                            &document,
                                             self.analysis_limits.ir(),
-                                            &mut append_state,
-                                        ) {
+                                        )
+                                        .and_then(|()| {
+                                            refinement::retain_structural_occurrences(
+                                                document,
+                                                &fallback_documents,
+                                                self.analysis_limits.ir(),
+                                                cancellation,
+                                            )
+                                        })
+                                        .and_then(|document| {
+                                            append_project_document_with_capacity(
+                                                target,
+                                                document,
+                                                self.analysis_limits.ir(),
+                                                &mut append_state,
+                                            )
+                                        });
+                                        match append_result {
                                             Ok(()) => continue,
                                             Err(error @ FirstSliceError::ResourceLimit { .. })
                                                 if require_complete_project_analysis =>
@@ -8731,6 +8748,9 @@ impl FirstSliceService {
                                                     Some(FirstSliceProjectAnalysisError::Capacity);
                                             }
                                             Err(error @ FirstSliceError::Limits) => {
+                                                return Err(error);
+                                            }
+                                            Err(error @ FirstSliceError::Cancelled(_)) => {
                                                 return Err(error);
                                             }
                                             Err(_) => {
@@ -23395,6 +23415,76 @@ mod tests {
     }
 
     #[test]
+    fn bounded_project_refinement_preserves_structural_call_evidence() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "print('bounded project syntax')\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"bounded-call-project-adapter"),
+            calls: Arc::clone(&calls),
+            partitioned: false,
+            syntax_facts_bounded: true,
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+        let structural = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("structural indexing succeeds");
+        let structural_calls = service
+            .loaded_generation_snapshot(structural.generation)
+            .expect("structural snapshot is retained")
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .map(|occurrence| occurrence.source.span())
+            .collect::<Vec<_>>();
+        assert!(
+            !structural_calls.is_empty(),
+            "structural call evidence exists before refinement"
+        );
+        let refined = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("bounded project refinement publishes");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let snapshot = service
+            .loaded_generation_snapshot(refined.generation)
+            .expect("refined snapshot is retained");
+        assert!(
+            snapshot
+                .document()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+        );
+        assert!(
+            refined
+                .diagnostics
+                .iter()
+                .all(|diagnostic| { !diagnostic.code.ends_with("-fallback") }),
+            "retaining structural evidence must not discard the accepted project result"
+        );
+        for span in structural_calls {
+            assert!(
+                snapshot.document().occurrences.iter().any(|occurrence| {
+                    occurrence.role == OccurrenceRole::CallSite
+                        && occurrence.source.span() == span
+                        && occurrence.source.generation() == refined.generation
+                }),
+                "bounded semantic refinement must not erase existing call evidence"
+            );
+        }
+    }
+
+    #[test]
     fn bounded_project_syntax_falls_back_when_a_declaration_is_lost() {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
@@ -23432,6 +23522,312 @@ mod tests {
             diagnostic.code == "project-adapter-declaration-loss-fallback"
                 && diagnostic.message == "project analysis for python used structural fallback"
         }));
+    }
+
+    fn structural_refinement_fixture(
+        suffix: &str,
+        source: &str,
+    ) -> (NormalizedIrDocument, GenerationMetadata) {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let path = format!("src/input.{suffix}");
+        write_language_fixture(fixture.path(), &[(path.as_str(), source)]);
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("structural fixture publishes");
+        (
+            service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("fixture snapshot exists")
+                .document()
+                .clone(),
+            service
+                .generation_metadata(receipt.generation)
+                .expect("fixture metadata exists"),
+        )
+    }
+
+    fn file_only_refinement_project(structural: &NormalizedIrDocument) -> NormalizedIrDocument {
+        let mut project = structural.clone();
+        project.entities.clear();
+        project.occurrences.clear();
+        project.relations.clear();
+        project
+            .extensions
+            .retain(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE);
+        project
+            .coverage_records
+            .retain(|coverage| coverage.domain == IrFactDomain::Files);
+        project.skipped_regions.clear();
+        project.diagnostics.clear();
+        let provenance = project
+            .files
+            .iter()
+            .map(|file| file.provenance)
+            .chain(
+                project
+                    .coverage_records
+                    .iter()
+                    .map(|coverage| coverage.provenance),
+            )
+            .chain(
+                project
+                    .extensions
+                    .iter()
+                    .map(|extension| extension.provenance),
+            )
+            .collect::<BTreeSet<_>>();
+        project
+            .provenance
+            .retain(|record| provenance.contains(&record.id));
+        project
+    }
+
+    #[test]
+    fn structural_refinement_restores_c_calls_with_verified_identity_closure() {
+        let (structural, metadata) = structural_refinement_fixture(
+            "c",
+            "int leaf(void) { return 7; }\nint entry(void) { return leaf(); }\n",
+        );
+        let expected_calls = structural
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .collect::<Vec<_>>();
+        assert!(
+            !expected_calls.is_empty(),
+            "fixture has structural call evidence"
+        );
+        let project = file_only_refinement_project(&structural);
+        let project_coverage = project.coverage_records.clone();
+        let refined = refinement::retain_structural_occurrences(
+            project,
+            std::slice::from_ref(&structural),
+            &IrLimits::default(),
+            &deadline(),
+        )
+        .expect("structural evidence supplements the project");
+        for call in expected_calls {
+            assert!(refined.occurrences.contains(call));
+        }
+        assert!(
+            structural
+                .occurrences
+                .iter()
+                .all(|record| refined.occurrences.contains(record))
+        );
+        for coverage in structural
+            .coverage_records
+            .iter()
+            .filter(|record| record.domain == IrFactDomain::Occurrences)
+            .chain(&project_coverage)
+        {
+            assert!(refined.coverage_records.contains(coverage));
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+        }
+        let cancellation = deadline();
+        IdentityVerifiedGeneration::verify(
+            metadata,
+            refined,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .expect("supplemented graph verifies every identity, claim and provenance reference");
+    }
+
+    #[test]
+    fn structural_refinement_keeps_project_calls_and_unknown_targets() {
+        let (structural, metadata) = structural_refinement_fixture(
+            "rs",
+            "fn leaf() {}\nfn entry() { leaf(); unknown(); }\nfn second() { leaf(); }\n",
+        );
+        let mut project = structural.clone();
+        let mut preferred = structural
+            .occurrences
+            .iter()
+            .find(|record| {
+                record.role == OccurrenceRole::CallSite
+                    && matches!(record.target, OccurrenceTarget::Resolved { .. })
+            })
+            .expect("fixture includes a resolved call")
+            .clone();
+        let previous = preferred.id;
+        preferred.confidence =
+            rootlight_ir::Confidence::new(1000).expect("project confidence is valid");
+        preferred.source = SourceRef::new(
+            preferred.repository,
+            preferred.generation,
+            preferred.source.span(),
+            preferred.source.content_hash(),
+            Some(rootlight_ir::LineRange::new(1, 3).expect("presentation hint is valid")),
+        );
+        preferred.id = rootlight_ir::derive_occurrence_record_id(&preferred)
+            .expect("project occurrence identity derives");
+        let omitted = structural
+            .occurrences
+            .iter()
+            .filter(|record| record.role == OccurrenceRole::CallSite && record.id != previous)
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
+        assert!(!omitted.is_empty(), "fixture also includes an unknown call");
+        project
+            .occurrences
+            .retain(|record| !omitted.contains(&record.id) && record.id != previous);
+        project.occurrences.push(preferred.clone());
+        project.relations.retain(|relation| [relation.subject, relation.object].iter()
+            .all(|endpoint| !matches!(endpoint, RelationEndpoint::Occurrence(id) if omitted.contains(id))));
+        for relation in &mut project.relations {
+            for endpoint in [&mut relation.subject, &mut relation.object] {
+                if *endpoint == RelationEndpoint::Occurrence(previous) {
+                    *endpoint = RelationEndpoint::Occurrence(preferred.id);
+                }
+            }
+            for reference in &mut relation.evidence.derivation {
+                if *reference == FactRef::Fact(previous) {
+                    *reference = FactRef::Fact(preferred.id);
+                }
+            }
+            relation.id =
+                derive_relation_record_id(relation).expect("project edge identity derives");
+        }
+        let refined = refinement::retain_structural_occurrences(
+            project,
+            std::slice::from_ref(&structural),
+            &IrLimits::default(),
+            &deadline(),
+        )
+        .expect("missing calls are supplemented");
+        assert_eq!(
+            refined
+                .occurrences
+                .iter()
+                .filter(|record| record.role == preferred.role
+                    && record.source.span() == preferred.source.span())
+                .count(),
+            1
+        );
+        assert!(refined.occurrences.contains(&preferred));
+        for occurrence in structural
+            .occurrences
+            .iter()
+            .filter(|record| omitted.contains(&record.id))
+        {
+            assert!(refined.occurrences.contains(occurrence));
+            if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
+                assert!(
+                    !refined
+                        .relations
+                        .iter()
+                        .any(|relation| relation.predicate == RelationPredicate::Calls
+                            && relation.subject == RelationEndpoint::Occurrence(occurrence.id))
+                );
+            } else {
+                let edges = structural
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.predicate == RelationPredicate::Calls
+                            && relation.subject == RelationEndpoint::Occurrence(occurrence.id)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !edges.is_empty(),
+                    "omitted resolved call has structural edges"
+                );
+                assert!(
+                    edges
+                        .into_iter()
+                        .all(|edge| refined.relations.contains(edge))
+                );
+            }
+        }
+        assert!(
+            refined
+                .occurrences
+                .iter()
+                .any(|record| omitted.contains(&record.id)
+                    && matches!(record.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(
+            refined
+                .occurrences
+                .iter()
+                .any(|record| omitted.contains(&record.id)
+                    && matches!(record.target, OccurrenceTarget::Resolved { .. }))
+        );
+        assert_eq!(
+            refinement::retain_structural_occurrences(
+                refined.clone(),
+                std::slice::from_ref(&structural),
+                &IrLimits::default(),
+                &deadline()
+            )
+            .expect("repeated refinement succeeds"),
+            refined
+        );
+        let cancellation = deadline();
+        IdentityVerifiedGeneration::verify(
+            metadata,
+            refined,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .expect("preferred project and retained structural identities verify together");
+    }
+
+    #[test]
+    fn structural_refinement_rejects_missing_evidence_limits_and_cancellation() {
+        let (mut structural, _) = structural_refinement_fixture("py", "print('probe')\n");
+        let project = file_only_refinement_project(&structural);
+        let mut limits = IrLimits::default();
+        limits.max_occurrences = 0;
+        assert!(matches!(
+            refinement::retain_structural_occurrences(
+                project.clone(),
+                std::slice::from_ref(&structural),
+                &limits,
+                &deadline()
+            ),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Occurrences,
+                ..
+            })
+        ));
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            refinement::retain_structural_occurrences(
+                project.clone(),
+                std::slice::from_ref(&structural),
+                &IrLimits::default(),
+                &cancellation
+            ),
+            Err(FirstSliceError::Cancelled(_))
+        ));
+        let occurrence = structural
+            .occurrences
+            .iter_mut()
+            .find(|record| record.role == OccurrenceRole::CallSite)
+            .expect("fixture includes a call");
+        occurrence
+            .evidence
+            .derivation
+            .push(FactRef::Fact(FactId::from_bytes([37; 20])));
+        assert_eq!(
+            refinement::retain_structural_occurrences(
+                project,
+                &[structural],
+                &IrLimits::default(),
+                &deadline()
+            ),
+            Err(FirstSliceError::Identity)
+        );
     }
 
     #[test]
