@@ -14745,14 +14745,10 @@ fn supported_source_language<'a>(
     {
         return Some(language);
     }
-    // Content evidence may resolve the shared C-family header suffix, but it
-    // must never activate a parser for arbitrary text or unknown extensions.
-    if is_ambiguous_c_header(&input.path)
-        && let Some(language) =
-            unique_supported_language(input, analyzers, LanguageEvidence::Content)
-        && matches!(language, "c" | "cpp")
-    {
-        return Some(language);
+    // A header's C-family evidence can override its C extension default.
+    // Unsupported Objective-C must retain file-only evidence, not enter the C parser.
+    if let Some(language) = c_header_content_language(input) {
+        return analyzers.contains_key(language).then_some(language);
     }
     for evidence in [LanguageEvidence::Extension, LanguageEvidence::Shebang] {
         if let Some(language) = unique_supported_language(input, analyzers, evidence) {
@@ -14786,8 +14782,29 @@ fn is_ambiguous_c_header(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
 }
 
+fn c_header_content_language(input: &ManifestInput) -> Option<&str> {
+    if !is_ambiguous_c_header(&input.path) {
+        return None;
+    }
+    let mut languages = input.language_signals.iter().filter(|signal| {
+        signal.evidence == LanguageEvidence::Content
+            && matches!(
+                signal.language.as_str(),
+                "c" | "cpp" | "objective-c" | "objective-cpp"
+            )
+    });
+    let language = languages.next()?;
+    if languages.any(|other| other.language != language.language) {
+        return None;
+    }
+    Some(language.language.as_str())
+}
+
 fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = source_language_from_path(&input.path) {
+        return Some(language);
+    }
+    if let Some(language) = c_header_content_language(input) {
         return Some(language);
     }
     // `.m` is shared by Objective-C and MATLAB, so bounded content evidence
@@ -14823,6 +14840,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
 }
 
 fn source_language_from_path(path: &str) -> Option<&'static str> {
+    if is_ambiguous_c_header(path) {
+        return None;
+    }
     extension_language(path).filter(|language| *language != "objective-c")
 }
 
@@ -22680,6 +22700,104 @@ mod tests {
                 "package sample\n\nfunc GoValue() int { return 1 }\n",
             )],
             &[("go", "GoValue")],
+        );
+    }
+
+    #[test]
+    fn public_indexing_retains_guarded_c_header_symbols() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[(
+                "include/reader.h",
+                "#ifndef READER_API\n#define READER_API\n/* contract: stable */\nextern int read_item(int key);\n#endif\n",
+            )],
+        );
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("guarded header publishes");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("repository status resolves");
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|coverage| coverage.language == "c")
+            .expect("C coverage is reported");
+        assert_eq!(coverage.indexed_files, 1);
+        // Guarded syntax does not establish evaluated preprocessor conditions.
+        assert_eq!(coverage.status, "bounded");
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "read_item".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("header symbol locates");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.identifier == "read_item"
+                && hit.path == "include/reader.h"
+                && hit.language == "c"
+                && hit.symbol.is_some()
+        }));
+    }
+
+    #[test]
+    fn objc_headers_keep_file_only_source_provenance() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let content = "@interface Signal : NSObject\n@end\n";
+        write_language_fixture(fixture.path(), &[("Signal.h", content)]);
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Objective-C header disposition publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let file = generation
+            .document()
+            .files
+            .first()
+            .expect("header is retained");
+        assert_eq!(file.language, "objective-c");
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .expect("header coverage resolves");
+        assert_eq!(
+            coverage.reason,
+            Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+        );
+        let reference = file
+            .evidence
+            .source
+            .clone()
+            .expect("header has source provenance");
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("Objective-C source remains readable");
+        assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "Signal".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("header locates");
+        assert!(!located.data.hits.is_empty());
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .all(|hit| hit.symbol.is_none() && hit.language == "objective-c")
         );
     }
 

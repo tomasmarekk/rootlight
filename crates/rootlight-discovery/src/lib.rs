@@ -1447,7 +1447,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "c",
-        suffixes: &[".c"],
+        suffixes: &[".c", ".h"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_b",
@@ -1737,7 +1737,13 @@ fn content_language(content: &[u8]) -> Option<&'static str> {
         Some("rust")
     } else if text.contains("package main") && text.contains("func ") {
         Some("go")
-    } else if text.contains("def ") && text.contains(':') {
+    } else if text.lines().any(|line| {
+        let statement = line.trim_start();
+        // Substring matches also accept C header guards and typedefs.
+        (statement.starts_with("def ") || statement.starts_with("async def "))
+            && statement.contains('(')
+            && statement.contains(':')
+    }) {
         Some("python")
     } else if looks_like_cpp(&text) {
         Some("cpp")
@@ -2306,6 +2312,23 @@ max_source_file_bytes = 2097152
         );
         assert_eq!(first.inputs.len(), 1);
         assert_eq!(first.exclusions.len(), 1);
+    }
+
+    #[test]
+    fn header_guards_and_typedefs_are_not_python_definitions() {
+        for source in [
+            b"#ifdef CLIENT_API\n/* contract: stable */\nint read_item(void);\n#endif\n".as_slice(),
+            b"typedef struct { int value; } Item;\n/* note: opaque handle */\n".as_slice(),
+        ] {
+            assert_eq!(content_language(source), None);
+        }
+        for source in [
+            b"def inspect_item(value):\n    return value\n".as_slice(),
+            b"async def load_item(value):\n    return value\n".as_slice(),
+        ] {
+            assert_eq!(content_language(source), Some("python"));
+        }
+        assert_eq!(extension_language("include/reader.h"), Some("c"));
     }
 
     #[test]
