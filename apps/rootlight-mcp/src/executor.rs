@@ -2491,7 +2491,8 @@ where
             } else {
                 operation.await
             }
-            .map_err(|_| AgentPortError::Unavailable)?;
+            .map_err(map_port_error)
+            .map_err(map_agent_child_error)?;
             adapt_plan_change_response(response, &expected).map_err(map_agent_child_error)
         })
     }

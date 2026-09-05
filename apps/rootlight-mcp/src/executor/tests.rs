@@ -4488,6 +4488,112 @@ async fn query_batch_executes_plan_change_under_the_pinned_identity() {
 }
 
 #[tokio::test]
+async fn plan_change_preserves_public_failures_through_the_router() {
+    for code in [
+        ErrorCode::BudgetExceeded,
+        ErrorCode::StaleGeneration,
+        ErrorCode::IndexCorrupt,
+        ErrorCode::UnsupportedCapability,
+    ] {
+        let public = PublicError::builder(code, error_definition(code).message)
+            .repository(repository())
+            .generation(generation())
+            .build()
+            .expect("registered failure is valid");
+        let expected = serde_json::to_value(&public).expect("public error serializes");
+        let harness = Harness::new(FakeOutcome::BatchPlanChange {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Err(ClientPortError::Executor),
+            plan_change: Box::new(Err(ClientPortError::Public(Box::new(public)))),
+        });
+        let calls = Arc::clone(&harness.calls);
+        let router =
+            ToolRouter::new(harness.executor, ExposureProfile::Developer).expect("router compiles");
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": "plan.change",
+                    "arguments": {
+                        "repository": {"repository_id": repository()},
+                        "generation": generation(),
+                        "objective": "bug_fix",
+                        "objective_text": "fix the defect",
+                        "targets": [{"symbol_id": symbol()}],
+                        "budget": {"max_tokens": 16000}
+                    }
+                })),
+                cancellation(),
+            )
+            .await;
+        assert!(
+            calls
+                .lock()
+                .expect("call recorder is not poisoned")
+                .iter()
+                .any(|call| matches!(call, ObservedCall::PlanChange(_)))
+        );
+        let HandlerResponse::Success(result) = response else {
+            panic!("{code:?} must remain a typed tool result: {response:?}");
+        };
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error"], expected);
+    }
+}
+
+#[tokio::test]
+async fn plan_change_keeps_internal_failures_distinct_from_domain_errors() {
+    for (error, message) in [
+        (ClientPortError::Transport, "tool executor failed"),
+        (ClientPortError::Executor, "tool executor failed"),
+        (
+            ClientPortError::InvalidResponse,
+            "tool response mapping failed",
+        ),
+    ] {
+        let harness = Harness::new(FakeOutcome::BatchPlanChange {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Err(ClientPortError::Executor),
+            plan_change: Box::new(Err(error)),
+        });
+        let calls = Arc::clone(&harness.calls);
+        let router =
+            ToolRouter::new(harness.executor, ExposureProfile::Developer).expect("router compiles");
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": "plan.change",
+                    "arguments": {
+                        "repository": {"repository_id": repository()},
+                        "generation": generation(),
+                        "objective": "bug_fix",
+                        "objective_text": "fix the defect",
+                        "targets": [{"symbol_id": symbol()}],
+                        "budget": {"max_tokens": 16000}
+                    }
+                })),
+                cancellation(),
+            )
+            .await;
+        assert!(
+            calls
+                .lock()
+                .expect("call recorder is not poisoned")
+                .iter()
+                .any(|call| matches!(call, ObservedCall::PlanChange(_)))
+        );
+        let HandlerResponse::Error {
+            code,
+            message: actual,
+        } = response
+        else {
+            panic!("internal failures must not become domain responses");
+        };
+        assert_eq!(code, -32603);
+        assert_eq!(actual, message);
+    }
+}
+
+#[tokio::test]
 async fn plan_change_data_is_identical_in_standalone_and_batch_execution() {
     let standalone_harness =
         Harness::new(FakeOutcome::PlanChange(Ok(batch_plan_change_response())));
