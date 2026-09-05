@@ -1140,6 +1140,54 @@ fn bounded_go_calls_prefer_cross_symbol_edges_over_recursion() {
 }
 
 #[test]
+fn bounded_go_domain_routes_do_not_hide_production_local_relationships() {
+    let routes = (0..120)
+        .map(|index| format!("    router.GET(\"/route-{index}\", handle)\n"))
+        .collect::<String>();
+    let route_source = format!(
+        "package sample\nimport \"github.com/gin-gonic/gin\"\nfunc handle() {{}}\nfunc Routes() {{\n    router := gin.Default()\n{routes}}}\n"
+    );
+    let recursive_calls = "    walk()\n".repeat(8);
+    let relationship_source =
+        format!("package sample\nfunc walk() {{\n{recursive_calls}}}\nfunc infer() {{ walk() }}\n");
+    let mut paths = vec!["sample/a_routes.go".to_owned()];
+    let mut sources = vec![route_source];
+    for index in 0..30 {
+        paths.push(format!("sample/b_worker_{index:02}.go"));
+        let repeated = format!("    helper{index}()\n").repeat(24);
+        sources.push(format!(
+            "package sample\nfunc helper{index}() {{}}\nfunc worker{index}() {{\n{repeated}}}\n"
+        ));
+    }
+    paths.push("sample/z_relationships.go".to_owned());
+    sources.push(relationship_source);
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::Go);
+    let limits = real_parser_limits_with_project_files(128);
+    let output = analyze_with_real_parser_limits(&fixture, &limits);
+    let walk = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "walk")
+        .expect("callee is materialized");
+    let infer = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "infer")
+        .expect("caller is materialized");
+
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(infer.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == walk.id
+            )
+    }));
+}
+
+#[test]
 fn go_project_semantics_do_not_cross_package_directories() {
     let fixture = ProjectFixture::new(
         ["first/worker.go", "second/caller.go"],

@@ -353,8 +353,19 @@ fn bound_project_syntax_facts(
                     .cmp(parsed[*right].input.source().path().as_str())
             })
     });
+    let local_fact_reservation = priorities.iter().try_fold(0_usize, |total, priority| {
+        total
+            .checked_add(priority.local.required_facts)
+            .ok_or_else(|| provider_failure("project-fact-accounting"))
+    })?;
+    let reserve_every_local_group = local_fact_reservation <= maximum_optional_facts;
+    let mut remaining_local_fact_reservation = local_fact_reservation;
     for input_index in selection_order {
         let input = &mut parsed[input_index];
+        let local_required_facts = priorities[input_index].local.required_facts;
+        remaining_local_fact_reservation = remaining_local_fact_reservation
+            .checked_sub(local_required_facts)
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
         let fair_allowance = remaining_optional_facts
             .checked_add(remaining_inputs.saturating_sub(1))
             .and_then(|value| value.checked_div(remaining_inputs))
@@ -373,12 +384,25 @@ fn bound_project_syntax_facts(
         } else {
             0
         };
-        let preferred_ceiling = remaining_optional_facts
-            .saturating_sub(reserved_for_remaining)
-            .max(fair_allowance);
-        let allowance = fair_allowance
-            .max(preferred_allowance.min(preferred_ceiling))
-            .min(remaining_optional_facts);
+        let allowance = if reserve_every_local_group {
+            // One representative edge for every repeated local call group is
+            // stronger than spending the same cap on extra early-file sites.
+            let reserved_for_remaining = reserved_for_remaining
+                .max(remaining_local_fact_reservation)
+                .min(remaining_optional_facts);
+            let available = remaining_optional_facts.saturating_sub(reserved_for_remaining);
+            fair_allowance
+                .min(available)
+                .max(preferred_allowance.min(available))
+                .max(local_required_facts.min(available))
+        } else {
+            let preferred_ceiling = remaining_optional_facts
+                .saturating_sub(reserved_for_remaining)
+                .max(fair_allowance);
+            fair_allowance
+                .max(preferred_allowance.min(preferred_ceiling))
+                .min(remaining_optional_facts)
+        };
         let mandatory = mandatory_project_syntax_fact_ids(&input.facts).len();
         let original_len = input.facts.len();
         retain_project_syntax_facts(
@@ -693,6 +717,7 @@ struct PreferredLocalCallGroup {
     call_id: u64,
     is_test: bool,
     demand: usize,
+    required_facts: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -716,7 +741,7 @@ fn project_input_relationship_priority(
     let domain_demand =
         preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
             .len();
-    let local = preferred_local_call_syntax_fact_group(
+    let mut local = preferred_local_call_syntax_fact_group(
         language,
         facts,
         source,
@@ -725,6 +750,20 @@ fn project_input_relationship_priority(
         &declared_calls,
     )
     .unwrap_or_default();
+    if local.demand > 1
+        && let Some(call) = facts_by_id.get(&local.call_id).copied()
+    {
+        let terminal = call_names
+            .get(&call.local_id())
+            .and_then(|name| facts_by_id.get(name))
+            .copied();
+        let mandatory = mandatory_project_syntax_fact_ids(facts);
+        local.required_facts =
+            syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id)
+                .iter()
+                .filter(|local_id| !mandatory.contains(local_id))
+                .count();
+    }
     let imported_demand = imported_call_syntax_fact_groups(
         language,
         facts,
@@ -786,6 +825,7 @@ fn preferred_local_call_syntax_fact_group(
                 call_id: call.local_id(),
                 is_test,
                 demand,
+                required_facts: 0,
             });
     }
     let call_nesting = call_span_nesting(facts);
@@ -864,6 +904,7 @@ fn preferred_local_call_syntax_fact_group(
         call_id: call.local_id(),
         is_test,
         demand,
+        required_facts: 0,
     })
 }
 
