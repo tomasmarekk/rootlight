@@ -113,7 +113,7 @@ pub use rootlight_query::{
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
     QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
-    project_source_fallback_document_with_text_limit,
+    project_source_fallback_document, project_source_fallback_document_with_text_limit,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -10661,6 +10661,40 @@ impl FirstSliceService {
             language.clear();
             language.push_str(canonical);
         }
+        if mode == LocateMode::Text && path_prefixes.len() == 1 {
+            let source_document = self.scoped_partial_source_document(
+                lease.generation(),
+                generation,
+                &path_prefixes[0],
+                cancellation,
+            )?;
+            if let Some(source_document) = source_document {
+                let search = LexicalIndex::build_ephemeral(
+                    generation,
+                    vec![source_document],
+                    BuildBudget::default(),
+                    cancellation,
+                )
+                .map_err(|error| map_search_error(error, cancellation))?;
+                let source_service = QueryService::new(lease.generation(), &search)
+                    .map_err(|error| map_query_error(error, cancellation))?;
+                let plan = source_service
+                    .plan_code_locate_with_filters(
+                        query,
+                        mode,
+                        languages,
+                        path_prefixes,
+                        effective_maximum_results,
+                        page_offset,
+                        search_budget,
+                        query_budget,
+                    )
+                    .map_err(|error| map_query_error(error, cancellation))?;
+                return source_service
+                    .execute_code_locate(&plan, cancellation)
+                    .map_err(|error| map_query_error(error, cancellation));
+            }
+        }
         let plan = service
             .plan_code_locate_with_filters(
                 query,
@@ -10675,6 +10709,57 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_code_locate(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    fn scoped_partial_source_document(
+        &self,
+        snapshot: &rootlight_storage::GenerationSnapshot,
+        generation: GenerationId,
+        path: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<LexicalDocument>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let Some(file) = snapshot
+            .document()
+            .files
+            .iter()
+            .chain(
+                snapshot
+                    .source_files()
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.file()),
+            )
+            .find(|file| file.path == path)
+        else {
+            return Ok(None);
+        };
+        if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64 {
+            return Ok(None);
+        }
+        let has_partial_diagnostic = snapshot.document().diagnostics.iter().any(|diagnostic| {
+            diagnostic.coverage_effect != CoverageStatus::Complete
+                && diagnostic
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file.id)
+        });
+        if !has_partial_diagnostic {
+            return Ok(None);
+        }
+        let retained = self
+            .source_snapshots
+            .snapshots(generation)
+            .ok_or(FirstSliceError::Query)?;
+        let source = if let Some(source) = retained.iter().find(|source| source.file() == file.id) {
+            Arc::clone(source)
+        } else {
+            let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
+            Arc::new(durable.read_source(file.repository, generation, file, cancellation)?)
+        };
+        project_source_fallback_document(snapshot, &source, BuildBudget::default(), cancellation)
+            .map(Some)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
@@ -27170,9 +27255,16 @@ mod tests {
 
     #[test]
     fn repository_analysis_reserves_identity_demand_before_optional_facts() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
         let fixture = TempDir::new().expect("fixture root exists");
-        let sparse = "struct A;\n";
+        let sparse = "// lexical_fallback_marker\nstruct A;\n";
         let dense = concat!(
+            "// lexical_fallback_marker\n",
             "fn alpha() {}\n",
             "fn beta() {}\n",
             "fn gamma() {}\n",
@@ -27198,7 +27290,8 @@ mod tests {
             "the static partition alone must be too small for five declaration closures"
         );
 
-        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
         service.analysis_limits = limits;
         let receipt = service
             .index_repository_with_mode(
@@ -27225,6 +27318,55 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "syntax-extraction-limit"),
             "optional fact truncation remains explicit"
+        );
+        let limited_file = document
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "syntax-extraction-limit")
+            .and_then(|diagnostic| diagnostic.source.as_ref())
+            .and_then(|source| snapshot.find_file(source.span().file()))
+            .expect("bounded syntax diagnostic identifies its source file");
+        let limited_file_id = limited_file.id;
+        let limited_path = limited_file.path.clone();
+        let located = service
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                "lexical_fallback_marker".to_owned(),
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path.clone()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("an exact file scope can recover bounded source text");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.symbol.is_none() && hit.file == limited_file_id && hit.path == limited_path
+        }));
+
+        drop(service);
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service restores");
+        let restored_locate = restored
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                "lexical_fallback_marker".to_owned(),
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("restored exact scope can recover bounded source text");
+        assert!(
+            restored_locate
+                .data
+                .hits
+                .iter()
+                .any(|hit| { hit.symbol.is_none() && hit.file == limited_file_id })
         );
     }
 
