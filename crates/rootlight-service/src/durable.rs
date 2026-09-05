@@ -84,7 +84,8 @@ const SOURCE_PACK_INDEX_VERSION: u16 = 1;
 const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
-const INCREMENTAL_STATE_VERSION: u16 = 1;
+const LEGACY_INCREMENTAL_STATE_VERSION: u16 = 1;
+const INCREMENTAL_STATE_VERSION: u16 = 2;
 const LEGACY_SOURCE_FILE_CATALOG_VERSION: u16 = 1;
 const SOURCE_FILE_CATALOG_VERSION: u16 = 2;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
@@ -842,17 +843,7 @@ impl DurableSourceFileCatalog {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DurableIncrementalState {
-    version: u16,
-    baseline_files: Vec<DurableBaselineFile>,
-    baseline_inputs: Vec<DurableInputFingerprint>,
-    analysis_inputs: Vec<DurableInputFingerprint>,
-    evidence: FirstSliceIncrementalEvidence,
-}
-
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableBaselineFile {
     file: rootlight_ids::FileId,
@@ -877,6 +868,46 @@ struct DurablePlatformFileIdentity {
 struct DurableInputFingerprint {
     key: InputKey,
     value: ContentHash,
+}
+
+#[derive(Deserialize)]
+struct DurableIncrementalStateHeader {
+    version: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDurableIncrementalState {
+    version: u16,
+    baseline_files: Vec<DurableBaselineFile>,
+    baseline_inputs: Vec<DurableInputFingerprint>,
+    analysis_inputs: Vec<DurableInputFingerprint>,
+    evidence: FirstSliceIncrementalEvidence,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableIncrementalState {
+    version: u16,
+    baseline_files: Vec<DurableBaselineFile>,
+    // File content and path fingerprints are reconstructed from the same
+    // baseline records so large repositories do not persist them three times.
+    baseline_context_inputs: Vec<DurableInputFingerprint>,
+    analysis_files: DurableAnalysisFileSelection,
+    analysis_context_inputs: Vec<DurableInputFingerprint>,
+    evidence: FirstSliceIncrementalEvidence,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "selection",
+    content = "files"
+)]
+enum DurableAnalysisFileSelection {
+    AllBaseline,
+    Explicit(Vec<FileId>),
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1329,83 +1360,15 @@ fn recovery_json_serialized_bytes<T: Serialize>(
     Ok(writer.bytes)
 }
 
-impl DurableIncrementalState {
-    fn from_prepared(state: &PreparedIncrementalState) -> Result<Self, FirstSliceError> {
-        let baseline_files = state
-            .baseline
-            .metadata()
-            .files()
-            .map(|file| {
-                let descriptor = file.descriptor();
-                let metadata = descriptor.metadata();
-                DurableBaselineFile {
-                    file: descriptor.file(),
-                    path_hash: descriptor.path_hash(),
-                    content_hash: file.content_hash(),
-                    length: metadata.length(),
-                    modified_ns: metadata.modified_ns(),
-                    change_token: metadata.change_token(),
-                    identity: metadata
-                        .identity()
-                        .map(|identity| DurablePlatformFileIdentity {
-                            volume: identity.volume(),
-                            file_index: identity.file_index(),
-                        }),
-                    reliability: metadata.reliability(),
-                }
-            })
-            .collect();
-        let baseline_inputs = durable_input_fingerprints(state.baseline.inputs());
-        let analysis_inputs = durable_input_fingerprints(&state.inputs);
-        validate_incremental_evidence(&state.evidence)?;
-        Ok(Self {
-            version: INCREMENTAL_STATE_VERSION,
-            baseline_files,
-            baseline_inputs,
-            analysis_inputs,
-            evidence: state.evidence.clone(),
-        })
-    }
-
+impl LegacyDurableIncrementalState {
     fn into_prepared(
         self,
         cancellation: &Cancellation,
     ) -> Result<PreparedIncrementalState, FirstSliceError> {
-        if self.version != INCREMENTAL_STATE_VERSION {
+        if self.version != LEGACY_INCREMENTAL_STATE_VERSION {
             return Err(FirstSliceError::CatalogCorrupt);
         }
-        let reconcile_limits = ReconcileLimits::new(self.baseline_files.len().max(1))
-            .map_err(|error| map_incremental_error(error, cancellation))?;
-        let mut baseline_files = Vec::new();
-        baseline_files
-            .try_reserve_exact(self.baseline_files.len())
-            .map_err(|_| FirstSliceError::Retention)?;
-        for file in self.baseline_files {
-            check_cancellation(cancellation)?;
-            let identity = file
-                .identity
-                .map(|identity| PlatformFileIdentity::new(identity.volume, identity.file_index));
-            let metadata = match file.reliability {
-                MetadataReliability::Trusted => FileMetadata::trusted_with_change_token(
-                    file.length,
-                    file.modified_ns.ok_or(FirstSliceError::CatalogCorrupt)?,
-                    file.change_token.ok_or(FirstSliceError::CatalogCorrupt)?,
-                    identity.ok_or(FirstSliceError::CatalogCorrupt)?,
-                ),
-                MetadataReliability::Untrusted => FileMetadata::untrusted_with_change_token(
-                    file.length,
-                    file.modified_ns,
-                    file.change_token,
-                    identity,
-                ),
-            };
-            baseline_files.push(BaselineFile::new(
-                FileDescriptor::new(file.file, file.path_hash, metadata),
-                file.content_hash,
-            ));
-        }
-        let metadata = MetadataBaseline::new(baseline_files, reconcile_limits, cancellation)
-            .map_err(|error| map_incremental_error(error, cancellation))?;
+        let metadata = restore_metadata_baseline(&self.baseline_files, cancellation)?;
         let baseline_inputs = restore_input_snapshot(self.baseline_inputs, cancellation)?;
         let analysis_inputs = restore_input_snapshot(self.analysis_inputs, cancellation)?;
         validate_incremental_evidence(&self.evidence)?;
@@ -1417,6 +1380,264 @@ impl DurableIncrementalState {
     }
 }
 
+impl DurableIncrementalState {
+    fn from_prepared(
+        state: &PreparedIncrementalState,
+        cancellation: &Cancellation,
+    ) -> Result<Self, FirstSliceError> {
+        let mut baseline_files = Vec::new();
+        baseline_files
+            .try_reserve_exact(state.baseline.metadata().len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        for file in state.baseline.metadata().files() {
+            check_cancellation(cancellation)?;
+            let descriptor = file.descriptor();
+            let metadata = descriptor.metadata();
+            baseline_files.push(DurableBaselineFile {
+                file: descriptor.file(),
+                path_hash: descriptor.path_hash(),
+                content_hash: file.content_hash(),
+                length: metadata.length(),
+                modified_ns: metadata.modified_ns(),
+                change_token: metadata.change_token(),
+                identity: metadata
+                    .identity()
+                    .map(|identity| DurablePlatformFileIdentity {
+                        volume: identity.volume(),
+                        file_index: identity.file_index(),
+                    }),
+                reliability: metadata.reliability(),
+            });
+        }
+        let (baseline_file_ids, baseline_context_inputs) =
+            compact_incremental_inputs(state.baseline.inputs(), &baseline_files, cancellation)?;
+        if !file_ids_cover_baseline(&baseline_file_ids, &baseline_files) {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        drop(baseline_file_ids);
+        let (analysis_file_ids, analysis_context_inputs) =
+            compact_incremental_inputs(&state.inputs, &baseline_files, cancellation)?;
+        let analysis_files = if file_ids_cover_baseline(&analysis_file_ids, &baseline_files) {
+            DurableAnalysisFileSelection::AllBaseline
+        } else {
+            DurableAnalysisFileSelection::Explicit(analysis_file_ids)
+        };
+        validate_incremental_evidence(&state.evidence)?;
+        Ok(Self {
+            version: INCREMENTAL_STATE_VERSION,
+            baseline_files,
+            baseline_context_inputs,
+            analysis_files,
+            analysis_context_inputs,
+            evidence: state.evidence.clone(),
+        })
+    }
+
+    fn into_prepared(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<PreparedIncrementalState, FirstSliceError> {
+        if self.version != INCREMENTAL_STATE_VERSION {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        validate_durable_baseline_order(&self.baseline_files)?;
+        let metadata = restore_metadata_baseline(&self.baseline_files, cancellation)?;
+        let baseline_inputs = restore_compact_input_snapshot(
+            self.baseline_files.iter().map(|file| file.file),
+            self.baseline_files.len(),
+            &self.baseline_files,
+            self.baseline_context_inputs,
+            cancellation,
+        )?;
+        let analysis_inputs = match self.analysis_files {
+            DurableAnalysisFileSelection::AllBaseline => restore_compact_input_snapshot(
+                self.baseline_files.iter().map(|file| file.file),
+                self.baseline_files.len(),
+                &self.baseline_files,
+                self.analysis_context_inputs,
+                cancellation,
+            )?,
+            DurableAnalysisFileSelection::Explicit(files) => {
+                if files.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+                let file_count = files.len();
+                restore_compact_input_snapshot(
+                    files,
+                    file_count,
+                    &self.baseline_files,
+                    self.analysis_context_inputs,
+                    cancellation,
+                )?
+            }
+        };
+        validate_incremental_evidence(&self.evidence)?;
+        Ok(PreparedIncrementalState {
+            baseline: IncrementalDiscoveryBaseline::from_validated_parts(metadata, baseline_inputs),
+            inputs: analysis_inputs,
+            evidence: self.evidence,
+        })
+    }
+}
+
+fn compact_incremental_inputs(
+    snapshot: &InputSnapshot,
+    baseline_files: &[DurableBaselineFile],
+    cancellation: &Cancellation,
+) -> Result<(Vec<FileId>, Vec<DurableInputFingerprint>), FirstSliceError> {
+    let mut content_files = Vec::new();
+    let mut path_files = Vec::new();
+    content_files
+        .try_reserve_exact(baseline_files.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    path_files
+        .try_reserve_exact(baseline_files.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    let mut context_inputs = Vec::new();
+    for input in snapshot.iter() {
+        check_cancellation(cancellation)?;
+        let (file, expected, target) = match input.key() {
+            InputKey::FileContent(file) => (
+                file,
+                durable_baseline_file(baseline_files, file)?.content_hash,
+                &mut content_files,
+            ),
+            InputKey::FilePath(file) => (
+                file,
+                durable_baseline_file(baseline_files, file)?.path_hash,
+                &mut path_files,
+            ),
+            key => {
+                context_inputs.push(DurableInputFingerprint {
+                    key,
+                    value: input.value(),
+                });
+                continue;
+            }
+        };
+        if input.value() != expected {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        target.push(file);
+    }
+    if content_files != path_files {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok((content_files, context_inputs))
+}
+
+fn durable_baseline_file(
+    baseline_files: &[DurableBaselineFile],
+    file: FileId,
+) -> Result<&DurableBaselineFile, FirstSliceError> {
+    baseline_files
+        .binary_search_by_key(&file, |candidate| candidate.file)
+        .ok()
+        .map(|index| &baseline_files[index])
+        .ok_or(FirstSliceError::CatalogCorrupt)
+}
+
+fn file_ids_cover_baseline(file_ids: &[FileId], baseline_files: &[DurableBaselineFile]) -> bool {
+    file_ids.len() == baseline_files.len()
+        && file_ids
+            .iter()
+            .zip(baseline_files)
+            .all(|(file, baseline)| *file == baseline.file)
+}
+
+fn validate_durable_baseline_order(
+    baseline_files: &[DurableBaselineFile],
+) -> Result<(), FirstSliceError> {
+    if baseline_files
+        .windows(2)
+        .any(|pair| pair[0].file >= pair[1].file)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
+}
+
+fn restore_metadata_baseline(
+    durable_files: &[DurableBaselineFile],
+    cancellation: &Cancellation,
+) -> Result<MetadataBaseline, FirstSliceError> {
+    let reconcile_limits = ReconcileLimits::new(durable_files.len().max(1))
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    let mut baseline_files = Vec::new();
+    baseline_files
+        .try_reserve_exact(durable_files.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    for file in durable_files {
+        check_cancellation(cancellation)?;
+        let identity = file
+            .identity
+            .map(|identity| PlatformFileIdentity::new(identity.volume, identity.file_index));
+        let metadata = match file.reliability {
+            MetadataReliability::Trusted => FileMetadata::trusted_with_change_token(
+                file.length,
+                file.modified_ns.ok_or(FirstSliceError::CatalogCorrupt)?,
+                file.change_token.ok_or(FirstSliceError::CatalogCorrupt)?,
+                identity.ok_or(FirstSliceError::CatalogCorrupt)?,
+            ),
+            MetadataReliability::Untrusted => FileMetadata::untrusted_with_change_token(
+                file.length,
+                file.modified_ns,
+                file.change_token,
+                identity,
+            ),
+        };
+        baseline_files.push(BaselineFile::new(
+            FileDescriptor::new(file.file, file.path_hash, metadata),
+            file.content_hash,
+        ));
+    }
+    MetadataBaseline::new(baseline_files, reconcile_limits, cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))
+}
+
+fn restore_compact_input_snapshot(
+    file_ids: impl IntoIterator<Item = FileId>,
+    file_count: usize,
+    baseline_files: &[DurableBaselineFile],
+    context_inputs: Vec<DurableInputFingerprint>,
+    cancellation: &Cancellation,
+) -> Result<InputSnapshot, FirstSliceError> {
+    if context_inputs
+        .iter()
+        .any(|input| matches!(input.key, InputKey::FileContent(_) | InputKey::FilePath(_)))
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let expected = file_count
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(context_inputs.len()))
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(expected)
+        .map_err(|_| FirstSliceError::Retention)?;
+    for file in file_ids {
+        check_cancellation(cancellation)?;
+        let baseline = durable_baseline_file(baseline_files, file)?;
+        inputs.extend([
+            DurableInputFingerprint {
+                key: InputKey::FileContent(file),
+                value: baseline.content_hash,
+            },
+            DurableInputFingerprint {
+                key: InputKey::FilePath(file),
+                value: baseline.path_hash,
+            },
+        ]);
+    }
+    inputs.extend(context_inputs);
+    if inputs.len() != expected {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    restore_input_snapshot(inputs, cancellation)
+}
+
+#[cfg(test)]
 fn durable_input_fingerprints(snapshot: &InputSnapshot) -> Vec<DurableInputFingerprint> {
     snapshot
         .iter()
@@ -3240,7 +3461,7 @@ impl DurablePreparedGeneration {
         cancellation: &Cancellation,
     ) -> Result<u64, FirstSliceError> {
         check_cancellation(cancellation)?;
-        let durable = DurableIncrementalState::from_prepared(state)?;
+        let durable = DurableIncrementalState::from_prepared(state, cancellation)?;
         check_cancellation(cancellation)?;
         let staging = self.staging();
         let file = staging
@@ -5662,9 +5883,28 @@ fn restore_incremental_state(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let durable: DurableIncrementalState =
-        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    durable.into_prepared(cancellation).map(Some)
+    decode_incremental_state(&bytes, cancellation).map(Some)
+}
+
+fn decode_incremental_state(
+    bytes: &[u8],
+    cancellation: &Cancellation,
+) -> Result<PreparedIncrementalState, FirstSliceError> {
+    let header: DurableIncrementalStateHeader =
+        serde_json::from_slice(bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    match header.version {
+        LEGACY_INCREMENTAL_STATE_VERSION => {
+            let durable: LegacyDurableIncrementalState =
+                serde_json::from_slice(bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            durable.into_prepared(cancellation)
+        }
+        INCREMENTAL_STATE_VERSION => {
+            let durable: DurableIncrementalState =
+                serde_json::from_slice(bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            durable.into_prepared(cancellation)
+        }
+        _ => Err(FirstSliceError::CatalogCorrupt),
+    }
 }
 
 fn restore_source_file_catalog(
@@ -6338,8 +6578,8 @@ mod tests {
     use crate::FirstSliceService;
     use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::{
-        FileIdentity, GenerationIdentity, content_hash, derive_file, derive_generation,
-        derive_repository,
+        FileIdentity, GenerationIdentity, content_hash, derive_fact, derive_file,
+        derive_generation, derive_repository,
     };
     use rootlight_query::LocateMode;
     use rootlight_runtime::RuntimePaths;
@@ -6403,6 +6643,192 @@ mod tests {
         {
             TempDir::new().expect("durable test directory is available")
         }
+    }
+
+    fn compact_incremental_fixture(file_count: usize) -> PreparedIncrementalState {
+        let cancellation = Cancellation::new();
+        let repository = derive_repository(b"compact-incremental-fixture").id();
+        let mut files = Vec::new();
+        let mut baseline_inputs = Vec::new();
+        for ordinal in 0..file_count {
+            let path = format!("src/generated-{ordinal:06}.rs");
+            let file = derive_file(FileIdentity {
+                repository,
+                path_identity: path.as_bytes(),
+            })
+            .id();
+            let path_hash = content_hash(path.as_bytes());
+            let content_hash = content_hash(format!("fixture-{ordinal}").as_bytes());
+            let ordinal = u64::try_from(ordinal).expect("fixture ordinal is representable");
+            let descending = u64::MAX - ordinal;
+            files.push(BaselineFile::new(
+                FileDescriptor::new(
+                    file,
+                    path_hash,
+                    FileMetadata::trusted_with_change_token(
+                        descending,
+                        u128::MAX - u128::from(ordinal),
+                        u128::MAX - u128::from(ordinal) - 1,
+                        PlatformFileIdentity::new(descending, descending - 1),
+                    ),
+                ),
+                content_hash,
+            ));
+            baseline_inputs.extend([
+                InputFingerprint::new(InputKey::FileContent(file), content_hash),
+                InputFingerprint::new(InputKey::FilePath(file), path_hash),
+            ]);
+        }
+        baseline_inputs.extend([
+            InputFingerprint::new(
+                InputKey::ConfigurationRevision,
+                content_hash(b"fixture-configuration"),
+            ),
+            InputFingerprint::new(
+                InputKey::AdapterVersion(derive_fact("fixture-adapter", b"adapter").id()),
+                content_hash(b"fixture-adapter-revision"),
+            ),
+        ]);
+        let mut analysis_inputs = baseline_inputs.clone();
+        analysis_inputs.push(InputFingerprint::new(
+            InputKey::SearchRevision,
+            content_hash(b"fixture-search-revision"),
+        ));
+        let metadata = MetadataBaseline::new(
+            files,
+            ReconcileLimits::new(file_count.max(1)).expect("fixture reconcile limit is valid"),
+            &cancellation,
+        )
+        .expect("fixture metadata baseline is valid");
+        let baseline_snapshot =
+            InputSnapshot::new(baseline_inputs, PlanningLimits::default(), &cancellation)
+                .expect("fixture baseline inputs are valid");
+        let analysis_snapshot =
+            InputSnapshot::new(analysis_inputs, PlanningLimits::default(), &cancellation)
+                .expect("fixture analysis inputs are valid");
+        PreparedIncrementalState {
+            baseline: IncrementalDiscoveryBaseline::from_validated_parts(
+                metadata,
+                baseline_snapshot,
+            ),
+            inputs: analysis_snapshot,
+            evidence: FirstSliceIncrementalEvidence {
+                strategy: crate::FirstSliceBuildStrategy::Initial,
+                input_changes: Vec::new(),
+                file_changes: Vec::new(),
+                hashed_files: u64::try_from(file_count)
+                    .expect("fixture file count is representable"),
+                invalidated_domains: Vec::new(),
+                invalidated_units: 0,
+                fallback_reason: None,
+                trace_entries: 0,
+                invalidation_trace: Vec::new(),
+                parsed_files: 0,
+                reused_parser_artifacts: 0,
+                reused_parser_artifact_bytes: 0,
+                reused_durable_artifact_bytes: 0,
+                lowered_files: 0,
+                reused_normalized_facts: 0,
+                rebuilt_normalized_facts: 0,
+                planned_fact_work: Vec::new(),
+                normalized_fact_work: Vec::new(),
+                structural_cache_retained: false,
+            },
+        }
+    }
+
+    #[test]
+    fn compact_incremental_state_elides_reconstructible_file_fingerprints() {
+        let cancellation = Cancellation::new();
+        let prepared = compact_incremental_fixture(128);
+        let compact = DurableIncrementalState::from_prepared(&prepared, &cancellation)
+            .expect("compact incremental state is derivable");
+        assert!(matches!(
+            compact.analysis_files,
+            DurableAnalysisFileSelection::AllBaseline
+        ));
+        assert_eq!(compact.baseline_context_inputs.len(), 2);
+        assert_eq!(compact.analysis_context_inputs.len(), 3);
+
+        let legacy = LegacyDurableIncrementalState {
+            version: LEGACY_INCREMENTAL_STATE_VERSION,
+            baseline_files: compact.baseline_files.clone(),
+            baseline_inputs: durable_input_fingerprints(prepared.baseline.inputs()),
+            analysis_inputs: durable_input_fingerprints(&prepared.inputs),
+            evidence: prepared.evidence.clone(),
+        };
+        let legacy_bytes =
+            serde_json::to_vec(&legacy).expect("legacy incremental state serializes");
+        let compact_bytes =
+            serde_json::to_vec(&compact).expect("compact incremental state serializes");
+        assert!(
+            compact_bytes
+                .len()
+                .checked_mul(2)
+                .is_some_and(|twice| twice < legacy_bytes.len()),
+            "compact state should remove most repeated file fingerprint bytes"
+        );
+
+        let single = compact_incremental_fixture(1);
+        let single_compact = DurableIncrementalState::from_prepared(&single, &cancellation)
+            .expect("single-file compact state is derivable");
+        let single_legacy = LegacyDurableIncrementalState {
+            version: LEGACY_INCREMENTAL_STATE_VERSION,
+            baseline_files: single_compact.baseline_files.clone(),
+            baseline_inputs: durable_input_fingerprints(single.baseline.inputs()),
+            analysis_inputs: durable_input_fingerprints(&single.inputs),
+            evidence: single.evidence.clone(),
+        };
+        let single_compact_bytes =
+            serde_json::to_vec(&single_compact).expect("single compact state serializes");
+        let single_legacy_bytes =
+            serde_json::to_vec(&single_legacy).expect("single legacy state serializes");
+        let additional_files = 127_u64;
+        // Reserve the non-file revision slots retained by this representative state.
+        let maximum_files = u64::try_from(MAX_SOURCE_BLOB_ENTRIES / 2 - 8)
+            .expect("durable file ceiling is representable");
+        let project = |single: usize, sample: usize| {
+            let incremental = u64::try_from(sample - single)
+                .expect("sample delta is representable")
+                .div_ceil(additional_files);
+            u64::try_from(single)
+                .expect("single state length is representable")
+                .checked_add(incremental.saturating_mul(maximum_files - 1))
+                .and_then(|bytes| bytes.checked_add(1_024))
+                .expect("projected state length is representable")
+        };
+        let compact_projection = project(single_compact_bytes.len(), compact_bytes.len());
+        let legacy_projection = project(single_legacy_bytes.len(), legacy_bytes.len());
+        assert!(compact_projection <= MAX_INCREMENTAL_STATE_BYTES);
+        assert!(legacy_projection > MAX_INCREMENTAL_STATE_BYTES);
+
+        for (format, encoded) in [("legacy", &legacy_bytes), ("compact", &compact_bytes)] {
+            let restored = decode_incremental_state(encoded, &cancellation)
+                .unwrap_or_else(|error| panic!("{format} incremental state restores: {error:?}"));
+            assert_eq!(restored.baseline, prepared.baseline);
+            assert_eq!(restored.inputs, prepared.inputs);
+            assert_eq!(restored.evidence, prepared.evidence);
+        }
+    }
+
+    #[test]
+    fn compact_incremental_state_rejects_ambiguous_file_selection() {
+        let cancellation = Cancellation::new();
+        let prepared = compact_incremental_fixture(2);
+        let mut compact = DurableIncrementalState::from_prepared(&prepared, &cancellation)
+            .expect("compact incremental state is derivable");
+        let file = compact.baseline_files[0].file;
+        compact.analysis_files = DurableAnalysisFileSelection::Explicit(vec![file, file]);
+        let encoded = serde_json::to_vec(&compact).expect("malformed fixture serializes");
+
+        assert!(matches!(
+            decode_incremental_state(&encoded, &cancellation),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            decode_incremental_state(br#"{"version":65535}"#, &cancellation),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
     }
 
     fn open_test_catalog(
@@ -6656,15 +7082,15 @@ mod tests {
             normalized_fact_work: Vec::new(),
             structural_cache_retained: true,
         };
-        let state = DurableIncrementalState {
-            version: INCREMENTAL_STATE_VERSION,
+        let state = LegacyDurableIncrementalState {
+            version: LEGACY_INCREMENTAL_STATE_VERSION,
             baseline_files: Vec::new(),
             baseline_inputs: Vec::new(),
             analysis_inputs: Vec::new(),
             evidence,
         };
         let encoded = serde_json::to_vec(&state).expect("durable incremental state serializes");
-        let restored: DurableIncrementalState =
+        let restored: LegacyDurableIncrementalState =
             serde_json::from_slice(&encoded).expect("durable incremental state deserializes");
 
         validate_incremental_evidence(&restored.evidence)
@@ -6691,8 +7117,8 @@ mod tests {
             file_ids: BTreeSet::new(),
             analysis_unit_ids: BTreeSet::new(),
         }];
-        let semantic_state = DurableIncrementalState {
-            version: INCREMENTAL_STATE_VERSION,
+        let semantic_state = LegacyDurableIncrementalState {
+            version: LEGACY_INCREMENTAL_STATE_VERSION,
             baseline_files: Vec::new(),
             baseline_inputs: Vec::new(),
             analysis_inputs: Vec::new(),
@@ -6700,7 +7126,7 @@ mod tests {
         };
         let encoded =
             serde_json::to_vec(&semantic_state).expect("semantic replacement state serializes");
-        let semantic_restored: DurableIncrementalState =
+        let semantic_restored: LegacyDurableIncrementalState =
             serde_json::from_slice(&encoded).expect("semantic replacement state deserializes");
         validate_incremental_evidence(&semantic_restored.evidence)
             .expect("planned structural reuse survives complete semantic replacement");
