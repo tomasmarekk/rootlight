@@ -1030,12 +1030,15 @@ fn omitted_provider(
     provider: PlanEvidenceProvider,
     reason: PlanEvidenceOmissionReason,
 ) -> CollectedPlanProvider {
-    let completeness = if reason == PlanEvidenceOmissionReason::SharedBudgetExhausted {
-        truncated_completeness(LimitingResourceKind::EstimatedTokens, 0, 0)
-            .unwrap_or_else(|_| ResultCompleteness::indeterminate())
-    } else {
-        ResultCompleteness::indeterminate()
-    };
+    // The omission reason identifies exhaustion, not which resource stopped
+    // the provider or how much evidence it evaluated. Do not invent a token
+    // measurement for result, source, or other shared-budget exhaustion.
+    let mut completeness = ResultCompleteness::indeterminate();
+    if reason == PlanEvidenceOmissionReason::SharedBudgetExhausted {
+        completeness
+            .guidance
+            .insert(0, ContinuationGuidance::IncreaseBudgetWithinLimit);
+    }
     CollectedPlanProvider {
         coverage: PlanProviderCoverage {
             provider,
@@ -1620,8 +1623,9 @@ mod tests {
     use rootlight_mcp_contract::{
         RepositorySelector,
         change::{
-            ChangePlanStep, ContextPackRequest, PlanChangeInput, PlanFileTarget, PlanImpactSummary,
-            PlanObjective, PlanSymbolTarget, PlanTargetSelector, RiskLevel,
+            ChangePlanStep, ContextPackRequest, PlanChangeInput, PlanEvidenceOmissionReason,
+            PlanEvidenceProvider, PlanFileTarget, PlanImpactSummary, PlanObjective,
+            PlanProviderState, PlanSymbolTarget, PlanTargetSelector, RiskLevel,
         },
         completeness::{
             CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
@@ -1632,7 +1636,8 @@ mod tests {
 
     use super::{
         PlanChangeError, PlanChangeResult, PlanImpactResult, explain_plan_change,
-        merge_completeness, normalize_plan_change, shape_plan_change,
+        merge_completeness, merge_plan_completeness, normalize_plan_change, omitted_provider,
+        shape_plan_change, truncated_completeness,
     };
 
     fn input() -> PlanChangeInput {
@@ -1767,6 +1772,38 @@ mod tests {
         assert_eq!(data.affected_scope.risk_level, RiskLevel::None);
         assert!(data.explanation.is_some());
         serde_json::to_value(data).expect("public plan data serializes");
+    }
+
+    #[test]
+    fn unknown_provider_budget_preserves_known_planner_measurements() {
+        let omitted = omitted_provider(
+            PlanEvidenceProvider::Tests,
+            PlanEvidenceOmissionReason::SharedBudgetExhausted,
+        );
+        assert_eq!(omitted.coverage.state, PlanProviderState::Omitted);
+        assert!(omitted.coverage.evidence.is_empty());
+        assert!(omitted.coverage.completeness.limiting_resources.is_empty());
+        assert!(
+            omitted
+                .coverage
+                .completeness
+                .guidance
+                .contains(&ContinuationGuidance::IncreaseBudgetWithinLimit)
+        );
+
+        for (limit, observed) in [(0, 1), (32, 40)] {
+            let measured = truncated_completeness(LimitingResourceKind::Results, limit, observed)
+                .expect("measured completeness is valid");
+            let merged = merge_plan_completeness(&measured, std::slice::from_ref(&omitted))
+                .expect("known and unknown evidence can coexist");
+            assert_eq!(merged.state, CompletenessState::Indeterminate);
+            assert_eq!(merged.limiting_resources, measured.limiting_resources);
+            assert_eq!(merged.continuation, ContinuationAvailability::Unavailable);
+            let encoded = serde_json::to_value(&merged).expect("completeness serializes");
+            let decoded: ResultCompleteness =
+                serde_json::from_value(encoded).expect("public completeness remains valid");
+            assert_eq!(decoded, merged);
+        }
     }
 
     #[test]

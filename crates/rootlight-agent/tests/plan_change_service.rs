@@ -774,6 +774,27 @@ async fn single_step_budget_preserves_planning_when_optional_evidence_cannot_run
                 omission.reason == PlanEvidenceOmissionReason::SharedBudgetExhausted
             })
     }));
+    for coverage in &output.data.provider_coverage[..4] {
+        assert_eq!(
+            coverage.completeness.state,
+            rootlight_mcp_contract::completeness::CompletenessState::Indeterminate
+        );
+        assert!(coverage.completeness.limiting_resources.is_empty());
+    }
+    assert_eq!(
+        output.completeness.state,
+        rootlight_mcp_contract::completeness::CompletenessState::Indeterminate
+    );
+    assert!(
+        output
+            .completeness
+            .limiting_resources
+            .iter()
+            .all(|resource| {
+                resource.kind
+                    != rootlight_mcp_contract::completeness::LimitingResourceKind::EstimatedTokens
+            })
+    );
 }
 
 #[tokio::test]
