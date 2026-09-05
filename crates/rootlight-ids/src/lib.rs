@@ -126,20 +126,38 @@ macro_rules! define_stable_id {
             pub const fn as_bytes(&self) -> &[u8; $size] {
                 &self.0
             }
+
+            fn with_text<T>(&self, consume: impl FnOnce(&str) -> T) -> T {
+                // Fixed ID families bound both buffers. Recovery serializes the
+                // same binary references repeatedly, so text conversion must not
+                // allocate an intermediate string for each reference.
+                let mut payload = [0_u8; $size + CHECKSUM_BYTES];
+                payload[..$size].copy_from_slice(&self.0);
+                payload[$size..].copy_from_slice(&text_checksum($prefix, &self.0));
+                let mut encoded =
+                    [0_u8; $prefix.len() + (($size + CHECKSUM_BYTES) * 8).div_ceil(5)];
+                encoded[..$prefix.len()].copy_from_slice($prefix.as_bytes());
+                let suffix = &mut encoded[$prefix.len()..];
+                BASE32_NOPAD.encode_mut(&payload, suffix);
+                suffix.make_ascii_lowercase();
+                consume(std::str::from_utf8(&encoded).expect("ID alphabet and prefix are ASCII"))
+            }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                encode_text($prefix, &self.0).fmt(formatter)
+                self.with_text(|text| formatter.pad(text))
             }
         }
 
         impl fmt::Debug for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter
-                    .debug_tuple(stringify!($name))
-                    .field(&self.to_string())
-                    .finish()
+                self.with_text(|text| {
+                    formatter
+                        .debug_tuple(stringify!($name))
+                        .field(&text)
+                        .finish()
+                })
             }
         }
 
@@ -156,7 +174,7 @@ macro_rules! define_stable_id {
             where
                 S: Serializer,
             {
-                serializer.serialize_str(&self.to_string())
+                self.with_text(|text| serializer.serialize_str(text))
             }
         }
 
@@ -704,6 +722,39 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn stack_text_codec_matches_canonical_encoding(
+            short in any::<[u8; 16]>(),
+            medium in any::<[u8; 20]>(),
+            long in any::<[u8; 32]>(),
+        ) {
+            macro_rules! check_family {
+                ($family:ident, $prefix:literal, $bytes:expr) => {{
+                    let id = $family::from_bytes($bytes);
+                    let expected = encode_text($prefix, &$bytes);
+                    prop_assert_eq!(id.to_string(), expected.as_str());
+                    prop_assert_eq!(format!("{id:>70}"), format!("{expected:>70}"));
+                    prop_assert_eq!(format!("{id:.12}"), format!("{expected:.12}"));
+                    prop_assert_eq!(
+                        format!("{id:?}"),
+                        format!("{}({expected:?})", stringify!($family))
+                    );
+                    prop_assert_eq!(
+                        serde_json::to_string(&id).expect("ID serializes"),
+                        serde_json::to_string(&expected).expect("string serializes")
+                    );
+                    prop_assert_eq!(expected.parse::<$family>(), Ok(id));
+                }};
+            }
+            check_family!(RepositoryId, "repo1_", short);
+            check_family!(OperationId, "op1_", short);
+            check_family!(GenerationId, "gen1_", medium);
+            check_family!(SymbolId, "sym1_", medium);
+            check_family!(FileId, "file1_", medium);
+            check_family!(FactId, "fact1_", medium);
+            check_family!(ContentHash, "b3_", long);
+        }
+
         #[test]
         fn operation_id_round_trips(bytes in any::<[u8; 16]>()) {
             let id = OperationId::from_bytes(bytes);
