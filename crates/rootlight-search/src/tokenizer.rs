@@ -59,7 +59,7 @@ impl TokenStream for CodeTokenStream<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Span {
     start: usize,
     end: usize,
@@ -84,23 +84,24 @@ pub(crate) fn token_texts(text: &str) -> Vec<String> {
 
 /// Applies the index format's full, non-Turkic Unicode normalization.
 pub(crate) fn normalize_text(input: &str) -> String {
-    input.nfd().case_fold().nfc().collect()
+    if input.is_ascii() {
+        input.to_ascii_lowercase()
+    } else {
+        input.nfd().case_fold().nfc().collect()
+    }
 }
 
 fn split_spans(text: &str, output: &mut Vec<Span>) {
     output.clear();
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut characters = text
+        .char_indices()
+        .filter(|(_, character)| !is_mark(*character))
+        .peekable();
     let mut start = None;
     let mut previous_base = None;
 
-    for (position, &(offset, current)) in chars.iter().enumerate() {
-        if is_mark(current) {
-            if start.is_none() {
-                previous_base = None;
-            }
-            continue;
-        }
-        if !current.is_alphanumeric() {
+    while let Some((offset, current)) = characters.next() {
+        if !is_alphanumeric(current) {
             finish_span(start.take(), offset, output);
             previous_base = None;
             continue;
@@ -110,11 +111,10 @@ fn split_spans(text: &str, output: &mut Vec<Span>) {
             previous_base = Some(current);
             continue;
         };
-        let next = chars[position + 1..]
-            .iter()
+        let next = characters
+            .peek()
             .map(|(_, character)| *character)
-            .find(|character| !is_mark(*character))
-            .filter(|character| character.is_alphanumeric());
+            .filter(|character| is_alphanumeric(*character));
         if previous_base.is_some_and(|previous| is_boundary(previous, current, next)) {
             finish_span(Some(token_start), offset, output);
             start = Some(offset);
@@ -140,25 +140,74 @@ fn is_boundary(previous: char, current: char, next: Option<char>) -> bool {
 }
 
 fn is_mark(character: char) -> bool {
-    matches!(
-        get_general_category(character),
-        GeneralCategory::NonspacingMark
-            | GeneralCategory::SpacingMark
-            | GeneralCategory::EnclosingMark
-    )
+    !character.is_ascii()
+        && matches!(
+            get_general_category(character),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        )
+}
+
+fn is_alphanumeric(character: char) -> bool {
+    if character.is_ascii() {
+        character.is_ascii_alphanumeric()
+    } else {
+        character.is_alphanumeric()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use tantivy::tokenizer::{TextAnalyzer, TokenStream};
 
-    use super::{CodeTokenizer, normalize_text};
+    use super::{
+        CodeTokenizer, Span, finish_span, is_boundary, is_mark, normalize_text, split_spans,
+    };
 
     fn tokens(input: &str) -> Vec<String> {
         let mut analyzer = TextAnalyzer::from(CodeTokenizer::default());
         let mut stream = analyzer.token_stream(input);
         let mut output = Vec::new();
         stream.process(&mut |token| output.push(token.text.clone()));
+        output
+    }
+
+    fn reference_spans(text: &str) -> Vec<Span> {
+        let characters = text.char_indices().collect::<Vec<_>>();
+        let mut output = Vec::new();
+        let mut start = None;
+        let mut previous_base = None;
+
+        for (position, &(offset, current)) in characters.iter().enumerate() {
+            if is_mark(current) {
+                if start.is_none() {
+                    previous_base = None;
+                }
+                continue;
+            }
+            if !current.is_alphanumeric() {
+                finish_span(start.take(), offset, &mut output);
+                previous_base = None;
+                continue;
+            }
+            let Some(token_start) = start else {
+                start = Some(offset);
+                previous_base = Some(current);
+                continue;
+            };
+            let next = characters[position + 1..]
+                .iter()
+                .map(|(_, character)| *character)
+                .find(|character| !is_mark(*character))
+                .filter(|character| character.is_alphanumeric());
+            if previous_base.is_some_and(|previous| is_boundary(previous, current, next)) {
+                finish_span(Some(token_start), offset, &mut output);
+                start = Some(offset);
+            }
+            previous_base = Some(current);
+        }
+        finish_span(start, text.len(), &mut output);
         output
     }
 
@@ -181,5 +230,23 @@ mod tests {
         assert_eq!(tokens("Straße STRASSE"), ["strasse", "strasse"]);
         assert_eq!(tokens("Σίσυφος ςσΣ"), ["σίσυφοσ", "σσ", "σ"]);
         assert_eq!(normalize_text("ςσΣ"), "σσσ");
+    }
+
+    #[test]
+    fn streaming_span_split_matches_the_original_unicode_boundaries() {
+        let cases = [
+            "",
+            "snake_case HTTP2Server/path.rs",
+            "Cafe\u{301}Value Straße Σίσυφος",
+            "\u{301}\u{302}leading middle\u{301}-trailing\u{301}\u{302}",
+            "a\u{301}\u{302}B2\u{303}c :: XML\u{301}Http",
+            "文字列値_42 кириллицаValue",
+        ];
+
+        for text in cases {
+            let mut actual = Vec::new();
+            split_spans(text, &mut actual);
+            assert_eq!(actual, reference_spans(text), "input: {text:?}");
+        }
     }
 }
