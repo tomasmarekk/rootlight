@@ -269,14 +269,29 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
                 getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
                 identity
             };
-            let client = Client::connect_or_start(
-                &paths,
-                client_instance_id,
-                ConnectPolicy::StartIfMissing,
-            )?;
+            let client = if command_observes_during_recovery(&command, &trailing) {
+                Client::connect_or_start_observing_recovery(
+                    &paths,
+                    client_instance_id,
+                    ConnectPolicy::StartIfMissing,
+                )?
+            } else {
+                Client::connect_or_start(&paths, client_instance_id, ConnectPolicy::StartIfMissing)?
+            };
             execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
         }
     })
+}
+
+fn command_observes_during_recovery(
+    command: &std::ffi::OsStr,
+    arguments: &[std::ffi::OsString],
+) -> bool {
+    matches!((command, arguments), (command, []) if command == "health")
+        || matches!((command, arguments), (command, [json]) if command == "health" && json == "--json")
+        || matches!((command, arguments), (command, [quick]) if command == "diagnostics" && quick == "quick")
+        || matches!((command, arguments), (command, [output, _]) if command == "support-bundle" && output == "--output")
+        || matches!((command, arguments), (command, [repository, _, output, _]) if command == "support-bundle" && repository == "--repo" && output == "--output")
 }
 
 fn execute_web(arguments: &[std::ffi::OsString]) -> Result<ExitCode, CliError> {
@@ -3771,6 +3786,47 @@ mod tests {
         .expect("supported platform dispatches");
 
         assert!(dispatched);
+    }
+
+    #[test]
+    fn only_recovery_safe_control_reads_bypass_the_readiness_barrier() {
+        let empty = Vec::<std::ffi::OsString>::new();
+        let health_json = vec![std::ffi::OsString::from("--json")];
+        let quick = vec![std::ffi::OsString::from("quick")];
+        let support = vec![
+            std::ffi::OsString::from("--output"),
+            std::ffi::OsString::from("support.zip"),
+        ];
+        let full = vec![
+            std::ffi::OsString::from("full"),
+            std::ffi::OsString::from("--repo"),
+            std::ffi::OsString::from("repo1_fixture"),
+        ];
+
+        assert!(command_observes_during_recovery(
+            std::ffi::OsStr::new("health"),
+            &empty
+        ));
+        assert!(command_observes_during_recovery(
+            std::ffi::OsStr::new("health"),
+            &health_json
+        ));
+        assert!(command_observes_during_recovery(
+            std::ffi::OsStr::new("diagnostics"),
+            &quick
+        ));
+        assert!(command_observes_during_recovery(
+            std::ffi::OsStr::new("support-bundle"),
+            &support
+        ));
+        assert!(!command_observes_during_recovery(
+            std::ffi::OsStr::new("diagnostics"),
+            &full
+        ));
+        assert!(!command_observes_during_recovery(
+            std::ffi::OsStr::new("repo"),
+            &empty
+        ));
     }
 
     #[test]
