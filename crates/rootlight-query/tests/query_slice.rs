@@ -508,6 +508,113 @@ fn test_and_route_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId, SymbolI
     (snapshot, production, test, handler, route)
 }
 
+#[test]
+fn plan_change_preserves_the_plan_when_ranked_tests_exceed_output_budget() {
+    let base = fixture_snapshot();
+    let mut document = base.document().clone();
+    let template = document.entities[0].clone();
+    let target = template.id;
+    for ordinal in 1_u8..=100 {
+        let mut test = template.clone();
+        let mut identity = [0xf0; 20];
+        identity[0] = ordinal;
+        test.id = SymbolId::from_bytes(identity);
+        test.kind = rootlight_ir::EntityKind::Test;
+        test.canonical_name = format!("verification_{ordinal}");
+        test.display_name = test.canonical_name.clone();
+        test.qualified_name = format!("fixture::{}", test.canonical_name);
+        document.entities.push(test);
+    }
+    let snapshot = GenerationSnapshot::new(
+        base.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("ranked-test fixture is valid");
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let execute = |budget| {
+        let plan = service
+            .plan_plan_change(
+                rootlight_query::PlanChangeObjective::BugFix,
+                "preserve the selected behavior".to_owned(),
+                BTreeSet::from([target]),
+                BTreeSet::new(),
+                6,
+                budget,
+            )
+            .expect("bounded plan is admitted");
+        service.execute_plan_change(&plan, &Cancellation::new())
+    };
+    let complete = execute(QueryBudget::new()).expect("full plan fits the default policy");
+    assert_eq!(complete.data.test_plan.len(), 100);
+    let limit = complete.usage.json_bytes / 2;
+    for (resource, budget) in [
+        (
+            QueryResource::Tokens,
+            QueryBudget::new().with_max_tokens(limit),
+        ),
+        (
+            QueryResource::JsonBytes,
+            QueryBudget::new().with_max_json_bytes(limit),
+        ),
+    ] {
+        let bounded = execute(budget).expect("optional tests must not discard a useful plan");
+        assert_eq!(bounded.data.plan, complete.data.plan);
+        assert_eq!(bounded.data.affected_scope, complete.data.affected_scope);
+        assert_eq!(bounded.data.generation, snapshot.metadata().generation());
+        assert_eq!(
+            bounded.data.context_pack_request,
+            complete.data.context_pack_request
+        );
+        assert!(!bounded.data.test_plan.is_empty());
+        assert!(bounded.data.test_plan.len() < complete.data.test_plan.len());
+        assert_eq!(
+            bounded.data.test_plan,
+            complete.data.test_plan[..bounded.data.test_plan.len()]
+        );
+        assert!(bounded.data.execution.is_truncated());
+        assert!(
+            bounded
+                .data
+                .execution
+                .limiting_resources()
+                .contains(&resource)
+        );
+        assert_eq!(
+            bounded.data.limiting_resources,
+            bounded.data.execution.limiting_resources()
+        );
+        assert!(bounded.usage.json_bytes <= limit);
+        assert_exact_response_accounting(&bounded);
+        let mut extended = bounded.clone();
+        extended
+            .data
+            .test_plan
+            .push(complete.data.test_plan[extended.data.test_plan.len()].clone());
+        assert!(
+            serde_json::to_vec(&extended)
+                .expect("extended response serializes")
+                .len()
+                > usize::try_from(limit).expect("fixture limit fits")
+        );
+    }
+    assert_eq!(
+        execute(QueryBudget::new())
+            .expect("later complete query is unchanged")
+            .data,
+        complete.data
+    );
+    assert!(matches!(
+        execute(QueryBudget::new().with_max_tokens(1)),
+        Err(QueryError::BudgetExceeded {
+            resource: QueryResource::Tokens,
+            ..
+        })
+    ));
+}
+
 fn selective_relationship_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {
     let (base, production, test, _handler, _route) = test_and_route_snapshot();
     let metadata = base.metadata();

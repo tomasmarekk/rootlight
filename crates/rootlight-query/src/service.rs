@@ -2008,8 +2008,9 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
-    /// resource-accounting overflow. A request budget that cannot fund the
-    /// comparison workspace produces an explicit truncated result.
+    /// resource-accounting overflow. Optional ranked tests are truncated when
+    /// the complete response exceeds its byte or token budget. If the plan
+    /// itself cannot fit, returns [`QueryError::BudgetExceeded`].
     pub fn execute_plan_change(
         &self,
         plan: &PlanChangePlan,
@@ -2032,7 +2033,7 @@ where
         )?;
         let execution = authoritative_execution(&limiting_resources);
 
-        let data = PlanChangeResult {
+        let mut data = PlanChangeResult {
             generation: self.generation.metadata().generation(),
             plan: analysis.plan,
             affected_scope: analysis.affected_scope,
@@ -2043,7 +2044,36 @@ where
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
-        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+        // Ranked tests are supplementary to the actionable plan. Retain the
+        // longest fitting prefix under the exact final envelope measurement;
+        // the existing test cap bounds retries and each encoding checks cancellation.
+        loop {
+            match finish_response(
+                plan.explanation.clone(),
+                &data,
+                UsageTracker { ..tracker },
+                started,
+                &control,
+            ) {
+                Ok(response) => {
+                    let QueryResponse { plan, usage, .. } = response;
+                    return Ok(QueryResponse { plan, data, usage });
+                }
+                Err(
+                    error @ QueryError::BudgetExceeded {
+                        resource: resource @ (QueryResource::Tokens | QueryResource::JsonBytes),
+                        ..
+                    },
+                ) => {
+                    if data.test_plan.pop().is_none() {
+                        return Err(error);
+                    }
+                    record_limit(&mut data.limiting_resources, resource)?;
+                    data.execution = authoritative_execution(&data.limiting_resources);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Builds a deterministic bounded `history.compare` plan.
