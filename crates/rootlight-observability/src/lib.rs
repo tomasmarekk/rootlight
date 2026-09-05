@@ -2829,6 +2829,12 @@ fn json_entry_with_limit(
     let mut bytes = serde_json::to_vec_pretty(value).map_err(SupportBundleError::SerializeJson)?;
     bytes.push(b'\n');
     if bytes.len() > maximum {
+        // Formatting must not displace valid evidence that fits the same byte limit.
+        // Preserve existing pretty output whenever possible; never remove JSON values.
+        bytes = serde_json::to_vec(value).map_err(SupportBundleError::SerializeJson)?;
+        bytes.push(b'\n');
+    }
+    if bytes.len() > maximum {
         return Err(SupportBundleError::EntryTooLarge { name });
     }
     Ok(SupportEntry { name, bytes })
@@ -2915,6 +2921,149 @@ mod tests {
     use std::{io::Read as _, sync::Barrier, thread};
 
     use super::*;
+
+    #[test]
+    fn json_entry_compacts_formatting_without_changing_values_or_limits() {
+        let value = serde_json::json!({
+            "records": [{"label": "alpha  beta\n\t\"λ\"", "count": 7}, {"known": null}]
+        });
+        let mut compact = serde_json::to_vec(&value).expect("fixture serializes");
+        compact.push(b'\n');
+        assert!(
+            serde_json::to_vec_pretty(&value)
+                .expect("fixture serializes")
+                .len()
+                > compact.len()
+        );
+        let entry = json_entry_with_limit("fixture.json", &value, compact.len())
+            .expect("formatting alone must not exhaust the entry budget");
+        assert_eq!(entry.bytes, compact);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&entry.bytes).expect("entry decodes"),
+            value
+        );
+        for maximum in [0, compact.len() - 1] {
+            assert!(matches!(
+                json_entry_with_limit("fixture.json", &value, maximum),
+                Err(SupportBundleError::EntryTooLarge {
+                    name: "fixture.json"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn json_entry_preserves_pretty_bytes_when_they_fit() {
+        let value = serde_json::json!({"records": [1, 2, 3]});
+        let mut expected = serde_json::to_vec_pretty(&value).expect("fixture serializes");
+        expected.push(b'\n');
+        let entry = json_entry_with_limit("fixture.json", &value, expected.len())
+            .expect("exact pretty byte boundary fits");
+        assert_eq!(entry.bytes, expected);
+    }
+
+    #[test]
+    fn schema_v8_preserves_large_inventory_within_the_entry_budget() {
+        let mut input = production_input();
+        make_schema_v8_input(&mut input);
+        input.terminal_operations.clear();
+        let inventory = input.inventory.as_mut().expect("fixture inventory exists");
+        let mut repository = inventory.repositories[0].clone();
+        repository.generation_count = 2;
+        repository.predecessor_generation_bytes = Some(4_096);
+        repository.storage_bytes = Some(9_344);
+        repository.repository_headroom_bytes = Some(1_039_104);
+        let generation = inventory.generations[0].clone();
+        let count = u32::try_from(MAX_SUPPORT_REPOSITORIES).expect("support count fits u32");
+        inventory.repositories = (1..=count)
+            .map(|id| SupportRepositoryInventory {
+                repository_id: format!("{id:032x}"),
+                ..repository.clone()
+            })
+            .collect();
+        let generation_count =
+            u32::try_from(MAX_SUPPORT_GENERATIONS).expect("generation count fits u32");
+        assert_eq!(generation_count, count * 2);
+        inventory.generations = (1..=generation_count)
+            .map(|id| SupportGenerationInventory {
+                repository_id: format!("{:032x}", (id - 1) % count + 1),
+                generation_id: format!("{id:032x}"),
+                state: if id <= count { "active" } else { "superseded" }.to_owned(),
+                ..generation.clone()
+            })
+            .collect();
+        let capacity = inventory
+            .repository_capacity
+            .as_mut()
+            .expect("capacity exists");
+        capacity.registered_repository_count = count;
+        capacity.active_repository_count = count;
+        capacity.pending_repository_count = 0;
+        capacity.reclaimable_repository_count = count;
+        capacity.repository_headroom = capacity.effective_maximum_repositories - count;
+        let count = u64::from(count);
+        let storage = &mut inventory.storage;
+        storage.generation_disk_bytes = 8_192 * count;
+        storage.active_generation_bytes = Some(4_096 * count);
+        storage.predecessor_generation_bytes = Some(4_096 * count);
+        storage.source_pool_bytes = Some(1_024 * count);
+        storage.repository_overhead_bytes = Some(128 * count);
+        let total = 9_344 * count;
+        let inflight = 128 * count;
+        storage.total_storage_bytes = Some(total);
+        storage.catalog_accounted_bytes = Some(total);
+        storage.inflight_catalog_reservation_bytes = Some(inflight);
+        let catalog_headroom = 2_097_152 - total - inflight;
+        let filesystem_headroom = 3_145_728 - 1_048_576 - inflight;
+        storage.catalog_headroom_bytes = Some(catalog_headroom);
+        storage.filesystem_headroom_bytes = Some(filesystem_headroom);
+        storage.repository_headroom_bytes = Some(1_039_104);
+        storage.admission_margin_bytes =
+            Some(1_039_104.min(catalog_headroom).min(filesystem_headroom));
+        assert!(
+            serde_json::to_vec_pretty(inventory)
+                .expect("inventory serializes")
+                .len()
+                > MAX_SUPPORT_ENTRY_BYTES
+        );
+        assert!(
+            serde_json::to_vec(inventory)
+                .expect("inventory serializes")
+                .len()
+                < MAX_SUPPORT_ENTRY_BYTES
+        );
+        let expected = inventory.clone();
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V8)
+            .expect("valid inventory fits without removing records");
+        assert_eq!(
+            bundle,
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V8)
+                .expect("deterministic rebuild")
+        );
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("archive opens");
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory exists")
+            .read_to_end(&mut bytes)
+            .expect("inventory reads");
+        assert!(bytes.len() <= MAX_SUPPORT_ENTRY_BYTES);
+        assert_eq!(
+            serde_json::from_slice::<SupportInventory>(&bytes).expect("inventory decodes"),
+            expected
+        );
+        input
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .storage
+            .total_storage_bytes = Some(total + 1);
+        assert!(matches!(
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V8),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
 
     fn input() -> SupportBundleInput {
         SupportBundleInput {
