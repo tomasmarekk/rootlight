@@ -15,7 +15,8 @@ use std::{
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
-    ExposureProfile, McpTool, PublicError, SchemaVersion, TrustClassification,
+    ExposureProfile, McpTool, PublicError, SafeLabel, SchemaVersion, SourceFreeMessage,
+    TrustClassification,
     batch::{
         BatchBindingCardinality, BatchBindingPathSegment, BatchBindingSourceSlot,
         BatchBindingTargetSlot, BatchBindingValueType, BatchBudgetDimension,
@@ -32,7 +33,7 @@ use rootlight_mcp_contract::{
     },
     vertical::{
         CacheStatus, GenerationSelector, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
-        ResponseBudget, ResponseProfile, UsageSummary,
+        ResponseBudget, ResponseProfile, ResponseWarning, UsageSummary,
     },
 };
 use serde_json::{Map, Value};
@@ -1215,6 +1216,9 @@ pub struct ResolvedBatchArguments {
 }
 
 /// Shapes one successful child response into a batch operation result.
+///
+/// Keeps the child data and continuation intact. Warning overflow is represented
+/// by an exact omitted-record count and guidance to request standalone diagnostics.
 #[must_use]
 pub fn success_result(
     operation: &ContractBatchOperation,
@@ -1229,7 +1233,7 @@ pub fn success_result(
         truncated: envelope.truncated,
         next_cursor: envelope.next_cursor.clone(),
         usage: Some(envelope.usage.clone()),
-        warnings: envelope.warnings.clone(),
+        warnings: bounded_batch_warnings(&envelope.warnings),
     }
 }
 
@@ -1284,7 +1288,7 @@ fn planned_success_result(
         truncated: envelope.truncated,
         next_cursor: envelope.next_cursor.clone(),
         usage: Some(envelope.usage.clone()),
-        warnings: envelope.warnings.clone(),
+        warnings: bounded_batch_warnings(&envelope.warnings),
     }
 }
 
@@ -2468,14 +2472,32 @@ fn aggregate_warnings(
 ) -> Vec<rootlight_mcp_contract::vertical::ResponseWarning> {
     let mut warnings = identity.to_vec();
     for warning in results.iter().flat_map(|result| &result.warnings) {
-        if warnings.len() == 32 {
-            break;
-        }
         if !warnings.contains(warning) {
             warnings.push(warning.clone());
         }
     }
-    warnings
+    bounded_batch_warnings(&warnings)
+}
+
+fn bounded_batch_warnings(warnings: &[ResponseWarning]) -> Vec<ResponseWarning> {
+    const LIMIT: usize = 32;
+    if warnings.len() <= LIMIT {
+        return warnings.to_vec();
+    }
+    // Child envelopes allow more diagnostics than batch operation records.
+    // Reserve one slot to make this representation-only loss explicit instead
+    // of discarding warnings silently or invalidating an otherwise useful batch.
+    let retained = LIMIT - 1;
+    let omitted = warnings.len() - retained;
+    let mut bounded = warnings[..retained].to_vec();
+    bounded.push(ResponseWarning {
+        code: SafeLabel::parse("batch_warnings_omitted")
+            .expect("static warning code is a valid safe label"),
+        message: SourceFreeMessage::parse(&format!(
+            "{omitted} warning records omitted from this batch projection - run the tool separately for full diagnostics"
+        )).expect("fixed text and a decimal count form a bounded source-free message"),
+    });
+    bounded
 }
 
 fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget {
@@ -2878,8 +2900,8 @@ mod tests {
     use super::{
         BatchExecutionError, BatchPlan, BatchValidationError, DEFAULT_BATCH_TOKENS, DeadlineSource,
         MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, StaticBatchPlan, admitted_parent_budget,
-        aggregate_status, effective_child_deadline, is_batch_allowed,
-        is_batch_allowed_under_profile, resolve_dependencies, terminal_result,
+        aggregate_status, aggregate_warnings, bounded_batch_warnings, effective_child_deadline,
+        is_batch_allowed, is_batch_allowed_under_profile, resolve_dependencies, terminal_result,
         translate_target_binding, validate_binding_pair,
     };
     use crate::policy::BudgetLimits;
@@ -2892,9 +2914,43 @@ mod tests {
             BatchOperation as ContractBatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
             FailurePolicy, QueryBatchInput,
         },
-        vertical::{RepositoryIdSelector, ResponseBudget, ResponseProfile},
+        vertical::{RepositoryIdSelector, ResponseBudget, ResponseProfile, ResponseWarning},
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn warning_projection_preserves_boundaries_and_exact_omission_counts() {
+        for count in [0, 1, 31, 32, 33, 100] {
+            let warnings: Vec<ResponseWarning> = (0..count)
+                .map(|ordinal| {
+                    serde_json::from_value(serde_json::json!({
+                        "code": format!("diagnostic_{ordinal}"),
+                        "message": "bounded diagnostic"
+                    }))
+                    .expect("synthetic warning is source free")
+                })
+                .collect();
+            let original = warnings.clone();
+            let projected = bounded_batch_warnings(&warnings);
+            assert_eq!(warnings, original);
+            assert_eq!(projected.len(), count.min(32));
+            assert_eq!(aggregate_warnings(&warnings, &[]), projected);
+            if count <= 32 {
+                assert_eq!(projected, warnings);
+            } else {
+                assert_eq!(projected[..31], warnings[..31]);
+                let summary = serde_json::to_value(&projected[31]).expect("warning serializes");
+                assert_eq!(summary["code"], "batch_warnings_omitted");
+                assert_eq!(
+                    summary["message"],
+                    format!(
+                        "{} warning records omitted from this batch projection - run the tool separately for full diagnostics",
+                        count - 31
+                    )
+                );
+            }
+        }
+    }
 
     fn contract_operation(
         id: &str,

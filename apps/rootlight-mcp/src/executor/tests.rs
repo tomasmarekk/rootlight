@@ -4176,6 +4176,94 @@ async fn query_batch_public_profiles_preserve_child_semantics() {
 }
 
 #[tokio::test]
+async fn query_batch_preserves_paginated_child_results_through_the_router() {
+    let harness = Harness::new(FakeOutcome::Batch {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate_page(symbol(), "Publisher", Some(1))),
+    });
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "query.batch",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "response_profile": "compact",
+                    "operations": [{
+                        "id": "find", "tool": "code.locate",
+                        "arguments": {"query": "Publisher", "max_results": 1}
+                    }]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(result) = response else {
+        panic!("paginated child must remain a valid batch output: {response:?}");
+    };
+    assert_eq!(result["isError"], false);
+    let child = &result["structuredContent"]["data"]["operation_results"][0];
+    assert_eq!(child["status"], "ok");
+    assert_eq!(child["truncated"], true);
+    assert!(child["next_cursor"].is_string());
+    assert_eq!(child["data"]["matches"][0]["symbol_id"], json!(symbol()));
+}
+
+#[tokio::test]
+async fn query_batch_reports_child_warning_projection_without_transport_failure() {
+    let mut locate = locate_response();
+    locate.metadata.warnings = (0..40)
+        .map(|ordinal| {
+            serde_json::from_value(json!({
+                "code": format!("coverage_gap_{ordinal}"),
+                "message": "bounded coverage gap"
+            }))
+            .expect("source-free warning is valid")
+        })
+        .collect();
+    let harness = Harness::new(FakeOutcome::Batch {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate),
+    });
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "query.batch",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "operations": [{"id": "find", "tool": "code.locate",
+                        "arguments": {"query": "Publisher", "max_results": 1}}]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(result) = response else {
+        panic!("bounded child warnings must remain a valid batch output: {response:?}");
+    };
+    assert_eq!(result["isError"], false);
+    let child = &result["structuredContent"]["data"]["operation_results"][0];
+    assert_eq!(child["status"], "ok");
+    assert_eq!(child["data"]["matches"][0]["symbol_id"], json!(symbol()));
+    let warnings = child["warnings"].as_array().expect("warnings are present");
+    assert_eq!(warnings.len(), 32);
+    assert_eq!(warnings[31]["code"], "batch_warnings_omitted");
+    assert_eq!(
+        warnings[31]["message"],
+        "9 warning records omitted from this batch projection - run the tool separately for full diagnostics"
+    );
+}
+
+#[tokio::test]
 async fn query_batch_identity_survives_active_generation_race() {
     let active_generation = Arc::new(Mutex::new(generation()));
     let locate_calls = Arc::new(AtomicUsize::new(0));
