@@ -497,6 +497,22 @@ fn retain_project_syntax_facts(
         let required = imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names);
         select_syntax_fact_ids(required, &mut selected, &mut remaining);
     }
+    // Spend remaining syntax on distinct callable-owner/callee shapes before
+    // extra repeated sites. This schedules evidence, not semantic resolution.
+    for call in
+        distinct_call_syntax_representatives(facts, source, &facts_by_id, &call_names, &selected)
+    {
+        if remaining == 0 {
+            break;
+        }
+        select_call_syntax_fact_group(
+            call,
+            &call_names,
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
+    }
     for call in facts
         .iter()
         .filter(|fact| is_call_fact(fact))
@@ -980,6 +996,58 @@ fn declared_call_ids(
                 .map(|_| call.local_id())
         })
         .collect()
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct CallSyntaxShape<'source> {
+    owner: Option<u64>,
+    name: &'source str,
+    receiver: Option<&'source str>,
+    arity: Option<usize>,
+}
+
+fn distinct_call_syntax_representatives<'fact>(
+    facts: &'fact [SyntaxFact],
+    source: &[u8],
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    call_names: &BTreeMap<u64, u64>,
+    selected: &BTreeSet<u64>,
+) -> Vec<&'fact SyntaxFact> {
+    let declaration_kinds = facts
+        .iter()
+        .filter_map(|fact| structural_entity_kind(fact).map(|kind| (fact.local_id(), kind)))
+        .collect::<BTreeMap<_, _>>();
+    let mut groups = BTreeMap::<CallSyntaxShape<'_>, (&SyntaxFact, bool)>::new();
+    for call in facts.iter().filter(|fact| is_call_fact(fact)) {
+        let Some(name) = retained_call_name(source, call, call_names, facts_by_id) else {
+            continue;
+        };
+        let Some(text) = source_text(source, call.span()) else {
+            continue;
+        };
+        let shape = CallSyntaxShape {
+            owner: enclosing_callable_declaration(call, facts_by_id, &declaration_kinds),
+            name,
+            receiver: call_receiver(text, name),
+            arity: call_arity(text),
+        };
+        let represented = selected.contains(&call.local_id());
+        groups
+            .entry(shape)
+            .and_modify(|(representative, already_selected)| {
+                *already_selected |= represented;
+                if structural_syntax_fact_order(call, representative).is_lt() {
+                    *representative = call;
+                }
+            })
+            .or_insert((call, represented));
+    }
+    let mut representatives = groups
+        .into_values()
+        .filter_map(|(call, represented)| (!represented).then_some(call))
+        .collect::<Vec<_>>();
+    representatives.sort_unstable_by(|left, right| structural_syntax_fact_order(left, right));
+    representatives
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -1772,6 +1772,123 @@ fn c_function_prototypes_preserve_structural_and_project_identity() {
 }
 
 #[test]
+fn bounded_c_repeated_local_calls_preserve_distinct_external_relationships() {
+    let mut files = vec![
+        (
+            "reader.h".to_owned(),
+            "int read_value(int key);\n".to_owned(),
+        ),
+        (
+            "worker.c".to_owned(),
+            format!(
+                "#include \"reader.h\"\nstatic int local_value(void) {{ return 1; }}\nint invoke(void) {{\n{}    return read_value(7);\n}}\n",
+                "    local_value();\n".repeat(24)
+            ),
+        ),
+    ];
+    for index in 0..16 {
+        files.push((
+            format!("load_{index:02}.c"),
+            format!(
+                "static int helper_{index}(void) {{ return 1; }}\nint work_{index}(void) {{\n{}    return 0;\n}}\n",
+                format!("    helper_{index}();\n").repeat(24)
+            ),
+        ));
+    }
+    files.sort_by_cached_key(|(path, _)| {
+        RelativePath::parse(Path::new(path))
+            .expect("fixture path is valid")
+            .identity_bytes()
+            .to_vec()
+    });
+    let (paths, sources) = files.into_iter().unzip();
+    let fixture = ProjectFixture::new_owned(paths, sources, SemanticProjectLanguage::C);
+    let output =
+        analyze_with_real_parser_limits(&fixture, &real_parser_limits_with_project_files(32));
+    let document = output.document();
+    assert!(
+        document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    let caller = document
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "invoke")
+        .expect("caller identity is retained");
+    let callee = document
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "read_value")
+        .expect("external declaration identity is retained");
+    let call = document.occurrences.iter().find(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { symbol } if symbol == callee.id)
+    }).expect("repeated local sites must not hide the distinct external relationship");
+    assert!(document.relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+            && relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(callee.id)
+    }));
+}
+
+#[test]
+fn bounded_rust_call_selection_preserves_owners_and_unknown_targets() {
+    let source = format!(
+        "fn local() {{}}\nfn read_data(key: i32) -> i32 {{ key }}\nfn run() {{\n{}    read_data(7);\n}}\nfn again() {{ read_data(8); }}\nfn dispatch() {{ unknown(9); }}\n",
+        "    local();\n".repeat(200)
+    );
+    let fixture = ProjectFixture::new(["src/lib.rs"], [&source], SemanticProjectLanguage::Rust);
+    let output = analyze_with_real_parser(&fixture);
+    let document = output.document();
+    assert!(
+        document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
+    );
+    let callee = document
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "read_data")
+        .expect("callee identity is retained");
+    for name in ["run", "again"] {
+        let caller = document
+            .entities
+            .iter()
+            .find(|entity| entity.display_name == name)
+            .expect("caller identity is retained");
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.enclosing == Some(caller.id)
+                && matches!(occurrence.target, OccurrenceTarget::Resolved { symbol } if symbol == callee.id)
+        }), "distinct callable owner {name} must retain its call");
+    }
+    let dispatch = document
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "dispatch")
+        .expect("unknown-call owner is retained");
+    let unknown = document
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite && occurrence.enclosing == Some(dispatch.id)
+        })
+        .expect("unknown call syntax is retained");
+    assert!(matches!(
+        unknown.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(!document.relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(unknown.id)
+            && relation.predicate == RelationPredicate::Calls
+    }));
+}
+
+#[test]
 fn reviewed_csharp_php_and_c_calls_resolve_only_through_static_rules() {
     for (language, paths, sources, caller_name) in [
         (
