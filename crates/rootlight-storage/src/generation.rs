@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    io::{self, Read, Write},
+    io::{self, BufReader, Read, Write},
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
@@ -1166,8 +1166,19 @@ impl IdentityVerifiedGeneration {
         context: &GenerationContext<'_>,
     ) -> Result<Self, IdentityVerificationError> {
         let mut digest = PublishedDigestReader::new(reader, *context)?;
+        let maximum_read = u64::try_from(encoded_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(1))
+            .ok_or(IdentityVerificationError::InvalidGeneration)?;
+        // MessagePack reads tiny markers; batch above the digest so hashing and
+        // cancellation checks operate on checkpoint-sized chunks. Keep read-ahead
+        // within the declared document plus the existing trailing-byte probe.
+        let buffered = BufReader::with_capacity(
+            IDENTITY_RECIPE_CHECKPOINT_BYTES,
+            (&mut digest).take(maximum_read),
+        );
         let document = decode_normalized_ir_document_messagepack_reader_with_checkpoint(
-            &mut digest,
+            buffered,
             encoded_bytes,
             limits,
             extensions,
@@ -2767,6 +2778,201 @@ mod tests {
         );
 
         assert_eq!(result, Err(IdentityVerificationError::InvalidGeneration));
+    }
+
+    #[test]
+    fn published_messagepack_stream_amortizes_small_parser_reads() {
+        struct ObservedReader<'a> {
+            remaining: &'a [u8],
+            reads: usize,
+        }
+
+        impl Read for ObservedReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.remaining.read(buffer)
+            }
+        }
+
+        let repository = RepositoryId::from_bytes([2; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded = rmp_serde::to_vec_named(&document).expect("fixture encodes");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut reader = ObservedReader {
+            remaining: &encoded,
+            reads: 0,
+        };
+
+        let restored = IdentityVerifiedGeneration::restore_published_messagepack_reader(
+            metadata,
+            &mut reader,
+            encoded.len(),
+            content_hash(&encoded),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("batched reads preserve the verified generation");
+
+        assert_eq!(restored.document(), &document);
+        assert!(reader.remaining.is_empty());
+        assert!(
+            reader.reads <= encoded.len().div_ceil(IDENTITY_RECIPE_CHECKPOINT_BYTES) + 1,
+            "parser fragments must not become individual digest reads: {}",
+            reader.reads,
+        );
+    }
+
+    #[test]
+    fn published_messagepack_stream_bounds_read_ahead_and_rejects_bad_lengths() {
+        let repository = RepositoryId::from_bytes([2; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded = rmp_serde::to_vec_named(&document).expect("fixture encodes");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut trailing = encoded.clone();
+        trailing.extend_from_slice(&[0; 2 * IDENTITY_RECIPE_CHECKPOINT_BYTES]);
+
+        for (input, declared) in [
+            (&encoded[..encoded.len() - 1], encoded.len()),
+            (encoded.as_slice(), encoded.len() - 1),
+            (encoded.as_slice(), encoded.len() + 1),
+            (trailing.as_slice(), encoded.len()),
+        ] {
+            let mut reader = io::Cursor::new(input);
+            let result = IdentityVerifiedGeneration::restore_published_messagepack_reader(
+                metadata,
+                &mut reader,
+                declared,
+                content_hash(&encoded),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+            );
+            assert_eq!(result, Err(IdentityVerificationError::InvalidGeneration));
+            assert!(reader.position() <= u64::try_from(declared + 1).expect("fixture fits"));
+        }
+
+        let mut reader = io::Cursor::new(&encoded);
+        let mut limits = IrLimits::default();
+        limits.max_document_bytes = encoded.len() - 1;
+        assert_eq!(
+            IdentityVerifiedGeneration::restore_published_messagepack_reader(
+                metadata,
+                &mut reader,
+                encoded.len(),
+                content_hash(&encoded),
+                &limits,
+                &ExtensionSupport::default(),
+                &context,
+            ),
+            Err(IdentityVerificationError::InvalidGeneration),
+        );
+        assert_eq!(reader.position(), 0);
+    }
+
+    #[test]
+    fn published_messagepack_stream_preserves_source_catalog_across_short_reads() {
+        struct ShortReader<'a> {
+            remaining: &'a [u8],
+            maximum_read: usize,
+        }
+
+        impl Read for ShortReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let maximum = buffer.len().min(self.maximum_read);
+                self.remaining.read(&mut buffer[..maximum])
+            }
+        }
+
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let provenance = document.provenance[0].clone();
+        for index in 0..32 {
+            let mut record = provenance.clone();
+            record.rule = Some(format!("stream-validation-{index}"));
+            record.id = derive_provenance_record_id(&record).expect("fixture identity derives");
+            document.provenance.push(record);
+        }
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let expected = GenerationSnapshot::new_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+        )
+        .expect("fixture canonicalizes");
+        let expected = IdentityVerifiedGeneration::verify_snapshot(expected, &context)
+            .expect("fixture identities verify");
+        let encoded = rmp_serde::to_vec_named(&document).expect("fixture encodes");
+        assert!(encoded.len() > 2 * IDENTITY_RECIPE_CHECKPOINT_BYTES);
+
+        for maximum_read in [1, 3, IDENTITY_RECIPE_CHECKPOINT_BYTES] {
+            let restored =
+                IdentityVerifiedGeneration::restore_published_messagepack_reader_with_source_files(
+                    metadata,
+                    ShortReader {
+                        remaining: &encoded,
+                        maximum_read,
+                    },
+                    encoded.len(),
+                    content_hash(&encoded),
+                    catalog.clone(),
+                    &limits,
+                    &extensions,
+                    &context,
+                )
+                .expect("fragmented input preserves the full generation");
+            assert_eq!(restored, expected);
+        }
+    }
+
+    #[test]
+    fn published_messagepack_stream_preserves_cancellation_during_read() {
+        struct CancelOnRead<'a> {
+            remaining: &'a [u8],
+            cancellation: &'a Cancellation,
+        }
+
+        impl Read for CancelOnRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = self.remaining.read(buffer)?;
+                self.cancellation.cancel(CancellationReason::ClientRequest);
+                Ok(count)
+            }
+        }
+
+        let repository = RepositoryId::from_bytes([2; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded = rmp_serde::to_vec_named(&document).expect("fixture encodes");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        assert_eq!(
+            IdentityVerifiedGeneration::restore_published_messagepack_reader(
+                metadata,
+                CancelOnRead {
+                    remaining: &encoded,
+                    cancellation: &cancellation
+                },
+                encoded.len(),
+                content_hash(&encoded),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+            ),
+            Err(IdentityVerificationError::Control(
+                GenerationControlError::Cancelled {
+                    reason: CancellationReason::ClientRequest,
+                }
+            )),
+        );
     }
 
     #[test]
