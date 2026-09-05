@@ -789,7 +789,7 @@ fn preferred_local_call_syntax_fact_group(
             });
     }
     let call_nesting = call_span_nesting(facts);
-    let ((is_test, _), calls) = groups.into_iter().max_by(
+    let ((is_test, selected_name), calls) = groups.into_iter().max_by(
         |((left_test, left_name), left_calls), ((right_test, right_name), right_calls)| {
             let left_call_nesting = left_calls
                 .iter()
@@ -822,9 +822,44 @@ fn preferred_local_call_syntax_fact_group(
         },
     )?;
     let demand = calls.len();
-    let call = calls
-        .into_iter()
-        .min_by(|left, right| structural_syntax_fact_order(left, right))?;
+    let declaration_kinds = facts
+        .iter()
+        .filter_map(|fact| structural_entity_kind(fact).map(|kind| (fact.local_id(), kind)))
+        .collect::<BTreeMap<_, _>>();
+    let callable_names = facts
+        .iter()
+        .filter(|fact| is_definition_fact(fact))
+        .filter_map(|definition| {
+            let mut parent = definition.parent();
+            let mut remaining = facts_by_id.len();
+            while let Some(parent_id) = parent {
+                if remaining == 0 {
+                    return None;
+                }
+                remaining -= 1;
+                let declaration = facts_by_id.get(&parent_id).copied()?;
+                if declaration_kinds
+                    .get(&parent_id)
+                    .is_some_and(|kind| is_callable_entity_kind(*kind))
+                {
+                    return source_text(source, definition.span())
+                        .map(|name| (declaration.local_id(), name));
+                }
+                parent = declaration.parent();
+            }
+            None
+        })
+        .collect::<BTreeMap<_, _>>();
+    let call = calls.into_iter().min_by(|left, right| {
+        let recursive = |call: &SyntaxFact| {
+            enclosing_callable_declaration(call, facts_by_id, &declaration_kinds)
+                .and_then(|declaration| callable_names.get(&declaration))
+                .is_some_and(|caller| *caller == selected_name)
+        };
+        recursive(left)
+            .cmp(&recursive(right))
+            .then_with(|| structural_syntax_fact_order(left, right))
+    })?;
     Some(PreferredLocalCallGroup {
         call_id: call.local_id(),
         is_test,

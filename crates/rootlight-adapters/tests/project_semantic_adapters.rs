@@ -1091,6 +1091,55 @@ fn go_project_semantics_preserve_test_calls() {
 }
 
 #[test]
+fn bounded_go_calls_prefer_cross_symbol_edges_over_recursion() {
+    let recursive_calls = "    visit()\n".repeat(400);
+    let source = format!(
+        "package sample\nfunc visit() {{\n{recursive_calls}}}\nfunc infer() {{ visit() }}\n"
+    );
+    let fixture = ProjectFixture::new(
+        ["thinking/visit.go"],
+        [source.as_str()],
+        SemanticProjectLanguage::Go,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let visit = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "visit")
+        .expect("visited function is materialized");
+    let infer = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "infer")
+        .expect("non-recursive caller is materialized");
+
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+    let cross_symbol_call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.enclosing == Some(infer.id)
+                && matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Resolved { symbol } if symbol == visit.id
+                )
+        })
+        .expect("bounded syntax retains a cross-symbol call site");
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(cross_symbol_call.id)
+            && relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(visit.id)
+    }));
+}
+
+#[test]
 fn go_project_semantics_do_not_cross_package_directories() {
     let fixture = ProjectFixture::new(
         ["first/worker.go", "second/caller.go"],
