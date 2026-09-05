@@ -165,7 +165,13 @@ macro_rules! define_stable_id {
             type Err = IdParseError;
 
             fn from_str(input: &str) -> Result<Self, Self::Err> {
-                decode_text::<$size>($prefix, input).map(Self)
+                decode_text::<$size>(
+                    $prefix,
+                    input,
+                    &mut [0_u8; (($size + CHECKSUM_BYTES) * 8).div_ceil(5)],
+                    &mut [0_u8; $size + CHECKSUM_BYTES],
+                )
+                .map(Self)
             }
         }
 
@@ -443,6 +449,7 @@ impl CanonicalEncoder {
     }
 }
 
+#[cfg(test)]
 fn encode_text(prefix: &str, raw: &[u8]) -> String {
     let checksum = text_checksum(prefix, raw);
     let mut payload = Vec::with_capacity(raw.len() + CHECKSUM_BYTES);
@@ -452,7 +459,12 @@ fn encode_text(prefix: &str, raw: &[u8]) -> String {
     format!("{prefix}{encoded}")
 }
 
-fn decode_text<const N: usize>(prefix: &str, input: &str) -> Result<[u8; N], IdParseError> {
+fn decode_text<const N: usize>(
+    prefix: &str,
+    input: &str,
+    encoded_buffer: &mut [u8],
+    payload: &mut [u8],
+) -> Result<[u8; N], IdParseError> {
     if input.trim() != input {
         return Err(IdParseError::Whitespace);
     }
@@ -477,13 +489,19 @@ fn decode_text<const N: usize>(prefix: &str, input: &str) -> Result<[u8; N], IdP
             actual: encoded.len(),
         });
     }
-    let payload = BASE32_NOPAD
-        .decode(encoded.to_ascii_uppercase().as_bytes())
+    // Macro-owned buffers have fixed family widths, independent of input.
+    // The exact-length gate above must precede copying or invoking the codec.
+    debug_assert_eq!(encoded_buffer.len(), expected_encoded_length);
+    debug_assert_eq!(payload.len(), expected_length);
+    encoded_buffer.copy_from_slice(encoded.as_bytes());
+    encoded_buffer.make_ascii_uppercase();
+    let decoded_length = BASE32_NOPAD
+        .decode_mut(encoded_buffer, payload)
         .map_err(|_| IdParseError::InvalidAlphabet)?;
-    if payload.len() != expected_length {
+    if decoded_length != expected_length {
         return Err(IdParseError::InvalidLength {
             expected: expected_length,
-            actual: payload.len(),
+            actual: decoded_length,
         });
     }
 
@@ -494,7 +512,11 @@ fn decode_text<const N: usize>(prefix: &str, input: &str) -> Result<[u8; N], IdP
 
     let mut bytes = [0_u8; N];
     bytes.copy_from_slice(raw);
-    if encode_text(prefix, &bytes) != input {
+    // Reuse the verified payload, including its checksum, for the canonical
+    // round-trip check instead of deriving and allocating the entire ID again.
+    BASE32_NOPAD.encode_mut(payload, encoded_buffer);
+    encoded_buffer.make_ascii_lowercase();
+    if encoded_buffer != encoded.as_bytes() {
         return Err(IdParseError::NonCanonical);
     }
     Ok(bytes)
@@ -580,6 +602,59 @@ impl fmt::Debug for Hex<'_> {
 
 #[cfg(test)]
 mod tests {
+    // Keep the allocating decoder as an independent compatibility oracle for
+    // the exact error precedence as well as canonical successful inputs.
+    fn decode_text_legacy<const N: usize>(
+        prefix: &str,
+        input: &str,
+    ) -> Result<[u8; N], IdParseError> {
+        if input.trim() != input {
+            return Err(IdParseError::Whitespace);
+        }
+        if input.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(IdParseError::Uppercase);
+        }
+        if input.contains('=') {
+            return Err(IdParseError::Padding);
+        }
+        if !input.is_ascii() {
+            return Err(IdParseError::InvalidAlphabet);
+        }
+
+        let encoded = input
+            .strip_prefix(prefix)
+            .ok_or_else(|| classify_prefix(prefix, input))?;
+        let expected_length = N + CHECKSUM_BYTES;
+        let expected_encoded_length = (expected_length * 8).div_ceil(5);
+        if encoded.len() != expected_encoded_length {
+            return Err(IdParseError::InvalidEncodedLength {
+                expected: expected_encoded_length,
+                actual: encoded.len(),
+            });
+        }
+        let payload = BASE32_NOPAD
+            .decode(encoded.to_ascii_uppercase().as_bytes())
+            .map_err(|_| IdParseError::InvalidAlphabet)?;
+        if payload.len() != expected_length {
+            return Err(IdParseError::InvalidLength {
+                expected: expected_length,
+                actual: payload.len(),
+            });
+        }
+
+        let (raw, checksum) = payload.split_at(N);
+        if checksum != text_checksum(prefix, raw) {
+            return Err(IdParseError::ChecksumMismatch);
+        }
+
+        let mut bytes = [0_u8; N];
+        bytes.copy_from_slice(raw);
+        if encode_text(prefix, &bytes) != input {
+            return Err(IdParseError::NonCanonical);
+        }
+        Ok(bytes)
+    }
+
     use super::*;
     use proptest::prelude::*;
 
@@ -722,6 +797,39 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn fixed_buffer_decoder_matches_reference_errors(
+            short in any::<[u8; 16]>(),
+            medium in any::<[u8; 20]>(),
+            long in any::<[u8; 32]>(),
+            position in 0_usize..64,
+            replacement in 0_u8..=127,
+            arbitrary in ".{0,96}",
+        ) {
+            macro_rules! check_family {
+                ($family:ident, $prefix:literal, $bytes:expr, $size:expr) => {{
+                    let canonical = encode_text($prefix, &$bytes);
+                    let mut mutated = canonical.as_bytes().to_vec();
+                    let index = position % mutated.len();
+                    mutated[index] = replacement;
+                    let mutated = String::from_utf8(mutated).expect("ASCII mutation is UTF-8");
+                    for input in [&canonical, &mutated, &arbitrary] {
+                        prop_assert_eq!(
+                            input.parse::<$family>().map(|id| *id.as_bytes()),
+                            decode_text_legacy::<$size>($prefix, input)
+                        );
+                    }
+                }};
+            }
+            check_family!(RepositoryId, "repo1_", short, 16);
+            check_family!(OperationId, "op1_", short, 16);
+            check_family!(GenerationId, "gen1_", medium, 20);
+            check_family!(SymbolId, "sym1_", medium, 20);
+            check_family!(FileId, "file1_", medium, 20);
+            check_family!(FactId, "fact1_", medium, 20);
+            check_family!(ContentHash, "b3_", long, 32);
+        }
+
         #[test]
         fn stack_text_codec_matches_canonical_encoding(
             short in any::<[u8; 16]>(),
