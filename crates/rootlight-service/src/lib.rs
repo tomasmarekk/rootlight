@@ -113,7 +113,7 @@ pub use rootlight_query::{
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
     QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
-    project_source_fallback_document, project_source_fallback_document_with_text_limit,
+    project_scoped_lexical_documents_with_source, project_source_fallback_document_with_text_limit,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -10662,16 +10662,16 @@ impl FirstSliceService {
             language.push_str(canonical);
         }
         if mode == LocateMode::Text && path_prefixes.len() == 1 {
-            let source_document = self.scoped_partial_source_document(
+            let source_documents = self.scoped_partial_source_documents(
                 lease.generation(),
                 generation,
                 &path_prefixes[0],
                 cancellation,
             )?;
-            if let Some(source_document) = source_document {
+            if let Some(source_documents) = source_documents {
                 let search = LexicalIndex::build_ephemeral(
                     generation,
-                    vec![source_document],
+                    source_documents,
                     BuildBudget::default(),
                     cancellation,
                 )
@@ -10712,13 +10712,13 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))
     }
 
-    fn scoped_partial_source_document(
+    fn scoped_partial_source_documents(
         &self,
         snapshot: &rootlight_storage::GenerationSnapshot,
         generation: GenerationId,
         path: &str,
         cancellation: &Cancellation,
-    ) -> Result<Option<LexicalDocument>, FirstSliceError> {
+    ) -> Result<Option<Vec<LexicalDocument>>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let Some(file) = snapshot
             .document()
@@ -10758,9 +10758,14 @@ impl FirstSliceService {
             let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
             Arc::new(durable.read_source(file.repository, generation, file, cancellation)?)
         };
-        project_source_fallback_document(snapshot, &source, BuildBudget::default(), cancellation)
-            .map(Some)
-            .map_err(|error| map_query_error(error, cancellation))
+        project_scoped_lexical_documents_with_source(
+            snapshot,
+            &source,
+            BuildBudget::default(),
+            cancellation,
+        )
+        .map(Some)
+        .map_err(|error| map_query_error(error, cancellation))
     }
 
     /// Executes a generation-pinned bounded `symbol.explain` query.
@@ -27262,7 +27267,7 @@ mod tests {
             .prepare_owner()
             .expect("account-private runtime paths prepare");
         let fixture = TempDir::new().expect("fixture root exists");
-        let sparse = "// lexical_fallback_marker\nstruct A;\n";
+        let sparse = "// lexical_fallback_marker\nstruct SparseAnchor;\n";
         let dense = concat!(
             "// lexical_fallback_marker\n",
             "fn alpha() {}\n",
@@ -27309,7 +27314,7 @@ mod tests {
             .iter()
             .map(|entity| entity.canonical_name.as_str())
             .collect::<BTreeSet<_>>();
-        for expected in ["A", "alpha", "beta", "gamma", "delta", "epsilon"] {
+        for expected in ["SparseAnchor", "alpha", "beta", "gamma", "delta", "epsilon"] {
             assert!(names.contains(expected), "{expected} remains queryable");
         }
         assert!(
@@ -27328,6 +27333,30 @@ mod tests {
             .expect("bounded syntax diagnostic identifies its source file");
         let limited_file_id = limited_file.id;
         let limited_path = limited_file.path.clone();
+        let limited_symbol = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == limited_file_id)
+            })
+            .map(|entity| (entity.id, entity.display_name.clone()))
+            .expect("bounded file retains a structural symbol");
+        let out_of_scope_symbol = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() != limited_file_id)
+            })
+            .map(|entity| (entity.id, entity.display_name.clone()))
+            .expect("the other file retains a negative-control symbol");
         let located = service
             .code_locate_with_filters_and_budget(
                 receipt.generation,
@@ -27344,6 +27373,46 @@ mod tests {
         assert!(located.data.hits.iter().any(|hit| {
             hit.symbol.is_none() && hit.file == limited_file_id && hit.path == limited_path
         }));
+        let located_symbol = service
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                limited_symbol.1.clone(),
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path.clone()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("source fallback preserves a structural symbol in the same file");
+        assert!(
+            located_symbol
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.symbol == Some(limited_symbol.0))
+        );
+        let out_of_scope = service
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                out_of_scope_symbol.1.clone(),
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path.clone()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("exact source fallback scope remains bounded to one file");
+        assert!(
+            out_of_scope
+                .data
+                .hits
+                .iter()
+                .all(|hit| hit.symbol != Some(out_of_scope_symbol.0))
+        );
 
         drop(service);
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
@@ -27354,7 +27423,7 @@ mod tests {
                 "lexical_fallback_marker".to_owned(),
                 LocateMode::Text,
                 Vec::new(),
-                vec![limited_path],
+                vec![limited_path.clone()],
                 8,
                 0,
                 FirstSliceBudget::default(),
@@ -27367,6 +27436,46 @@ mod tests {
                 .hits
                 .iter()
                 .any(|hit| { hit.symbol.is_none() && hit.file == limited_file_id })
+        );
+        let restored_symbol = restored
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                limited_symbol.1,
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path.clone()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("restored fallback preserves the same structural symbol");
+        assert!(
+            restored_symbol
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.symbol == Some(limited_symbol.0))
+        );
+        let restored_out_of_scope = restored
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                out_of_scope_symbol.1,
+                LocateMode::Text,
+                Vec::new(),
+                vec![limited_path],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("restored fallback keeps the negative-control symbol out of scope");
+        assert!(
+            restored_out_of_scope
+                .data
+                .hits
+                .iter()
+                .all(|hit| hit.symbol != Some(out_of_scope_symbol.0))
         );
     }
 
