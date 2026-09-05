@@ -1069,7 +1069,11 @@ where
             identity: format!("{}:{}:{}", symbol, chunk.start_byte, chunk.end_byte),
             observed_score: Some(confidence),
             observed_relevance: None,
-            estimated_tokens: u64::try_from(chunk.content.len()).unwrap_or(u64::MAX),
+            // The pack reservation uses token estimates, while exact source
+            // bytes remain a separately enforced resource in the parent ledger.
+            estimated_tokens: rootlight_mcp_contract::accounting::estimate_tokens(
+                chunk.content.len(),
+            ),
             source_bytes: u64::try_from(chunk.content.len()).unwrap_or(u64::MAX),
             source_refs,
         });

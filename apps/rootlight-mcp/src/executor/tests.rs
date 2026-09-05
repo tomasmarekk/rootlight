@@ -611,7 +611,9 @@ impl FirstSliceClientPort for FakePort {
             FakeOutcome::BatchContextPack { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchSourceRead { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
-            FakeOutcome::SymbolExplain(Ok(_)) | FakeOutcome::SymbolExplainPerRequest(Ok(_)) => {
+            FakeOutcome::SymbolExplain(Ok(_))
+            | FakeOutcome::SymbolExplainPerRequest(Ok(_))
+            | FakeOutcome::SourceReadSymbolResolution { explain: Ok(_), .. } => {
                 Ok(repository_status_response())
             }
             FakeOutcome::PlanChange(Ok(_)) => Ok(repository_status_response()),
@@ -6190,6 +6192,105 @@ async fn maps_truncated_symbol_explain_without_reclassifying_omitted_ids() {
     assert_eq!(output.data.symbols.len(), 1);
     assert!(output.data.unresolved_ids.is_empty());
     assert_eq!(output.completeness.state, CompletenessState::Truncated);
+}
+
+fn context_source_harness(content: Vec<u8>) -> Harness {
+    let bytes = content.len();
+    let end = 4 + u64::try_from(bytes).expect("fixture length fits u64");
+    let reference = source_reference(4, end, 2, 2);
+    let mut explain = explain_response(reference.clone());
+    explain.result.unresolved_symbols.clear();
+    let mut source = source_read_response(source_reference(4, 12, 2, 2));
+    source.result.context.usage.source_bytes = u64::try_from(bytes).unwrap();
+    source.result.total_source_bytes = u64::try_from(bytes).unwrap();
+    let chunk = &mut source.result.chunks[0];
+    chunk.source = reference.clone();
+    chunk.end_byte = end;
+    chunk.content = content;
+    Harness::new(FakeOutcome::SourceReadSymbolResolution {
+        explain: Ok(explain),
+        source: Ok(source),
+    })
+}
+
+#[tokio::test]
+async fn context_pack_accepts_source_within_its_provider_byte_reservation() {
+    for bytes in [512_usize, 513, 2_048] {
+        let end = 4 + u64::try_from(bytes).expect("fixture length fits u64");
+        let harness = context_source_harness(vec![b'x'; bytes]);
+        let result = execute(
+            &harness.executor,
+            VerticalTool::ContextPack,
+            json!({
+                "repository": {"repository_id": repository()},
+                "task": "explain the selected source symbol",
+                "seeds": {"symbols": [symbol()]},
+                "sections": ["definitions", "source"],
+                "source_policy": "references_only",
+                "token_budget": 4000
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{bytes} source bytes must fit: {error:?}"));
+        let ToolResponse::Success(pack) = decode::<ContextPackOutput>(result) else {
+            panic!("expected a source-backed pack for {bytes} bytes");
+        };
+        assert_eq!(pack.generation.generation_id, generation());
+        assert!(pack.data.items.iter().any(|item| {
+            item.symbol_id == Some(symbol())
+                && item.source_ref.as_ref().is_some_and(|source| {
+                    source.span().start_byte() == 4 && source.span().end_byte() == end
+                })
+        }));
+        assert!(pack.data.omitted.iter().any(|omission| {
+            omission.role == Some(rootlight_mcp_contract::context::EvidenceRole::Implementation)
+                && omission.reason.as_str() == "selection_diversity"
+                && omission.count == 1
+                && omission.resumable
+                && omission.continuation.is_some()
+        }));
+        assert_eq!(pack.usage.source_bytes, u64::try_from(bytes).unwrap());
+        assert!(pack.usage.estimated_tokens <= 4000);
+    }
+}
+
+#[tokio::test]
+async fn context_pack_source_accounting_preserves_utf8_and_byte_limits() {
+    for content in ["λ".repeat(513).into_bytes(), vec![b'x'; 2_049]] {
+        let bytes = content.len();
+        let harness = context_source_harness(content);
+        let result = execute(
+            &harness.executor,
+            VerticalTool::ContextPack,
+            json!({
+                "repository": {"repository_id": repository()},
+                "task": "explain the selected source symbol",
+                "seeds": {"symbols": [symbol()]},
+                "sections": ["source"],
+                "source_policy": "references_only",
+                "token_budget": 4000
+            }),
+        )
+        .await;
+        if bytes > 2_048 {
+            let error = result.expect_err("the exact provider source-byte ceiling is unchanged");
+            assert_canonical_budget_error(error.public_error().expect("a typed budget error"));
+        } else {
+            let ToolResponse::Success(pack) = decode::<ContextPackOutput>(
+                result.expect("multibyte source within the byte ceiling fits"),
+            ) else {
+                panic!("expected a source-backed pack");
+            };
+            assert_eq!(pack.usage.source_bytes, u64::try_from(bytes).unwrap());
+            assert!(pack.data.items.iter().any(|item| {
+                item.role == rootlight_mcp_contract::context::EvidenceRole::Implementation
+                    && item.source_ref.as_ref().is_some_and(|source| {
+                        source.generation() == generation()
+                            && source.span().end_byte() == 4 + u64::try_from(bytes).unwrap()
+                    })
+            }));
+        }
+    }
 }
 
 #[tokio::test]
