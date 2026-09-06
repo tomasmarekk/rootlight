@@ -957,6 +957,19 @@ enum RecoverySnapshotFormat {
     MessagePackGzip,
 }
 
+// Keep descriptor validation separate from payload materialization so admission
+// and decoding use the same bounded lengths, codec, and generation identity.
+struct RecoverySnapshotPlan {
+    snapshot_name: &'static str,
+    encoded_bytes: u64,
+    encoded_digest: ContentHash,
+    decoded_bytes: u64,
+    decoded_digest: ContentHash,
+    serialized_document_bytes: u64,
+    format: RecoverySnapshotFormat,
+    metadata: GenerationMetadata,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableActivationManifest {
@@ -5601,6 +5614,13 @@ fn restore_generation(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    let recovery_plan = read_recovery_snapshot_plan(
+        &generation_directory,
+        repository,
+        generation,
+        manifest.receipt.parent,
+        cancellation,
+    );
     let incremental = match restore_incremental_state(
         &generation_directory,
         manifest.incremental_state,
@@ -5620,15 +5640,18 @@ fn restore_generation(
 
     let context = GenerationContext::new(cancellation, GenerationBudget::default());
     let generation_path = repository_path.join(&generation_name);
-    let recovered = restore_recovery_generation(
-        &generation_directory,
-        repository,
-        generation,
-        manifest.receipt.parent,
-        &source_file_catalog,
-        &context,
-        cancellation,
-    );
+    let recovered = recovery_plan.and_then(|plan| {
+        plan.map(|plan| {
+            restore_recovery_generation(
+                &generation_directory,
+                &plan,
+                &source_file_catalog,
+                &context,
+                cancellation,
+            )
+        })
+        .transpose()
+    });
     // A zero oracle charge is the persisted discriminator for semantic
     // generations whose checksummed recovery snapshot is authoritative.
     let (verified, allocated_bytes, recovery_serialized_document_bytes) =
@@ -6051,15 +6074,14 @@ fn restore_logical_snapshot_identity(
     }))
 }
 
-fn restore_recovery_generation(
+fn read_recovery_snapshot_plan(
     generation_directory: &PrivateDirectory<'_>,
     repository: RepositoryId,
     generation: GenerationId,
     parent: Option<GenerationId>,
-    source_files: &SourceFileCatalog,
-    context: &GenerationContext<'_>,
     cancellation: &Cancellation,
-) -> Result<Option<(IdentityVerifiedGeneration, u64)>, FirstSliceError> {
+) -> Result<Option<RecoverySnapshotPlan>, FirstSliceError> {
+    check_cancellation(cancellation)?;
     let names = private_entry_names(generation_directory)?;
     if !names
         .iter()
@@ -6067,7 +6089,6 @@ fn restore_recovery_generation(
     {
         return Ok(None);
     }
-    check_cancellation(cancellation)?;
     let descriptor = generation_directory
         .read_file_bounded(
             OsStr::new(RECOVERY_MANIFEST_FILENAME),
@@ -6149,14 +6170,6 @@ fn restore_recovery_generation(
             }
             _ => return Err(FirstSliceError::CatalogCorrupt),
         };
-    let encoded = generation_directory
-        .read_file_bounded_cancellable(OsStr::new(snapshot_name), recovery.bytes, cancellation)
-        .map_err(map_private_read_error)?;
-    if u64::try_from(encoded.len()).ok() != Some(recovery.bytes)
-        || content_hash_bytes(&encoded) != recovery.digest
-    {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
     let metadata = GenerationMetadata::new_for_contract(
         contract,
         repository,
@@ -6167,18 +6180,49 @@ fn restore_recovery_generation(
         recovery.provider_set_hash,
     )
     .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    Ok(Some(RecoverySnapshotPlan {
+        snapshot_name,
+        encoded_bytes: recovery.bytes,
+        encoded_digest: recovery.digest,
+        decoded_bytes,
+        decoded_digest,
+        serialized_document_bytes,
+        format,
+        metadata,
+    }))
+}
+
+fn restore_recovery_generation(
+    generation_directory: &PrivateDirectory<'_>,
+    plan: &RecoverySnapshotPlan,
+    source_files: &SourceFileCatalog,
+    context: &GenerationContext<'_>,
+    cancellation: &Cancellation,
+) -> Result<(IdentityVerifiedGeneration, u64), FirstSliceError> {
+    let encoded = generation_directory
+        .read_file_bounded_cancellable(
+            OsStr::new(plan.snapshot_name),
+            plan.encoded_bytes,
+            cancellation,
+        )
+        .map_err(map_private_read_error)?;
+    if u64::try_from(encoded.len()).ok() != Some(plan.encoded_bytes)
+        || content_hash_bytes(&encoded) != plan.encoded_digest
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
     let mut recovery_limits = IrLimits::default();
     // Published in-memory documents may legitimately serialize beyond the
     // default import envelope. The sidecar supplies the exact checksummed
     // length, still capped by the recovery hard bound.
     recovery_limits.max_document_bytes =
-        usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?;
-    let restored = match format {
+        usize::try_from(plan.decoded_bytes).map_err(|_| FirstSliceError::Limits)?;
+    let restored = match plan.format {
         RecoverySnapshotFormat::Json => {
             IdentityVerifiedGeneration::restore_published_json_with_source_files(
-                metadata,
+                plan.metadata,
                 &encoded,
-                decoded_digest,
+                plan.decoded_digest,
                 source_files.clone(),
                 &recovery_limits,
                 &ExtensionSupport::default(),
@@ -6186,11 +6230,11 @@ fn restore_recovery_generation(
             )
         }
         RecoverySnapshotFormat::JsonGzip => {
-            let decoded = decode_recovery_snapshot(&encoded, decoded_bytes, cancellation)?;
+            let decoded = decode_recovery_snapshot(&encoded, plan.decoded_bytes, cancellation)?;
             IdentityVerifiedGeneration::restore_published_json_with_source_files(
-                metadata,
+                plan.metadata,
                 &decoded,
-                decoded_digest,
+                plan.decoded_digest,
                 source_files.clone(),
                 &recovery_limits,
                 &ExtensionSupport::default(),
@@ -6203,10 +6247,10 @@ fn restore_recovery_generation(
                 GzDecoder::new(encoded.as_slice()),
             );
             IdentityVerifiedGeneration::restore_published_messagepack_reader_with_source_files(
-                metadata,
+                plan.metadata,
                 reader,
-                usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
-                decoded_digest,
+                usize::try_from(plan.decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
+                plan.decoded_digest,
                 source_files.clone(),
                 &recovery_limits,
                 &ExtensionSupport::default(),
@@ -6218,7 +6262,7 @@ fn restore_recovery_generation(
     // The caller may reuse this charge only after the independently persisted
     // logical descriptor confirms it; otherwise it recomputes the exact JSON
     // measure from the verified document.
-    Ok(Some((restored, serialized_document_bytes)))
+    Ok((restored, plan.serialized_document_bytes))
 }
 
 fn restore_oracle_generation(
@@ -7246,6 +7290,192 @@ mod tests {
                 CancellationReason::ClientRequest
             ))
         );
+    }
+
+    #[test]
+    fn recovery_snapshot_plan_validates_all_codecs_without_loading_payloads() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = open_test_catalog(paths.state_dir(), 2).expect("catalog opens");
+        let repository = derive_repository(b"recovery-descriptor").id();
+        let parent = Some(GenerationId::from_bytes([6; 20]));
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent,
+            manifest_hash: content_hash(b"manifest"),
+            config_hash: content_hash(b"configuration"),
+            provider_set_hash: content_hash(b"providers"),
+            format_version: u32::from(GENERATION_CONTRACT_VERSION.major()) << 16
+                | u32::from(GENERATION_CONTRACT_VERSION.minor()),
+        })
+        .id();
+        let prepared = durable
+            .begin_generation(repository, generation)
+            .expect("staging generation opens");
+        let directory = prepared.staging();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        assert!(
+            read_recovery_snapshot_plan(directory, repository, generation, parent, &cancellation)
+                .expect("absent descriptor is compatible with oracle recovery")
+                .is_none()
+        );
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::Shutdown);
+        assert!(matches!(
+            read_recovery_snapshot_plan(directory, repository, generation, parent, &cancelled),
+            Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+        ));
+
+        let baseline = serde_json::json!({
+            "version": RECOVERY_SNAPSHOT_VERSION,
+            "bytes": 128,
+            "digest": content_hash(b"encoded"),
+            "encoding": "message_pack_gzip",
+            "decoded_bytes": 512,
+            "decoded_digest": content_hash(b"decoded"),
+            "serialized_document_bytes": 640,
+            "contract_major": GENERATION_CONTRACT_VERSION.major(),
+            "contract_minor": GENERATION_CONTRACT_VERSION.minor(),
+            "manifest_hash": content_hash(b"manifest"),
+            "configuration_hash": content_hash(b"configuration"),
+            "provider_set_hash": content_hash(b"providers"),
+        });
+        let descriptor_path = prepared.path().join(RECOVERY_MANIFEST_FILENAME);
+        drop(
+            directory
+                .create_file(OsStr::new(RECOVERY_MANIFEST_FILENAME))
+                .expect("private descriptor file creates"),
+        );
+        for (version, snapshot_name, decoded_bytes, serialized_bytes) in [
+            (
+                LEGACY_RECOVERY_SNAPSHOT_VERSION,
+                RECOVERY_SNAPSHOT_FILENAME,
+                128,
+                128,
+            ),
+            (
+                JSON_GZIP_RECOVERY_SNAPSHOT_VERSION,
+                RECOVERY_SNAPSHOT_GZIP_FILENAME,
+                512,
+                512,
+            ),
+            (
+                RECOVERY_SNAPSHOT_VERSION,
+                RECOVERY_SNAPSHOT_MESSAGEPACK_GZIP_FILENAME,
+                512,
+                640,
+            ),
+        ] {
+            let mut descriptor = baseline.clone();
+            descriptor["version"] = serde_json::json!(version);
+            if version == LEGACY_RECOVERY_SNAPSHOT_VERSION {
+                for field in [
+                    "encoding",
+                    "decoded_bytes",
+                    "decoded_digest",
+                    "serialized_document_bytes",
+                ] {
+                    descriptor
+                        .as_object_mut()
+                        .expect("descriptor is an object")
+                        .remove(field);
+                }
+            } else if version == JSON_GZIP_RECOVERY_SNAPSHOT_VERSION {
+                descriptor["encoding"] = serde_json::json!("gzip");
+                descriptor
+                    .as_object_mut()
+                    .expect("descriptor is an object")
+                    .remove("serialized_document_bytes");
+            }
+            fs::write(
+                &descriptor_path,
+                serde_json::to_vec(&descriptor).expect("descriptor serializes"),
+            )
+            .expect("descriptor writes");
+            serde_json::from_value::<DurableRecoverySnapshot>(descriptor)
+                .expect("valid fixture uses the persisted descriptor schema");
+            let plan = read_recovery_snapshot_plan(
+                directory,
+                repository,
+                generation,
+                parent,
+                &cancellation,
+            )
+            .expect("bounded descriptor validates without its payload")
+            .expect("descriptor is present");
+            assert_eq!(plan.snapshot_name, snapshot_name);
+            assert_eq!(plan.encoded_bytes, 128);
+            assert_eq!(plan.decoded_bytes, decoded_bytes);
+            assert_eq!(plan.serialized_document_bytes, serialized_bytes);
+            assert_eq!(plan.metadata.repository(), repository);
+            assert_eq!(plan.metadata.generation(), generation);
+            assert_eq!(plan.metadata.parent(), parent);
+            assert!(!prepared.path().join(snapshot_name).exists());
+            assert!(matches!(
+                restore_recovery_generation(
+                    directory,
+                    &plan,
+                    &SourceFileCatalog::default(),
+                    &context,
+                    &cancellation
+                ),
+                Err(FirstSliceError::CatalogCorrupt)
+            ));
+        }
+
+        for (field, invalid) in [
+            ("version", serde_json::json!(0)),
+            ("version", serde_json::json!(RECOVERY_SNAPSHOT_VERSION + 1)),
+            ("encoding", serde_json::json!("gzip")),
+            ("encoding", serde_json::Value::Null),
+            ("bytes", serde_json::json!(0)),
+            ("bytes", serde_json::json!(MAX_RECOVERY_ENCODED_BYTES + 1)),
+            ("decoded_bytes", serde_json::json!(0)),
+            (
+                "decoded_bytes",
+                serde_json::json!(MAX_RECOVERY_SNAPSHOT_BYTES + 1),
+            ),
+            ("decoded_bytes", serde_json::Value::Null),
+            ("decoded_digest", serde_json::Value::Null),
+            ("serialized_document_bytes", serde_json::json!(511)),
+            (
+                "serialized_document_bytes",
+                serde_json::json!(MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1),
+            ),
+            ("serialized_document_bytes", serde_json::Value::Null),
+            (
+                "contract_major",
+                serde_json::json!(GENERATION_CONTRACT_VERSION.major() + 1),
+            ),
+            (
+                "contract_minor",
+                serde_json::json!(GENERATION_CONTRACT_VERSION.minor() + 1),
+            ),
+        ] {
+            let mut descriptor = baseline.clone();
+            descriptor[field] = invalid;
+            fs::write(
+                &descriptor_path,
+                serde_json::to_vec(&descriptor).expect("descriptor serializes"),
+            )
+            .expect("descriptor writes");
+            assert!(
+                matches!(
+                    read_recovery_snapshot_plan(
+                        directory,
+                        repository,
+                        generation,
+                        parent,
+                        &cancellation
+                    ),
+                    Err(FirstSliceError::CatalogCorrupt)
+                ),
+                "invalid {field} must fail before payload materialization"
+            );
+        }
     }
 
     #[test]
