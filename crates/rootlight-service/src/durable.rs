@@ -35,8 +35,8 @@ use rootlight_query::project_source_fallback_document_with_text_limit;
 use rootlight_search::{BuildBudget, EphemeralLexicalIndexBuilder, LexicalIndex};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
-    GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
-    SourceFileCatalog, SourceFileCatalogEntry,
+    GenerationMetadata, GenerationReader, GenerationSnapshot, IdentityVerificationError,
+    IdentityVerifiedGeneration, SourceFileCatalog, SourceFileCatalogEntry,
 };
 use rootlight_vfs::{
     MAX_PATH_BYTES, MAX_PATH_COMPONENTS, MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
@@ -135,6 +135,39 @@ pub(super) fn recovery_snapshot_output_reservation(
 }
 
 #[cfg(test)]
+fn write_test_recovery_file(
+    generation_path: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), FirstSliceError> {
+    // Ambient file creation can inherit non-private permissions and make a
+    // compatibility test silently exercise oracle fallback instead of its codec.
+    let parent = Dir::open_ambient_dir(
+        generation_path.parent().ok_or(FirstSliceError::Catalog)?,
+        ambient_authority(),
+    )
+    .map_err(|_| FirstSliceError::Catalog)?;
+    let generation = PrivateDirectory::open(
+        &parent,
+        generation_path
+            .file_name()
+            .ok_or(FirstSliceError::Catalog)?,
+    )
+    .map_err(|_| FirstSliceError::Catalog)?;
+    match generation.capability().remove_file(name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(FirstSliceError::Catalog),
+    }
+    let mut file = generation
+        .create_file(OsStr::new(name))
+        .map_err(|_| FirstSliceError::Catalog)?;
+    file.write_all(bytes)
+        .map_err(|_| FirstSliceError::Catalog)?;
+    file.sync_all().map_err(|_| FirstSliceError::Catalog)
+}
+
+#[cfg(test)]
 pub(super) fn write_legacy_recovery_snapshot(
     generation_directory: &Path,
     snapshot: &GenerationSnapshot,
@@ -144,11 +177,7 @@ pub(super) fn write_legacy_recovery_snapshot(
     if decoded_bytes == 0 || decoded_bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
         return Err(FirstSliceError::Limits);
     }
-    std::fs::write(
-        generation_directory.join(RECOVERY_SNAPSHOT_FILENAME),
-        &decoded,
-    )
-    .map_err(|_| FirstSliceError::Catalog)?;
+    write_test_recovery_file(generation_directory, RECOVERY_SNAPSHOT_FILENAME, &decoded)?;
     let metadata = snapshot.metadata();
     let contract = metadata.contract_version();
     let recovery = DurableRecoverySnapshot {
@@ -171,11 +200,11 @@ pub(super) fn write_legacy_recovery_snapshot(
     {
         return Err(FirstSliceError::Limits);
     }
-    std::fs::write(
-        generation_directory.join(RECOVERY_MANIFEST_FILENAME),
-        descriptor,
+    write_test_recovery_file(
+        generation_directory,
+        RECOVERY_MANIFEST_FILENAME,
+        &descriptor,
     )
-    .map_err(|_| FirstSliceError::Catalog)
 }
 
 #[cfg(test)]
@@ -197,11 +226,11 @@ pub(super) fn write_legacy_gzip_recovery_snapshot(
     if encoded_bytes == 0 || encoded_bytes > MAX_RECOVERY_ENCODED_BYTES {
         return Err(FirstSliceError::Limits);
     }
-    std::fs::write(
-        generation_directory.join(RECOVERY_SNAPSHOT_GZIP_FILENAME),
+    write_test_recovery_file(
+        generation_directory,
+        RECOVERY_SNAPSHOT_GZIP_FILENAME,
         &encoded,
-    )
-    .map_err(|_| FirstSliceError::Catalog)?;
+    )?;
     let metadata = snapshot.metadata();
     let contract = metadata.contract_version();
     let recovery = DurableRecoverySnapshot {
@@ -224,11 +253,11 @@ pub(super) fn write_legacy_gzip_recovery_snapshot(
     {
         return Err(FirstSliceError::Limits);
     }
-    std::fs::write(
-        generation_directory.join(RECOVERY_MANIFEST_FILENAME),
-        descriptor,
+    write_test_recovery_file(
+        generation_directory,
+        RECOVERY_MANIFEST_FILENAME,
+        &descriptor,
     )
-    .map_err(|_| FirstSliceError::Catalog)
 }
 
 pub(super) struct DurableCatalog {
@@ -239,6 +268,7 @@ pub(super) struct DurableCatalog {
     maximum_repositories: usize,
     staging_bytes: Arc<AtomicU64>,
     storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
+    generation_cache: Option<Arc<Mutex<super::FirstSliceGenerationCache>>>,
 }
 
 pub(super) struct DurablePreparedGeneration {
@@ -1028,6 +1058,7 @@ struct GenerationRestoreRequest<'a> {
     published_generation_count: Option<u64>,
     repository_directory: &'a PrivateDirectory<'a>,
     repository_path: &'a Path,
+    generation_cache: Option<&'a Arc<Mutex<super::FirstSliceGenerationCache>>>,
 }
 
 struct OracleRestoreExpectation {
@@ -1787,7 +1818,16 @@ impl DurableCatalog {
             maximum_repositories,
             staging_bytes: Arc::new(AtomicU64::new(0)),
             storage_accounting: Arc::new(Mutex::new(DurableStorageAccounting::default())),
+            generation_cache: None,
         })
+    }
+
+    pub(super) fn with_generation_cache(
+        mut self,
+        cache: Arc<Mutex<super::FirstSliceGenerationCache>>,
+    ) -> Self {
+        self.generation_cache = Some(cache);
+        self
     }
 
     pub(super) fn begin_generation(
@@ -2540,6 +2580,9 @@ impl DurableCatalog {
                 published_generation_count: marker.manifest.published_generation_count,
                 repository_directory: &repository,
                 repository_path: &repository_path,
+                // Exact lazy rehydration already holds the cache lock and its
+                // reload reservation; reacquiring either would deadlock.
+                generation_cache: None,
             },
             cancellation,
         )?;
@@ -2990,6 +3033,7 @@ impl DurableCatalog {
                     published_generation_count: latest_marker.manifest.published_generation_count,
                     repository_directory: repository,
                     repository_path,
+                    generation_cache: self.generation_cache.as_ref(),
                 },
                 cancellation,
             );
@@ -5580,6 +5624,65 @@ fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), F
     repository.sync_all().map_err(|_| FirstSliceError::Catalog)
 }
 
+fn recovery_sidecar_memory_bytes(
+    manifest: &DurableGenerationManifest,
+) -> Result<u64, FirstSliceError> {
+    // Incremental state is an optional cache: an invalid descriptor is ignored
+    // by its loader, whereas a source-file catalog is part of query authority.
+    let incremental = manifest
+        .incremental_state
+        .filter(|descriptor| {
+            descriptor.bytes > 0 && descriptor.bytes <= MAX_INCREMENTAL_STATE_BYTES
+        })
+        .map_or(0, |descriptor| descriptor.bytes);
+    let source_catalog = match manifest.source_file_catalog {
+        Some(descriptor)
+            if descriptor.bytes == 0 || descriptor.bytes > MAX_SOURCE_FILE_CATALOG_BYTES =>
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Some(descriptor) => descriptor.bytes,
+        None => 0,
+    };
+    let packed_index = manifest
+        .source_storage
+        .and_then(|storage| storage.index_bytes)
+        .unwrap_or(0);
+    let file_entries = if manifest.source_file_catalog.is_some() {
+        manifest
+            .receipt
+            .indexed_files
+            .checked_mul(super::SOURCE_FILE_FALLBACK_ENTRY_MEMORY_BYTES)
+            .ok_or(FirstSliceError::Limits)?
+    } else {
+        0
+    };
+    // Include encoded/owned sidecar representations and the existing file-only
+    // path/identity charge. Backend allocation limits remain independently active.
+    incremental
+        .checked_add(source_catalog)
+        .and_then(|bytes| bytes.checked_add(packed_index))
+        .and_then(|bytes| bytes.checked_mul(8))
+        .and_then(|bytes| bytes.checked_add(file_entries))
+        .and_then(|bytes| bytes.checked_add(super::GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
+        .ok_or(FirstSliceError::Limits)
+}
+
+fn recovery_snapshot_memory_bytes(
+    plan: &RecoverySnapshotPlan,
+    file_only: bool,
+) -> Result<u64, FirstSliceError> {
+    // JSON-gzip recovery retains both encoded and decoded buffers. MessagePack
+    // streams decoding, but reserves the same envelope for verification work.
+    // File-only snapshots also retain normalized paths outside the sidecar.
+    let document_copies = if file_only { 9 } else { 1 };
+    plan.serialized_document_bytes
+        .checked_mul(document_copies)
+        .and_then(|bytes| bytes.checked_add(plan.encoded_bytes))
+        .and_then(|bytes| bytes.checked_add(plan.decoded_bytes))
+        .ok_or(FirstSliceError::Limits)
+}
+
 fn restore_generation(
     request: GenerationRestoreRequest<'_>,
     cancellation: &Cancellation,
@@ -5592,6 +5695,7 @@ fn restore_generation(
         published_generation_count,
         repository_directory,
         repository_path,
+        generation_cache,
     } = request;
     let generation_name = generation.to_string();
     let generation_directory = PrivateDirectory::open(
@@ -5614,13 +5718,40 @@ fn restore_generation(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let recovery_plan = read_recovery_snapshot_plan(
+    let mut recovery_plan = read_recovery_snapshot_plan(
         &generation_directory,
         repository,
         generation,
         manifest.receipt.parent,
         cancellation,
     );
+    let staging_bytes = recovery_sidecar_memory_bytes(&manifest)?;
+    let snapshot_bytes = match &recovery_plan {
+        Ok(Some(plan)) => {
+            recovery_snapshot_memory_bytes(plan, manifest.source_file_catalog.is_some())?
+        }
+        Ok(None) | Err(FirstSliceError::CatalogCorrupt) => 0,
+        Err(error) => return Err(*error),
+    };
+    let mut memory_reservation = generation_cache
+        .map(|cache| {
+            let bytes = staging_bytes
+                .checked_add(snapshot_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            match super::RestoredMemoryReservation::new(Arc::clone(cache), bytes, true) {
+                Err(FirstSliceError::GenerationMemoryLimit { .. })
+                    if snapshot_bytes > 0 && manifest.receipt.oracle_allocated_bytes > 0 =>
+                {
+                    // A snapshot is only an accelerator when an authoritative
+                    // oracle exists. Its larger decode envelope must not strand
+                    // a generation whose oracle can fit the remaining budget.
+                    recovery_plan = Ok(None);
+                    super::RestoredMemoryReservation::new(Arc::clone(cache), staging_bytes, true)
+                }
+                result => result,
+            }
+        })
+        .transpose()?;
     let incremental = match restore_incremental_state(
         &generation_directory,
         manifest.incremental_state,
@@ -5683,6 +5814,9 @@ fn restore_generation(
                     source_file_catalog,
                     &context,
                     cancellation,
+                    memory_reservation
+                        .as_mut()
+                        .map(|reservation| (reservation, staging_bytes)),
                 )
                 .map(|(verified, allocated_bytes)| (verified, allocated_bytes, None))?,
                 Err(error) => return Err(error),
@@ -5736,7 +5870,7 @@ fn restore_generation(
     // the query authorities. Rehashing every canonical logical component here
     // only revalidates source-free observability evidence and can turn a bounded
     // active-generation open into minutes of hidden startup work.
-    Ok(RestoredGeneration {
+    let mut restored = RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
         root_path: manifest.root_path,
@@ -5752,8 +5886,15 @@ fn restore_generation(
         sources,
         incremental,
         operations: Vec::new(),
-        memory_reservation: None,
-    })
+        memory_reservation: memory_reservation.take(),
+    };
+    if restored.memory_reservation.is_some() {
+        let memory_bytes = super::restored_generation_memory_bytes(&mut restored)?;
+        if let Some(reservation) = restored.memory_reservation.as_mut() {
+            reservation.resize(memory_bytes, true)?;
+        }
+    }
+    Ok(restored)
 }
 
 fn restore_normalized_search(
@@ -6271,12 +6412,28 @@ fn restore_oracle_generation(
     source_files: SourceFileCatalog,
     context: &GenerationContext<'_>,
     cancellation: &Cancellation,
+    admission: Option<(&mut super::RestoredMemoryReservation, u64)>,
 ) -> Result<(IdentityVerifiedGeneration, u64), FirstSliceError> {
     let oracle = OracleReader::open_in(generation_path, context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;
     let allocated_bytes = oracle
         .allocated_bytes(context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;
+    if let Some((reservation, staging_bytes)) = admission {
+        let stats = oracle.stats();
+        // Oracle header validation checks text lengths without materializing the
+        // document; read() checks the same header and row cardinalities again.
+        // Charge fixed record/association work and worst-case JSON text escaping,
+        // not SQLite file size. This logical envelope is not an exact RSS bound.
+        let text_copies = if source_files.is_empty() { 6 } else { 14 };
+        let bytes = stats
+            .stored_rows()
+            .checked_mul(4 * 1024)
+            .and_then(|bytes| bytes.checked_add(stats.text_bytes().checked_mul(text_copies)?))
+            .and_then(|bytes| bytes.checked_add(staging_bytes))
+            .ok_or(FirstSliceError::Limits)?;
+        reservation.resize(bytes, true)?;
+    }
     let persisted = oracle
         .read(context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;

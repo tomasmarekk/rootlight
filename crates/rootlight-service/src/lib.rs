@@ -788,6 +788,8 @@ impl FirstSliceDeferredRestore {
     ///
     /// The work is intentionally separate from service construction so daemon
     /// readiness and lifecycle control do not depend on catalog size.
+    /// Payload loading acquires an aggregate logical-memory reservation first;
+    /// resource failures leave durable generations available for a later retry.
     ///
     /// # Errors
     ///
@@ -843,11 +845,15 @@ impl FirstSliceDeferredRestore {
         for restored in &mut generations {
             check_cancellation(cancellation)?;
             let memory_bytes = restored_generation_memory_bytes(restored)?;
-            restored.memory_reservation = Some(RestoredMemoryReservation::new(
-                Arc::clone(&self.generation_cache),
-                memory_bytes,
-                true,
-            )?);
+            if let Some(reservation) = restored.memory_reservation.as_mut() {
+                reservation.resize(memory_bytes, true)?;
+            } else {
+                restored.memory_reservation = Some(RestoredMemoryReservation::new(
+                    Arc::clone(&self.generation_cache),
+                    memory_bytes,
+                    true,
+                )?);
+            }
         }
         Ok(FirstSliceRestoredState { generations })
     }
@@ -4992,6 +4998,25 @@ impl RestoredMemoryReservation {
         Ok(Self { cache, bytes })
     }
 
+    fn resize(&mut self, bytes: u64, durable_cache: bool) -> Result<(), FirstSliceError> {
+        let mut ledger = self.cache.lock().map_err(|_| FirstSliceError::Retention)?;
+        if bytes > self.bytes {
+            let additional = bytes - self.bytes;
+            ledger.ensure_capacity(additional, PendingGenerationMemory::Reserved, durable_cache)?;
+            ledger.restored_reservation_bytes = ledger
+                .restored_reservation_bytes
+                .checked_add(additional)
+                .ok_or(FirstSliceError::Limits)?;
+        } else {
+            ledger.restored_reservation_bytes = ledger
+                .restored_reservation_bytes
+                .checked_sub(self.bytes - bytes)
+                .ok_or(FirstSliceError::Retention)?;
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
     fn release_locked(
         &mut self,
         ledger: &mut FirstSliceGenerationCache,
@@ -5274,21 +5299,19 @@ impl FirstSliceService {
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
         let maximum_generations = policy.retained_generations();
         let maximum_repositories = policy.effective_maximum_repositories(maximum_generations)?;
-        let durable = Arc::new(DurableCatalog::open(
-            state_root,
-            maximum_generations,
-            maximum_repositories,
-        )?);
+        let durable = DurableCatalog::open(state_root, maximum_generations, maximum_repositories)?;
         let active_targets = durable.active_restore_targets()?;
         let mut service = Self::new_with_storage_policy(
             maximum_generations,
             MAX_RETAINED_SOURCE_BYTES,
-            Some(Arc::clone(&durable)),
+            None,
             project_analyzer,
             policy,
         )?;
         service.bootstrap_deferred_restore(&active_targets)?;
         let generation_cache = Arc::clone(&service.generation_cache);
+        let durable = Arc::new(durable.with_generation_cache(Arc::clone(&generation_cache)));
+        service.durable = Some(Arc::clone(&durable));
         Ok((
             service,
             FirstSliceDeferredRestore {
@@ -26282,6 +26305,172 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn deferred_restore_admits_before_payload_reads_and_preserves_retryable_generations() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn recovered_answer() -> u32 { 7 }\n",
+        )
+        .expect("fixture writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let receipt = service
+                .index_repository(fixture.path(), &cancellation)
+                .expect("fixture publishes");
+            let generation_directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("published snapshot resolves");
+            assert_eq!(
+                snapshot.metadata().contract_version(),
+                GENERATION_CONTRACT_VERSION
+            );
+            durable::write_legacy_gzip_recovery_snapshot(&generation_directory, &snapshot)
+                .expect("compatible recovery snapshot writes");
+            receipt
+        };
+        let directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        let snapshot_path = directory.join("recovery.json.gz");
+        let oracle_path = directory.join("oracle.sqlite3");
+        let snapshot = fs::read(&snapshot_path).expect("snapshot reads");
+        let oracle = fs::read(&oracle_path).expect("oracle reads");
+        let (service, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred service opens");
+        let reserved = || {
+            service
+                .generation_cache
+                .lock()
+                .expect("cache opens")
+                .reserved_memory_bytes()
+                .expect("reservation total reads")
+        };
+        let pressure = service
+            .reserve_generation_memory(
+                GenerationId::from_bytes([19; 20]),
+                MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+                PendingGenerationMemory::Reserved,
+            )
+            .expect("competing owner reserves the budget");
+
+        // If payload decoding precedes admission, these bytes select quarantine.
+        // Capacity pressure must instead leave the generation untouched for retry.
+        fs::write(&snapshot_path, b"corrupt").expect("snapshot corrupts");
+        fs::write(&oracle_path, b"corrupt").expect("oracle corrupts");
+        assert!(matches!(
+            deferred.restore_active_repository(receipt.repository, &cancellation),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        assert!(
+            directory.exists(),
+            "admission must precede payload reads and quarantine"
+        );
+        assert_eq!(reserved(), MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
+        drop(pressure);
+        assert_eq!(reserved(), 0);
+        fs::write(&snapshot_path, snapshot).expect("snapshot repairs");
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("snapshot recovery retries while the oracle remains corrupt");
+        assert_eq!(
+            restored.generation_ids(),
+            BTreeSet::from([receipt.generation])
+        );
+        drop(restored);
+        assert_eq!(reserved(), 0);
+        fs::write(&oracle_path, oracle).expect("oracle repairs");
+
+        let descriptor_path = directory.join("recovery-manifest.json");
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).expect("snapshot descriptor reads"))
+                .expect("snapshot descriptor decodes");
+        descriptor["decoded_bytes"] = serde_json::json!(128 * 1024 * 1024);
+        fs::write(
+            &descriptor_path,
+            serde_json::to_vec(&descriptor).expect("descriptor serializes"),
+        )
+        .expect("optional snapshot advertises an over-budget decoded buffer");
+        let pressure = service
+            .reserve_generation_memory(
+                GenerationId::from_bytes([21; 20]),
+                MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+                    - GENERATION_MEMORY_FIXED_OVERHEAD_BYTES
+                    - 16 * 1024 * 1024,
+                PendingGenerationMemory::Reserved,
+            )
+            .expect("oracle capacity remains while snapshot staging does not fit");
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("optional snapshot pressure selects a fitting authoritative oracle");
+        assert_eq!(
+            restored.generation_ids(),
+            BTreeSet::from([receipt.generation])
+        );
+        drop(restored);
+        drop(pressure);
+        assert_eq!(reserved(), 0);
+
+        fs::rename(
+            &descriptor_path,
+            directory.join("saved-recovery-manifest.json"),
+        )
+        .expect("legacy fixture has no recovery descriptor");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("manifest.json")).expect("manifest reads"),
+        )
+        .expect("manifest decodes");
+        assert!(manifest["source_file_catalog"].is_null());
+        assert!(manifest["source_storage"].get("index_bytes").is_none());
+        let incremental_bytes = manifest["incremental_state"]["bytes"].as_u64().unwrap_or(0);
+        let staging_bytes = GENERATION_MEMORY_FIXED_OVERHEAD_BYTES + incremental_bytes * 8;
+        let pressure_bytes = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - staging_bytes;
+        let pressure = service
+            .reserve_generation_memory(
+                GenerationId::from_bytes([20; 20]),
+                pressure_bytes,
+                PendingGenerationMemory::Reserved,
+            )
+            .expect("only sidecar capacity remains");
+        assert!(matches!(
+            deferred.restore_active_repository(receipt.repository, &cancellation),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        assert!(
+            directory.exists(),
+            "oracle admission failure must not quarantine"
+        );
+        assert_eq!(
+            reserved(),
+            pressure_bytes,
+            "failed growth releases only its own staging charge"
+        );
+        drop(pressure);
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("legacy oracle recovery retries after pressure clears");
+        assert_eq!(
+            restored.generation_ids(),
+            BTreeSet::from([receipt.generation])
+        );
+        drop(restored);
+        assert_eq!(reserved(), 0);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn deferred_restore_owns_memory_through_drop_and_installation() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -26445,7 +26634,7 @@ mod tests {
             let mut payloads = deferred
                 .durable
                 .restore_active_repository(receipt.repository, &cancellation)
-                .expect("unreserved payload restores for admission failure injection");
+                .expect("payload restores for admission failure injection");
             for payload in &mut payloads {
                 payload.serialized_document_bytes =
                     Some(MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2 + 1);
@@ -27963,6 +28152,58 @@ mod tests {
                 && available_bytes == source_only_reservation
         ));
         assert!(service.receipts.is_empty());
+    }
+
+    #[test]
+    fn restored_memory_growth_failure_preserves_every_pending_owner() {
+        let service = FirstSliceService::new(2).expect("service initializes");
+        let mut first =
+            RestoredMemoryReservation::new(Arc::clone(&service.generation_cache), 3, false)
+                .expect("first owner reserves");
+        let second = RestoredMemoryReservation::new(
+            Arc::clone(&service.generation_cache),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - 3,
+            false,
+        )
+        .expect("second owner reserves remaining capacity");
+        assert!(matches!(
+            first.resize(4, false),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        assert_eq!(first.bytes, 3);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache opens")
+                .reserved_memory_bytes()
+                .expect("total reads"),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        );
+        first.resize(2, false).expect("shrinking releases capacity");
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache opens")
+                .reserved_memory_bytes()
+                .expect("total reads"),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - 1
+        );
+        drop(second);
+        first
+            .resize(MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, false)
+            .expect("growth retries after the other owner drops");
+        drop(first);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache opens")
+                .reserved_memory_bytes()
+                .expect("total reads"),
+            0
+        );
     }
 
     #[test]
