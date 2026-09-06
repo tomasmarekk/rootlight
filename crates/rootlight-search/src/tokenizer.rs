@@ -139,7 +139,7 @@ fn is_boundary(previous: char, current: char, next: Option<char>) -> bool {
     alpha_digit_edge || lower_to_upper || acronym_to_word
 }
 
-fn is_mark(character: char) -> bool {
+pub(crate) fn is_mark(character: char) -> bool {
     !character.is_ascii()
         && matches!(
             get_general_category(character),

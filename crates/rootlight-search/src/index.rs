@@ -28,7 +28,7 @@ use crate::{
         BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, QueryViolation,
         SearchBudget, SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
     },
-    tokenizer::{CodeTokenizer, has_oversized_term, normalize_text, token_texts},
+    tokenizer::{CodeTokenizer, has_oversized_term, is_mark, normalize_text, token_texts},
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
@@ -1791,6 +1791,149 @@ fn compile_literal_prefix(input: &str) -> Result<BoundedPattern, SearchError> {
     )
 }
 
+/// Selects bounded, genuinely occurring source words relevant to one text query.
+///
+/// The scan uses the index's tokenizer and Unicode normalization, retaining at
+/// most one new witness per query term or identifier-prefix match. It never
+/// increases persisted source prefixes or manufactures a term absent from the
+/// source. The caller remains responsible for binding source bytes to a file.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for invalid query budgets, cancellation, elapsed
+/// query duration, allocation failure, or a selection exceeding `maximum_bytes`.
+pub fn select_query_source_text(
+    source: &str,
+    query: &str,
+    maximum_bytes: usize,
+    budget: SearchBudget,
+    cancellation: &Cancellation,
+) -> Result<String, SearchError> {
+    cancellation.check()?;
+    if query.len() > HARD_MAX_QUERY_BYTES || query.len() > budget.max_query_bytes {
+        return Err(SearchError::InvalidQuery(QueryViolation::TooLong));
+    }
+    validate_search_request(
+        &SearchRequest {
+            query: query.to_owned(),
+            mode: SearchMode::Text,
+            max_results: 1,
+            page_offset: 0,
+        },
+        budget,
+    )?;
+    let normalized = normalize_text(query);
+    let tokens = token_texts(&normalized);
+    let mut selection = SourceQuerySelection {
+        terminal: qualified_symbol_terminal(&normalized),
+        normalized,
+        matched: vec![false; tokens.len()],
+        tokens,
+        output: String::new(),
+        maximum_bytes: maximum_bytes.min(MAX_SOURCE_TEXT_BYTES),
+        complete: false,
+    };
+    let started = Instant::now();
+    let mut next_check = 0usize;
+    let mut start = None;
+    for (offset, character) in source.char_indices() {
+        if offset >= next_check {
+            cancellation.check()?;
+            if started.elapsed() >= budget.max_duration {
+                return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
+            }
+            next_check = offset.saturating_add(4096);
+        }
+        if character == '_' || character.is_alphanumeric() || is_mark(character) {
+            start.get_or_insert(offset);
+        } else if let Some(begin) = start.take() {
+            selection.observe(
+                source
+                    .get(begin..offset)
+                    .ok_or(SearchError::IncompatibleIndex)?,
+            )?;
+            if selection.complete {
+                break;
+            }
+        }
+    }
+    if let Some(begin) = start {
+        selection.observe(source.get(begin..).ok_or(SearchError::IncompatibleIndex)?)?;
+    }
+    cancellation.check()?;
+    if started.elapsed() >= budget.max_duration {
+        return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
+    }
+    Ok(selection.output)
+}
+
+struct SourceQuerySelection {
+    normalized: String,
+    terminal: Option<String>,
+    tokens: Vec<String>,
+    matched: Vec<bool>,
+    output: String,
+    maximum_bytes: usize,
+    complete: bool,
+}
+
+impl SourceQuerySelection {
+    fn observe(&mut self, word: &str) -> Result<(), SearchError> {
+        if word.len() > MAX_SOURCE_IDENTIFIER_BYTES {
+            return Ok(());
+        }
+        let normalized = normalize_text(word);
+        if normalized.len() > MAX_SOURCE_IDENTIFIER_BYTES {
+            return Ok(());
+        }
+        let prefix = self.normalized.chars().count() >= MIN_PATTERN_LITERALS
+            && normalized.starts_with(&self.normalized);
+        let terminal = self.terminal.as_ref() == Some(&normalized);
+        let mut contributes = prefix || terminal;
+        if self.terminal.is_none() {
+            let word_tokens = token_texts(word);
+            for (query_token, matched) in self.tokens.iter().zip(&mut self.matched) {
+                if !*matched && word_tokens.contains(query_token) {
+                    *matched = true;
+                    contributes = true;
+                }
+            }
+        }
+        if contributes {
+            let separator = usize::from(!self.output.is_empty());
+            let additional =
+                separator
+                    .checked_add(word.len())
+                    .ok_or(SearchError::BuildBudgetExceeded {
+                        resource: "source_text",
+                    })?;
+            if self
+                .output
+                .len()
+                .checked_add(additional)
+                .is_none_or(|length| length > self.maximum_bytes)
+            {
+                return Err(SearchError::BuildBudgetExceeded {
+                    resource: "source_text",
+                });
+            }
+            self.output
+                .try_reserve(additional)
+                .map_err(|_| SearchError::BuildBudgetExceeded {
+                    resource: "source_text",
+                })?;
+            if separator != 0 {
+                self.output.push(' ');
+            }
+            self.output.push_str(word);
+        }
+        self.complete = prefix
+            || terminal
+            || (self.terminal.is_none() && self.matched.iter().all(|matched| *matched));
+        Ok(())
+    }
+}
+
 fn qualified_symbol_terminal(query: &str) -> Option<String> {
     let canonical = query.replace("::", ".");
     if (canonical == query && !query.contains('.')) || canonical.contains(':') {
@@ -2367,6 +2510,140 @@ mod tests {
 
     fn generation(byte: u8) -> GenerationId {
         GenerationId::from_bytes([byte; 20])
+    }
+
+    #[test]
+    fn source_selection_preserves_text_query_matches() {
+        for (source, query, expected) in [
+            ("unrelated tailOnlyMarker", "tailOnlyMarker", true),
+            ("unrelated tailOnlyMarker", "absentMarker", false),
+            ("first_value ignored second_value", "first second", true),
+            ("first_value ignored", "first second", false),
+            ("HTTPServer", "http server", true),
+            ("HTTPServer", "http", true),
+            ("crate handler_suffix handler", "crate::handler", true),
+            ("crate handler_suffix", "crate::handler", false),
+            ("Cafe\u{301} Straße", "CAFÉ", true),
+            ("Cafe\u{301} Straße", "STRASSE", true),
+            ("x", "x", true),
+        ] {
+            let selected = select_query_source_text(
+                source,
+                query,
+                1024,
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("bounded source selection succeeds");
+            assert!(
+                selected
+                    .split_whitespace()
+                    .all(|word| source.contains(word))
+            );
+            let mut file = document(1, "fixture", "fixture.css");
+            file.symbol_id = None;
+            file.source_identifiers = selected.split_whitespace().map(str::to_owned).collect();
+            file.source_text = (!selected.is_empty()).then_some(selected);
+            let index = LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![file],
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("selected witnesses build");
+            let hits = index
+                .search(
+                    &SearchRequest {
+                        query: query.to_owned(),
+                        mode: SearchMode::Text,
+                        max_results: 1,
+                        page_offset: 0,
+                    },
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .expect("selected source query executes");
+            assert_eq!(!hits.is_empty(), expected, "source={source}, query={query}");
+        }
+    }
+
+    #[test]
+    fn source_selection_enforces_admission_output_and_cancellation() {
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            select_query_source_text(
+                "marker",
+                "marker",
+                5,
+                SearchBudget::default(),
+                &cancellation
+            ),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "source_text"
+            })
+        );
+        assert_eq!(
+            select_query_source_text(
+                "marker",
+                "marker",
+                6,
+                SearchBudget::default(),
+                &cancellation
+            ),
+            Ok("marker".to_owned())
+        );
+        assert_eq!(
+            select_query_source_text(
+                "marker",
+                "marker",
+                6,
+                SearchBudget {
+                    max_query_bytes: 5,
+                    ..SearchBudget::default()
+                },
+                &cancellation
+            ),
+            Err(SearchError::InvalidQuery(QueryViolation::TooLong))
+        );
+        assert_eq!(
+            select_query_source_text(
+                "marker",
+                "marker",
+                6,
+                SearchBudget {
+                    max_duration: Duration::ZERO,
+                    ..SearchBudget::default()
+                },
+                &cancellation
+            ),
+            Err(SearchError::InvalidQueryBudget {
+                resource: "duration"
+            })
+        );
+        assert_eq!(
+            select_query_source_text(
+                &" ".repeat(65_536),
+                "marker",
+                6,
+                SearchBudget {
+                    max_duration: Duration::from_nanos(1),
+                    ..SearchBudget::default()
+                },
+                &cancellation
+            ),
+            Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded))
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            select_query_source_text(
+                "marker",
+                "marker",
+                6,
+                SearchBudget::default(),
+                &cancellation
+            ),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        );
     }
 
     fn document(byte: u8, identifier: &str, path: &str) -> LexicalDocument {

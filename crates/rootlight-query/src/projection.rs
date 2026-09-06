@@ -3,7 +3,10 @@ use std::collections::{BTreeSet, HashSet};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
-use rootlight_search::{BuildBudget, LexicalDocument, SearchError, validate_build_admission};
+use rootlight_search::{
+    BuildBudget, LexicalDocument, SearchBudget, SearchError, select_query_source_text,
+    validate_build_admission,
+};
 use rootlight_storage::GenerationSnapshot;
 use rootlight_vfs::SourceSnapshot;
 use serde::Serialize;
@@ -158,6 +161,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             source,
             self.text_bytes,
             SOURCE_FALLBACK_TEXT_BYTES,
+            None,
             self.budget,
             cancellation,
         )?;
@@ -235,6 +239,7 @@ pub fn project_source_fallback_document_with_text_limit(
         source,
         0,
         maximum_source_text_bytes.min(SOURCE_FALLBACK_TEXT_BYTES),
+        None,
         budget,
         cancellation,
     )
@@ -246,6 +251,7 @@ fn project_source_document(
     source: &SourceSnapshot,
     current_text_bytes: usize,
     maximum_source_text_bytes: usize,
+    selected_text: Option<&str>,
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<(LexicalDocument, usize), QueryError> {
@@ -262,15 +268,40 @@ fn project_source_document(
     {
         return Err(QueryError::IndexDrift);
     }
-    let source_prefix = bounded_utf8_prefix(source.content(), maximum_source_text_bytes);
-    let (source_identifiers, source_text) = source_prefix
-        .as_deref()
-        .map(bounded_source_projection)
-        .map(|(identifiers, text)| {
-            let text = (!text.is_empty()).then_some(text);
-            (identifiers, text)
-        })
-        .unwrap_or_default();
+    let (source_identifiers, source_text) = if let Some(text) = selected_text {
+        if text.len() > maximum_source_text_bytes {
+            return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                resource: "source_text",
+            }));
+        }
+        let mut identifiers = Vec::new();
+        for word in text.split_whitespace() {
+            if identifiers.len() >= MAX_SOURCE_IDENTIFIERS
+                || word.len() > MAX_SOURCE_IDENTIFIER_BYTES
+            {
+                return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                    resource: "source_identifiers",
+                }));
+            }
+            identifiers
+                .try_reserve(1)
+                .map_err(|_| QueryError::MemoryUnavailable)?;
+            identifiers.push(try_clone(word)?);
+        }
+        (
+            identifiers,
+            (!text.is_empty()).then(|| try_clone(text)).transpose()?,
+        )
+    } else {
+        bounded_utf8_prefix(source.content(), maximum_source_text_bytes)
+            .as_deref()
+            .map(bounded_source_projection)
+            .map(|(identifiers, text)| {
+                let text = (!text.is_empty()).then_some(text);
+                (identifiers, text)
+            })
+            .unwrap_or_default()
+    };
     let identifier = file
         .path
         .rsplit('/')
@@ -396,6 +427,55 @@ pub fn project_scoped_lexical_documents_with_source(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
+    project_scoped_source_documents(generation, source, None, budget, cancellation)
+}
+
+/// Projects exact-file text witnesses from anywhere in a verified source snapshot.
+///
+/// Only query-relevant source words are retained, under the unchanged source
+/// projection ceiling. Structural entities and full-file source identity are
+/// preserved; this query-time projection never changes the persisted index.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] for invalid query/build budgets, source identity drift,
+/// cancellation, elapsed search duration, allocation failure or exceeded bounds.
+pub fn project_scoped_lexical_documents_for_query(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    query: &str,
+    search_budget: SearchBudget,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    let selected = std::str::from_utf8(source.content())
+        .ok()
+        .map(|text| {
+            select_query_source_text(
+                text,
+                query,
+                SOURCE_FALLBACK_TEXT_BYTES,
+                search_budget,
+                cancellation,
+            )
+        })
+        .transpose()?;
+    project_scoped_source_documents(
+        generation,
+        source,
+        selected.as_deref(),
+        budget,
+        cancellation,
+    )
+}
+
+fn project_scoped_source_documents(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    selected_text: Option<&str>,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
     validate_build_admission(budget)?;
     cancellation
         .check()
@@ -450,6 +530,7 @@ pub fn project_scoped_lexical_documents_with_source(
         source,
         text_bytes,
         SOURCE_FALLBACK_TEXT_BYTES,
+        selected_text,
         budget,
         cancellation,
     )?;

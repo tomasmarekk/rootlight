@@ -114,7 +114,7 @@ pub use rootlight_query::{
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
     QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
-    project_scoped_lexical_documents_with_source, project_source_fallback_document_with_text_limit,
+    project_scoped_lexical_documents_for_query, project_source_fallback_document_with_text_limit,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -10931,10 +10931,14 @@ impl FirstSliceService {
             language.push_str(canonical);
         }
         if mode == LocateMode::Text && path_prefixes.len() == 1 {
+            let started = Instant::now();
+            search_budget.max_duration =
+                search_budget.max_duration.min(query_budget.max_duration());
             let source_documents = self.scoped_source_documents(
                 lease.generation(),
-                generation,
                 &path_prefixes[0],
+                &query,
+                search_budget,
                 cancellation,
             )?;
             if let Some(source_documents) = source_documents {
@@ -10945,6 +10949,15 @@ impl FirstSliceService {
                     cancellation,
                 )
                 .map_err(|error| map_search_error(error, cancellation))?;
+                // Source selection and ephemeral construction share the query
+                // allowance; the fallback must not grant a fresh search deadline.
+                search_budget.max_duration = search_budget
+                    .max_duration
+                    .checked_sub(started.elapsed())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or(FirstSliceError::Cancelled(
+                        CancellationReason::DeadlineExceeded,
+                    ))?;
                 let source_service = QueryService::new(lease.generation(), &search)
                     .map_err(|error| map_query_error(error, cancellation))?;
                 let plan = source_service
@@ -10984,11 +10997,13 @@ impl FirstSliceService {
     fn scoped_source_documents(
         &self,
         snapshot: &rootlight_storage::GenerationSnapshot,
-        generation: GenerationId,
         path: &str,
+        query: &str,
+        search_budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<Option<Vec<LexicalDocument>>, FirstSliceError> {
         check_cancellation(cancellation)?;
+        let generation = snapshot.metadata().generation();
         let Some(file) = snapshot
             .document()
             .files
@@ -11004,9 +11019,6 @@ impl FirstSliceService {
         else {
             return Ok(None);
         };
-        if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64 {
-            return Ok(None);
-        }
         // Structural completeness does not imply that comments or body text
         // were projected into the symbol index. An exact file scope admits the
         // same bounded immutable source lookup regardless of parser diagnostics.
@@ -11020,9 +11032,11 @@ impl FirstSliceService {
             let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
             Arc::new(durable.read_source(file.repository, generation, file, cancellation)?)
         };
-        project_scoped_lexical_documents_with_source(
+        project_scoped_lexical_documents_for_query(
             snapshot,
             &source,
+            query,
+            search_budget,
             BuildBudget::default(),
             cancellation,
         )
@@ -25507,6 +25521,81 @@ mod tests {
                     assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn scoped_text_retrieves_source_after_projection_prefix() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = format!(
+            "/* {} */\n.tailOnlyMarker {{ color: green; }}\n",
+            " ".repeat(SOURCE_FALLBACK_TEXT_BYTES + 257)
+        );
+        fs::write(fixture.path().join("theme.css"), &source).expect("source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("source fixture publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable source restores");
+            }
+            for (query, expected) in [("tailOnlyMarker", true), ("absentMarker", false)] {
+                let located = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        query.to_owned(),
+                        LocateMode::Text,
+                        Vec::new(),
+                        vec!["theme.css".to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("exact source scope executes");
+                let hit = located.data.hits.iter().find(|hit| hit.symbol.is_none());
+                assert_eq!(
+                    hit.is_some(),
+                    expected,
+                    "restored={restored}, query={query}"
+                );
+                if let Some(hit) = hit {
+                    let read = service
+                        .source_read(
+                            receipt.generation,
+                            vec![hit.source.clone().expect("file hit has source evidence")],
+                            &deadline(),
+                        )
+                        .expect("full generation-bound source remains readable");
+                    assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+                }
+            }
+            assert!(matches!(
+                service.code_locate_with_filters_and_budget(
+                    receipt.generation,
+                    "tailOnlyMarker".to_owned(),
+                    LocateMode::Text,
+                    Vec::new(),
+                    vec!["theme.css".to_owned()],
+                    8,
+                    0,
+                    FirstSliceBudget::default().reduce_max_duration(Duration::from_nanos(1)),
+                    &deadline(),
+                ),
+                Err(FirstSliceError::Cancelled(
+                    CancellationReason::DeadlineExceeded
+                ))
+            ));
         }
     }
 

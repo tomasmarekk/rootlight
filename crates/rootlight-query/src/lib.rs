@@ -43,8 +43,9 @@ pub use model::{
 };
 pub use projection::{
     LexicalProjectionBuilder, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents,
-    project_lexical_documents_with_sources, project_scoped_lexical_documents_with_source,
-    project_source_fallback_document, project_source_fallback_document_with_text_limit,
+    project_lexical_documents_with_sources, project_scoped_lexical_documents_for_query,
+    project_scoped_lexical_documents_with_source, project_source_fallback_document,
+    project_source_fallback_document_with_text_limit,
 };
 pub use service::QueryService;
 pub use store::{GenerationLease, GenerationSet};
