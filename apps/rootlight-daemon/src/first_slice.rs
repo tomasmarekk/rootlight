@@ -143,6 +143,7 @@ const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
 // the worker commits to a different non-preemptible restore.
 const INITIAL_RECOVERY_DEMAND_GRACE: Duration = Duration::from_secs(30);
 const INITIAL_RECOVERY_DEMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_RECOVERY_LOAD_WORKERS: usize = 4;
 // The public client timeout is also 30 seconds. Leave enough time after a
 // maximum long poll for serialization, IPC scheduling, and client decoding.
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
@@ -6434,6 +6435,92 @@ fn recovery_cancelled_error(operation: OperationId, reason: CancellationReason) 
         .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
 }
 
+type RecoveryLoadResults<T> = Vec<(usize, Result<T, FirstSliceError>)>;
+
+fn run_recovery_load_batch<T: Send>(
+    cancellations: &[Cancellation],
+    stopping: &AtomicBool,
+    worker_cancellation: &Cancellation,
+    load: impl Fn(usize) -> Result<T, FirstSliceError> + Sync,
+) -> Result<RecoveryLoadResults<T>, FirstSliceHostError> {
+    if cancellations.len() > MAX_RECOVERY_LOAD_WORKERS {
+        return Err(FirstSliceHostError::Service(FirstSliceError::Limits));
+    }
+    if let Some(reason) = worker_cancellation.reason().or_else(|| {
+        stopping
+            .load(Ordering::Acquire)
+            .then_some(CancellationReason::Shutdown)
+    }) {
+        for cancellation in cancellations {
+            let _ = cancellation.cancel(reason);
+        }
+    }
+    // Payloads keep their service-owned memory reservations until publication or
+    // drop. Bounding the entire batch also bounds completed, unpublished payloads.
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(cancellations.len());
+        let mut results = Vec::with_capacity(cancellations.len());
+        let mut failure = None;
+        for index in 0..cancellations.len() {
+            let load = &load;
+            match thread::Builder::new()
+                .name("rootlight-recovery-load".to_owned())
+                .spawn_scoped(scope, move || load(index))
+            {
+                Ok(worker) => workers.push(Some(worker)),
+                Err(error) => {
+                    failure = Some(FirstSliceHostError::Thread(error));
+                    break;
+                }
+            }
+        }
+        loop {
+            let reason = worker_cancellation.reason().or_else(|| {
+                stopping
+                    .load(Ordering::Acquire)
+                    .then_some(CancellationReason::Shutdown)
+            });
+            if let Some(reason) = reason.or_else(|| {
+                failure
+                    .as_ref()
+                    .map(|_| CancellationReason::ParentCancelled)
+            }) {
+                for cancellation in cancellations {
+                    let _ = cancellation.cancel(reason);
+                }
+            }
+            for (index, worker) in workers.iter_mut().enumerate() {
+                if worker.as_ref().is_some_and(|worker| worker.is_finished())
+                    && let Some(worker) = worker.take()
+                {
+                    match worker.join() {
+                        Ok(result) => results.push((index, result)),
+                        Err(_) => {
+                            failure.get_or_insert(FirstSliceHostError::ThreadPanicked);
+                        }
+                    }
+                }
+            }
+            if workers.iter().all(Option::is_none) {
+                break;
+            }
+            thread::park_timeout(INITIAL_RECOVERY_DEMAND_POLL_INTERVAL);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        // Publish/drop successful payloads before retrying a resource rejection;
+        // otherwise a completed sibling can keep the retry's staging budget busy.
+        results.sort_by_key(|(index, result)| {
+            (
+                matches!(result, Err(FirstSliceError::GenerationMemoryLimit { .. })),
+                *index,
+            )
+        });
+        Ok(results)
+    })
+}
+
 fn durable_recovery_worker(
     mut deferred: DeferredRecoveryWork,
     lanes: FirstSliceServiceLanes,
@@ -6478,107 +6565,150 @@ fn durable_recovery_worker(
                 &cancellation,
                 INITIAL_RECOVERY_DEMAND_GRACE,
             )?;
-            for index in 0..active_recoveries.len() {
-                prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
-                mark_current_recovery(&lanes, active_recoveries[index].target.repository())?;
-                let recovery = &mut active_recoveries[index];
-                let target = recovery.target;
-                if let Some(reason) = cancellation.reason() {
-                    let _ = recovery.cancellation().cancel(reason);
+            for start in (0..active_recoveries.len()).step_by(MAX_RECOVERY_LOAD_WORKERS) {
+                let end = start
+                    .saturating_add(MAX_RECOVERY_LOAD_WORKERS)
+                    .min(active_recoveries.len());
+                for index in start..end {
+                    prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
                 }
-                let resource_sampler =
-                    recovery.start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
-                let active_result = deferred
-                    .restore
-                    .restore_active_repository(target.repository(), recovery.cancellation());
-                drop(resource_sampler);
-                let active = match active_result {
-                    Ok(restored) => restored,
-                    Err(FirstSliceError::Cancelled(reason)) => {
-                        recovery.cancel(&runtime, reason)?;
+                mark_current_recovery(&lanes, active_recoveries[start].target.repository())?;
+                let cancellations: Vec<_> = active_recoveries[start..end]
+                    .iter()
+                    .map(|recovery| recovery.cancellation().clone())
+                    .collect();
+                let results =
+                    run_recovery_load_batch(&cancellations, &stopping, &cancellation, |offset| {
+                        let recovery = &active_recoveries[start + offset];
+                        let _sampler = recovery
+                            .start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
+                        deferred.restore.restore_active_repository(
+                            recovery.target.repository(),
+                            recovery.cancellation(),
+                        )
+                    })?;
+                for (offset, mut active_result) in results {
+                    let index = start + offset;
+                    mark_current_recovery(&lanes, active_recoveries[index].target.repository())?;
+                    let recovery = &mut active_recoveries[index];
+                    let target = recovery.target;
+                    if let Some(reason) = cancellation.reason() {
+                        let _ = recovery.cancellation().cancel(reason);
+                    }
+                    if end - start > 1
+                        && matches!(
+                            active_result,
+                            Err(FirstSliceError::GenerationMemoryLimit { .. })
+                        )
+                    {
+                        active_result = run_recovery_load_batch(
+                            std::slice::from_ref(recovery.cancellation()),
+                            &stopping,
+                            &cancellation,
+                            |_| {
+                                let _sampler = recovery.start_resource_sampler(
+                                    lanes.support_state.as_ref().map(Arc::clone),
+                                );
+                                deferred.restore.restore_active_repository(
+                                    target.repository(),
+                                    recovery.cancellation(),
+                                )
+                            },
+                        )?
+                        .pop()
+                        .ok_or(FirstSliceHostError::Service(
+                            FirstSliceError::CatalogCorrupt,
+                        ))?
+                        .1;
+                    }
+                    let active = match active_result {
+                        Ok(restored) => restored,
+                        Err(FirstSliceError::Cancelled(reason)) => {
+                            recovery.cancel(&runtime, reason)?;
+                            deferred.installed_generations.insert(target.generation());
+                            remove_recovering_repository(&lanes, target.repository())?;
+                            if stopping.load(Ordering::Acquire)
+                                || reason == CancellationReason::Shutdown
+                            {
+                                return Ok(());
+                            }
+                            degraded = true;
+                            continue;
+                        }
+                        Err(error) => {
+                            recovery.fail(&runtime, error)?;
+                            deferred.installed_generations.insert(target.generation());
+                            remove_recovering_repository(&lanes, target.repository())?;
+                            if let Some(state) = lanes.support_state.as_deref() {
+                                state.set_generation_status(HealthStatus::Degraded);
+                            }
+                            degraded = true;
+                            continue;
+                        }
+                    };
+                    let observation = active
+                        .recovery_observation()
+                        .map_err(FirstSliceHostError::Service)?;
+                    recovery.observe_restored_sources(
+                        &runtime,
+                        observation.files_examined,
+                        observation.bytes_examined,
+                    )?;
+                    if stopping.load(Ordering::Acquire) {
+                        recovery.cancel(&runtime, CancellationReason::Shutdown)?;
+                        return Ok(());
+                    }
+                    let installed = active.generation_ids();
+                    let active = active.prepare_active_installation(recovery.cancellation());
+                    let install_result = match active {
+                        Ok(active) => lanes
+                            .service
+                            .write()
+                            .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                            .install_prepared_progressive_deferred_restore(
+                                active,
+                                recovery.cancellation(),
+                            ),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = install_result {
+                        match error {
+                            FirstSliceError::Cancelled(reason) => {
+                                recovery.cancel(&runtime, reason)?;
+                            }
+                            error => {
+                                recovery.fail(&runtime, error)?;
+                            }
+                        }
                         deferred.installed_generations.insert(target.generation());
                         remove_recovering_repository(&lanes, target.repository())?;
-                        if stopping.load(Ordering::Acquire)
-                            || reason == CancellationReason::Shutdown
-                        {
+                        if stopping.load(Ordering::Acquire) {
                             return Ok(());
                         }
-                        degraded = true;
-                        continue;
-                    }
-                    Err(error) => {
-                        recovery.fail(&runtime, error)?;
-                        deferred.installed_generations.insert(target.generation());
-                        remove_recovering_repository(&lanes, target.repository())?;
                         if let Some(state) = lanes.support_state.as_deref() {
                             state.set_generation_status(HealthStatus::Degraded);
                         }
                         degraded = true;
                         continue;
                     }
-                };
-                let observation = active
-                    .recovery_observation()
-                    .map_err(FirstSliceHostError::Service)?;
-                recovery.observe_restored_sources(
-                    &runtime,
-                    observation.files_examined,
-                    observation.bytes_examined,
-                )?;
-                if stopping.load(Ordering::Acquire) {
-                    recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-                    return Ok(());
-                }
-                let installed = active.generation_ids();
-                let active = active.prepare_active_installation(recovery.cancellation());
-                let install_result = match active {
-                    Ok(active) => lanes
-                        .service
-                        .write()
-                        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                        .install_prepared_progressive_deferred_restore(
-                            active,
-                            recovery.cancellation(),
-                        ),
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = install_result {
-                    match error {
-                        FirstSliceError::Cancelled(reason) => {
-                            recovery.cancel(&runtime, reason)?;
-                        }
-                        error => {
-                            recovery.fail(&runtime, error)?;
-                        }
+                    deferred
+                        .installed_generations
+                        .extend(installed.iter().copied());
+                    if let Err(error) = reconcile_restored_publications(
+                        &lanes,
+                        &journal,
+                        metadata.as_ref(),
+                        &stopping,
+                        &runtime,
+                        &installed,
+                    ) {
+                        recovery.fail(&runtime, FirstSliceError::Catalog)?;
+                        return Err(error);
                     }
-                    deferred.installed_generations.insert(target.generation());
-                    remove_recovering_repository(&lanes, target.repository())?;
-                    if stopping.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-                    if let Some(state) = lanes.support_state.as_deref() {
-                        state.set_generation_status(HealthStatus::Degraded);
-                    }
-                    degraded = true;
-                    continue;
+                    recovered_targets.insert(recovery.operation());
+                    recovery.mark_active_available(&runtime)?;
+                    mark_active_recovery_available(&lanes, target.repository())?;
                 }
-                deferred
-                    .installed_generations
-                    .extend(installed.iter().copied());
-                if let Err(error) = reconcile_restored_publications(
-                    &lanes,
-                    &journal,
-                    metadata.as_ref(),
-                    &stopping,
-                    &runtime,
-                    &installed,
-                ) {
-                    recovery.fail(&runtime, FirstSliceError::Catalog)?;
-                    return Err(error);
-                }
-                recovered_targets.insert(recovery.operation());
-                recovery.mark_active_available(&runtime)?;
-                mark_active_recovery_available(&lanes, target.repository())?;
             }
         }
         // Active generations become queryable before retained history finishes,
@@ -6590,100 +6720,151 @@ fn durable_recovery_worker(
         if let Some(after_active_restore) = deferred.after_active_restore.take() {
             after_active_restore(&lanes, &cancellation)?;
         }
-        for index in 0..active_recoveries.len() {
-            prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
-            let recovery = &mut active_recoveries[index];
-            if !recovered_targets.contains(&recovery.operation()) {
-                continue;
-            }
-            let target = recovery.target;
-            mark_current_recovery(&lanes, target.repository())?;
-            if let Some(reason) = cancellation.reason() {
-                let _ = recovery.cancellation().cancel(reason);
-            }
+        for start in (0..active_recoveries.len()).step_by(MAX_RECOVERY_LOAD_WORKERS) {
             if stopping.load(Ordering::Acquire) {
-                // No retained work began for the remaining batch. Let direct
-                // finalization preserve journal outcomes without resampling
-                // resources or submitting metadata to the draining actor.
                 return Ok(());
             }
-            let resource_sampler =
-                recovery.start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
-            let remaining_result = deferred.restore.restore_retained_repository(
-                target.repository(),
-                &deferred.installed_generations,
-                recovery.cancellation(),
-            );
-            drop(resource_sampler);
-            let remaining = match remaining_result {
-                Ok(restored) => restored,
-                Err(FirstSliceError::Cancelled(reason)) => {
-                    recovery.cancel(&runtime, reason)?;
-                    remove_recovering_repository(&lanes, target.repository())?;
-                    if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
+            let end = start
+                .saturating_add(MAX_RECOVERY_LOAD_WORKERS)
+                .min(active_recoveries.len());
+            for index in start..end {
+                prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
+            }
+            let indices: Vec<_> = (start..end)
+                .filter(|index| recovered_targets.contains(&active_recoveries[*index].operation()))
+                .collect();
+            let Some(&first) = indices.first() else {
+                continue;
+            };
+            mark_current_recovery(&lanes, active_recoveries[first].target.repository())?;
+            let cancellations: Vec<_> = indices
+                .iter()
+                .map(|index| active_recoveries[*index].cancellation().clone())
+                .collect();
+            let results =
+                run_recovery_load_batch(&cancellations, &stopping, &cancellation, |offset| {
+                    let recovery = &active_recoveries[indices[offset]];
+                    let _sampler = recovery
+                        .start_resource_sampler(lanes.support_state.as_ref().map(Arc::clone));
+                    deferred.restore.restore_retained_repository(
+                        recovery.target.repository(),
+                        &deferred.installed_generations,
+                        recovery.cancellation(),
+                    )
+                })?;
+            for (offset, mut remaining_result) in results {
+                let index = indices[offset];
+                let recovery = &mut active_recoveries[index];
+                let target = recovery.target;
+                mark_current_recovery(&lanes, target.repository())?;
+                if let Some(reason) = cancellation.reason() {
+                    let _ = recovery.cancellation().cancel(reason);
+                }
+                if stopping.load(Ordering::Acquire) {
+                    // Batch workers have joined. Drop unpublished payloads and
+                    // finalize directly without submitting new metadata to the
+                    // draining journal actor.
+                    return Ok(());
+                }
+                if indices.len() > 1
+                    && matches!(
+                        remaining_result,
+                        Err(FirstSliceError::GenerationMemoryLimit { .. })
+                    )
+                {
+                    remaining_result = run_recovery_load_batch(
+                        std::slice::from_ref(recovery.cancellation()),
+                        &stopping,
+                        &cancellation,
+                        |_| {
+                            let _sampler = recovery.start_resource_sampler(
+                                lanes.support_state.as_ref().map(Arc::clone),
+                            );
+                            deferred.restore.restore_retained_repository(
+                                target.repository(),
+                                &deferred.installed_generations,
+                                recovery.cancellation(),
+                            )
+                        },
+                    )?
+                    .pop()
+                    .ok_or(FirstSliceHostError::Service(
+                        FirstSliceError::CatalogCorrupt,
+                    ))?
+                    .1;
+                }
+                let remaining = match remaining_result {
+                    Ok(restored) => restored,
+                    Err(FirstSliceError::Cancelled(reason)) => {
+                        recovery.cancel(&runtime, reason)?;
+                        remove_recovering_repository(&lanes, target.repository())?;
+                        if stopping.load(Ordering::Acquire)
+                            || reason == CancellationReason::Shutdown
+                        {
+                            continue;
+                        }
+                        degraded = true;
                         continue;
                     }
-                    degraded = true;
+                    Err(error) => {
+                        recovery.fail(&runtime, error)?;
+                        remove_recovering_repository(&lanes, target.repository())?;
+                        if let Some(state) = lanes.support_state.as_deref() {
+                            state.set_generation_status(HealthStatus::Degraded);
+                        }
+                        degraded = true;
+                        continue;
+                    }
+                };
+                let observation = remaining
+                    .recovery_observation()
+                    .map_err(FirstSliceHostError::Service)?;
+                recovery.observe_restored_sources(
+                    &runtime,
+                    observation.files_examined,
+                    observation.bytes_examined,
+                )?;
+                if stopping.load(Ordering::Acquire) {
+                    recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                     continue;
                 }
-                Err(error) => {
-                    recovery.fail(&runtime, error)?;
-                    remove_recovering_repository(&lanes, target.repository())?;
+                let remaining_generations = remaining.generation_ids();
+                if !remaining_generations.is_empty()
+                    && let Err(error) = lanes
+                        .service
+                        .write()
+                        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                        .install_additional_deferred_restore(remaining, recovery.cancellation())
+                {
+                    match error {
+                        FirstSliceError::Cancelled(reason) => {
+                            recovery.cancel(&runtime, reason)?;
+                        }
+                        error => {
+                            recovery.fail(&runtime, error)?;
+                        }
+                    }
+                    if stopping.load(Ordering::Acquire) {
+                        continue;
+                    }
                     if let Some(state) = lanes.support_state.as_deref() {
                         state.set_generation_status(HealthStatus::Degraded);
                     }
+                    remove_recovering_repository(&lanes, target.repository())?;
                     degraded = true;
                     continue;
                 }
-            };
-            let observation = remaining
-                .recovery_observation()
-                .map_err(FirstSliceHostError::Service)?;
-            recovery.observe_restored_sources(
-                &runtime,
-                observation.files_examined,
-                observation.bytes_examined,
-            )?;
-            if stopping.load(Ordering::Acquire) {
-                recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-                continue;
-            }
-            let remaining_generations = remaining.generation_ids();
-            if !remaining_generations.is_empty()
-                && let Err(error) = lanes
-                    .service
-                    .write()
-                    .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                    .install_additional_deferred_restore(remaining, recovery.cancellation())
-            {
-                match error {
-                    FirstSliceError::Cancelled(reason) => {
-                        recovery.cancel(&runtime, reason)?;
-                    }
-                    error => {
-                        recovery.fail(&runtime, error)?;
-                    }
-                }
-                if stopping.load(Ordering::Acquire) {
-                    continue;
-                }
-                if let Some(state) = lanes.support_state.as_deref() {
-                    state.set_generation_status(HealthStatus::Degraded);
-                }
+                reconcile_restored_publications(
+                    &lanes,
+                    &journal,
+                    metadata.as_ref(),
+                    &stopping,
+                    &runtime,
+                    &remaining_generations,
+                )?;
+                recovery.complete(&runtime)?;
                 remove_recovering_repository(&lanes, target.repository())?;
-                degraded = true;
-                continue;
             }
-            reconcile_restored_publications(
-                &lanes,
-                &journal,
-                metadata.as_ref(),
-                &stopping,
-                &runtime,
-                &remaining_generations,
-            )?;
-            recovery.complete(&runtime)?;
-            remove_recovering_repository(&lanes, target.repository())?;
         }
         Ok(())
     })();
@@ -24055,6 +24236,201 @@ mod tests {
         actor.join().expect("journal actor joins");
     }
 
+    #[test]
+    fn recovery_load_batch_overlaps_bounded_work_and_joins_before_return() {
+        let cancellations: Vec<_> = (0..MAX_RECOVERY_LOAD_WORKERS)
+            .map(|_| Cancellation::new())
+            .collect();
+        let stopping = AtomicBool::new(false);
+        let parent = Cancellation::new();
+        let (started, arrivals) = mpsc::sync_channel(MAX_RECOVERY_LOAD_WORKERS);
+        let (releases, waits): (Vec<_>, Vec<_>) = (0..MAX_RECOVERY_LOAD_WORKERS)
+            .map(|_| {
+                let (send, receive) = mpsc::sync_channel(1);
+                (send, Mutex::new(receive))
+            })
+            .unzip();
+        let completed = AtomicUsize::new(0);
+        thread::scope(|scope| {
+            let coordinator = scope.spawn(|| {
+                run_recovery_load_batch(&cancellations, &stopping, &parent, |index| {
+                    started.send(index).expect("start notification fits");
+                    waits[index]
+                        .lock()
+                        .expect("release receiver locks")
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("all workers start before release");
+                    completed.fetch_add(1, AtomicOrdering::Relaxed);
+                    Ok(index)
+                })
+            });
+            let observed: BTreeSet<_> = (0..MAX_RECOVERY_LOAD_WORKERS)
+                .map(|_| {
+                    arrivals
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("bounded workers overlap")
+                })
+                .collect();
+            assert_eq!(observed, (0..MAX_RECOVERY_LOAD_WORKERS).collect());
+            assert_eq!(completed.load(AtomicOrdering::Relaxed), 0);
+            for release in releases.iter().rev() {
+                release.send(()).expect("worker is waiting");
+            }
+            let results = coordinator
+                .join()
+                .expect("coordinator joins")
+                .expect("batch succeeds");
+            assert_eq!(
+                results,
+                (0..MAX_RECOVERY_LOAD_WORKERS)
+                    .map(|index| (index, Ok(index)))
+                    .collect::<Vec<_>>()
+            );
+        });
+        assert_eq!(
+            completed.load(AtomicOrdering::Relaxed),
+            MAX_RECOVERY_LOAD_WORKERS
+        );
+        let oversized: Vec<_> = (0..=MAX_RECOVERY_LOAD_WORKERS)
+            .map(|_| Cancellation::new())
+            .collect();
+        assert!(matches!(
+            run_recovery_load_batch::<()>(&oversized, &stopping, &parent, |_| {
+                panic!("oversized batches must not start payload work");
+            }),
+            Err(FirstSliceHostError::Service(FirstSliceError::Limits))
+        ));
+    }
+
+    #[test]
+    fn recovery_load_batch_propagates_shutdown_and_joins_cancelled_workers() {
+        let cancellations: Vec<_> = (0..MAX_RECOVERY_LOAD_WORKERS)
+            .map(|_| Cancellation::with_deadline(Instant::now() + Duration::from_secs(5)))
+            .collect();
+        let stopping = AtomicBool::new(false);
+        let parent = Cancellation::new();
+        let completed = AtomicUsize::new(0);
+        let (started, arrivals) = mpsc::sync_channel(MAX_RECOVERY_LOAD_WORKERS);
+        thread::scope(|scope| {
+            let coordinator = scope.spawn(|| {
+                run_recovery_load_batch::<()>(&cancellations, &stopping, &parent, |index| {
+                    started.send(()).expect("start notification fits");
+                    loop {
+                        if let Some(reason) = cancellations[index].reason() {
+                            completed.fetch_add(1, AtomicOrdering::Relaxed);
+                            return Err(FirstSliceError::Cancelled(reason));
+                        }
+                        thread::park_timeout(Duration::from_millis(1));
+                    }
+                })
+            });
+            for _ in &cancellations {
+                arrivals
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("worker starts");
+            }
+            stopping.store(true, Ordering::Release);
+            let results = coordinator
+                .join()
+                .expect("coordinator joins")
+                .expect("cancellation is a typed result");
+            assert!(results.iter().all(|(_, result)| matches!(
+                result,
+                Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+            )));
+        });
+        assert_eq!(completed.load(AtomicOrdering::Relaxed), cancellations.len());
+    }
+
+    #[test]
+    fn recovery_load_batch_observes_later_panic_and_drains_earlier_worker() {
+        let cancellations: Vec<_> = (0..2)
+            .map(|_| Cancellation::with_deadline(Instant::now() + Duration::from_secs(5)))
+            .collect();
+        let stopping = AtomicBool::new(false);
+        let parent = Cancellation::new();
+        let completed = AtomicUsize::new(0);
+        let result = run_recovery_load_batch::<()>(&cancellations, &stopping, &parent, |index| {
+            if index == 1 {
+                panic!("injected recovery load failure");
+            }
+            loop {
+                if let Some(reason) = cancellations[index].reason() {
+                    assert_eq!(reason, CancellationReason::ParentCancelled);
+                    completed.fetch_add(1, AtomicOrdering::Relaxed);
+                    return Err(FirstSliceError::Cancelled(reason));
+                }
+                thread::park_timeout(Duration::from_millis(1));
+            }
+        });
+        assert!(matches!(result, Err(FirstSliceHostError::ThreadPanicked)));
+        assert_eq!(completed.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn recovery_load_batch_orders_memory_rejections_after_owned_payloads() {
+        struct Payload<'a>(&'a AtomicUsize);
+        impl Drop for Payload<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, AtomicOrdering::Relaxed);
+            }
+        }
+        let live = AtomicUsize::new(0);
+        let memory_error = FirstSliceError::GenerationMemoryLimit {
+            breakdown: rootlight_service::GenerationMemoryBreakdown {
+                retained_bytes: 0,
+                reserved_bytes: 1,
+                owned_bytes: 0,
+                referenced_bytes: 0,
+                mapped_bytes: 0,
+                staged_bytes: 1,
+                shared_bytes: 0,
+            },
+            observed: 2,
+            limit: 1,
+        };
+        let results = run_recovery_load_batch(
+            &[Cancellation::new(), Cancellation::new()],
+            &AtomicBool::new(false),
+            &Cancellation::new(),
+            |index| {
+                if index == 0 {
+                    return Err(memory_error);
+                }
+                live.fetch_add(1, AtomicOrdering::Relaxed);
+                Ok(Payload(&live))
+            },
+        )
+        .expect("batch joins");
+        assert_eq!(live.load(AtomicOrdering::Relaxed), 1);
+        for (index, result) in results {
+            match result {
+                Ok(payload) => {
+                    assert_eq!(index, 1);
+                    drop(payload);
+                }
+                Err(error) => {
+                    assert_eq!(error, memory_error);
+                    assert_eq!(live.load(AtomicOrdering::Relaxed), 0);
+                }
+            }
+        }
+        let failed = run_recovery_load_batch(
+            &[Cancellation::new(), Cancellation::new()],
+            &AtomicBool::new(false),
+            &Cancellation::new(),
+            |index| {
+                if index == 0 {
+                    panic!("injected sibling failure after payload admission");
+                }
+                live.fetch_add(1, AtomicOrdering::Relaxed);
+                Ok(Payload(&live))
+            },
+        );
+        assert!(matches!(failed, Err(FirstSliceHostError::ThreadPanicked)));
+        assert_eq!(live.load(AtomicOrdering::Relaxed), 0);
+    }
+
     fn run_recovery_worker_with_start_hook(
         repository_count: usize,
         after_start: RecoveryWorkerStartHook,
@@ -24161,7 +24537,7 @@ mod tests {
             after_start(cancellation, stopping)
         });
         let stopping = Arc::new(AtomicBool::new(false));
-        if shutdown_interrupt_count.is_some() {
+        if shutdown_interrupt_count.is_some() || repository_count > 1 {
             let target = targets.first().expect("shutdown fixture has active work");
             lanes
                 .recovery_demand
@@ -24267,6 +24643,37 @@ mod tests {
         assert!(!recovery_ready);
         assert!(recovery_complete);
         assert_eq!(generation_status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn recovery_batches_publish_every_repository_with_terminal_journal_evidence() {
+        let count = MAX_RECOVERY_LOAD_WORKERS * 2 + 1;
+        let (result, records, contexts, ready, complete, health) =
+            run_recovery_worker_with_start_hook(count, Box::new(|_, _| Ok(())), None);
+        result.expect("multiple batches recover");
+        assert_eq!(records.len(), count);
+        assert_eq!(contexts.len(), count);
+        assert_eq!(
+            contexts
+                .iter()
+                .map(|context| context.repository)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            count
+        );
+        for (record, context) in records.iter().zip(&contexts) {
+            assert_eq!(record.operation, context.operation);
+            assert_eq!(record.state, OperationState::Succeeded);
+            assert_eq!(
+                record.progress,
+                Progress::new(2, 2).expect("both phases complete")
+            );
+            assert!(record.error.is_none());
+            assert_eq!(context.files_examined, 1);
+            assert!(context.bytes_examined > 0);
+        }
+        assert!(ready && complete);
+        assert_eq!(health, HealthStatus::Healthy);
     }
 
     #[test]
