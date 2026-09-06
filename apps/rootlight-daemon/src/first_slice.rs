@@ -6831,7 +6831,7 @@ fn durable_recovery_worker(
         // but mutation and watcher admission remain closed until the full batch
         // has either restored or reached a durable terminal result.
         publish_active_recovery_readiness(&lanes, degraded)?;
-        reconcile_recovery_support_inventory(&lanes)?;
+        reconcile_recovery_support_inventory(&lanes, &cancellation)?;
         #[cfg(test)]
         if let Some(after_active_restore) = deferred.after_active_restore.take() {
             after_active_restore(&lanes, &cancellation)?;
@@ -7084,6 +7084,7 @@ fn refresh_recovery_support_inventory(
 
 fn reconcile_recovery_support_inventory(
     lanes: &FirstSliceServiceLanes,
+    cancellation: &Cancellation,
 ) -> Result<(), FirstSliceHostError> {
     if let Some(state) = lanes.support_state.as_deref() {
         let inventory = lanes
@@ -7091,7 +7092,10 @@ fn reconcile_recovery_support_inventory(
             .read()
             .map_err(|_| FirstSliceHostError::ThreadPanicked)
             .and_then(|service| {
-                reconciled_index_support_inventory(&service).map_err(FirstSliceHostError::Service)
+                service
+                    .support_inventory_snapshot_reconciled_with_cancellation(cancellation)
+                    .map(map_index_support_inventory)
+                    .map_err(FirstSliceHostError::Service)
             })?;
         state
             .replace_index_support_inventory(inventory)
@@ -14472,6 +14476,7 @@ fn verified_index_support_inventory(
     Ok(map_index_support_inventory(snapshot))
 }
 
+#[cfg(test)]
 fn reconciled_index_support_inventory(
     service: &FirstSliceService,
 ) -> Result<IndexSupportInventory, FirstSliceError> {

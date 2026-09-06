@@ -1121,6 +1121,9 @@ struct CachedSourcePack {
 
 struct StorageScanBudget {
     visited_entries: usize,
+    cancellation: Cancellation,
+    #[cfg(test)]
+    after_visit: Option<Box<dyn FnMut(usize) + Send>>,
 }
 
 #[derive(Clone, Copy)]
@@ -2180,32 +2183,42 @@ impl DurableCatalog {
     }
 
     pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
-        self.scan_storage_inventory(SourceBlobScan::VerifyContent)
+        self.scan_storage_inventory(SourceBlobScan::VerifyContent, StorageScanBudget::new())
     }
 
     pub(super) fn reconcile_storage_inventory(
         &self,
+        cancellation: &Cancellation,
     ) -> Result<DurableStorageInventory, FirstSliceError> {
-        self.scan_storage_inventory(SourceBlobScan::AccountPhysicalBytes)
+        self.scan_storage_inventory(
+            SourceBlobScan::AccountPhysicalBytes,
+            StorageScanBudget::with_cancellation(cancellation),
+        )
     }
 
     fn scan_storage_inventory(
         &self,
         source_blob_scan: SourceBlobScan,
+        mut budget: StorageScanBudget,
     ) -> Result<DurableStorageInventory, FirstSliceError> {
+        budget.check()?;
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
         let mut accounting = self
             .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
+        budget.check()?;
+        // A cancelled reconciliation must not expose a partially refreshed cache.
+        accounting.dirty = true;
         accounting.verified_source_blobs.clear();
-        let scanned = scan_storage_state(
+        let scanned = scan_storage_state_with_budget(
             &self.repositories,
             &self.quarantine,
             self.maximum_repositories,
             &mut accounting.verified_source_blobs,
             source_blob_scan,
+            &mut budget,
         );
         let (repositories, quarantine_bytes) = match scanned {
             Ok(scanned) => scanned,
@@ -2231,6 +2244,7 @@ impl DurableCatalog {
             }
         };
         apply_storage_reservations(&mut inventory, &accounting.reservations)?;
+        budget.check()?;
         if accounting.reservations.entries.is_empty() {
             accounting.repositories = Some(repositories);
             accounting.quarantine_bytes = quarantine_bytes;
@@ -4271,6 +4285,15 @@ fn read_packed_source_index(
     sources: &PrivateDirectory<'_>,
     storage: DurableSourceStorage,
 ) -> Result<PackedSourceIndex, FirstSliceError> {
+    read_packed_source_index_with_cancellation(sources, storage, &Cancellation::new())
+}
+
+fn read_packed_source_index_with_cancellation(
+    sources: &PrivateDirectory<'_>,
+    storage: DurableSourceStorage,
+    cancellation: &Cancellation,
+) -> Result<PackedSourceIndex, FirstSliceError> {
+    check_cancellation(cancellation)?;
     let expected_index_bytes = storage.index_bytes.ok_or(FirstSliceError::CatalogCorrupt)?;
     let expected_index_digest = storage
         .index_digest
@@ -4279,22 +4302,29 @@ fn read_packed_source_index(
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let encoded = sources
-        .read_file_bounded(OsStr::new(SOURCE_PACK_INDEX_FILENAME), expected_index_bytes)
-        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        .read_file_bounded_cancellable(
+            OsStr::new(SOURCE_PACK_INDEX_FILENAME),
+            expected_index_bytes,
+            cancellation,
+        )
+        .map_err(map_private_read_error)?;
     if u64::try_from(encoded.len()).ok() != Some(expected_index_bytes)
         || content_hash_bytes(&encoded) != expected_index_digest
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    check_cancellation(cancellation)?;
     let index: DurablePackedSourceIndex =
         rmp_serde::from_slice(&encoded).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    validate_packed_source_index(index, storage)
+    validate_packed_source_index(index, storage, cancellation)
 }
 
 fn validate_packed_source_index(
     index: DurablePackedSourceIndex,
     storage: DurableSourceStorage,
+    cancellation: &Cancellation,
 ) -> Result<PackedSourceIndex, FirstSliceError> {
+    check_cancellation(cancellation)?;
     let expected_files = storage.files.ok_or(FirstSliceError::CatalogCorrupt)?;
     let expected_packs = storage.packs.ok_or(FirstSliceError::CatalogCorrupt)?;
     let expected_payload_bytes = storage
@@ -4311,6 +4341,7 @@ fn validate_packed_source_index(
             .iter()
             .any(|bytes| *bytes > SOURCE_PACK_TARGET_BYTES)
         || index.pack_bytes.iter().try_fold(0_u64, |total, bytes| {
+            check_cancellation(cancellation)?;
             total.checked_add(*bytes).ok_or(FirstSliceError::Limits)
         })? != expected_payload_bytes
     {
@@ -4324,6 +4355,7 @@ fn validate_packed_source_index(
     let mut expected_pack = 0_u32;
     let mut expected_offset = 0_u64;
     for entry in index.entries {
+        check_cancellation(cancellation)?;
         if entry.bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -4370,6 +4402,7 @@ fn validate_packed_source_index(
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    check_cancellation(cancellation)?;
     Ok(PackedSourceIndex {
         pack_bytes: index.pack_bytes,
         entries,
@@ -4377,12 +4410,21 @@ fn validate_packed_source_index(
 }
 
 fn private_entry_names(directory: &PrivateDirectory<'_>) -> Result<Vec<OsString>, FirstSliceError> {
+    private_entry_names_with_cancellation(directory, &Cancellation::new())
+}
+
+fn private_entry_names_with_cancellation(
+    directory: &PrivateDirectory<'_>,
+    cancellation: &Cancellation,
+) -> Result<Vec<OsString>, FirstSliceError> {
+    check_cancellation(cancellation)?;
     let entries = directory
         .capability()
         .entries()
         .map_err(|_| FirstSliceError::Catalog)?;
     let mut names = Vec::new();
     for entry in entries {
+        check_cancellation(cancellation)?;
         let entry = entry.map_err(|_| FirstSliceError::Catalog)?;
         if names.len() >= MAX_DURABLE_ENTRIES {
             return Err(FirstSliceError::Retention);
@@ -4392,16 +4434,42 @@ fn private_entry_names(directory: &PrivateDirectory<'_>) -> Result<Vec<OsString>
             .map_err(|_| FirstSliceError::Retention)?;
         names.push(entry.file_name());
     }
+    check_cancellation(cancellation)?;
     names.sort();
+    check_cancellation(cancellation)?;
     Ok(names)
 }
 
 impl StorageScanBudget {
     fn new() -> Self {
-        Self { visited_entries: 0 }
+        Self {
+            visited_entries: 0,
+            cancellation: Cancellation::new(),
+            #[cfg(test)]
+            after_visit: None,
+        }
+    }
+
+    fn with_cancellation(cancellation: &Cancellation) -> Self {
+        Self {
+            cancellation: cancellation.clone(),
+            ..Self::new()
+        }
+    }
+
+    fn check(&self) -> Result<(), FirstSliceError> {
+        check_cancellation(&self.cancellation)
+    }
+
+    fn entry_names(
+        &self,
+        directory: &PrivateDirectory<'_>,
+    ) -> Result<Vec<OsString>, FirstSliceError> {
+        private_entry_names_with_cancellation(directory, &self.cancellation)
     }
 
     fn visit(&mut self) -> Result<(), FirstSliceError> {
+        self.check()?;
         self.visited_entries = self
             .visited_entries
             .checked_add(1)
@@ -4409,6 +4477,11 @@ impl StorageScanBudget {
         if self.visited_entries > MAX_STORAGE_INVENTORY_ENTRIES {
             return Err(FirstSliceError::Retention);
         }
+        #[cfg(test)]
+        if let Some(after_visit) = self.after_visit.as_mut() {
+            after_visit(self.visited_entries);
+        }
+        self.check()?;
         Ok(())
     }
 }
@@ -4567,11 +4640,28 @@ fn scan_storage_state(
     verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
     source_blob_scan: SourceBlobScan,
 ) -> Result<(BTreeMap<RepositoryId, ScannedRepositoryStorage>, u64), FirstSliceError> {
-    let repository_names = private_entry_names(repositories)?;
+    scan_storage_state_with_budget(
+        repositories,
+        quarantine,
+        maximum_repositories,
+        verified_source_blobs,
+        source_blob_scan,
+        &mut StorageScanBudget::new(),
+    )
+}
+
+fn scan_storage_state_with_budget(
+    repositories: &PrivateDirectory<'_>,
+    quarantine: &PrivateDirectory<'_>,
+    maximum_repositories: usize,
+    verified_source_blobs: &mut BTreeMap<(RepositoryId, ContentHash), VerifiedSourceBlobMetadata>,
+    source_blob_scan: SourceBlobScan,
+    budget: &mut StorageScanBudget,
+) -> Result<(BTreeMap<RepositoryId, ScannedRepositoryStorage>, u64), FirstSliceError> {
+    let repository_names = budget.entry_names(repositories)?;
     if repository_names.len() > maximum_repositories {
         return Err(FirstSliceError::Retention);
     }
-    let mut budget = StorageScanBudget::new();
     let mut scanned_repositories = BTreeMap::new();
     for repository_name in repository_names {
         budget.visit()?;
@@ -4585,7 +4675,7 @@ fn scan_storage_state(
         let scanned = scan_repository_storage(
             repository_id,
             &repository,
-            &mut budget,
+            budget,
             verified_source_blobs,
             source_blob_scan,
         )?;
@@ -4596,7 +4686,8 @@ fn scan_storage_state(
             return Err(FirstSliceError::CatalogCorrupt);
         }
     }
-    let quarantine_bytes = directory_tree_bytes(quarantine, &mut budget)?;
+    let quarantine_bytes = directory_tree_bytes(quarantine, budget)?;
+    budget.check()?;
     Ok((scanned_repositories, quarantine_bytes))
 }
 
@@ -4611,7 +4702,7 @@ fn scan_repository_storage(
         repository: Some(repository_id),
         ..ScannedRepositoryStorage::default()
     };
-    for name in private_entry_names(repository)? {
+    for name in budget.entry_names(repository)? {
         budget.visit()?;
         let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
         if text.starts_with(STAGING_PREFIX) {
@@ -4700,7 +4791,7 @@ fn scan_generation_storage(
     }
     let source_blobs = match source_storage_layout(manifest.version, manifest.source_storage)? {
         DurableSourceLayout::Inline => BTreeMap::new(),
-        DurableSourceLayout::Blobs => generation_source_digests(directory)?,
+        DurableSourceLayout::Blobs => generation_source_digests(directory, budget)?,
         DurableSourceLayout::Packed(storage) => {
             scan_packed_source_storage(directory, storage, budget, source_scan)?;
             BTreeMap::new()
@@ -4717,11 +4808,13 @@ fn scan_generation_storage(
 
 fn generation_source_digests(
     generation: &PrivateDirectory<'_>,
+    budget: &StorageScanBudget,
 ) -> Result<BTreeMap<ContentHash, u64>, FirstSliceError> {
     let sources = PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let mut blobs = BTreeMap::new();
-    for name in private_entry_names(&sources)? {
+    for name in budget.entry_names(&sources)? {
+        budget.check()?;
         let pointer = sources
             .read_file_bounded(&name, MAX_SOURCE_POINTER_BYTES)
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
@@ -4743,13 +4836,15 @@ fn scan_packed_source_storage(
 ) -> Result<(), FirstSliceError> {
     let sources = PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let index = read_packed_source_index(&sources, storage)?;
+    budget.check()?;
+    let index =
+        read_packed_source_index_with_cancellation(&sources, storage, &budget.cancellation)?;
     let mut expected_names = BTreeSet::from([OsString::from(SOURCE_PACK_INDEX_FILENAME)]);
     for ordinal in 0..index.pack_bytes.len() {
         let ordinal = u32::try_from(ordinal).map_err(|_| FirstSliceError::Limits)?;
         expected_names.insert(OsString::from(source_pack_name(ordinal)));
     }
-    let observed_names = private_entry_names(&sources)?;
+    let observed_names = budget.entry_names(&sources)?;
     if observed_names.len() != expected_names.len()
         || observed_names
             .iter()
@@ -4813,7 +4908,7 @@ fn scan_source_blob_storage(
 ) -> Result<(), FirstSliceError> {
     let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    for name in private_entry_names(&blobs)? {
+    for name in budget.entry_names(&blobs)? {
         budget.visit()?;
         let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
         let blob = PrivateDirectory::open(blobs.capability(), &name)
@@ -5118,7 +5213,7 @@ fn directory_tree_bytes(
     budget: &mut StorageScanBudget,
 ) -> Result<u64, FirstSliceError> {
     let mut total = 0_u64;
-    for name in private_entry_names(directory)? {
+    for name in budget.entry_names(directory)? {
         budget.visit()?;
         let metadata = directory
             .capability()
@@ -6789,6 +6884,139 @@ mod tests {
     use rootlight_runtime::RuntimePaths;
     use std::{fs, io, time::Duration};
     use tempfile::TempDir;
+
+    #[test]
+    fn storage_scan_budget_stops_after_inflight_cancellation() {
+        for reason in [
+            CancellationReason::Shutdown,
+            CancellationReason::ClientRequest,
+        ] {
+            let mut budget = StorageScanBudget::new();
+            budget.visit().expect("first entry is admitted");
+            let _ = budget.cancellation.cancel(reason);
+            assert_eq!(budget.visit(), Err(FirstSliceError::Cancelled(reason)));
+            assert_eq!(budget.visited_entries, 1, "cancelled work is not admitted");
+        }
+    }
+
+    #[test]
+    fn storage_scan_tree_rejects_cancelled_traversal() {
+        let root = durable_test_tempdir();
+        let paths = RuntimePaths::new(root.path().join("state"), root.path().join("runtime"))
+            .expect("fixture paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let parent = Dir::open_ambient_dir(paths.state_dir(), ambient_authority())
+            .expect("fixture parent opens");
+        let directory =
+            PrivateDirectory::create(&parent, OsStr::new("scan")).expect("fixture directory opens");
+        fs::write(
+            paths.state_dir().join("scan/payload"),
+            b"bounded inventory fixture",
+        )
+        .expect("fixture writes");
+        let mut budget = StorageScanBudget::new();
+        let _ = budget.cancellation.cancel(CancellationReason::Shutdown);
+        assert_eq!(
+            directory_tree_bytes(&directory, &mut budget),
+            Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+        );
+    }
+
+    #[test]
+    fn storage_scan_cancellation_invalidates_cache_and_retry_preserves_inventory() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn inventory_value() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("generation publishes");
+        let catalog = service.durable.as_ref().expect("durable catalog exists");
+        let repository = PrivateDirectory::open(
+            catalog.repositories.capability(),
+            OsStr::new(&receipt.repository.to_string()),
+        )
+        .expect("repository opens");
+        let names_before = private_entry_names(&repository).expect("repository entries read");
+        let visited = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&visited);
+        let mut budget = StorageScanBudget::new();
+        budget.after_visit = Some(Box::new(move |count| {
+            observed.store(
+                u64::try_from(count).expect("fixture count fits"),
+                Ordering::Relaxed,
+            );
+        }));
+        let baseline = catalog
+            .scan_storage_inventory(SourceBlobScan::AccountPhysicalBytes, budget)
+            .expect("complete physical inventory reads");
+        let total = usize::try_from(visited.load(Ordering::Relaxed)).expect("fixture count fits");
+        assert!(total > 2, "fixture exercises a nested scan");
+
+        for reason in [
+            CancellationReason::Shutdown,
+            CancellationReason::ClientRequest,
+        ] {
+            for cancel_at in [1, total / 2, total] {
+                let cancellation = Cancellation::new();
+                let trigger = cancellation.clone();
+                let mut budget = StorageScanBudget::with_cancellation(&cancellation);
+                budget.after_visit = Some(Box::new(move |count| {
+                    if count == cancel_at {
+                        let _ = trigger.cancel(reason);
+                    }
+                }));
+                assert_eq!(
+                    catalog.scan_storage_inventory(SourceBlobScan::AccountPhysicalBytes, budget),
+                    Err(FirstSliceError::Cancelled(reason)),
+                );
+                assert_eq!(catalog.storage_inventory_cached(), Ok(None));
+                assert!(
+                    catalog
+                        .storage_accounting
+                        .lock()
+                        .expect("accounting lock")
+                        .dirty
+                );
+                assert!(matches!(
+                    service.support_inventory_snapshot_reconciled_with_cancellation(&cancellation),
+                    Err(FirstSliceError::Cancelled(observed)) if observed == reason
+                ));
+                let mut retried = catalog
+                    .reconcile_storage_inventory(&Cancellation::new())
+                    .expect("uncancelled retry reconciles");
+                // Free space belongs to the whole volume and can change outside this catalog.
+                retried.available_bytes = baseline.available_bytes;
+                assert_eq!(retried, baseline);
+                let mut cached = catalog
+                    .storage_inventory_cached()
+                    .expect("cache reads")
+                    .expect("retry restores authoritative accounting");
+                cached.available_bytes = baseline.available_bytes;
+                assert_eq!(cached, baseline);
+                assert_eq!(
+                    private_entry_names(&repository).expect("repository entries read"),
+                    names_before
+                );
+            }
+        }
+        service
+            .support_inventory_snapshot_reconciled()
+            .expect("compatibility API reconciles");
+    }
 
     #[derive(Default)]
     struct CountingWriter {

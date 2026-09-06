@@ -10318,16 +10318,36 @@ impl FirstSliceService {
     pub fn support_inventory_snapshot_reconciled(
         &self,
     ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        self.support_inventory_snapshot_reconciled_with_cancellation(&Cancellation::new())
+    }
+
+    /// Reconciles physical accounting while observing caller cancellation.
+    ///
+    /// A cancelled scan returns no partial inventory and leaves in-progress
+    /// accounting dirty so it cannot be reused as an authoritative measurement.
+    /// No source payloads are verified by this physical accounting projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Cancelled`] for observed cancellation, or the
+    /// same consistency, storage and limit errors as
+    /// [`Self::support_inventory_snapshot_reconciled`].
+    pub fn support_inventory_snapshot_reconciled_with_cancellation(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        check_cancellation(cancellation)?;
         let storage = self
             .durable
             .as_ref()
-            .map(|durable| durable.reconcile_storage_inventory())
+            .map(|durable| durable.reconcile_storage_inventory(cancellation))
             .transpose()?;
         let accounting_state = if storage.is_some() {
             FirstSliceStorageAccountingState::Reconciled
         } else {
             FirstSliceStorageAccountingState::Unavailable
         };
+        check_cancellation(cancellation)?;
         self.support_inventory_snapshot_inner(storage, accounting_state)
     }
 
