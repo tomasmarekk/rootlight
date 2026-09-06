@@ -114,7 +114,8 @@ pub use rootlight_query::{
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
     QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
-    project_scoped_lexical_documents_for_query, project_source_fallback_document_with_text_limit,
+    project_scoped_lexical_documents_for_query, project_scoped_lexical_documents_with_source,
+    project_source_fallback_document_with_text_limit,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -10930,15 +10931,16 @@ impl FirstSliceService {
             language.clear();
             language.push_str(canonical);
         }
-        if mode == LocateMode::Text && path_prefixes.len() == 1 {
+        let exact_path_query =
+            mode == LocateMode::Prefix && path_prefixes.first().is_some_and(|path| path == &query);
+        if (mode == LocateMode::Text || exact_path_query) && path_prefixes.len() == 1 {
             let started = Instant::now();
             search_budget.max_duration =
                 search_budget.max_duration.min(query_budget.max_duration());
             let source_documents = self.scoped_source_documents(
                 lease.generation(),
                 &path_prefixes[0],
-                &query,
-                search_budget,
+                (mode == LocateMode::Text).then_some((query.as_str(), search_budget)),
                 cancellation,
             )?;
             if let Some(source_documents) = source_documents {
@@ -10998,8 +11000,7 @@ impl FirstSliceService {
         &self,
         snapshot: &rootlight_storage::GenerationSnapshot,
         path: &str,
-        query: &str,
-        search_budget: SearchBudget,
+        text_query: Option<(&str, SearchBudget)>,
         cancellation: &Cancellation,
     ) -> Result<Option<Vec<LexicalDocument>>, FirstSliceError> {
         check_cancellation(cancellation)?;
@@ -11032,16 +11033,28 @@ impl FirstSliceService {
             let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
             Arc::new(durable.read_source(file.repository, generation, file, cancellation)?)
         };
-        project_scoped_lexical_documents_for_query(
-            snapshot,
-            &source,
-            query,
-            search_budget,
-            BuildBudget::default(),
-            cancellation,
-        )
-        .map(Some)
-        .map_err(|error| map_query_error(error, cancellation))
+        let projected = if let Some((query, search_budget)) = text_query {
+            project_scoped_lexical_documents_for_query(
+                snapshot,
+                &source,
+                query,
+                search_budget,
+                BuildBudget::default(),
+                cancellation,
+            )
+        } else {
+            // An exact path is file evidence even when parsing yields no
+            // symbols. Path requests must not be validated as lexical queries.
+            project_scoped_lexical_documents_with_source(
+                snapshot,
+                &source,
+                BuildBudget::default(),
+                cancellation,
+            )
+        };
+        projected
+            .map(Some)
+            .map_err(|error| map_query_error(error, cancellation))
     }
 
     /// Executes a generation-pinned bounded `symbol.explain` query.
@@ -25596,6 +25609,95 @@ mod tests {
                     CancellationReason::DeadlineExceeded
                 ))
             ));
+        }
+    }
+
+    #[test]
+    fn scoped_path_retrieves_source_without_symbols() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let sources = [
+            ("comments.rs", "// retainedCommentOnly\n"),
+            ("empty.rs", ""),
+            (".private.rs", "// hiddenSourceComment\n"),
+            ("ordinary.rs", "pub fn retained_function() -> u32 { 1 }\n"),
+        ];
+        for (path, source) in sources {
+            fs::write(fixture.path().join(path), source).expect("source writes");
+        }
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("comment-only source publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable source restores");
+            }
+            for (path, source) in sources {
+                let located = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        path.to_owned(),
+                        LocateMode::Prefix,
+                        Vec::new(),
+                        vec![path.to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("scoped path query executes");
+                let hit = located
+                    .data
+                    .hits
+                    .iter()
+                    .find(|hit| hit.symbol.is_none())
+                    .expect("comment-only source retains file identity without symbols");
+                assert_eq!(hit.path, path);
+                let read = service
+                    .source_read(
+                        receipt.generation,
+                        vec![hit.source.clone().expect("file source identity exists")],
+                        &deadline(),
+                    )
+                    .expect("comment-only source remains readable");
+                assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+                assert_eq!(
+                    located.data.hits.iter().any(|hit| hit.symbol.is_some()),
+                    path == "ordinary.rs",
+                    "path={path}, restored={restored}"
+                );
+            }
+            for (scope, languages) in [
+                ("empty.rs", Vec::new()),
+                ("comments.rs", vec!["typescript".to_owned()]),
+            ] {
+                let located = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        "comments.rs".to_owned(),
+                        LocateMode::Prefix,
+                        languages,
+                        vec![scope.to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("negative scope query executes");
+                assert!(
+                    located.data.hits.is_empty(),
+                    "scope={scope}, restored={restored}"
+                );
+            }
         }
     }
 
