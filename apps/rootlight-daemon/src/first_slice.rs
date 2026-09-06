@@ -6974,8 +6974,12 @@ fn durable_recovery_worker(
         Ok(())
     })();
     let current_result = clear_current_recovery(&lanes);
-    let finalization_result =
-        finalize_incomplete_recoveries(&mut active_recoveries, stopping.as_ref(), &cancellation);
+    let finalization_result = finalize_incomplete_recoveries(
+        &lanes,
+        &mut active_recoveries,
+        stopping.as_ref(),
+        &cancellation,
+    );
     finalization_result?;
     current_result?;
     if !stopping.load(Ordering::Acquire) {
@@ -6989,6 +6993,7 @@ fn durable_recovery_worker(
 }
 
 fn finalize_incomplete_recoveries(
+    lanes: &FirstSliceServiceLanes,
     recoveries: &mut [RecoveryOperationGuard<'_>],
     stopping: &AtomicBool,
     worker_cancellation: &Cancellation,
@@ -7001,7 +7006,12 @@ fn finalize_incomplete_recoveries(
     let mut first_error = None;
     for recovery in recoveries {
         let reason = recovery.cancellation().reason().or(worker_reason);
-        if let Err(error) = recovery.finalize_unowned(reason)
+        // Early batch exits bypass per-loader removal. Retire the BUSY fast
+        // path only after the journal confirms that this operation is terminal.
+        let finalized = recovery
+            .finalize_unowned(reason)
+            .and_then(|()| remove_recovering_repository(lanes, recovery.target.repository()));
+        if let Err(error) = finalized
             && first_error.is_none()
         {
             first_error = Some(error);
@@ -25082,6 +25092,86 @@ mod tests {
         assert!(recovery_ready);
         assert!(recovery_complete);
         assert_eq!(generation_status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn terminal_retained_recovery_releases_busy_admission() {
+        for (reason, expected_state) in [
+            (
+                Some(CancellationReason::DeadlineExceeded),
+                OperationState::Interrupted,
+            ),
+            (
+                Some(CancellationReason::ClientRequest),
+                OperationState::Cancelled,
+            ),
+            (None, OperationState::Failed),
+        ] {
+            let observed_lanes = Arc::new(Mutex::new(None));
+            let captured_lanes = Arc::clone(&observed_lanes);
+            let (result, records, contexts, ready, complete, health) =
+                run_recovery_worker_with_start_hook(
+                    2,
+                    Box::new(|_, _| Ok(())),
+                    Some(Box::new(move |lanes, cancellation| {
+                        *captured_lanes.lock().expect("observation locks") = Some(lanes.clone());
+                        let repositories = lanes
+                            .recovering_repositories
+                            .read()
+                            .expect("recoveries read");
+                        let mut demand = lanes.recovery_demand.lock().expect("demand locks");
+                        for repository in repositories.keys() {
+                            demand.insert(*repository);
+                        }
+                        if let Some(reason) = reason {
+                            assert!(cancellation.cancel(reason));
+                            Ok(())
+                        } else {
+                            Err(FirstSliceHostError::ThreadPanicked)
+                        }
+                    })),
+                );
+            if reason.is_some() {
+                result.expect("cancelled recovery completes degraded");
+            } else {
+                assert!(matches!(result, Err(FirstSliceHostError::ThreadPanicked)));
+            }
+            assert!(ready && complete);
+            assert_eq!(health, HealthStatus::Degraded);
+            for record in &records {
+                assert_eq!(record.kind, OperationKind::Recovery);
+                assert_eq!(record.state, expected_state);
+                assert_eq!(
+                    record.progress,
+                    Progress::new(1, 2).expect("active phase finished")
+                );
+            }
+            let lanes = observed_lanes
+                .lock()
+                .expect("observation locks")
+                .take()
+                .expect("active recovery was observed");
+            assert!(
+                lanes
+                    .recovering_repositories
+                    .read()
+                    .expect("recoveries read")
+                    .is_empty(),
+                "terminal operations must not remain in the operation.status BUSY fast path"
+            );
+            assert!(
+                lanes
+                    .recovery_demand
+                    .lock()
+                    .expect("demand locks")
+                    .repositories
+                    .is_empty()
+            );
+            for context in contexts {
+                guard_repository_index_recovery(&lanes, Some(context.repository))
+                    .expect("terminal recovery no longer blocks repository admission");
+            }
+        }
     }
 
     #[test]
