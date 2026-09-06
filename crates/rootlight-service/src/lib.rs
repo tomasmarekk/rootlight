@@ -2465,6 +2465,96 @@ impl StructuralArtifactEntry {
     }
 }
 
+/// Keeps optional normalized chunks from displacing reusable parser artifacts.
+/// The monotonic eviction cursor visits each retained entry at most once.
+struct StructuralArtifactCollector {
+    entries: Vec<StructuralArtifactEntry>,
+    accounted_bytes: usize,
+    maximum_bytes: usize,
+    next_normalized: usize,
+    complete: bool,
+}
+
+impl StructuralArtifactCollector {
+    fn new(maximum_bytes: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            accounted_bytes: 0,
+            maximum_bytes,
+            next_normalized: 0,
+            complete: true,
+        }
+    }
+
+    fn push(
+        &mut self,
+        mut entry: StructuralArtifactEntry,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        check_cancellation(cancellation)?;
+        if !self.complete {
+            return Ok(());
+        }
+        let mut admitted_bytes = self
+            .accounted_bytes
+            .checked_add(entry.accounted_bytes()?)
+            .ok_or(FirstSliceError::Retention)?;
+        if admitted_bytes > self.maximum_bytes
+            && let Some(chunk) = entry.normalized.take()
+        {
+            admitted_bytes = admitted_bytes
+                .checked_sub(chunk.encoded_bytes())
+                .ok_or(FirstSliceError::Retention)?;
+        }
+        while admitted_bytes > self.maximum_bytes && self.next_normalized < self.entries.len() {
+            check_cancellation(cancellation)?;
+            let retained = self
+                .entries
+                .get_mut(self.next_normalized)
+                .ok_or(FirstSliceError::Retention)?;
+            if let Some(chunk) = retained.normalized.take() {
+                self.accounted_bytes = self
+                    .accounted_bytes
+                    .checked_sub(chunk.encoded_bytes())
+                    .ok_or(FirstSliceError::Retention)?;
+                admitted_bytes = admitted_bytes
+                    .checked_sub(chunk.encoded_bytes())
+                    .ok_or(FirstSliceError::Retention)?;
+            }
+            self.next_normalized = self
+                .next_normalized
+                .checked_add(1)
+                .ok_or(FirstSliceError::Retention)?;
+        }
+        if admitted_bytes > self.maximum_bytes {
+            // Parser artifacts themselves no longer fit. Preserve the existing
+            // uncached fallback and its explicit incomplete-retention evidence.
+            self.entries.clear();
+            self.accounted_bytes = 0;
+            self.complete = false;
+            return Ok(());
+        }
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| FirstSliceError::Retention)?;
+        self.entries.push(entry);
+        self.accounted_bytes = admitted_bytes;
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<StructuralGenerationArtifacts, FirstSliceError> {
+        StructuralGenerationArtifacts::new(
+            self.entries,
+            self.maximum_bytes,
+            self.complete,
+            cancellation,
+        )
+    }
+}
+
 #[derive(Default)]
 struct ReusedNormalizedRecords {
     // Generation-bound fact IDs content-bind their complete records. File and
@@ -2730,10 +2820,30 @@ impl StructuralArtifactRetention {
         if retained_generations >= self.maximum_generations {
             return Err(FirstSliceError::Retention);
         }
-        let admitted_bytes = self
+        let mut admitted_bytes = self
             .retained_bytes
             .checked_add(artifacts.accounted_bytes)
             .ok_or(FirstSliceError::Retention)?;
+        if artifacts.retention_complete && artifacts.accounted_bytes <= self.maximum_bytes {
+            // Parser caches are optional, unlike queryable generation state.
+            // Reclaim committed caches before admitting a prepared successor;
+            // staged publication-owned caches must remain rollback-safe.
+            for committed in self.committed.values_mut() {
+                if admitted_bytes <= self.maximum_bytes {
+                    break;
+                }
+                check_cancellation(cancellation)?;
+                let released_bytes = committed.accounted_bytes;
+                self.retained_bytes = self
+                    .retained_bytes
+                    .checked_sub(released_bytes)
+                    .ok_or(FirstSliceError::Retention)?;
+                admitted_bytes = admitted_bytes
+                    .checked_sub(released_bytes)
+                    .ok_or(FirstSliceError::Retention)?;
+                *committed = StructuralGenerationArtifacts::empty();
+            }
+        }
         let (artifacts, retained, admitted_bytes) =
             if artifacts.retention_complete && admitted_bytes <= self.maximum_bytes {
                 (artifacts, true, admitted_bytes)
@@ -7304,10 +7414,10 @@ impl FirstSliceService {
             )?;
         }
         let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
-        let mut structural_entries = Vec::new();
-        let structural_artifact_budget = self.structural_artifacts.available_bytes();
-        let mut structural_artifact_bytes = 0usize;
-        let mut structural_retention_complete = true;
+        // Preparation owns its generation-memory reservation. Publication
+        // reclaims optional committed caches before enforcing the shared cap.
+        let mut structural_entries =
+            StructuralArtifactCollector::new(self.structural_artifacts.maximum_bytes);
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
         let mut reused_parser_artifact_bytes = 0usize;
@@ -7470,27 +7580,15 @@ impl FirstSliceService {
                 .try_reserve(1)
                 .map_err(|_| FirstSliceError::Limits)?;
             language_documents.push(file_document);
-            if let Some(artifact) = artifact
-                && structural_retention_complete
-            {
-                let entry = StructuralArtifactEntry {
-                    id: artifact_id,
-                    artifact,
-                    normalized,
-                };
-                let admitted_bytes = structural_artifact_bytes
-                    .checked_add(entry.accounted_bytes()?)
-                    .ok_or(FirstSliceError::Retention)?;
-                if admitted_bytes <= structural_artifact_budget {
-                    structural_entries
-                        .try_reserve(1)
-                        .map_err(|_| FirstSliceError::Retention)?;
-                    structural_entries.push(entry);
-                    structural_artifact_bytes = admitted_bytes;
-                } else {
-                    structural_entries.clear();
-                    structural_retention_complete = false;
-                }
+            if let Some(artifact) = artifact {
+                structural_entries.push(
+                    StructuralArtifactEntry {
+                        id: artifact_id,
+                        artifact,
+                        normalized,
+                    },
+                    cancellation,
+                )?;
             }
             analyzed_files = analyzed_files
                 .checked_add(1)
@@ -7619,12 +7717,7 @@ impl FirstSliceService {
             u64::try_from(reused_parser_artifact_bytes).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.lowered_files =
             u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
-        let structural_artifacts = StructuralGenerationArtifacts::new(
-            structural_entries,
-            structural_artifact_budget,
-            structural_retention_complete,
-            cancellation,
-        )?;
+        let structural_artifacts = structural_entries.finish(cancellation)?;
         let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
         let document = apply_bounded_resolution(
             document,
@@ -7654,10 +7747,16 @@ impl FirstSliceService {
                     current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits)
                 })?;
         let logical_staged_memory_bytes =
-            logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?;
+            logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?
+                .checked_add(
+                    u64::try_from(structural_artifacts.accounted_bytes)
+                        .map_err(|_| FirstSliceError::Limits)?,
+                )
+                .ok_or(FirstSliceError::Limits)?;
         // Projection can retain the canonical document while one complete
         // source record and its rebound buffers coexist with compact graph
-        // workspace. Admit that conservative peak before either allocation.
+        // workspace and the prepared parser cache. Admit that conservative peak
+        // before allocating the projection buffers.
         memory_reservation.resize(
             logical_staged_memory_bytes,
             PendingGenerationMemory::Staged,
@@ -30730,6 +30829,210 @@ mod tests {
         assert!(evidence.structural_cache_retained());
         assert_eq!(service.receipts.len(), 2);
         assert_eq!(service.incremental_inputs.len(), 2);
+    }
+
+    #[test]
+    fn optional_normalized_cache_pressure_preserves_parser_reuse() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        for name in ["alpha", "bravo", "delta"] {
+            fs::write(
+                fixture.path().join(format!("src/{name}.rs")),
+                format!("pub fn {name}() -> u32 {{ 1 }}\n"),
+            )
+            .expect("independent source writes");
+        }
+        let cancellation = deadline();
+        let budget = {
+            let sizing = FirstSliceService::new(3).expect("sizing service initializes");
+            let prepared = sizing
+                .prepare_rust_fixture(fixture.path(), &cancellation)
+                .expect("unconstrained cache prepares");
+            let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
+                panic!("initial fixture requires a generation");
+            };
+            let artifacts = &pending.structural_artifacts;
+            assert_eq!(artifacts.len(), 3);
+            let smallest_chunk = artifacts
+                .iter()
+                .map(|(_, entry)| {
+                    entry
+                        .normalized
+                        .as_ref()
+                        .expect("source supports normalized reuse")
+                        .encoded_bytes()
+                })
+                .min()
+                .expect("normalized chunks exist");
+            artifacts
+                .accounted_bytes
+                .checked_sub(smallest_chunk)
+                .expect("all parsers and two normalized chunks fit")
+        };
+        let mut service = FirstSliceService::new(3).expect("bounded service initializes");
+        service.structural_artifacts.maximum_bytes = budget;
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("bounded initial generation publishes");
+        let artifacts = service
+            .structural_artifacts
+            .generation(first.generation)
+            .expect("published cache is recorded");
+        assert_eq!(artifacts.len(), 3, "optional chunks must not evict parsers");
+        assert!(artifacts.retention_complete);
+        assert!(artifacts.accounted_bytes <= budget);
+        assert!(
+            artifacts
+                .iter()
+                .any(|(_, entry)| entry.normalized.is_none())
+        );
+
+        fs::write(
+            fixture.path().join("src/alpha.rs"),
+            "pub fn alpha() -> u32 { 2 }\n",
+        )
+        .expect("one body changes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("incremental successor publishes");
+        let evidence = service
+            .incremental_evidence(second.generation)
+            .expect("incremental evidence is retained");
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 2);
+        assert!(evidence.reused_normalized_facts() > 0);
+        assert!(service.structural_artifacts.retained_bytes <= budget);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            first.generation,
+            &second,
+            &cancellation,
+        );
+
+        fs::write(
+            fixture.path().join("src/bravo.rs"),
+            "pub fn bravo() -> u32 { 3 }\n",
+        )
+        .expect("a later independent body changes");
+        let third = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("later successor publishes within the same cache bound");
+        let evidence = service
+            .incremental_evidence(third.generation)
+            .expect("later incremental evidence is retained");
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 2);
+        assert!(evidence.reused_normalized_facts() > 0);
+        assert!(evidence.structural_cache_retained());
+        assert!(service.structural_artifacts.retained_bytes <= budget);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            second.generation,
+            &third,
+            &cancellation,
+        );
+    }
+
+    #[test]
+    fn structural_cache_pressure_preserves_staged_owners_and_cancellation() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn value() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = deadline();
+        let service = FirstSliceService::new(3).expect("service initializes");
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .expect("parser artifact prepares");
+        let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
+            panic!("initial source requires a generation");
+        };
+        let (_, entry) = pending
+            .structural_artifacts
+            .iter()
+            .next()
+            .expect("parser artifact exists");
+        let budget = entry.accounted_bytes().expect("cache charge fits");
+        let artifacts = || {
+            StructuralGenerationArtifacts::new(
+                [StructuralArtifactEntry {
+                    id: entry.id,
+                    artifact: Arc::clone(&entry.artifact),
+                    normalized: entry.normalized.as_ref().map(Arc::clone),
+                }],
+                budget,
+                true,
+                &cancellation,
+            )
+            .expect("complete cache fits exactly")
+        };
+        let first = GenerationId::from_bytes([1; 20]);
+        let second = GenerationId::from_bytes([2; 20]);
+        let mut retention =
+            StructuralArtifactRetention::new(3, budget).expect("bounded cache initializes");
+        assert!(
+            retention
+                .stage(first, artifacts(), &cancellation)
+                .expect("first stages")
+        );
+        assert!(
+            !retention
+                .stage(second, artifacts(), &cancellation)
+                .expect("second stages uncached")
+        );
+        assert_eq!(
+            retention
+                .staged
+                .get(&first)
+                .expect("staged owner remains")
+                .len(),
+            1
+        );
+        assert_eq!(retention.retained_bytes, budget);
+        let release = retention
+            .begin_discard(second)
+            .expect("uncached staging releases");
+        retention.finish_discard(release);
+        retention.commit_staged(first).expect("first cache commits");
+
+        let cancelled = deadline();
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            retention.stage(second, artifacts(), &cancelled),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        ));
+        assert_eq!(
+            retention
+                .generation(first)
+                .expect("committed cache remains")
+                .len(),
+            1
+        );
+        assert_eq!(retention.retained_bytes, budget);
+        assert!(
+            retention
+                .stage(second, artifacts(), &cancellation)
+                .expect("successor stages")
+        );
+        assert_eq!(
+            retention
+                .generation(first)
+                .expect("old cache record remains")
+                .len(),
+            0
+        );
+        assert_eq!(retention.retained_bytes, budget);
+        let release = retention
+            .begin_discard(second)
+            .expect("successor rolls back");
+        retention.finish_discard(release);
+        assert_eq!(retention.retained_bytes, 0);
     }
 
     #[test]
