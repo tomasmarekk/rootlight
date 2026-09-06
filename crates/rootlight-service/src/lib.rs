@@ -10962,6 +10962,14 @@ impl FirstSliceService {
                     ))?;
                 let source_service = QueryService::new(lease.generation(), &search)
                     .map_err(|error| map_query_error(error, cancellation))?;
+                // Every document in this projection belongs to the exact file.
+                // Equality preserves all path hits without expanding unrelated
+                // qualified symbol suffixes under the shared lexical budget.
+                let mode = if exact_path_query {
+                    LocateMode::Exact
+                } else {
+                    mode
+                };
                 let plan = source_service
                     .plan_code_locate_with_filters(
                         query,
@@ -25710,6 +25718,76 @@ mod tests {
                     "scope={scope}, restored={restored}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn exact_file_scope_does_not_expand_symbol_prefixes() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = (0..16)
+            .map(|number| format!("export function value_{number}() {{ return {number}; }}\n"))
+            .collect::<String>();
+        fs::write(fixture.path().join("source.js"), &source).expect("source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("source publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable source restores");
+            }
+            let result = service.code_locate_with_filters_and_budget(
+                receipt.generation,
+                "source.js".to_owned(),
+                LocateMode::Prefix,
+                Vec::new(),
+                vec!["source.js".to_owned()],
+                32,
+                0,
+                FirstSliceBudget::default().reduce_search_max_expanded_terms(8),
+                &deadline(),
+            );
+            assert!(result.is_ok(), "restored={restored}, result={result:?}");
+            let located = result.expect("exact file scope admits bounded path lookup");
+            assert!(located.data.hits.iter().any(|hit| hit.symbol.is_some()));
+            let file = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_none())
+                .expect("file identity is not omitted");
+            assert!(located.data.hits.iter().all(|hit| hit.path == "source.js"));
+            let read = service
+                .source_read(
+                    receipt.generation,
+                    vec![file.source.clone().expect("file has source identity")],
+                    &deadline(),
+                )
+                .expect("source reads with generation provenance");
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            assert!(matches!(
+                service.code_locate_with_filters_and_budget(
+                    receipt.generation,
+                    "value".to_owned(),
+                    LocateMode::Prefix,
+                    Vec::new(),
+                    vec!["source.js".to_owned()],
+                    32,
+                    0,
+                    FirstSliceBudget::default().reduce_search_max_expanded_terms(8),
+                    &deadline(),
+                ),
+                Err(FirstSliceError::BudgetExceeded)
+            ));
         }
     }
 
