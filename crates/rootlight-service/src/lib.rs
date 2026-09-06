@@ -7049,8 +7049,29 @@ impl FirstSliceService {
         let root_result = RepositoryRoot::open(repository, path);
         check_cancellation(cancellation)?;
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
-        let policy =
-            DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
+        let tracked_paths = rootlight_git::collect_tracked_paths(
+            root.local_path(),
+            GitCollectLimits::default(),
+            cancellation,
+        )
+        .map_err(|error| match error {
+            rootlight_git::GitCollectError::Cancelled(cancelled) => {
+                FirstSliceError::Cancelled(cancelled.reason())
+            }
+            rootlight_git::GitCollectError::CommandOutputLimit { .. }
+            | rootlight_git::GitCollectError::CommandTimedOut { .. } => {
+                FirstSliceError::BudgetExceeded
+            }
+            _ => FirstSliceError::Discovery,
+        })?;
+        let policy = DiscoveryPolicy::build(Vec::new(), false)
+            .and_then(|policy| policy.with_tracked_files(tracked_paths, cancellation))
+            .map_err(|error| match error {
+                rootlight_discovery::DiscoveryError::Cancelled(cancelled) => {
+                    FirstSliceError::Cancelled(cancelled.reason())
+                }
+                _ => FirstSliceError::Discovery,
+            })?;
         let mut discovery_limits = DiscoveryLimits::from_config(&self.config);
         let parser_provider_hash = first_slice_parser_provider_hash()?;
         let provider_set_hash = self.provider_set_hash(mode)?;
@@ -25789,6 +25810,130 @@ mod tests {
                 Err(FirstSliceError::BudgetExceeded)
             ));
         }
+    }
+
+    #[test]
+    fn tracked_sources_remain_retrievable_under_vcs_ignores() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir_all(fixture.path().join("nested/cache")).expect("nested source root exists");
+        fs::write(fixture.path().join("nested/cache/empty.source"), "")
+            .expect("empty source writes");
+        fs::write(
+            fixture.path().join("nested/cache/retained.rs"),
+            "pub fn retained_value() -> u32 { 1 }\n",
+        )
+        .expect("tracked source writes");
+        fs::write(
+            fixture.path().join("visible.rs"),
+            "pub fn visible_value() -> u32 { 2 }\n",
+        )
+        .expect("visible control writes");
+        for arguments in [&["init", "--quiet"][..], &["add", "."][..]] {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(fixture.path())
+                .output()
+                .expect("fixture Git command starts");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fs::write(fixture.path().join("nested/.gitignore"), "cache/\n")
+            .expect("ignore rule writes");
+        fs::write(
+            fixture.path().join("nested/cache/untracked.rs"),
+            "pub fn untracked_value() -> u32 { 3 }\n",
+        )
+        .expect("untracked control writes");
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("fixture indexes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable service restores");
+            }
+            let mut observed = Vec::new();
+            for path in [
+                "nested/cache/empty.source",
+                "nested/cache/retained.rs",
+                "nested/cache/untracked.rs",
+                "visible.rs",
+            ] {
+                let result = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        path.to_owned(),
+                        LocateMode::Prefix,
+                        Vec::new(),
+                        vec![path.to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("scoped path request executes");
+                observed.push(result.data.hits.iter().any(|hit| hit.path == path));
+                if path != "nested/cache/untracked.rs" {
+                    let file = result
+                        .data
+                        .hits
+                        .iter()
+                        .find(|hit| hit.path == path && hit.symbol.is_none())
+                        .expect("each admitted source retains a file identity");
+                    let source = service
+                        .source_read(
+                            receipt.generation,
+                            vec![
+                                file.source
+                                    .clone()
+                                    .expect("file has generation-bound source identity"),
+                            ],
+                            &deadline(),
+                        )
+                        .expect("tracked source reads");
+                    assert_eq!(
+                        source.data.chunks[0].bytes,
+                        fs::read(fixture.path().join(path)).expect("live source reads")
+                    );
+                }
+            }
+            assert_eq!(observed, [true, true, false, true], "restored={restored}");
+        }
+        let output = Command::new("git")
+            .args(["rm", "--cached", "--", "nested/cache/retained.rs"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("index removal starts");
+        assert!(output.status.success());
+        let changed = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("tracking change reconciles");
+        assert_ne!(changed.generation, receipt.generation);
+        let removed = "nested/cache/retained.rs";
+        let result = service
+            .code_locate_with_filters_and_budget(
+                changed.generation,
+                removed.to_owned(),
+                LocateMode::Prefix,
+                Vec::new(),
+                vec![removed.to_owned()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("removed tracked path lookup executes");
+        assert!(result.data.hits.is_empty());
     }
 
     #[test]

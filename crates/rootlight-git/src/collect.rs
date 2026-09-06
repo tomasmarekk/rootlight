@@ -135,6 +135,9 @@ pub enum GitCollectOperation {
     /// Read staged gitlink entries.
     #[error("submodules")]
     Submodules,
+    /// Read tracked regular-file paths without inspecting source contents.
+    #[error("tracked files")]
+    TrackedFiles,
 }
 
 /// Stable source-free error family for Git collection callers.
@@ -224,6 +227,81 @@ impl GitCollectError {
             Self::Cancelled(_) => GitCollectErrorCode::Cancelled,
         }
     }
+}
+
+/// Collects the index paths of tracked regular files, including conflict stages.
+///
+/// Missing root-local Git metadata returns an empty set without starting Git.
+/// Symlinks and submodules are not regular-file admissions. Paths remain UTF-8
+/// Git paths; consumers must validate them against their own filesystem boundary.
+///
+/// # Errors
+///
+/// Returns [`GitCollectError`] for inaccessible metadata, command failure,
+/// malformed or non-UTF-8 output, resource limits, or cancellation. Collection
+/// never returns a partial inventory after a failure.
+pub fn collect_tracked_paths(
+    repository_root: &Path,
+    collect_limits: GitCollectLimits,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, GitCollectError> {
+    cancellation.check()?;
+    let operation = GitCollectOperation::TrackedFiles;
+    match std::fs::symlink_metadata(repository_root.join(".git")) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(source) => return Err(GitCollectError::CommandIo { operation, source }),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(GitCollectError::InvalidOutput { operation });
+        }
+        Ok(_) => {}
+    }
+    let runner = GitRunner::new(repository_root, collect_limits);
+    let output = runner.required(
+        operation,
+        ["ls-files", "--cached", "--stage", "--full-name", "-z"],
+        cancellation,
+    )?;
+    parse_tracked_paths(&output, cancellation)
+}
+
+fn parse_tracked_paths(
+    output: &[u8],
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, GitCollectError> {
+    let operation = GitCollectOperation::TrackedFiles;
+    let invalid = || GitCollectError::InvalidOutput { operation };
+    if !output.is_empty() && output.last() != Some(&0) {
+        return Err(invalid());
+    }
+    let mut paths = BTreeSet::new();
+    for record in output
+        .strip_suffix(&[0])
+        .into_iter()
+        .flat_map(|bytes| bytes.split(|byte| *byte == 0))
+    {
+        cancellation.check()?;
+        let mut record_fields = record.splitn(2, |byte| *byte == b'\t');
+        let metadata = record_fields.next().ok_or_else(invalid)?;
+        let path = record_fields.next().ok_or_else(invalid)?;
+        let mut fields = metadata.split(|byte| *byte == b' ');
+        let mode = fields.next().ok_or_else(invalid)?;
+        let object = fields.next().ok_or_else(invalid)?;
+        let stage = fields.next().ok_or_else(invalid)?;
+        if fields.next().is_some()
+            || !matches!(mode, b"100644" | b"100755" | b"120000" | b"160000")
+            || !matches!(stage, b"0" | b"1" | b"2" | b"3")
+            || !matches!(object.len(), 40 | 64)
+            || !object.iter().all(u8::is_ascii_hexdigit)
+            || path.is_empty()
+        {
+            return Err(invalid());
+        }
+        let path = parse_text(path, operation)?;
+        if matches!(mode, b"100644" | b"100755") {
+            paths.insert(path);
+        }
+    }
+    Ok(paths)
 }
 
 /// Collects and validates bounded source-free evidence from one repository.
@@ -1553,6 +1631,48 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracked_path_records_preserve_regular_files_and_reject_partial_output() {
+        let object = "a".repeat(40);
+        let records = format!(
+            "100644 {object} 0\tspace name.rs\0\
+             100755 {object} 0\tunicode-λ.rs\0\
+             100644 {object} 1\tconflict.rs\0\
+             100644 {object} 2\tconflict.rs\0\
+             120000 {object} 0\tlink.rs\0\
+             160000 {object} 0\tmodule\0"
+        );
+        let paths = parse_tracked_paths(records.as_bytes(), &Cancellation::new())
+            .expect("valid tracked paths parse");
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            ["conflict.rs", "space name.rs", "unicode-λ.rs"]
+        );
+        for invalid in [
+            format!("100644 {object} 0\tfile.rs"),
+            format!("100644 {object} 0\tfile.rs\0\0"),
+            format!("100644 {object} 4\tfile.rs\0"),
+            "100644 z 0\tfile.rs\0".to_owned(),
+            format!("100000 {object} 0\tfile.rs\0"),
+            format!("100644 {object} 0\t\0"),
+        ] {
+            assert_eq!(
+                parse_tracked_paths(invalid.as_bytes(), &Cancellation::new())
+                    .expect_err("malformed inventory is rejected")
+                    .code(),
+                GitCollectErrorCode::InvalidOutput
+            );
+        }
+        let mut invalid_utf8 = format!("100644 {object} 0\t").into_bytes();
+        invalid_utf8.extend_from_slice(&[255, 0]);
+        assert!(parse_tracked_paths(&invalid_utf8, &Cancellation::new()).is_err());
+        assert!(
+            parse_tracked_paths(b"", &Cancellation::new())
+                .expect("empty index parses")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn sparse_checkout_probe_distinguishes_absence_from_failure() {

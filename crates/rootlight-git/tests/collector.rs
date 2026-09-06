@@ -9,7 +9,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_git::{
     FileChangeKind, GitCollectErrorCode, GitCollectLimits, GitLimits, HeadState, HistoryState,
     HistoryTruncation, ObjectFormat, RenameEvidenceKind, RepositoryState, SubmoduleCheckoutState,
-    collect_repository, collect_revision_range, collect_worktree_status, revision_resolves_to_head,
+    collect_repository, collect_revision_range, collect_tracked_paths, collect_worktree_status,
+    revision_resolves_to_head,
 };
 use rootlight_ids::{RepositoryId, derive_repository};
 use tempfile::TempDir;
@@ -70,6 +71,59 @@ fn write_and_commit(root: &Path, path: &str, body: &str, message: &str) {
 fn collection_limits(history_commits: usize) -> GitCollectLimits {
     GitCollectLimits::new(history_commits, 2 * 1024 * 1024, Duration::from_secs(10))
         .expect("fixture collection limits are valid")
+}
+
+#[test]
+fn tracked_inventory_is_root_local_bounded_and_tracks_index_changes() {
+    let directory = initialized_repository();
+    let root = directory.path();
+    fs::create_dir(root.join("child")).expect("child root creates");
+    fs::write(root.join("child/kept.rs"), "fn kept() {}\n").expect("source writes");
+    run_git(root, &["add", "."]);
+    fs::write(root.join(".gitignore"), "child/\n").expect("ignore writes");
+    fs::write(root.join("child/untracked.rs"), "fn untracked() {}\n").expect("control writes");
+    let inventory = collect_tracked_paths(root, collection_limits(1), &Cancellation::new())
+        .expect("tracked inventory collects");
+    assert_eq!(inventory.into_iter().collect::<Vec<_>>(), ["child/kept.rs"]);
+    assert!(
+        collect_tracked_paths(
+            &root.join("child"),
+            collection_limits(1),
+            &Cancellation::new()
+        )
+        .expect("nested non-repository has no root-local inventory")
+        .is_empty()
+    );
+    let tiny = GitCollectLimits::new(1, 8, Duration::from_secs(10)).expect("small bound is valid");
+    assert_eq!(
+        collect_tracked_paths(root, tiny, &Cancellation::new())
+            .expect_err("oversized output cannot become a partial inventory")
+            .code(),
+        GitCollectErrorCode::CommandOutputLimit
+    );
+    let cancelled = Cancellation::new();
+    cancelled.cancel(CancellationReason::ClientRequest);
+    assert_eq!(
+        collect_tracked_paths(root, collection_limits(1), &cancelled)
+            .expect_err("cancelled inventory cannot succeed")
+            .code(),
+        GitCollectErrorCode::Cancelled
+    );
+    run_git(root, &["rm", "--cached", "--", "child/kept.rs"]);
+    assert!(
+        collect_tracked_paths(root, collection_limits(1), &Cancellation::new())
+            .expect("updated index collects")
+            .is_empty()
+    );
+    fs::write(root.join("child/.git"), "malformed metadata").expect("invalid metadata writes");
+    assert!(
+        collect_tracked_paths(
+            &root.join("child"),
+            collection_limits(1),
+            &Cancellation::new()
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -206,6 +206,7 @@ pub struct DiscoveryPolicy {
     rules: Vec<PolicyRule>,
     matchers: PolicyMatchers,
     audit: bool,
+    tracked_files: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -244,7 +245,51 @@ impl DiscoveryPolicy {
             rules,
             matchers,
             audit,
+            tracked_files: BTreeSet::new(),
         })
+    }
+
+    /// Retains tracked regular files through VCS ignores, without overriding
+    /// default, repository, operation, or VFS safety policy.
+    ///
+    /// Ancestors are traversal routes only; their untracked children do not
+    /// inherit the tracked-file admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError`] for excessive inventory size, invalid relative
+    /// paths, or cancellation. No partially validated policy is returned.
+    pub fn with_tracked_files(
+        mut self,
+        paths: BTreeSet<String>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, DiscoveryError> {
+        if paths.len() > MAX_DISCOVERY_ENTRIES {
+            return Err(DiscoveryError::EntryLimit {
+                maximum: MAX_DISCOVERY_ENTRIES,
+            });
+        }
+        for path in paths {
+            cancellation.check()?;
+            let path = RelativePath::parse(Path::new(&path))?;
+            self.tracked_files.insert(path.as_str().to_owned());
+        }
+        cancellation.check()?;
+        Ok(self)
+    }
+
+    fn admits_tracked_path(&self, path: &RelativePath, is_directory: bool) -> bool {
+        if !is_directory {
+            return self.tracked_files.contains(path.as_str());
+        }
+        let prefix = format!("{}/", path.as_str());
+        self.tracked_files
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix.as_str()),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|file| file.starts_with(&prefix))
     }
 
     /// Returns the ordered policy rules used to build this matcher.
@@ -295,6 +340,33 @@ impl DiscoveryPolicy {
                 scoped_ignores.and_then(|ignores| ignores.decision(path, is_directory, self.audit))
             {
                 decision = scoped_decision;
+            }
+            if !self.tracked_files.is_empty() {
+                // Reopened ignored directories still exclude untracked children,
+                // even when a child ignore file attempts to negate the parent.
+                let mut parent = parent_scope(path.as_str());
+                while !parent.is_empty() {
+                    let parent_path = Path::new(parent);
+                    let inherited = scoped_ignores
+                        .and_then(|ignores| ignores.decision_at(parent, true, self.audit))
+                        .or_else(|| {
+                            decision_from_match(
+                                self.matchers.vcs_ignore.matched(parent_path, true),
+                                self.audit,
+                            )
+                        });
+                    if let Some(inherited) = inherited.filter(|value| value.excluded) {
+                        decision = inherited;
+                        break;
+                    }
+                    parent = parent_scope(parent);
+                }
+                if self.admits_tracked_path(path, is_directory) {
+                    decision = PolicyDecision {
+                        included: true,
+                        ..PolicyDecision::default()
+                    };
+                }
             }
         }
         for matcher in [&self.matchers.repository, &self.matchers.operation] {
@@ -376,8 +448,12 @@ impl ScopedIgnores {
         is_directory: bool,
         audit: bool,
     ) -> Option<PolicyDecision> {
-        let candidate = Path::new(path.as_str());
-        let mut scope = parent_scope(path.as_str());
+        self.decision_at(path.as_str(), is_directory, audit)
+    }
+
+    fn decision_at(&self, path: &str, is_directory: bool, audit: bool) -> Option<PolicyDecision> {
+        let candidate = Path::new(path);
+        let mut scope = parent_scope(path);
         loop {
             if let Some(matcher) = self.matchers.get(scope)
                 && let Some(decision) =
@@ -2497,6 +2573,90 @@ max_source_file_bytes = 2097152
                 pattern: "!ignored/kept.rs".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn tracked_admission_opens_only_required_routes_and_preserves_policy() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"cache/\n*.rs\n");
+        write_fixture(&temporary, "cache/.gitignore", b"!*.rs\n");
+        for path in [
+            "cache/kept.rs",
+            "cache/untracked.rs",
+            "cache/deep/kept.rs",
+            "cache/deep/untracked.rs",
+            "cache-other.rs",
+            "cache/denied.rs",
+            "target/kept.rs",
+        ] {
+            write_fixture(&temporary, path, b"fn value() {}\n");
+        }
+        let root = fixture_root(&temporary, b"tracked-admission");
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "cache/denied.rs".to_owned(),
+                source: "operation".to_owned(),
+            }],
+            true,
+        )
+        .expect("policy builds")
+        .with_tracked_files(
+            [
+                "cache/kept.rs",
+                "cache/deep/kept.rs",
+                "cache-other.rs",
+                "cache/denied.rs",
+                "target/kept.rs",
+            ]
+            .map(str::to_owned)
+            .into(),
+            &Cancellation::new(),
+        )
+        .expect("tracked paths validate");
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("tracked discovery succeeds");
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                ".gitignore",
+                "cache-other.rs",
+                "cache/deep/kept.rs",
+                "cache/kept.rs"
+            ]
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "cache/untracked.rs")
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "cache/deep/untracked.rs")
+        );
+        for invalid in ["../escape.rs", "/absolute.rs", "alias\\file.rs", ""] {
+            assert!(
+                DiscoveryPolicy::build(Vec::new(), false)
+                    .expect("policy builds")
+                    .with_tracked_files([invalid.to_owned()].into(), &Cancellation::new())
+                    .is_err()
+            );
+        }
+        let file_policy = DiscoveryPolicy::build(Vec::new(), false)
+            .expect("policy builds")
+            .with_tracked_files(["cache".to_owned()].into(), &Cancellation::new())
+            .expect("path validates");
+        assert!(!file_policy.admits_tracked_path(
+            &RelativePath::parse(Path::new("cache")).expect("path"),
+            true
+        ));
     }
 
     #[test]
