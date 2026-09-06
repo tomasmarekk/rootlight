@@ -26180,6 +26180,147 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn concurrent_repository_restore_preserves_active_and_retained_generation_identity() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixtures = [durable_test_tempdir(), durable_test_tempdir()];
+        let cancellation = deadline();
+        let mut receipts = Vec::new();
+        {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            for fixture in &fixtures {
+                let source = fixture.path().join("lib.rs");
+                fs::write(&source, "pub fn retained_answer() -> u32 { 1 }\n")
+                    .expect("retained source writes");
+                let retained = service
+                    .index_rust_fixture(fixture.path(), &cancellation)
+                    .expect("retained generation publishes");
+                fs::write(&source, "pub fn active_answer() -> u32 { 2 }\n")
+                    .expect("active source writes");
+                let active = service
+                    .index_rust_fixture(fixture.path(), &cancellation)
+                    .expect("active generation publishes");
+                receipts.push((retained, active));
+            }
+        }
+        let (mut service, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("deferred service opens");
+        let prepared = thread::scope(|scope| {
+            let workers = receipts
+                .iter()
+                .map(|(_, active)| {
+                    let deferred = &deferred;
+                    let cancellation = &cancellation;
+                    scope.spawn(move || {
+                        let restored =
+                            deferred.restore_active_repository(active.repository, cancellation)?;
+                        assert_eq!(
+                            restored.generation_ids(),
+                            BTreeSet::from([active.generation])
+                        );
+                        restored.prepare_active_installation(cancellation)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("active worker joins"))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("independent active repositories restore concurrently");
+        // Completion order must not replace the durable global activation order.
+        for prepared in prepared.into_iter().rev() {
+            service
+                .install_prepared_progressive_deferred_restore(prepared, &cancellation)
+                .expect("prepared active generation installs");
+        }
+        let latest = receipts
+            .last()
+            .expect("two repositories were published")
+            .1
+            .generation;
+        assert_eq!(
+            service
+                .most_recent_activation
+                .map(|(_, generation)| generation),
+            Some(latest)
+        );
+
+        let retained = thread::scope(|scope| {
+            let workers = receipts
+                .iter()
+                .map(|(retained, active)| {
+                    let deferred = &deferred;
+                    let cancellation = &cancellation;
+                    scope.spawn(move || {
+                        let restored = deferred.restore_retained_repository(
+                            active.repository,
+                            &BTreeSet::from([active.generation]),
+                            cancellation,
+                        )?;
+                        assert_eq!(
+                            restored.generation_ids(),
+                            BTreeSet::from([retained.generation])
+                        );
+                        Ok::<_, FirstSliceError>(restored)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("retained worker joins"))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("independent retained repositories restore concurrently");
+        for retained in retained {
+            service
+                .install_additional_deferred_restore(retained, &cancellation)
+                .expect("retained generation installs");
+        }
+        assert_eq!(service.receipts.len(), 4);
+        assert_eq!(
+            service
+                .most_recent_activation
+                .map(|(_, generation)| generation),
+            Some(latest)
+        );
+        for (retained, active) in receipts {
+            assert_eq!(
+                service.active_generation_for(active.repository),
+                Some(active.generation)
+            );
+            for (receipt, identifier) in [(retained, "retained_answer"), (active, "active_answer")]
+            {
+                assert_eq!(service.receipts.get(&receipt.generation), Some(&receipt));
+                let located = service
+                    .code_locate(
+                        receipt.generation,
+                        identifier.to_owned(),
+                        LocateMode::Exact,
+                        8,
+                        0,
+                        &cancellation,
+                    )
+                    .expect("generation-specific lookup succeeds");
+                assert!(
+                    located
+                        .data
+                        .hits
+                        .iter()
+                        .any(|hit| hit.identifier == identifier)
+                );
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn synchronous_durable_restore_releases_each_repository_batch() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -27533,6 +27674,166 @@ mod tests {
                 && available_bytes == source_only_reservation
         ));
         assert!(service.receipts.is_empty());
+    }
+
+    #[test]
+    fn generation_memory_reservations_bound_concurrent_admission_and_cancelled_workers() {
+        for duplicate_identity in [false, true] {
+            let service = FirstSliceService::new(2).expect("service initializes");
+            let cancellation = Cancellation::new();
+            let charge = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2;
+            let (ready_sender, ready_receiver) = mpsc::sync_channel(4);
+            let (outcomes, reserved) = thread::scope(|scope| {
+                let mut workers = Vec::new();
+                let mut releases = Vec::new();
+                for identity in 1_u8..=4 {
+                    let service = &service;
+                    let cancellation = &cancellation;
+                    let ready_sender = ready_sender.clone();
+                    let (release, released) = mpsc::sync_channel(1);
+                    releases.push(release);
+                    workers.push(scope.spawn(move || {
+                        let generation = GenerationId::from_bytes(
+                            [if duplicate_identity { 1 } else { identity }; 20],
+                        );
+                        let reservation = service.reserve_generation_memory(
+                            generation,
+                            charge,
+                            PendingGenerationMemory::Reserved,
+                        );
+                        ready_sender
+                            .send(reservation.as_ref().map(|_| ()).map_err(|error| *error))
+                            .expect("admission outcome sends");
+                        // Keep every successful charge live until all contenders
+                        // have attempted admission; thread scheduling cannot free capacity.
+                        released
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("coordinator releases the worker");
+                        let _reservation = reservation?;
+                        check_cancellation(cancellation)
+                    }));
+                }
+                drop(ready_sender);
+                let outcomes = (0..4)
+                    .map(|_| {
+                        ready_receiver
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("every contender reports admission")
+                    })
+                    .collect::<Vec<_>>();
+                let reserved = service
+                    .generation_cache
+                    .lock()
+                    .expect("cache remains available")
+                    .reserved_memory_bytes()
+                    .expect("aggregate charge is representable");
+                let _ = cancellation.cancel(CancellationReason::Shutdown);
+                for release in releases {
+                    release.send(()).expect("worker is awaiting release");
+                }
+                let completed = workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("worker joins"))
+                    .collect::<Vec<_>>();
+                let admitted = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+                assert_eq!(
+                    completed
+                        .iter()
+                        .filter(|outcome| {
+                            **outcome
+                                == Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+                        })
+                        .count(),
+                    admitted
+                );
+                (outcomes, reserved)
+            });
+
+            let expected_admitted = if duplicate_identity { 1 } else { 2 };
+            assert_eq!(
+                outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+                expected_admitted
+            );
+            assert_eq!(
+                reserved,
+                if duplicate_identity {
+                    charge
+                } else {
+                    charge * 2
+                }
+            );
+            for error in outcomes.into_iter().filter_map(Result::err) {
+                if duplicate_identity {
+                    assert_eq!(error, FirstSliceError::CatalogCorrupt);
+                } else {
+                    assert_eq!(
+                        error,
+                        generation_memory_limit(0, charge * 3, PendingGenerationMemory::Reserved)
+                    );
+                }
+            }
+            assert!(
+                service
+                    .generation_cache
+                    .lock()
+                    .expect("cache remains available")
+                    .reservations
+                    .is_empty()
+            );
+            let retry = service
+                .reserve_generation_memory(
+                    GenerationId::from_bytes([1; 20]),
+                    MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+                    PendingGenerationMemory::Reserved,
+                )
+                .expect("joined cancelled workers release the entire budget and identity");
+            drop(retry);
+        }
+    }
+
+    #[test]
+    fn generation_memory_reservation_failed_growth_preserves_other_owners() {
+        let service = FirstSliceService::new(2).expect("service initializes");
+        let charge = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2;
+        let first_id = GenerationId::from_bytes([1; 20]);
+        let second_id = GenerationId::from_bytes([2; 20]);
+        let mut first = service
+            .reserve_generation_memory(first_id, charge, PendingGenerationMemory::Reserved)
+            .expect("first half of the budget reserves");
+        let second = service
+            .reserve_generation_memory(second_id, charge, PendingGenerationMemory::Reserved)
+            .expect("second half of the budget reserves");
+
+        assert!(matches!(
+            first.resize(charge + 1, PendingGenerationMemory::Reserved, true),
+            Err(FirstSliceError::GenerationMemoryLimit { observed, .. })
+                if observed == MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1
+        ));
+        {
+            let cache = service
+                .generation_cache
+                .lock()
+                .expect("cache remains available");
+            assert_eq!(cache.reservations.get(&first_id), Some(&charge));
+            assert_eq!(cache.reservations.get(&second_id), Some(&charge));
+        }
+        drop(second);
+        first
+            .resize(
+                MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+                PendingGenerationMemory::Reserved,
+                true,
+            )
+            .expect("released capacity admits growth");
+        drop(first);
+        assert!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache remains available")
+                .reservations
+                .is_empty()
+        );
     }
 
     #[test]
