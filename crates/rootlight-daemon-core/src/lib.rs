@@ -7866,10 +7866,24 @@ fn first_slice_response_correlates_for_minor(
                 && valid_repository_operation_status(operation)
                 && match daemon::OperationState::try_from(operation.state) {
                     Ok(daemon::OperationState::Succeeded) => {
-                        wire_id_has_len(
-                            response.published_generation.as_ref().map(|id| &id.value),
-                            20,
-                        ) && response.retry_after_ms.is_none()
+                        // Recovery restores existing generations; only indexing
+                        // publishes a new generation on successful completion.
+                        let publication_matches_kind =
+                            match daemon::OperationKind::try_from(operation.kind) {
+                                Ok(daemon::OperationKind::RepositoryIndex) => wire_id_has_len(
+                                    response.published_generation.as_ref().map(|id| &id.value),
+                                    20,
+                                ),
+                                Ok(daemon::OperationKind::Recovery) => {
+                                    response.published_generation.is_none()
+                                }
+                                Ok(
+                                    daemon::OperationKind::ControlProbe
+                                    | daemon::OperationKind::Unspecified,
+                                )
+                                | Err(_) => false,
+                            };
+                        publication_matches_kind && response.retry_after_ms.is_none()
                     }
                     Ok(
                         daemon::OperationState::Queued
@@ -9401,7 +9415,10 @@ fn valid_repository_operation_status(operation: &daemon::OperationStatus) -> boo
                 | daemon::OperationState::Interrupted
                 | daemon::OperationState::Cancelled
         )
-        && operation.kind == daemon::OperationKind::RepositoryIndex as i32
+        && matches!(
+            daemon::OperationKind::try_from(operation.kind),
+            Ok(daemon::OperationKind::RepositoryIndex | daemon::OperationKind::Recovery)
+        )
         && matches!(
             stage,
             daemon::OperationStage::Accepted
@@ -20041,6 +20058,99 @@ mod tests {
         });
 
         assert!(first_slice_response_correlates(&request, &response));
+    }
+
+    #[test]
+    fn recovery_operation_status_preserves_kind_and_publication_contract() {
+        let schema = Some(common::ContractVersion { major: 1, minor: 0 });
+        let operation = common::OperationId { value: vec![3; 16] };
+        let request = FirstSliceIpcRequest::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: schema,
+                operation: Some(operation.clone()),
+                ..Default::default()
+            },
+        );
+        for kind in [
+            daemon::OperationKind::Recovery,
+            daemon::OperationKind::RepositoryIndex,
+        ] {
+            for state in [
+                daemon::OperationState::Running,
+                daemon::OperationState::Succeeded,
+                daemon::OperationState::Cancelled,
+                daemon::OperationState::Interrupted,
+            ] {
+                let response = daemon::RepositoryOperationStatusResponse {
+                    schema_version: schema,
+                    operation: Some(daemon::OperationStatus {
+                        operation: Some(operation.clone()),
+                        kind: kind as i32,
+                        state: state as i32,
+                        stage: daemon::OperationStage::Executing as i32,
+                        revision: 3,
+                        completed_units: 2,
+                        total_units: 2,
+                        plan_hash: vec![4; 32],
+                        detached: true,
+                        recovery_class: if state == daemon::OperationState::Interrupted {
+                            daemon::RecoveryClass::InterruptedByRestart as i32
+                        } else {
+                            daemon::RecoveryClass::NotApplicable as i32
+                        },
+                        ..Default::default()
+                    }),
+                    published_generation: (kind == daemon::OperationKind::RepositoryIndex
+                        && state == daemon::OperationState::Succeeded)
+                        .then(|| common::GenerationId { value: vec![2; 20] }),
+                    started_unix_ms: 1,
+                    ..Default::default()
+                };
+                assert!(
+                    matches!(
+                        correlated_first_slice_response(
+                            &request,
+                            FirstSliceIpcResponse::RepositoryOperationStatus(response.clone()),
+                        ),
+                        daemon::response_envelope::Response::RepositoryOperationStatus(_)
+                    ),
+                    "valid {kind:?}/{state:?} must reach the client"
+                );
+
+                let mut wrong_publication = response.clone();
+                wrong_publication.published_generation = if response.published_generation.is_some()
+                {
+                    None
+                } else {
+                    Some(common::GenerationId { value: vec![2; 20] })
+                };
+                assert!(!first_slice_response_correlates(
+                    &request,
+                    &FirstSliceIpcResponse::RepositoryOperationStatus(wrong_publication),
+                ));
+
+                let mut wrong_identity = response.clone();
+                wrong_identity
+                    .operation
+                    .as_mut()
+                    .expect("operation exists")
+                    .operation = Some(common::OperationId { value: vec![8; 16] });
+                assert!(!first_slice_response_correlates(
+                    &request,
+                    &FirstSliceIpcResponse::RepositoryOperationStatus(wrong_identity),
+                ));
+                let mut wrong_kind = response;
+                wrong_kind
+                    .operation
+                    .as_mut()
+                    .expect("operation exists")
+                    .kind = daemon::OperationKind::ControlProbe as i32;
+                assert!(!first_slice_response_correlates(
+                    &request,
+                    &FirstSliceIpcResponse::RepositoryOperationStatus(wrong_kind),
+                ));
+            }
+        }
     }
 
     #[test]
