@@ -1,7 +1,7 @@
-//! Public behavior tests for the five whole-project semantic adapters.
+//! Public behavior tests for the audited whole-project semantic adapters.
 //!
-//! A parser-independent fixture provider exposes the same structural fact
-//! classes as audited query packs, keeping these contract tests deterministic.
+//! Fixture providers and native query packs exercise structural facts through
+//! deterministic project contracts, including source-backed cross-file targets.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -221,6 +221,91 @@ fn repeated_declarations_retain_each_resolved_definition_site() {
         definition_sites, expected_sites,
         "every repeated declaration retains its distinct resolved name site"
     );
+}
+
+#[test]
+fn tsx_nested_import_calls_preserve_project_targets_and_source_evidence() {
+    for target_path in ["src/provider.ts", "src/provider.tsx"] {
+        let fixture = ProjectFixture::new(
+            ["src/view.tsx", target_path],
+            [
+                "import {provide} from './provider';\nexport function View() { return <Panel title={provide()}><span>Hello</span></Panel>; }\n",
+                "export function provide(): number { return 1; }\n",
+            ],
+            SemanticProjectLanguage::TypeScript,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        assert!(
+            output
+                .document()
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "syntax-error-recovery")
+        );
+        let caller = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "View")
+            .expect("TSX component is materialized");
+        let target = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "provide")
+            .expect("TypeScript import target is materialized");
+        let target_module =
+            output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Module
+                        && entity.evidence.source.as_ref().is_some_and(|source| {
+                            source.span().file() == fixture.snapshots[1].file()
+                        })
+                })
+                .expect("imported module retains its source identity");
+        assert!(
+            output
+                .document()
+                .relations
+                .iter()
+                .any(|relation| relation.subject
+                    == rootlight_ir::RelationEndpoint::File(fixture.snapshots[0].file())
+                    && relation.predicate == RelationPredicate::Imports
+                    && relation.object == rootlight_ir::RelationEndpoint::Entity(target_module.id))
+        );
+        let call = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::CallSite
+                    && occurrence.enclosing == Some(caller.id)
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+            })
+            .expect("call nested in JSX resolves across files");
+        let start = usize::try_from(call.source.span().start_byte()).expect("fixture offset fits");
+        let end = usize::try_from(call.source.span().end_byte()).expect("fixture offset fits");
+        let consumer =
+            std::str::from_utf8(fixture.snapshots[0].content()).expect("fixture is UTF-8");
+        assert_eq!(start, consumer.find("provide()").expect("JSX call exists"));
+        assert_eq!(
+            fixture.snapshots[0].content().get(start..end),
+            Some(b"provide".as_slice())
+        );
+        assert!(
+            output
+                .document()
+                .relations
+                .iter()
+                .any(|relation| relation.subject
+                    == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+                    && relation.predicate == RelationPredicate::Calls
+                    && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id))
+        );
+    }
 }
 
 #[test]

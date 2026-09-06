@@ -49,6 +49,7 @@ proptest! {
             ("Fuzz.java", "java"),
             ("fuzz.go", "go"),
             ("fuzz.ts", "typescript"),
+            ("fuzz.tsx", "typescript"),
             ("fuzz.c", "c"),
             ("fuzz.cpp", "cpp"),
             ("Fuzz.cs", "csharp"),
@@ -118,7 +119,12 @@ proptest! {
             );
             prop_assert!(cancellation_observed);
 
-            let cleanup = Fixture::new("cleanup.txt", cleanup_source(language));
+            let cleanup_bytes = if name.ends_with(".tsx") {
+                b"function Cleanup() { return <span />; }\n".as_slice()
+            } else {
+                cleanup_source(language)
+            };
+            let cleanup = Fixture::new(name, cleanup_bytes);
             let cleanup_limits = limits(256, 32);
             let cleanup_request = request(&cleanup, &cleanup_limits, language);
             prop_assert!(execute_parse(
@@ -235,6 +241,7 @@ fn cleanup_source(language: &str) -> &'static [u8] {
         "csharp" => b"class Cleanup {}\n",
         "kotlin" => b"class Cleanup\n",
         "php" => b"<?php class Cleanup {}\n",
+        "lua" => b"local function cleanup() return 1 end\n",
         _ => b"",
     }
 }

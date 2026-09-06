@@ -794,6 +794,91 @@ export function renderLabel(input: InputValue): React.Node {
 }
 
 #[test]
+fn typescript_tsx_preserves_jsx_without_breaking_plain_type_assertions() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    for (path, source, name) in [
+        (
+            "src/view.tsx",
+            "export function View(props: Props) { return <Panel title={props.title}><span>Hello</span></Panel>; }\n",
+            "View",
+        ),
+        (
+            "src/convert.ts",
+            "export function convert(value: unknown) { return <number>value; }\n",
+            "convert",
+        ),
+    ] {
+        let case = LanguageCase { path, ..CASES[5] };
+        let fixture = Fixture::new(case, source.as_bytes());
+        let analyzer = analyzer(&provider, case);
+        let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+        assert!(
+            output
+                .document()
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "syntax-error-recovery"),
+            "{path}"
+        );
+        assert!(
+            output
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name && entity.kind == EntityKind::Function),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn tsx_structural_artifact_rebinds_to_a_clean_generation() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let case = LanguageCase {
+        path: "src/view.tsx",
+        ..CASES[5]
+    };
+    let fixture = Fixture::new(
+        case,
+        b"export function View() { return <span>Hello</span>; }\n",
+    );
+    let analyzer = analyzer(&provider, case);
+    let initial = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let (_, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("TSX captures a complete structural artifact");
+    assert!(
+        artifact
+            .required_syntax_fact_count(&deadline())
+            .expect("identity demand is retained")
+            > 0
+    );
+    let successor = fixture.next_generation();
+    let successor_request = request(&successor.snapshot, &successor.source, case, &limits);
+    let reused = analyzer
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("TSX artifact rebinds");
+    let clean = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(reused.report(), clean.report());
+    assert!(reused.document().diagnostics.is_empty());
+}
+
+#[test]
 fn reviewed_rust_structural_profile_reports_tier_b_without_tier_a_claims() {
     let case = CASES[0];
     let rust_provider = Arc::new(provider());

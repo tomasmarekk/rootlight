@@ -162,6 +162,7 @@ pub struct ParseReuseKey {
     pub(crate) previous_content_hash: Option<ContentHash>,
     pub(crate) current_content_hash: ContentHash,
     pub(crate) family: GrammarFamily,
+    pub(crate) native_family: GrammarFamily,
     pub(crate) grammar_version: &'static str,
     pub(crate) encoding: String,
     pub(crate) included_ranges: Arc<Vec<IncludedRange>>,
@@ -186,6 +187,15 @@ impl ParseReuseKey {
     #[must_use]
     pub const fn family(&self) -> GrammarFamily {
         self.family
+    }
+
+    /// Returns the audited family backing the cached native tree.
+    ///
+    /// TypeScript JSX shares the native parser audited by the JavaScript family,
+    /// while [`Self::family`] retains the requested TypeScript identity.
+    #[must_use]
+    pub const fn native_family(&self) -> GrammarFamily {
+        self.native_family
     }
 
     /// Returns the exact grammar version.

@@ -13,7 +13,10 @@ use tree_sitter::{
     CaptureQuantifier, Query, QueryCapture, QueryCursor, QueryCursorOptions, StreamingIterator,
 };
 
-use crate::{GrammarFamily, registry::language_for};
+use crate::{
+    GrammarFamily,
+    registry::{language_for, native_family_for_source},
+};
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
 const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
@@ -271,7 +274,15 @@ pub(crate) struct QueryPack {
 
 impl QueryPack {
     fn compile(family: GrammarFamily, source: &str) -> Result<Self, GrammarFamily> {
-        let language = language_for(family);
+        Self::compile_native(family, family, source)
+    }
+
+    fn compile_native(
+        family: GrammarFamily,
+        native_family: GrammarFamily,
+        source: &str,
+    ) -> Result<Self, GrammarFamily> {
+        let language = language_for(native_family);
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
@@ -541,6 +552,7 @@ fn identity_scan_limits(max_nodes: usize) -> Result<QueryScanLimits, AdapterErro
 
 pub(crate) struct QueryPackRegistry {
     packs: Vec<(GrammarFamily, QueryPack)>,
+    typescript_tsx: QueryPack,
 }
 
 fn query_failure(code: &'static str) -> AdapterError {
@@ -1037,7 +1049,15 @@ impl QueryPackRegistry {
             packs.push((family, QueryPack::compile(family, source)?));
         }
         packs.sort_by_key(|(family, _)| *family);
-        Ok(Self { packs })
+        let typescript_tsx = QueryPack::compile_native(
+            GrammarFamily::TypeScript,
+            GrammarFamily::JavaScript,
+            include_str!("../queries/typescript.scm"),
+        )?;
+        Ok(Self {
+            packs,
+            typescript_tsx,
+        })
     }
 
     pub(crate) fn get(&self, family: GrammarFamily) -> Option<&QueryPack> {
@@ -1049,14 +1069,23 @@ impl QueryPackRegistry {
     }
 
     pub(crate) const fn len(&self) -> usize {
-        self.packs.len()
+        self.packs.len() + 1
+    }
+
+    pub(crate) fn get_for_source(&self, family: GrammarFamily, path: &str) -> Option<&QueryPack> {
+        if native_family_for_source(family, path) != family {
+            Some(&self.typescript_tsx)
+        } else {
+            self.get(family)
+        }
     }
 
     pub(crate) fn pattern_count(&self) -> usize {
         self.packs
             .iter()
             .map(|(_, pack)| pack.identity_query.pattern_count())
-            .sum()
+            .sum::<usize>()
+            + self.typescript_tsx.identity_query.pattern_count()
     }
 }
 

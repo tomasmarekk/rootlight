@@ -34,7 +34,7 @@ use crate::{
     },
     pool::{ParserPool, PoolError},
     query_pack::{QueryCandidate, QueryPackRegistry, StructuralRole},
-    registry::language_for,
+    registry::{language_for, native_family_for_source},
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
@@ -141,7 +141,7 @@ impl TreeSitterProvider {
         }
         let pack = self
             .query_packs
-            .get(prepared.family)
+            .get_for_source(prepared.family, request.source().path().as_str())
             .ok_or_else(|| provider_failure("query-pack-missing"))?;
         let candidates = pack.extract_identity(
             prepared.family,
@@ -297,6 +297,7 @@ impl TreeSitterProvider {
             .registry
             .family_for_language(request.language())
             .ok_or(RequestError::UnsupportedLanguage)?;
+        let native_family = native_family_for_source(family, request.source().path().as_str());
         if request.encoding().as_str() != "utf-8" {
             return Err(RequestError::UnsupportedEncoding.into());
         }
@@ -329,14 +330,14 @@ impl TreeSitterProvider {
         )?;
         let descriptor = self
             .registry
-            .get(family)
+            .get(native_family)
             .ok_or_else(|| provider_failure("grammar-missing"))?;
         cancellation.check()?;
         let included_ranges = request.shared_included_ranges();
         cancellation.check()?;
         let identity = ParseIdentity {
             content_hash: request.source().source_ref().content_hash(),
-            family,
+            family: native_family,
             grammar_version: descriptor.grammar_version(),
             encoding: request.encoding().as_str().to_owned(),
             included_ranges: Arc::clone(&included_ranges),
@@ -351,6 +352,7 @@ impl TreeSitterProvider {
             previous_content_hash: previous_hash,
             current_content_hash: identity.content_hash,
             family,
+            native_family,
             grammar_version: identity.grammar_version,
             encoding: identity.encoding.clone(),
             included_ranges,
@@ -369,7 +371,7 @@ impl TreeSitterProvider {
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
-            .set_language(&language_for(family))
+            .set_language(&language_for(native_family))
             .map_err(|_| provider_failure("grammar-abi"))?;
         let included_ranges = tree_sitter_ranges(request, source_bytes, cancellation)?;
         parser
@@ -454,7 +456,7 @@ impl TreeSitterProvider {
         let max_facts = pre_extraction_fact_limit(budget)?;
         let pack = self
             .query_packs
-            .get(family)
+            .get_for_source(family, request.source().path().as_str())
             .ok_or_else(|| provider_failure("query-pack-missing"))?;
         let extraction = pack.extract(
             family,

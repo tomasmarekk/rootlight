@@ -205,7 +205,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/10";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/11";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -22945,6 +22945,81 @@ mod tests {
             map_catalog_error_kind(CatalogErrorKind::IncompatibleSchema, &cancellation),
             FirstSliceError::CatalogMigrationRequired
         );
+    }
+
+    #[test]
+    fn tsx_published_symbols_preserve_typescript_identity_and_exact_source() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "export interface Props { title: string }\nexport function View(props: Props) { return <Panel title={props.title}><span>Hello</span></Panel>; }\n";
+        fs::write(fixture.path().join("view.tsx"), source).expect("TSX fixture writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("TSX generation publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        assert!(
+            generation
+                .document()
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "syntax-error-recovery")
+        );
+        for name in ["Props", "View"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("TSX symbol locates");
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .expect("TSX declaration has a symbol identity");
+            let explained = service
+                .symbol_explain(
+                    receipt.generation,
+                    hit.symbol.expect("symbol exists"),
+                    &deadline(),
+                )
+                .expect("TSX symbol explains");
+            assert_eq!(explained.data.entity.language, "typescript");
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("declaration source exists");
+            assert_eq!(reference.generation(), receipt.generation);
+            let start =
+                usize::try_from(reference.span().start_byte()).expect("fixture offset fits");
+            let end = usize::try_from(reference.span().end_byte()).expect("fixture offset fits");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("TSX source reads exactly");
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                source
+                    .as_bytes()
+                    .get(start..end)
+                    .expect("source range exists")
+            );
+        }
     }
 
     #[test]

@@ -208,6 +208,20 @@ pub enum RegistryError {
     },
 }
 
+pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> GrammarFamily {
+    if family == GrammarFamily::TypeScript
+        && path
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("tsx"))
+    {
+        // The JavaScript family already audits the TSX native parser. Sharing its
+        // tree identity is safe; extraction still uses TypeScript's query contract.
+        GrammarFamily::JavaScript
+    } else {
+        family
+    }
+}
+
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
@@ -348,6 +362,41 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::*;
+
+    #[test]
+    fn tsx_native_selection_preserves_declared_language_and_plain_typescript_syntax() {
+        for (family, path, expected) in [
+            (GrammarFamily::TypeScript, "tsx", GrammarFamily::TypeScript),
+            (
+                GrammarFamily::TypeScript,
+                "view.tsx",
+                GrammarFamily::JavaScript,
+            ),
+            (
+                GrammarFamily::TypeScript,
+                "view.TSX",
+                GrammarFamily::JavaScript,
+            ),
+            (
+                GrammarFamily::TypeScript,
+                "view.tsx/file.ts",
+                GrammarFamily::TypeScript,
+            ),
+            (
+                GrammarFamily::TypeScript,
+                "convert.mts",
+                GrammarFamily::TypeScript,
+            ),
+            (
+                GrammarFamily::TypeScript,
+                "convert.cts",
+                GrammarFamily::TypeScript,
+            ),
+            (GrammarFamily::Rust, "view.tsx", GrammarFamily::Rust),
+        ] {
+            assert_eq!(native_family_for_source(family, path), expected, "{path}");
+        }
+    }
 
     #[test]
     fn registry_contains_each_audited_family_once_with_checked_abi() {

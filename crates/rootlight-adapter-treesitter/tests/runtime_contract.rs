@@ -356,6 +356,68 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
 }
 
 #[test]
+fn typescript_dialect_changes_invalidate_native_tree_reuse() {
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).expect("settings are bounded");
+    let mut previous = None;
+    for (name, expected) in [
+        ("view.ts", ReuseStatus::Fresh),
+        (
+            "view.tsx",
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+        ("view.TSX", ReuseStatus::Reused { changed_ranges: 0 }),
+        (
+            "view.mts",
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+    ] {
+        let fixture = Fixture::new(name, b"export const value = 1;\n");
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            "typescript",
+            Vec::new(),
+        );
+        let parsed = provider
+            .execute_with_previous(
+                &request,
+                previous.as_ref(),
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(Duration::from_secs(30)),
+            )
+            .expect("dialect-aware parsing succeeds");
+        assert_eq!(parsed.reuse_status(), expected, "{name}");
+        assert_eq!(
+            parsed.reuse_key().family(),
+            rootlight_adapter_treesitter::GrammarFamily::TypeScript
+        );
+        assert_eq!(
+            parsed.reuse_key().native_family(),
+            if name.ends_with(".ts") || name.ends_with(".mts") {
+                rootlight_adapter_treesitter::GrammarFamily::TypeScript
+            } else {
+                rootlight_adapter_treesitter::GrammarFamily::JavaScript
+            }
+        );
+        assert!(
+            parsed
+                .output()
+                .facts()
+                .iter()
+                .all(|fact| fact.syntax_kind().as_str().starts_with("typescript."))
+        );
+        previous = parsed.previous().cloned();
+        assert!(previous.is_some());
+    }
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
 fn provider_and_parser_settings_mismatches_invalidate_reuse() {
     let fixture = Fixture::new("identity.rs", b"fn identity() {}\n");
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
