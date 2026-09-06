@@ -17746,7 +17746,7 @@ fn truncate_aggregate_diagnostics(
         return Ok(0);
     }
 
-    let mut truncated_by_file = BTreeMap::<FileId, u64>::new();
+    let mut truncated_by_file = BTreeMap::<(FileId, FactId), u64>::new();
     let mut source_free = 0_u64;
     let mut truncated = 0_usize;
     if available == 0 {
@@ -17788,11 +17788,13 @@ fn truncate_aggregate_diagnostics(
 
 fn record_truncated_diagnostic(
     diagnostic: &DiagnosticRecord,
-    truncated_by_file: &mut BTreeMap<FileId, u64>,
+    truncated_by_file: &mut BTreeMap<(FileId, FactId), u64>,
     source_free: &mut u64,
 ) -> Result<(), FirstSliceError> {
     if let Some(source) = diagnostic.source.as_ref() {
-        let truncated = truncated_by_file.entry(source.span().file()).or_default();
+        let truncated = truncated_by_file
+            .entry((source.span().file(), diagnostic.provenance))
+            .or_default();
         *truncated = truncated.checked_add(1).ok_or(FirstSliceError::Limits)?;
     } else {
         *source_free = source_free.checked_add(1).ok_or(FirstSliceError::Limits)?;
@@ -17851,7 +17853,7 @@ fn truncate_optional_extensions(
         ));
     }
 
-    let mut dropped_from_target = BTreeMap::<FileId, u64>::new();
+    let mut dropped_from_target = BTreeMap::<(FileId, FactId), u64>::new();
     let mut dropped_target_indices = Vec::new();
     dropped_target_indices
         .try_reserve_exact(
@@ -17905,7 +17907,9 @@ fn truncate_optional_extensions(
             .checked_sub(extension.payload.len())
             .ok_or(FirstSliceError::Limits)?;
         let file = extension_file(extension)?;
-        let dropped = dropped_from_target.entry(file).or_default();
+        let dropped = dropped_from_target
+            .entry((file, extension.provenance))
+            .or_default();
         *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
         dropped_target_indices.push(index);
     }
@@ -17944,7 +17948,7 @@ fn truncate_optional_extensions(
     let mut retained_optional_count = 0_usize;
     let mut retained_optional_bytes = 0_usize;
     let mut retained_bytes = 0_usize;
-    let mut dropped_by_file = BTreeMap::<FileId, u64>::new();
+    let mut dropped_by_file = BTreeMap::<(FileId, FactId), u64>::new();
 
     for extension in source.extensions.drain(..) {
         let payload_bytes = extension.payload.len();
@@ -17970,7 +17974,9 @@ fn truncate_optional_extensions(
         }
 
         let file = extension_file(&extension)?;
-        let dropped = dropped_by_file.entry(file).or_default();
+        let dropped = dropped_by_file
+            .entry((file, extension.provenance))
+            .or_default();
         *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
     }
     let adjusted_source_coverage = (!dropped_by_file.is_empty())
@@ -18034,13 +18040,14 @@ fn extension_file(extension: &rootlight_ir::ExtensionEnvelope) -> Result<FileId,
 
 fn adjusted_extension_coverage(
     existing: &[rootlight_ir::CoverageRecord],
-    dropped_by_file: &BTreeMap<FileId, u64>,
+    dropped_by_file: &BTreeMap<(FileId, FactId), u64>,
 ) -> Result<Vec<rootlight_ir::CoverageRecord>, FirstSliceError> {
     let mut coverage_records = existing.to_vec();
-    for (file, dropped) in dropped_by_file {
+    for ((file, provenance), dropped) in dropped_by_file {
         let mut matching_records = coverage_records.iter_mut().filter(|coverage| {
             coverage.domain == rootlight_ir::FactDomain::Extensions
                 && coverage.scope == rootlight_ir::CoverageScope::File(*file)
+                && coverage.provenance == *provenance
         });
         let coverage = matching_records.next().ok_or(FirstSliceError::Identity)?;
         if matching_records.next().is_some() {
@@ -18064,14 +18071,15 @@ fn adjusted_extension_coverage(
 
 fn adjusted_diagnostic_coverage(
     existing: &[CoverageRecord],
-    dropped_by_file: &BTreeMap<FileId, u64>,
+    dropped_by_file: &BTreeMap<(FileId, FactId), u64>,
     source_free_dropped: u64,
 ) -> Result<Vec<CoverageRecord>, FirstSliceError> {
     let mut coverage_records = existing.to_vec();
-    for (file, dropped) in dropped_by_file {
+    for ((file, provenance), dropped) in dropped_by_file {
         let mut matching_records = coverage_records.iter_mut().filter(|coverage| {
             coverage.domain == IrFactDomain::Diagnostics
                 && coverage.scope == CoverageScope::File(*file)
+                && coverage.provenance == *provenance
         });
         let coverage = matching_records.next().ok_or(FirstSliceError::Identity)?;
         if matching_records.next().is_some() {
@@ -23585,6 +23593,239 @@ mod tests {
             .provenance
             .retain(|record| provenance.contains(&record.id));
         project
+    }
+
+    #[test]
+    fn structural_refinement_preserves_optional_fact_coverage_when_bounded() {
+        let (structural, metadata) = structural_refinement_fixture(
+            "c",
+            "int leaf(void) { return 7; }\nint entry(void) { return leaf(); }\n",
+        );
+        let project = file_only_refinement_project(&structural);
+        let refined = refinement::retain_structural_occurrences(
+            project,
+            std::slice::from_ref(&structural),
+            &IrLimits::default(),
+            &deadline(),
+        )
+        .expect("structural occurrences and their evidence refine the project");
+        let required_extensions = refined
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+            .count();
+        assert!(required_extensions < refined.extensions.len());
+        let mut limits = IrLimits::default();
+        limits.max_extensions = required_extensions;
+        let mut target = NormalizedIrDocument::empty(refined.repository, refined.generation);
+        let mut append_state = DocumentAppendState::default();
+        append_project_document_with_capacity(&mut target, refined, &limits, &mut append_state)
+            .expect("bounded optional evidence retains truthful producer coverage");
+        assert!(append_state.truncated_extensions > 0);
+        assert!(
+            target
+                .extensions
+                .iter()
+                .all(|extension| { extension.namespace != LEXICAL_EXTENSION_NAMESPACE })
+        );
+        assert!(!target.occurrences.is_empty());
+        assert!(
+            target
+                .coverage_records
+                .iter()
+                .all(|coverage| { coverage.discovered == coverage.indexed + coverage.skipped })
+        );
+        for coverage in target
+            .coverage_records
+            .iter()
+            .filter(|coverage| coverage.domain == IrFactDomain::Extensions)
+        {
+            assert_eq!(
+                coverage.indexed,
+                u64::try_from(
+                    target
+                        .extensions
+                        .iter()
+                        .filter(|extension| {
+                            extension.provenance == coverage.provenance
+                                && extension.evidence.source.as_ref().is_some_and(|source| {
+                                    coverage.scope == CoverageScope::File(source.span().file())
+                                })
+                        })
+                        .count()
+                )
+                .expect("retained extension count is bounded")
+            );
+        }
+        let cancellation = deadline();
+        IdentityVerifiedGeneration::verify(
+            metadata,
+            target,
+            &limits,
+            &ExtensionSupport::default(),
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .expect("bounded refinement retains valid identities and provenance closure");
+    }
+
+    #[test]
+    fn structural_refinement_bounds_evidence_by_original_producer() {
+        let source = "int leaf(void) { return 7; }\nint entry(void) { return leaf(); }\n";
+        let (structural, metadata) = structural_refinement_fixture("c", source);
+        let file = structural.files.first().expect("fixture has a source file");
+        let inputs = [FirstSliceProjectInput {
+            file: file.id,
+            path: &file.path,
+            content_hash: file.content_hash,
+            source: source.as_bytes(),
+            generated: false,
+            origins: &[],
+        }];
+        let analyzer = SuccessfulProjectAnalyzer {
+            identity: content_hash(b"independent-project-provider"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            partitioned: false,
+            syntax_facts_bounded: false,
+        };
+        let mut project = analyzer
+            .analyze(
+                FirstSliceProjectAnalysisRequest {
+                    repository: structural.repository,
+                    generation: structural.generation,
+                    language: "c",
+                    build_context: first_slice_build_context(),
+                    context_manifest: &[],
+                    inputs: &inputs,
+                },
+                &deadline(),
+            )
+            .expect("independent provider emits the file claim")
+            .into_parts()
+            .0
+            .pop()
+            .expect("provider returns a document");
+        let mut project_coverage = project
+            .coverage_records
+            .first()
+            .expect("project file coverage exists")
+            .clone();
+        project_coverage.domain = IrFactDomain::Extensions;
+        project_coverage.id = derive_coverage_record_id(&project_coverage)
+            .expect("project coverage identity derives");
+        assert_eq!(
+            project_coverage.indexed,
+            u64::try_from(project.extensions.len()).expect("fixture count is bounded")
+        );
+        project.coverage_records.push(project_coverage.clone());
+        let refined = refinement::retain_structural_occurrences(
+            project,
+            &[structural],
+            &IrLimits::default(),
+            &deadline(),
+        )
+        .expect("structural evidence supplements a distinct provider");
+        assert!(refined.coverage_records.contains(&project_coverage));
+        let mut limits = IrLimits::default();
+        limits.max_extensions = refined
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+            .count();
+        let mut target = NormalizedIrDocument::empty(refined.repository, refined.generation);
+        let mut append_state = DocumentAppendState::default();
+        append_project_document_with_capacity(&mut target, refined, &limits, &mut append_state)
+            .expect("structural omissions do not consume project coverage");
+        assert!(append_state.truncated_extensions > project_coverage.indexed);
+        assert!(target.coverage_records.contains(&project_coverage));
+        for coverage in target
+            .coverage_records
+            .iter()
+            .filter(|coverage| coverage.domain == IrFactDomain::Extensions)
+        {
+            assert_eq!(
+                coverage.indexed,
+                u64::try_from(
+                    target
+                        .extensions
+                        .iter()
+                        .filter(|extension| { extension.provenance == coverage.provenance })
+                        .count()
+                )
+                .expect("fixture count is bounded")
+            );
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+        }
+        let cancellation = deadline();
+        IdentityVerifiedGeneration::verify(
+            metadata,
+            target,
+            &limits,
+            &ExtensionSupport::default(),
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .expect("mixed producer evidence verifies after bounded append");
+    }
+
+    #[test]
+    fn optional_coverage_adjustment_keeps_producers_separate() {
+        let (structural, _) = structural_refinement_fixture("c", "int entry(void) { return 1; }\n");
+        let template = structural
+            .coverage_records
+            .iter()
+            .find(|coverage| coverage.domain == IrFactDomain::Extensions)
+            .expect("fixture has extension coverage");
+        let CoverageScope::File(file) = template.scope else {
+            panic!("coverage is file scoped")
+        };
+        for domain in [IrFactDomain::Extensions, IrFactDomain::Diagnostics] {
+            let mut first = template.clone();
+            first.domain = domain;
+            first.discovered = 2;
+            first.indexed = 2;
+            first.skipped = 0;
+            first.status = CoverageStatus::Complete;
+            first.id = derive_coverage_record_id(&first).expect("first coverage identity derives");
+            let mut second = first.clone();
+            second.provenance = FactId::from_bytes([42; 20]);
+            second.discovered = 5;
+            second.indexed = 5;
+            second.status = CoverageStatus::Unknown;
+            second.id =
+                derive_coverage_record_id(&second).expect("second coverage identity derives");
+            let existing = vec![first.clone(), second.clone()];
+            let dropped = BTreeMap::from([((file, second.provenance), 3)]);
+            let adjust = |records: &[CoverageRecord], dropped: &BTreeMap<(FileId, FactId), u64>| {
+                if domain == IrFactDomain::Extensions {
+                    adjusted_extension_coverage(records, dropped)
+                } else {
+                    adjusted_diagnostic_coverage(records, dropped, 0)
+                }
+            };
+            let adjusted =
+                adjust(&existing, &dropped).expect("each producer owns its omission count");
+            assert_eq!(adjusted[0], first);
+            assert_eq!(adjusted[1].indexed, 2);
+            assert_eq!(adjusted[1].skipped, 3);
+            assert_eq!(adjusted[1].discovered, 5);
+            assert_eq!(adjusted[1].status, CoverageStatus::Unknown);
+            assert_eq!(
+                adjusted[1].id,
+                derive_coverage_record_id(&adjusted[1]).expect("adjusted identity derives")
+            );
+            assert_eq!(existing, vec![first.clone(), second.clone()]);
+            assert_eq!(
+                adjust(&[first.clone()], &dropped),
+                Err(FirstSliceError::Identity)
+            );
+            assert_eq!(
+                adjust(&[second.clone(), second.clone()], &dropped),
+                Err(FirstSliceError::Identity)
+            );
+            assert_eq!(
+                adjust(&existing, &BTreeMap::from([((file, first.provenance), 3)])),
+                Err(FirstSliceError::Identity)
+            );
+        }
     }
 
     #[test]

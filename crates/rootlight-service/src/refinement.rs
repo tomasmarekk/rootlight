@@ -8,13 +8,14 @@ use super::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId};
 use rootlight_ir::{
-    ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, EntityRecord, ExtensionEnvelope,
-    FactDomain, FactEvidence, FactRef, FileRecord, IrLimits, LEXICAL_EXTENSION_NAMESPACE,
-    NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProvenanceRecord,
-    RelationEndpoint, RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion,
-    SourceMappingRecord, SourceSpan,
+    ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, DiagnosticRecord, EntityRecord,
+    ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
+    LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProvenanceRecord, RelationEndpoint, RelationRecord,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SourceMappingRecord, SourceSpan,
+    derive_coverage_record_id,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,9 +207,10 @@ fn occurrence_site(
 
 /// Retains missing source occurrences and their validated structural evidence.
 ///
-/// Existing project records take precedence. No identities or coverage counts are
-/// rewritten. Returns a typed identity, cancellation or resource error before the
-/// caller can append an incomplete evidence graph to the publication document.
+/// Existing project records take precedence. Supplemental coverage describes only
+/// retained evidence from its original producer. Returns a typed identity,
+/// cancellation or resource error before the caller can append an incomplete
+/// evidence graph to the publication document.
 pub(super) fn retain_structural_occurrences(
     mut project: NormalizedIrDocument,
     structural: &[NormalizedIrDocument],
@@ -296,11 +298,13 @@ pub(super) fn retain_structural_occurrences(
                     }
                 }
                 Record::Coverage(coverage)
-                    if coverage.domain == FactDomain::Occurrences
-                        && matches!(coverage.scope, CoverageScope::File(file) if affected_files.contains(&file)) =>
+                    if matches!(
+                        coverage.domain,
+                        FactDomain::Occurrences | FactDomain::Extensions | FactDomain::Diagnostics
+                    ) && matches!(coverage.scope, CoverageScope::File(file) if affected_files.contains(&file)) =>
                 {
                     // Every structural occurrence is retained or superseded at its exact
-                    // source. Keep that producer's coverage, not invented semantic coverage.
+                    // source. Optional evidence coverage is adjusted to its retained subset.
                     pending.insert(record.key());
                 }
                 Record::Skipped(skipped)
@@ -407,12 +411,67 @@ pub(super) fn retain_structural_occurrences(
     reserve(&mut project.skipped_regions, counts[7])?;
     reserve(&mut project.diagnostics, counts[8])?;
     reserve(&mut project.extensions, counts[9])?;
+    let mut optional_counts = BTreeMap::<(FactDomain, FileId, FactId), u64>::new();
+    for record in records(&project).chain(retained.iter().filter_map(|key| index.get(key).copied()))
+    {
+        check_cancellation(cancellation)?;
+        let group = match record {
+            Record::Extension(extension) => extension.evidence.source.as_ref().map(|source| {
+                (
+                    FactDomain::Extensions,
+                    source.span().file(),
+                    extension.provenance,
+                )
+            }),
+            Record::Diagnostic(diagnostic) => diagnostic.source.as_ref().map(|source| {
+                (
+                    FactDomain::Diagnostics,
+                    source.span().file(),
+                    diagnostic.provenance,
+                )
+            }),
+            _ => None,
+        };
+        if let Some(group) = group {
+            let count = optional_counts.entry(group).or_default();
+            *count = count.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        }
+    }
     for reference in retained {
         check_cancellation(cancellation)?;
-        index
-            .get(&reference)
-            .ok_or(FirstSliceError::Identity)?
-            .append(&mut project);
+        let record = index.get(&reference).ok_or(FirstSliceError::Identity)?;
+        if let Record::Coverage(coverage) = record
+            && matches!(
+                coverage.domain,
+                FactDomain::Extensions | FactDomain::Diagnostics
+            )
+            && let CoverageScope::File(file) = coverage.scope
+        {
+            // Structural claims and lexical metadata may be superseded individually.
+            // Never charge their omissions to a different provider's file coverage.
+            let mut coverage = (*coverage).clone();
+            let indexed = optional_counts
+                .get(&(coverage.domain, file, coverage.provenance))
+                .copied()
+                .unwrap_or(0);
+            let omitted = coverage
+                .indexed
+                .checked_sub(indexed)
+                .ok_or(FirstSliceError::Identity)?;
+            coverage.indexed = indexed;
+            coverage.skipped = coverage
+                .skipped
+                .checked_add(omitted)
+                .ok_or(FirstSliceError::Limits)?;
+            if omitted > 0 && coverage.status != CoverageStatus::Unknown {
+                coverage.status = CoverageStatus::Bounded;
+            }
+            coverage.id =
+                derive_coverage_record_id(&coverage).map_err(|_| FirstSliceError::Identity)?;
+            project.coverage_records.push(coverage);
+        } else {
+            record.append(&mut project);
+        }
     }
     Ok(project)
 }
