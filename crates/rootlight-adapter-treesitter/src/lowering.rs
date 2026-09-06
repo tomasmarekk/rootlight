@@ -16,8 +16,7 @@ use rootlight_adapter_sdk::{
     IrRecord, LanguageAnalyzer, MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput,
     ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, execute_analysis, execute_parse,
-    structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order,
+    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -1558,17 +1557,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .as_ref()
                     .is_some_and(|scope| scope.unsupported_semantic_identity)
                     || fact.syntax_kind().as_str() == "rust.impl.scope" && stable_header.is_none();
-                // Only reviewed semantic headers enter public symbol identity. Positional
-                // ordinals would silently rebind unchanged symbols after sibling edits.
-                let stable_identity = stable_header
-                    .as_ref()
-                    .map(|header| {
+                // Lua lexical boundaries distinguish nested bindings without offsets or
+                // body text. Identical sibling scopes remain guarded as ambiguous below.
+                let scope_digest =
+                    stable_header
+                        .as_ref()
+                        .map(|header| header.digest)
+                        .or_else(|| {
+                            (self.request.language().as_str() == "lua"
+                                && matches!(
+                                    fact.syntax_kind().as_str(),
+                                    "lua.file.scope" | "lua.block.scope" | "lua.function.scope"
+                                ))
+                            .then(|| *blake3::hash(b"rootlight.lua-lexical-scope/1\0").as_bytes())
+                        });
+                // Positional ordinals would rebind unchanged symbols after sibling edits.
+                let stable_identity = scope_digest
+                    .map(|digest| {
                         scope_identity(
                             parent_scope
                                 .as_ref()
                                 .and_then(|scope| scope.stable_identity),
                             fact.syntax_kind().as_str(),
-                            header.digest,
+                            digest,
                         )
                     })
                     .transpose()?
@@ -1649,9 +1660,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
-                let Some(name) =
-                    structural_captured_name(text, self.request.limits().ir().max_string_bytes)
-                else {
+                let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_language(
+                    language_for_fact(self.request, definition).as_str(),
+                    text,
+                    self.request.limits().ir().max_string_bytes,
+                ) else {
                     nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                     nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                     continue;
@@ -1659,7 +1672,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 (name, Some(definition.local_id()))
             } else if is_explicit_file_module(fact, self.request.language().as_str()) {
                 let name = self.request.source().path().as_str();
-                (name, None)
+                (std::borrow::Cow::Borrowed(name), None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -1723,7 +1736,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     span: fact.span(),
                     depth: fact.depth(),
                     kind,
-                    name: name.to_owned(),
+                    name: name.into_owned(),
                     signature,
                     signature_evidence,
                     signature_span,
@@ -2134,7 +2147,24 @@ fn scope_identity(
     syntax_kind: &str,
     header: [u8; 32],
 ) -> Result<[u8; 32], AdapterError> {
-    debug_assert_eq!(syntax_kind, "rust.impl.scope");
+    if matches!(
+        syntax_kind,
+        "lua.file.scope" | "lua.block.scope" | "lua.function.scope"
+    ) {
+        let mut hasher = blake3::Hasher::new_derive_key("rootlight.lua-lexical-scope-identity/1");
+        if let Some(parent) = parent {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        } else {
+            hasher.update(&[0]);
+        }
+        hasher.update(syntax_kind.as_bytes());
+        hasher.update(&header);
+        return Ok(*hasher.finalize().as_bytes());
+    }
+    if syntax_kind != "rust.impl.scope" {
+        return Err(provider_failure("treesitter-lowering-scope"));
+    }
     derive_rust_impl_scope_identity(parent, header)
         .map_err(|_| provider_failure("treesitter-lowering-scope"))
 }
@@ -2732,9 +2762,12 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
     fact.kind() == SyntaxFactKind::Module
         && matches!(
             fact.syntax_kind().as_str(),
-            "python.file.module" | "javascript.file.module" | "typescript.file.module"
+            "python.file.module"
+                | "javascript.file.module"
+                | "typescript.file.module"
+                | "lua.file.module"
         )
-        && matches!(language, "python" | "javascript" | "typescript")
+        && matches!(language, "python" | "javascript" | "typescript" | "lua")
 }
 
 fn is_definition_capture(fact: &SyntaxFact) -> bool {

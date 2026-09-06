@@ -54,6 +54,7 @@ proptest! {
             ("Fuzz.cs", "csharp"),
             ("fuzz.kt", "kotlin"),
             ("fuzz.php", "php"),
+            ("fuzz.lua", "lua"),
         ] {
             let provider = provider();
             let fixture = Fixture::new(name, &input);

@@ -10,6 +10,7 @@ mod descriptor;
 mod error;
 mod ir_accounting;
 mod limits;
+mod lua_names;
 mod report;
 mod request;
 mod sink;
@@ -45,6 +46,6 @@ pub use sink::{
     execute_project_analysis,
 };
 pub use structural::{
-    structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order,
+    structural_captured_name, structural_captured_name_for_language, structural_entity_kind,
+    structural_entity_kind_from_source, structural_syntax_fact_order,
 };

@@ -35,6 +35,8 @@ pub enum GrammarFamily {
     Kotlin,
     /// PHP grammar with mixed HTML support.
     Php,
+    /// Lua grammar.
+    Lua,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -114,7 +116,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(11);
+        let mut descriptors = Vec::with_capacity(12);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -127,6 +129,7 @@ impl GrammarRegistry {
             GrammarFamily::CSharp,
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
+            GrammarFamily::Lua,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -220,6 +223,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         GrammarFamily::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         GrammarFamily::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        GrammarFamily::Lua => tree_sitter_lua::LANGUAGE.into(),
     }
 }
 
@@ -234,6 +238,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Lua => GrammarIdentity {
+            language_id: "lua",
+            grammar_version: "0.5.0",
+            source_package_sha256: "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c",
+            parser_sha256: "933206d96a78f7785c13b2600182f1527dcd755c200b1271bb5bc4d8da4b17b3",
+            scanner_sha256: Some(
+                "35bbd630b5a7421d46d2e91185eeea09bf78565d44cb676b63ca20d0f1b54bbd",
+            ),
+        },
         GrammarFamily::Rust => GrammarIdentity {
             language_id: "rust",
             grammar_version: "0.24.2",
@@ -340,7 +353,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 11);
+        assert_eq!(registry.descriptors().len(), 12);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -353,6 +366,7 @@ mod tests {
             GrammarFamily::CSharp,
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
+            GrammarFamily::Lua,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -412,6 +426,7 @@ mod tests {
             (GrammarFamily::CSharp, "csharp", "tree-sitter-c-sharp"),
             (GrammarFamily::Kotlin, "kotlin", "tree-sitter-kotlin-ng"),
             (GrammarFamily::Php, "php", "tree-sitter-php"),
+            (GrammarFamily::Lua, "lua", "tree-sitter-lua"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

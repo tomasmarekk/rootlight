@@ -47,7 +47,17 @@ const EXPECTED_DOMAINS: [FactDomain; 8] = [
     FactDomain::Extensions,
 ];
 
-const CASES: [LanguageCase; 11] = [
+const LUA_CASE: LanguageCase = LanguageCase {
+    name: "lua",
+    path: "src/module.lua",
+    frontend: "tree-sitter-lua-0.5.0",
+    source: include_str!("fixtures/structural/lua.lua"),
+    generated: false,
+    body_before: "return value + limit",
+    body_after: "return  value + limit",
+};
+
+const CASES: [LanguageCase; 12] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -147,6 +157,7 @@ const CASES: [LanguageCase; 11] = [
         body_before: "public function greet(string $name): string\n    {\n        return Formatter::format(\"olá\", $name);\n    }",
         body_after: "public function greet(string $name): string\r\n    {\r\n            return Formatter::format(\"olá\", $name);\r\n    }",
     },
+    LUA_CASE,
 ];
 
 #[derive(Clone, Copy)]
@@ -415,6 +426,173 @@ fn reviewed_queries_preserve_explicit_call_sites() {
             case.name
         );
     }
+}
+
+#[test]
+fn lua_bindings_and_qualified_functions_keep_source_backed_identities() {
+    let case = LUA_CASE;
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let fixture = Fixture::new(case, case.source.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &request, &extensions);
+    let document = output.document();
+    for (name, kind) in [
+        ("M", EntityKind::Variable),
+        ("second", EntityKind::Variable),
+        ("left", EntityKind::Variable),
+        ("right", EntityKind::Variable),
+        ("limit", EntityKind::Constant),
+        ("transform", EntityKind::Function),
+        ("M.map", EntityKind::Function),
+        ("M:run", EntityKind::Method),
+        ("M.finish", EntityKind::Function),
+        ("index", EntityKind::Variable),
+        ("key", EntityKind::Variable),
+        ("entry", EntityKind::Variable),
+        ("value", EntityKind::Parameter),
+    ] {
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| { entity.canonical_name == name && entity.kind == kind }),
+            "missing Lua {kind:?} {name}"
+        );
+    }
+    let mut actual = BTreeMap::new();
+    for entity in &document.entities {
+        if entity.kind != EntityKind::Module {
+            *actual
+                .entry(entity.canonical_name.as_str())
+                .or_insert(0usize) += 1;
+        }
+    }
+    let mut expected = [
+        "M",
+        "M.finish",
+        "M.map",
+        "M:run",
+        "alpha",
+        "beta",
+        "block",
+        "callback",
+        "close",
+        "dependency",
+        "entry",
+        "first",
+        "first_fn",
+        "handlers",
+        "index",
+        "item",
+        "key",
+        "left",
+        "limit",
+        "name",
+        "quoted",
+        "require",
+        "right",
+        "second",
+        "second_fn",
+        "transform",
+        "value",
+    ]
+    .into_iter()
+    .map(|name| (name, 1usize))
+    .collect::<BTreeMap<_, _>>();
+    expected.insert("first", 2);
+    expected.insert("value", 6);
+    assert_eq!(
+        actual, expected,
+        "every source binding must survive IR lowering"
+    );
+    for name in ["invented", "also_invented", "comment_only"] {
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name)
+        );
+    }
+    assert!(
+        document
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "syntax-error-recovery")
+    );
+    assert_ne!(
+        symbol_id_named(document, "M.map"),
+        symbol_id_named(document, "M:run")
+    );
+}
+
+#[test]
+fn lua_qualified_name_trivia_preserves_identity_without_inventing_dynamic_receivers() {
+    let case = LUA_CASE;
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let analyzer = analyzer(&provider, case);
+    let fixture = Fixture::new(
+        case,
+        b"function M.nested:run(value) return value end\nfunction N.run() end\n",
+    );
+    let first_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let first = analyze(&analyzer, &first_request, &extensions);
+    let variant = fixture.rewrite(b"function M --[=[qualifier]=]\n . nested : run(value) return value end\nfunction N.run() end\n");
+    let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
+    let second = analyze(&analyzer, &variant_request, &extensions);
+    for name in ["M.nested:run", "N.run"] {
+        assert_eq!(
+            symbol_id_named(first.document(), name),
+            symbol_id_named(second.document(), name)
+        );
+    }
+    let dynamic = fixture.rewrite(b"factory().run = function(value) return value end\n");
+    let dynamic_request = request(&dynamic.snapshot, &dynamic.source, case, &limits);
+    let output = analyze(&analyzer, &dynamic_request, &extensions);
+    assert!(
+        !output
+            .document()
+            .entities
+            .iter()
+            .any(|entity| matches!(entity.kind, EntityKind::Function | EntityKind::Method))
+    );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|region| region.domain == FactDomain::Entities
+                && region.detail == "declaration-name-unavailable")
+    );
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+}
+
+#[test]
+fn lua_identical_sibling_scopes_remain_explicitly_ambiguous() {
+    let case = LUA_CASE;
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let analyzer = analyzer(&provider, case);
+    let fixture = Fixture::new(case, b"do local value = 1 end\ndo local value = 2 end\n");
+    let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &request, &extensions);
+    assert!(
+        !output
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "value")
+    );
+    assert!(output.document().skipped_regions.iter().any(|region| {
+        region.domain == FactDomain::Entities
+            && region.detail == "stable-scope-identity-unavailable"
+    }));
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
 }
 
 #[test]
@@ -1088,9 +1266,11 @@ fn assert_contract(
         assert_eq!(record.provenance, provenance.id);
         assert_eq!(record.evidence, direct_evidence(&fixture.source));
     }
-    assert!(document.skipped_regions.iter().any(|region| {
+    let unresolved_import = document.skipped_regions.iter().any(|region| {
         region.domain == FactDomain::Relations && region.detail == "unresolved-import-target"
-    }));
+    });
+    // Lua module loading is a shadowable call, not a grammar import statement.
+    assert_eq!(unresolved_import, case.name != "lua");
     assert!(document.entities.iter().all(|entity| {
         entity.tier == AnalysisTier::TierD
             && entity.provenance == provenance.id

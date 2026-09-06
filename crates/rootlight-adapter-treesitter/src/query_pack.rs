@@ -275,6 +275,10 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Lua {
+            // Lua's shadowable require function is not an import statement.
+            expected.retain(|name| *name != "import");
+        }
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
             expected.sort_unstable();
@@ -493,7 +497,22 @@ impl QueryPack {
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
-                retain(candidate_for_capture(input.family, *capture, role)?)?;
+                if input.family == GrammarFamily::Lua
+                    && role == StructuralRole::Reference
+                    && capture
+                        .node
+                        .parent()
+                        .is_some_and(|parent| parent.kind() == "attribute")
+                {
+                    // Attribute identifiers describe a binding, not a lexical reference.
+                    continue;
+                }
+                retain(candidate_for_capture(
+                    input.family,
+                    *capture,
+                    role,
+                    input.source,
+                )?)?;
             }
         }
         drop(matches);
@@ -576,10 +595,15 @@ fn candidate_for_capture(
     family: GrammarFamily,
     capture: QueryCapture<'_>,
     role: StructuralRole,
+    source: &[u8],
 ) -> Result<QueryCandidate, AdapterError> {
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Declaration if family == GrammarFamily::Lua => {
+            lua_declaration_syntax(capture.node, source)
+                .ok_or_else(|| query_failure("query-lua-declaration-kind"))?
+        }
         StructuralRole::Declaration
             if family == GrammarFamily::C && is_c_function_prototype(capture.node) =>
         {
@@ -601,6 +625,7 @@ fn candidate_for_capture(
             GrammarFamily::Go => "go.call_name",
             GrammarFamily::Java => "java.call_name",
             GrammarFamily::Php => "php.call_name",
+            GrammarFamily::Lua => "lua.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -615,6 +640,7 @@ fn candidate_for_capture(
             GrammarFamily::CSharp => "csharp.call",
             GrammarFamily::Kotlin => "kotlin.call",
             GrammarFamily::Php => "php.call",
+            GrammarFamily::Lua => "lua.call",
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -649,6 +675,60 @@ fn is_c_function_prototype(node: tree_sitter::Node<'_>) -> bool {
     false
 }
 
+fn lua_declaration_syntax(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<&'static str> {
+    Some(match node.kind() {
+        "function_declaration" => {
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|name| name.kind() == "method_index_expression")
+            {
+                "lua.method"
+            } else {
+                "lua.function"
+            }
+        }
+        "assignment_statement" | "field" => "lua.function",
+        "identifier"
+            if node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "parameters") =>
+        {
+            "lua.parameter"
+        }
+        "identifier" => lua_binding_syntax(node, source),
+        "variable_declaration" => {
+            let binding = node
+                .named_child(0)
+                .and_then(|child| {
+                    if child.kind() == "assignment_statement" {
+                        child.named_child(0)
+                    } else {
+                        Some(child)
+                    }
+                })
+                .and_then(|list| list.child_by_field_name("name"));
+            binding.map_or("lua.variable", |binding| {
+                lua_binding_syntax(binding, source)
+            })
+        }
+        _ => return None,
+    })
+}
+
+fn lua_binding_syntax(binding: tree_sitter::Node<'_>, source: &[u8]) -> &'static str {
+    let constant = binding
+        .next_named_sibling()
+        .filter(|node| node.kind() == "attribute")
+        .and_then(|attribute| attribute.named_child(0))
+        .and_then(|name| source.get(name.byte_range()))
+        .is_some_and(|name| name == b"const");
+    if constant {
+        "lua.constant"
+    } else {
+        "lua.variable"
+    }
+}
+
 const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
     matches!(
         family,
@@ -658,6 +738,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Go
             | GrammarFamily::Java
             | GrammarFamily::Php
+            | GrammarFamily::Lua
     )
 }
 
@@ -667,6 +748,22 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Lua, "chunk") => Some("lua.file"),
+        (GrammarFamily::Lua, "block" | "for_statement") => Some("lua.block"),
+        (GrammarFamily::Lua, "function_declaration" | "function_definition") => {
+            Some("lua.function")
+        }
+        (GrammarFamily::Lua, "parameters") => Some("lua.parameters"),
+        (GrammarFamily::Lua, "variable_declaration" | "assignment_statement") => {
+            Some("lua.variable")
+        }
+        (GrammarFamily::Lua, "field") => Some("lua.field"),
+        (GrammarFamily::Lua, "identifier") => Some("lua.identifier"),
+        (GrammarFamily::Lua, "dot_index_expression" | "method_index_expression") => {
+            Some("lua.qualified_name")
+        }
+        (GrammarFamily::Lua, "comment") => Some("lua.comment"),
+        (GrammarFamily::Lua, "string") => Some("lua.string"),
         (GrammarFamily::Rust, "source_file") => Some("rust.file"),
         (GrammarFamily::Rust, "mod_item") => Some("rust.module"),
         (GrammarFamily::Rust, "function_item") => Some("rust.function"),
@@ -898,7 +995,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(11);
+        let mut packs = Vec::with_capacity(12);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -917,6 +1014,7 @@ impl QueryPackRegistry {
             (GrammarFamily::CSharp, include_str!("../queries/csharp.scm")),
             (GrammarFamily::Kotlin, include_str!("../queries/kotlin.scm")),
             (GrammarFamily::Php, include_str!("../queries/php.scm")),
+            (GrammarFamily::Lua, include_str!("../queries/lua.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -964,11 +1062,15 @@ mod tests {
             GrammarFamily::CSharp,
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
+            GrammarFamily::Lua,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Lua {
+                expected.retain(|name| *name != "import");
+            }
             if family == GrammarFamily::Rust {
                 expected.extend(RUST_SPECIAL_CAPTURES);
                 expected.sort_unstable();

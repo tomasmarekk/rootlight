@@ -14,8 +14,7 @@ use rootlight_adapter_sdk::{
     ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport, execute_parse,
-    structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order,
+    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -1927,10 +1926,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         break 'draft None;
                     };
                     let Some(name) = source_text(bytes, definition.span()).and_then(|name| {
-                        structural_captured_name(name, self.request.limits().ir().max_string_bytes)
+                        rootlight_adapter_sdk::structural_captured_name_for_language(
+                            self.analyzer.language.as_str(),
+                            name,
+                            self.request.limits().ir().max_string_bytes,
+                        )
                     }) else {
                         break 'draft None;
                     };
+                    let name = name.as_ref();
                     let declaration_text = source_text(bytes, declaration.span())
                         .ok_or_else(|| provider_failure("project-declaration-span"))?;
                     let header = declaration_header(self.analyzer.language, declaration_text);

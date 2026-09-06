@@ -1,6 +1,6 @@
 //! Shared parser-independent structural fact classification.
 
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use rootlight_ir::EntityKind;
 
@@ -99,6 +99,25 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
                 && !matches!(character, '/' | '\\' | '(' | ')' | '{' | '}' | '[' | ']')
         }))
     .then_some(candidate)
+}
+
+/// Returns a bounded canonical name from a grammar-reviewed language capture.
+///
+/// Lua member captures may contain formatting or comments between qualifiers.
+/// Their canonical identity removes only that trivia; the caller must preserve
+/// the original source span. Other languages retain the shared borrowed-name
+/// contract. Non-static or invalid names return `None`, never an invented name.
+#[must_use]
+pub fn structural_captured_name_for_language<'a>(
+    language: &str,
+    text: &'a str,
+    maximum_bytes: usize,
+) -> Option<Cow<'a, str>> {
+    if language == "lua" {
+        crate::lua_names::canonical_lua_name(text, maximum_bytes)
+    } else {
+        structural_captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    }
 }
 
 /// Orders syntax facts exactly as structural declaration association consumes them.

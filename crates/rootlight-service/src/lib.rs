@@ -25236,6 +25236,7 @@ mod tests {
             "sample.java",
             "sample.js",
             "sample.kt",
+            "sample.lua",
             "sample.php",
             "sample.py",
             "sample.rs",
@@ -25287,7 +25288,6 @@ mod tests {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
             ("normalize.css", "css"),
-            ("plugin.lua", "lua"),
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
             ("plot.R", "r"),
@@ -25350,11 +25350,6 @@ mod tests {
                 "classify.m",
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
-            ),
-            (
-                "telescope.lua",
-                "local telescopePicker = require('telescope.pickers')\n",
-                "lua",
             ),
             (
                 "rails_application.rb",
@@ -25443,21 +25438,115 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in [
-            "css",
-            "swift",
-            "objective-c",
-            "matlab",
-            "lua",
-            "ruby",
-            "perl",
-        ] {
+        for language in ["css", "swift", "objective-c", "matlab", "ruby", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn lua_structural_index_preserves_symbols_and_exact_source() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "local function transform(value)\n  return value\nend\nreturn transform\n";
+        fs::write(fixture.path().join("module.lua"), source).expect("Lua fixture writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Lua structural generation publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("Lua generation remains retained");
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "module.lua")
+            .expect("Lua file remains represented");
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .expect("Lua source coverage resolves");
+        assert_eq!(coverage.language, "lua");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(coverage.status, CoverageStatus::Complete);
+        assert_eq!(coverage.reason, None);
+        let reference = file
+            .evidence
+            .source
+            .clone()
+            .expect("Lua source evidence exists");
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("Lua source reads from its generation");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        assert_eq!(read.data.chunks[0].language, "lua");
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "transform".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("Lua function locates");
+        let hit = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.file == file.id && hit.symbol.is_some())
+            .expect("Lua has structural symbol evidence, not just a file-only hit");
+        assert_eq!(hit.kind, "function");
+        let definition = service
+            .source_read(
+                receipt.generation,
+                vec![hit.source.clone().expect("symbol has source evidence")],
+                &deadline(),
+            )
+            .expect("Lua symbol source reads from its generation");
+        assert_eq!(definition.data.chunks[0].bytes, source.as_bytes());
+        let explained = service
+            .symbol_explain(
+                receipt.generation,
+                hit.symbol.expect("located symbol exists"),
+                &deadline(),
+            )
+            .expect("Lua structural symbol explains");
+        assert_eq!(explained.data.entity.canonical_name, "transform");
+        let definition = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![
+                    explained
+                        .data
+                        .entity
+                        .evidence
+                        .source
+                        .expect("declaration has exact source evidence"),
+                ],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("Lua declaration source reads");
+        assert_eq!(
+            definition.data.chunks[0].bytes,
+            b"local function transform(value)\n  return value\nend"
+        );
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("capabilities resolve");
+        let capability = inventory
+            .languages
+            .iter()
+            .find(|entry| entry.language == "lua")
+            .expect("Lua capability exists");
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
     }
 
     #[test]
@@ -32392,9 +32481,31 @@ mod tests {
             &cancellation,
         );
 
+        // Optional eviction follows file identities, not fixture names. Leave
+        // one retained normalized input unchanged so this step proves reuse.
+        let retained_file = service
+            .structural_artifacts
+            .generation(second.generation)
+            .expect("successor cache is retained")
+            .iter()
+            .find_map(|(file, entry)| entry.normalized.as_ref().map(|_| *file))
+            .expect("bounded cache retains a normalized input");
+        let snapshot = service
+            .loaded_generation_snapshot(second.generation)
+            .expect("successor snapshot remains loaded");
+        let (name, path) = [("bravo", "src/bravo.rs"), ("delta", "src/delta.rs")]
+            .into_iter()
+            .find(|(_, path)| {
+                snapshot
+                    .document()
+                    .files
+                    .iter()
+                    .any(|file| file.path == *path && file.id != retained_file)
+            })
+            .expect("an independent file can change without replacing retained evidence");
         fs::write(
-            fixture.path().join("src/bravo.rs"),
-            "pub fn bravo() -> u32 { 3 }\n",
+            fixture.path().join(path),
+            format!("pub fn {name}() -> u32 {{ 3 }}\n"),
         )
         .expect("a later independent body changes");
         let third = service

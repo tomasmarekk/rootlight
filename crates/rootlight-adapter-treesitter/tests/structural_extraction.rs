@@ -32,7 +32,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 11] = [
+const CASES: [LanguageCase; 12] = [
     LanguageCase {
         name: "structural.rs",
         language: "rust",
@@ -88,6 +88,11 @@ const CASES: [LanguageCase; 11] = [
         language: "php",
         source: include_str!("fixtures/structural/php.php"),
     },
+    LanguageCase {
+        name: "structural.lua",
+        language: "lua",
+        source: include_str!("fixtures/structural/lua_golden.lua"),
+    },
 ];
 
 #[test]
@@ -119,7 +124,7 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
         );
         assert!(output.diagnostics().is_empty());
         assert_eq!(label_counts(&output), golden_label_counts(case.language));
-        assert_required_roles(&output);
+        assert_required_roles(&output, case.language);
         assert_parent_contract(output.facts());
         assert_role_precedence(output.facts());
         assert!(bytes.windows(2).any(|window| window == b"\r\n"));
@@ -130,6 +135,32 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
         }
         if case.language == "java" {
             assert_java_annotation_element(&output, &bytes);
+        }
+        if case.language == "lua" {
+            let mut references = output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "lua.identifier.reference")
+                .map(|fact| {
+                    let start = usize::try_from(fact.span().start_byte())
+                        .expect("fixture span start fits the platform");
+                    let end = usize::try_from(fact.span().end_byte())
+                        .expect("fixture span end fits the platform");
+                    &bytes[start..end]
+                })
+                .collect::<Vec<_>>();
+            references.sort_unstable();
+            assert_eq!(
+                references,
+                [
+                    b"M".as_slice(),
+                    b"M",
+                    b"dependency",
+                    b"require",
+                    b"run",
+                    b"value"
+                ]
+            );
         }
     }
 }
@@ -953,6 +984,24 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("php.trait.declaration", 1),
             ("php.variable_name.reference", 2),
         ],
+        "lua" => &[
+            ("lua.block.scope", 1),
+            ("lua.call.call", 2),
+            ("lua.call_name.call_name", 2),
+            ("lua.comment.documentation", 1),
+            ("lua.file.module", 1),
+            ("lua.file.root", 1),
+            ("lua.file.scope", 1),
+            ("lua.function.scope", 1),
+            ("lua.identifier.definition", 3),
+            ("lua.identifier.reference", 6),
+            ("lua.method.declaration", 1),
+            ("lua.parameter.declaration", 1),
+            ("lua.parameters.signature", 1),
+            ("lua.qualified_name.definition", 1),
+            ("lua.string.string", 1),
+            ("lua.variable.declaration", 2),
+        ],
         _ => panic!("unexpected fixture language"),
     };
     entries
@@ -971,13 +1020,12 @@ fn label_counts(output: &ParseOutput) -> BTreeMap<String, usize> {
     counts
 }
 
-fn assert_required_roles(output: &ParseOutput) {
+fn assert_required_roles(output: &ParseOutput, language: &str) {
     for kind in [
         SyntaxFactKind::Root,
         SyntaxFactKind::Module,
         SyntaxFactKind::Declaration,
         SyntaxFactKind::Signature,
-        SyntaxFactKind::Import,
         SyntaxFactKind::Scope,
         SyntaxFactKind::Occurrence,
         SyntaxFactKind::Comment,
@@ -988,6 +1036,14 @@ fn assert_required_roles(output: &ParseOutput) {
             "fixture omitted required {kind:?} evidence"
         );
     }
+    // Lua module loading is an ordinary, shadowable call, not an import node.
+    assert_eq!(
+        output
+            .facts()
+            .iter()
+            .any(|fact| fact.kind() == SyntaxFactKind::Import),
+        language != "lua"
+    );
 }
 
 fn assert_parent_contract(facts: &[SyntaxFact]) {

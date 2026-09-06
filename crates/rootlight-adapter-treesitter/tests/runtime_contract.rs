@@ -87,7 +87,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 11] = [
+    let cases: [(&str, &str, &[u8]); 12] = [
+        (
+            "sample.lua",
+            "lua",
+            b"local function sample(value) return value end\n",
+        ),
         ("sample.rs", "rust", b"fn sample() {}\n"),
         ("sample.py", "python", b"def sample():\n    return None\n"),
         (

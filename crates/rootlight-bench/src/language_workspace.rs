@@ -1233,7 +1233,7 @@ fn validate_evidence(
     if evidence.schema != LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA
         || evidence.source_revision != source_revision
         || evidence.environment.toolchain != toolchain
-        || evidence.language.grammars.len() != 11
+        || evidence.language.grammars.len() != 12
         || evidence.language.expanded_languages.len() != EXPANDED_LANGUAGES.len()
         || evidence.language.scip.export_available
         || !evidence.language.scip.import_available
@@ -1490,6 +1490,12 @@ mod tests {
     fn structural_observations_report_actual_capabilities_and_limitations() {
         let evidence = build_language_workspace_evidence(REVISION, TOOLCHAIN)
             .expect("candidate-bound evidence should build");
+        assert_eq!(evidence.language.grammars.len(), 12);
+        assert!(evidence.language.grammars.iter().any(|grammar| {
+            grammar.language == "lua"
+                && grammar.grammar_version == "0.5.0"
+                && grammar.observed_tier == "tier_d"
+        }));
         assert!(evidence.language.expanded_languages.iter().all(|language| {
             language.observed_tier == "tier_d"
                 && language.parser_coverage == "complete"

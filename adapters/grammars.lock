@@ -269,3 +269,26 @@ offline_behavior = "builds from the Cargo cache without network access; build.rs
 capabilities = ["declarations", "namespaces", "imports", "traits", "scopes", "occurrences", "call-sites", "comments", "strings"]
 semantic_depth = "structural-only; dynamic dispatch, reflection, framework routes, candidate confidence, references, and calls are unresolved"
 audit_notes = ["published .cargo_vcs_info commit matches the peeled release tag", "build.rs also compiles PHP-only parser bc796948b625f74e390cfd1254392136c86fafbd2dc0c9d93360ec20bc6b0dfb and scanner 7a91ec341bef67f006e508f720edcd70b0d0eb73773584afa87ab7d12be25b14; exact crate checksum locks both"]
+
+[[grammars]]
+language = "lua"
+crate_name = "tree-sitter-lua"
+crate_version = "0.5.0"
+crates_io_checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-lua"
+tag = "v0.5.0"
+commit = "10fe0054734eec83049514ea2e718b2a56acd0c9"
+parser_sha256 = "933206d96a78f7785c13b2600182f1527dcd755c200b1271bb5bc4d8da4b17b3"
+scanner_sha256 = "35bbd630b5a7421d46d2e91185eeea09bf78565d44cb676b63ca20d0f1b54bbd"
+abi = 15
+analysis_tier = "D"
+license = "MIT"
+license_source = "adapters/licenses/tree-sitter-lua-0.5.0-LICENSE"
+license_sha256 = "9a32b02e4c917b1ce6b5e79d8ea81e25cefd7f27d89c7235f2afb262c06cf32e"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight Lua structural and source-identity fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled C11 parser.c and scanner.c"
+capabilities = ["declarations", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "structural-only; receiver evaluation, module loading, reference resolution and dynamic dispatch are unresolved"
+audit_notes = ["published crate omits LICENSE.md", "all 18 comparable published files are byte-identical to the release commit", "exact release LICENSE.md is copied into Rootlight distribution notices and hash-verified"]
