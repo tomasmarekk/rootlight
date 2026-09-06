@@ -2525,6 +2525,18 @@ mod tests {
             ("crate handler_suffix", "crate::handler", false),
             ("Cafe\u{301} Straße", "CAFÉ", true),
             ("Cafe\u{301} Straße", "STRASSE", true),
+            (
+                "aB1cD2aB1cD2aB1cD2aB1cD2aB1cD2aB1cD2",
+                "aB1cD2aB1cD2aB1c",
+                true,
+            ),
+            (
+                "ΩValue9ΩValue9ΩValue9ΩValue9ΩValue9",
+                "ΩValue9ΩValue9ΩV",
+                true,
+            ),
+            ("unrelatedSpelling", "aB1cD2aB1cD2aB1c", false),
+            ("unrelatedSpelling", "ΩValue9ΩValue9ΩV", false),
             ("x", "x", true),
         ] {
             let selected = select_query_source_text(

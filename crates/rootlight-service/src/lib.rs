@@ -19483,6 +19483,17 @@ fn map_search_error(error: SearchError, cancellation: &Cancellation) -> FirstSli
     }
     match error {
         SearchError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        SearchError::InvalidQuery(
+            rootlight_search::QueryViolation::TooLong
+            | rootlight_search::QueryViolation::TermTooLong,
+        )
+        | SearchError::InvalidQueryBudget { .. }
+        | SearchError::BuildBudgetExceeded { .. }
+        | SearchError::CandidateBudgetExceeded
+        | SearchError::TermExpansionBudgetExceeded
+        | SearchError::TermExaminationBudgetExceeded
+        | SearchError::PostingBudgetExceeded
+        | SearchError::ReturnedTextBudgetExceeded => FirstSliceError::BudgetExceeded,
         _ => FirstSliceError::Search,
     }
 }
@@ -19542,6 +19553,7 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
         | QueryError::BudgetExceeded { .. }
         | QueryError::MemoryUnavailable => FirstSliceError::BudgetExceeded,
         QueryError::Source(source) => map_source_error(source, cancellation),
+        QueryError::Search(search) => map_search_error(search, cancellation),
         _ => FirstSliceError::Query,
     }
 }
@@ -29912,6 +29924,120 @@ mod tests {
         "pub fn answer() -> u32 {\n    43\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
 
     #[test]
+    fn lexical_query_budget_failures_remain_distinct() {
+        let cancellation = Cancellation::new();
+        for error in [
+            SearchError::InvalidQuery(rootlight_search::QueryViolation::TooLong),
+            SearchError::InvalidQuery(rootlight_search::QueryViolation::TermTooLong),
+            SearchError::InvalidQueryBudget {
+                resource: "query_terms",
+            },
+            SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            },
+            SearchError::CandidateBudgetExceeded,
+            SearchError::TermExpansionBudgetExceeded,
+            SearchError::TermExaminationBudgetExceeded,
+            SearchError::PostingBudgetExceeded,
+            SearchError::ReturnedTextBudgetExceeded,
+        ] {
+            assert_eq!(
+                map_search_error(error.clone(), &cancellation),
+                FirstSliceError::BudgetExceeded
+            );
+            assert_eq!(
+                map_query_error(QueryError::Search(error), &cancellation),
+                FirstSliceError::BudgetExceeded
+            );
+        }
+        assert_eq!(
+            map_query_error(
+                QueryError::Search(SearchError::IncompatibleIndex),
+                &cancellation
+            ),
+            FirstSliceError::Search
+        );
+        assert_eq!(
+            map_query_error(QueryError::SymbolNotFound, &cancellation),
+            FirstSliceError::SymbolNotFound
+        );
+        let _ = cancellation.cancel(CancellationReason::Shutdown);
+        assert_eq!(
+            map_query_error(
+                QueryError::Search(SearchError::CandidateBudgetExceeded),
+                &cancellation
+            ),
+            FirstSliceError::Cancelled(CancellationReason::Shutdown)
+        );
+    }
+
+    #[test]
+    fn scoped_text_query_admission_is_not_missing_source() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("source.rs"),
+            "// alpha\npub fn ordinary_value() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("service initializes");
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("fixture publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("service restores");
+            }
+            let result = service.code_locate_with_filters_and_budget(
+                receipt.generation,
+                "alpha ".repeat(17),
+                LocateMode::Text,
+                Vec::new(),
+                vec!["source.rs".to_owned()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            );
+            assert!(
+                matches!(result, Err(FirstSliceError::BudgetExceeded)),
+                "restored={restored}, result={result:?}"
+            );
+            for (query, expected) in [("alpha", true), ("absentToken", false)] {
+                let located = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        query.to_owned(),
+                        LocateMode::Text,
+                        Vec::new(),
+                        vec!["source.rs".to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("admitted query executes");
+                assert_eq!(
+                    located.data.hits.iter().any(|hit| hit.path == "source.rs"),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn query_and_source_budget_failures_remain_distinct() {
         let cancellation = Cancellation::new();
         assert_eq!(
@@ -32437,7 +32563,7 @@ mod tests {
                 FirstSliceBudget::default().reduce_search_max_query_bytes(4),
                 &cancellation,
             ),
-            Err(FirstSliceError::Query)
+            Err(FirstSliceError::BudgetExceeded)
         ));
 
         let second = service
