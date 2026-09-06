@@ -658,6 +658,7 @@ pub struct FirstSliceIndexOperationEvidence {
 pub struct FirstSliceDeferredRestore {
     durable: Arc<DurableCatalog>,
     active_targets: Vec<FirstSliceRecoveryTarget>,
+    generation_cache: Arc<Mutex<FirstSliceGenerationCache>>,
 }
 
 /// One repository whose last activated generation requires background recovery.
@@ -694,7 +695,10 @@ impl FirstSliceRecoveryTarget {
     }
 }
 
-/// Fully verified durable state awaiting one atomic in-memory installation.
+/// Fully verified durable state owning its pending generation-memory charges.
+///
+/// Dropping the state releases its charges. Preparation transfers ownership;
+/// installation converts pending charges to resident charges under the cache lock.
 pub struct FirstSliceRestoredState {
     generations: Vec<RestoredGeneration>,
 }
@@ -703,7 +707,7 @@ pub struct FirstSliceRestoredState {
 ///
 /// Preparing this value may traverse a large normalized snapshot and search
 /// index. The opaque result lets a daemon complete that work without holding
-/// the service publication lock.
+/// the service publication lock while retaining the pending memory reservation.
 pub struct FirstSlicePreparedActiveRestore {
     generations: Vec<PreparedRestoredGeneration>,
 }
@@ -755,7 +759,7 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         self.durable
             .restore_active_repository(repository, cancellation)
-            .map(|generations| FirstSliceRestoredState { generations })
+            .and_then(|generations| self.reserve_restored_state(generations, cancellation))
     }
 
     /// Verifies retained rollback generations for one repository without repair writes.
@@ -777,7 +781,7 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         self.durable
             .restore_retained_repository(repository, excluded, cancellation)
-            .map(|generations| FirstSliceRestoredState { generations })
+            .and_then(|generations| self.reserve_restored_state(generations, cancellation))
     }
 
     /// Loads and verifies every retained activation-marked generation.
@@ -795,7 +799,7 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         self.durable
             .restore(cancellation)
-            .map(|generations| FirstSliceRestoredState { generations })
+            .and_then(|generations| self.reserve_restored_state(generations, cancellation))
     }
 
     /// Loads only the newest valid generation for each retained repository.
@@ -813,7 +817,7 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         self.durable
             .restore_active(cancellation)
-            .map(|generations| FirstSliceRestoredState { generations })
+            .and_then(|generations| self.reserve_restored_state(generations, cancellation))
     }
 
     /// Loads retained rollback generations not already installed.
@@ -828,7 +832,24 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         self.durable
             .restore_excluding(excluded, cancellation)
-            .map(|generations| FirstSliceRestoredState { generations })
+            .and_then(|generations| self.reserve_restored_state(generations, cancellation))
+    }
+
+    fn reserve_restored_state(
+        &self,
+        mut generations: Vec<RestoredGeneration>,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceRestoredState, FirstSliceError> {
+        for restored in &mut generations {
+            check_cancellation(cancellation)?;
+            let memory_bytes = restored_generation_memory_bytes(restored)?;
+            restored.memory_reservation = Some(RestoredMemoryReservation::new(
+                Arc::clone(&self.generation_cache),
+                memory_bytes,
+                true,
+            )?);
+        }
+        Ok(FirstSliceRestoredState { generations })
     }
 }
 
@@ -4585,7 +4606,7 @@ fn prepare_restored_generations(
     prepared
         .try_reserve_exact(restored.len())
         .map_err(|_| FirstSliceError::Retention)?;
-    for restored in restored {
+    for mut restored in restored {
         check_cancellation(cancellation)?;
         if validate_active_query {
             smoke_query_restored_generation(&restored, cancellation)?;
@@ -4595,14 +4616,7 @@ fn prepare_restored_generations(
             .map_err(|_| FirstSliceError::Limits)?;
         let fact_count = u64::try_from(normalized_record_count(restored.verified.document())?)
             .map_err(|_| FirstSliceError::Limits)?;
-        let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
-            || normalized_document_serialized_bytes(restored.verified.document()),
-            Ok,
-        )?;
-        let memory_bytes = generation_resident_memory_bytes(
-            serialized_document_bytes,
-            restored.verified.snapshot(),
-        )?;
+        let memory_bytes = restored_generation_memory_bytes(&mut restored)?;
         prepared.push(PreparedRestoredGeneration {
             restored,
             language_coverage,
@@ -4614,6 +4628,17 @@ fn prepare_restored_generations(
     Ok(prepared)
 }
 
+fn restored_generation_memory_bytes(
+    restored: &mut RestoredGeneration,
+) -> Result<u64, FirstSliceError> {
+    let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
+        || normalized_document_serialized_bytes(restored.verified.document()),
+        Ok,
+    )?;
+    restored.serialized_document_bytes = Some(serialized_document_bytes);
+    generation_resident_memory_bytes(serialized_document_bytes, restored.verified.snapshot())
+}
+
 /// Resident payload cache with normalized-IR admission charges.
 ///
 /// Charges deliberately use the stable serialized generation measure. Backend
@@ -4623,6 +4648,7 @@ struct FirstSliceGenerationCache {
     generations: GenerationSet<LexicalIndex>,
     logical_charge_bytes_by_generation: BTreeMap<GenerationId, u64>,
     reservations: BTreeMap<GenerationId, u64>,
+    restored_reservation_bytes: u64,
     access_sequence: u64,
     access_by_generation: BTreeMap<GenerationId, u64>,
 }
@@ -4634,6 +4660,7 @@ impl FirstSliceGenerationCache {
                 .map_err(|_| FirstSliceError::Retention)?,
             logical_charge_bytes_by_generation: BTreeMap::new(),
             reservations: BTreeMap::new(),
+            restored_reservation_bytes: 0,
             access_sequence: 0,
             access_by_generation: BTreeMap::new(),
         })
@@ -4702,9 +4729,11 @@ impl FirstSliceGenerationCache {
     }
 
     fn reserved_memory_bytes(&self) -> Result<u64, FirstSliceError> {
-        self.reservations.values().try_fold(0_u64, |total, bytes| {
-            total.checked_add(*bytes).ok_or(FirstSliceError::Limits)
-        })
+        self.reservations
+            .values()
+            .try_fold(self.restored_reservation_bytes, |total, bytes| {
+                total.checked_add(*bytes).ok_or(FirstSliceError::Limits)
+            })
     }
 
     fn observed_logical_charge_bytes(&self, additional: u64) -> Result<u64, FirstSliceError> {
@@ -4936,6 +4965,54 @@ impl FirstSliceGenerationCache {
         self.access_by_generation
             .retain(|generation, _| !generations.contains(generation));
         Ok(())
+    }
+}
+
+// Recovery may own multiple verified copies of one generation before deduplication.
+// Charge each payload owner, not its generation ID, until it is installed or dropped.
+struct RestoredMemoryReservation {
+    cache: Arc<Mutex<FirstSliceGenerationCache>>,
+    bytes: u64,
+}
+
+impl RestoredMemoryReservation {
+    fn new(
+        cache: Arc<Mutex<FirstSliceGenerationCache>>,
+        bytes: u64,
+        durable_cache: bool,
+    ) -> Result<Self, FirstSliceError> {
+        {
+            let mut ledger = cache.lock().map_err(|_| FirstSliceError::Retention)?;
+            ledger.ensure_capacity(bytes, PendingGenerationMemory::Reserved, durable_cache)?;
+            ledger.restored_reservation_bytes = ledger
+                .restored_reservation_bytes
+                .checked_add(bytes)
+                .ok_or(FirstSliceError::Limits)?;
+        }
+        Ok(Self { cache, bytes })
+    }
+
+    fn release_locked(
+        &mut self,
+        ledger: &mut FirstSliceGenerationCache,
+    ) -> Result<(), FirstSliceError> {
+        ledger.restored_reservation_bytes = ledger
+            .restored_reservation_bytes
+            .checked_sub(self.bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+impl Drop for RestoredMemoryReservation {
+    fn drop(&mut self) {
+        if self.bytes > 0
+            && let Ok(mut ledger) = self.cache.lock()
+            && let Some(remaining) = ledger.restored_reservation_bytes.checked_sub(self.bytes)
+        {
+            ledger.restored_reservation_bytes = remaining;
+        }
     }
 }
 
@@ -5211,11 +5288,13 @@ impl FirstSliceService {
             policy,
         )?;
         service.bootstrap_deferred_restore(&active_targets)?;
+        let generation_cache = Arc::clone(&service.generation_cache);
         Ok((
             service,
             FirstSliceDeferredRestore {
                 durable,
                 active_targets,
+                generation_cache,
             },
         ))
     }
@@ -6284,7 +6363,7 @@ impl FirstSliceService {
         for prepared in restored {
             check_cancellation(cancellation)?;
             let PreparedRestoredGeneration {
-                restored,
+                mut restored,
                 language_coverage,
                 relationship_count,
                 fact_count,
@@ -6318,7 +6397,20 @@ impl FirstSliceService {
             {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
-            self.make_room_for_generation(receipt.repository, memory_bytes)?;
+            if restored
+                .memory_reservation
+                .as_ref()
+                .is_none_or(|reservation| !Arc::ptr_eq(&reservation.cache, &self.generation_cache))
+            {
+                self.make_room_for_generation(receipt.repository, memory_bytes)?;
+                restored.memory_reservation = Some(RestoredMemoryReservation::new(
+                    Arc::clone(&self.generation_cache),
+                    memory_bytes,
+                    self.durable.is_some(),
+                )?);
+            } else {
+                self.make_room_for_generation(receipt.repository, 0)?;
+            }
             let source_plan =
                 self.plan_source_admission(receipt.generation, &restored.sources, cancellation)?;
             let source_admission =
@@ -6330,11 +6422,21 @@ impl FirstSliceService {
                     .lock()
                     .map_err(|_| FirstSliceError::Retention)?;
                 cache.validate_retain_loaded(receipt.generation)?;
+                let reservation = restored
+                    .memory_reservation
+                    .as_mut()
+                    .ok_or(FirstSliceError::Retention)?;
+                if reservation.bytes < memory_bytes
+                    || cache.restored_reservation_bytes < reservation.bytes
+                {
+                    return Err(FirstSliceError::Retention);
+                }
                 cache
                     .generations
                     .publish(restored.verified, restored.search, false)
                     .map_err(|_| FirstSliceError::Retention)?;
                 cache.retain_loaded(receipt.generation, memory_bytes)?;
+                reservation.release_locked(&mut cache)?;
             }
             self.source_snapshots.stage(source_admission)?;
             self.source_snapshots.commit_staged(receipt.generation)?;
@@ -26180,6 +26282,193 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn deferred_restore_owns_memory_through_drop_and_installation() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn restored_value() -> u32 { 7 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("fixture publishes")
+        };
+        let (mut service, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("deferred service opens");
+        let reserved = || {
+            service
+                .generation_cache
+                .lock()
+                .expect("cache remains available")
+                .reserved_memory_bytes()
+                .expect("reservation total is representable")
+        };
+        let first = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("first payload restores");
+        let charge = reserved();
+        assert!(
+            charge > 0,
+            "returned recovery payload must own a memory reservation"
+        );
+        let second = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("a second payload of the same generation restores independently");
+        assert_eq!(reserved(), charge * 2);
+        drop(first);
+        assert_eq!(reserved(), charge);
+        let prepared = second
+            .prepare_active_installation(&cancellation)
+            .expect("active preparation transfers reservation ownership");
+        assert_eq!(reserved(), charge);
+        let competing = service
+            .reserve_generation_memory(
+                GenerationId::from_bytes([19; 20]),
+                MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - charge,
+                PendingGenerationMemory::Reserved,
+            )
+            .expect("unreserved capacity remains available to another owner");
+        service
+            .install_prepared_progressive_deferred_restore(prepared, &cancellation)
+            .expect("installation converts the existing charge without double admission");
+        drop(competing);
+        assert_eq!(
+            service.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        let cache = service
+            .generation_cache
+            .lock()
+            .expect("cache remains available");
+        assert_eq!(
+            cache
+                .reserved_memory_bytes()
+                .expect("reserved charge reads"),
+            0
+        );
+        assert_eq!(
+            cache
+                .resident_logical_charge_bytes()
+                .expect("resident charge reads"),
+            charge
+        );
+        drop(cache);
+
+        let cancelled = Cancellation::new();
+        let _ = cancelled.cancel(CancellationReason::Shutdown);
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("payload restores for cancelled preparation");
+        assert!(matches!(
+            restored.prepare_active_installation(&cancelled),
+            Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+        ));
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache remains available")
+                .reserved_memory_bytes()
+                .expect("reservation total reads"),
+            0
+        );
+
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("payload restores for cancelled installation");
+        let prepared = restored
+            .prepare_active_installation(&cancellation)
+            .expect("payload prepares before cancellation");
+        assert_eq!(
+            service.install_prepared_progressive_deferred_restore(prepared, &cancelled),
+            Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+        );
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("cache remains available")
+                .reserved_memory_bytes()
+                .expect("reservation total reads"),
+            0
+        );
+
+        let restored = deferred
+            .restore_active_repository(receipt.repository, &cancellation)
+            .expect("payload restores for another service owner");
+        let prepared = restored
+            .prepare_active_installation(&cancellation)
+            .expect("payload prepares for transfer");
+        let (mut replacement, _) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("replacement service opens the same catalog");
+        replacement
+            .install_prepared_progressive_deferred_restore(prepared, &cancellation)
+            .expect("installation transfers the charge to its destination cache");
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("origin cache remains available")
+                .reserved_memory_bytes()
+                .expect("origin reservation total reads"),
+            0
+        );
+        let cache = replacement
+            .generation_cache
+            .lock()
+            .expect("destination cache remains available");
+        assert_eq!(
+            cache
+                .reserved_memory_bytes()
+                .expect("destination reservation total reads"),
+            0
+        );
+        assert_eq!(
+            cache
+                .resident_logical_charge_bytes()
+                .expect("destination resident charge reads"),
+            charge
+        );
+        drop(cache);
+
+        let mut oversized_batch = Vec::new();
+        for _ in 0..2 {
+            let mut payloads = deferred
+                .durable
+                .restore_active_repository(receipt.repository, &cancellation)
+                .expect("unreserved payload restores for admission failure injection");
+            for payload in &mut payloads {
+                payload.serialized_document_bytes =
+                    Some(MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2 + 1);
+            }
+            oversized_batch.extend(payloads);
+        }
+        assert!(matches!(
+            deferred.reserve_restored_state(oversized_batch, &cancellation),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .expect("origin cache remains available")
+                .reserved_memory_bytes()
+                .expect("failed batch releases all preceding owners"),
+            0
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn concurrent_repository_restore_preserves_active_and_retained_generation_identity() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -27674,6 +27963,41 @@ mod tests {
                 && available_bytes == source_only_reservation
         ));
         assert!(service.receipts.is_empty());
+    }
+
+    #[test]
+    fn process_local_restore_reservation_never_unloads_active_payload() {
+        let fixture = TempDir::new().expect("fixture directory exists");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn pinned_value() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let mut service = FirstSliceService::new(2).expect("process-local service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &deadline())
+            .expect("process-local generation publishes");
+        service
+            .generation_cache
+            .lock()
+            .expect("cache remains available")
+            .logical_charge_bytes_by_generation
+            .insert(receipt.generation, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
+        assert!(matches!(
+            RestoredMemoryReservation::new(Arc::clone(&service.generation_cache), 1, false),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        let cache = service
+            .generation_cache
+            .lock()
+            .expect("cache remains available");
+        assert!(cache.generations.is_loaded(receipt.generation));
+        assert_eq!(
+            cache
+                .reserved_memory_bytes()
+                .expect("reservation total reads"),
+            0
+        );
     }
 
     #[test]

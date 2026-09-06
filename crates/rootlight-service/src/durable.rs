@@ -280,6 +280,8 @@ pub(super) struct RestoredGeneration {
     pub(super) sources: Vec<RustSourceInput>,
     pub(super) incremental: Option<PreparedIncrementalState>,
     pub(super) operations: Vec<FirstSliceOperationContext>,
+    // Drop payload fields before releasing their aggregate admission charge.
+    pub(super) memory_reservation: Option<super::RestoredMemoryReservation>,
 }
 
 struct RestorePolicy<'a> {
@@ -5727,6 +5729,7 @@ fn restore_generation(
         sources,
         incremental,
         operations: Vec::new(),
+        memory_reservation: None,
     })
 }
 
