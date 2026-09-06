@@ -831,6 +831,7 @@ fn preflight_lowering_limits(
 
     let mut entity_candidates = 0_usize;
     let mut occurrence_candidates = 0_usize;
+    let mut lexical_relation_candidates = 0_usize;
     let mut extension_candidates = 0_usize;
     let mut skipped_candidates = included_range_gap_count(
         request.source().source_ref().span(),
@@ -886,6 +887,12 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+            if request.language().as_str() == "lua"
+                && parse_output.report().coverage().status() == CoverageStatus::Complete
+                && fact.syntax_kind().as_str() == "lua.identifier.reference"
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+            }
         }
         if is_definition_capture(fact) {
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
@@ -989,9 +996,10 @@ fn preflight_lowering_limits(
         occurrence_candidates,
         limits.max_occurrences,
     )?;
+    let relation_candidates = checked_add(entity_candidates, lexical_relation_candidates)?;
     require_resource_limit(
         ResourceKind::Records,
-        entity_candidates,
+        relation_candidates,
         limits.max_relations,
     )?;
     require_resource_limit(
@@ -1010,7 +1018,7 @@ fn preflight_lowering_limits(
         2,
         entity_candidates,
         occurrence_candidates,
-        entity_candidates,
+        relation_candidates,
         8,
         skipped_candidates,
         diagnostic_count,
@@ -1138,6 +1146,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .map(|fact| (fact.local_id(), fact))
             .collect();
         let terminal_call_names = terminal_call_names(self.parse_output.facts(), cancellation)?;
+        // A truncated capture plan may omit a shadowing declaration. Exact lexical
+        // targets require a complete plan even when remaining text is readable.
+        let lua_bindings = if self.request.language().as_str() == "lua"
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            let symbols = materialized
+                .values()
+                .filter_map(|entity| {
+                    entity
+                        .definition_local_id
+                        .map(|definition| (definition, entity.record.id))
+                })
+                .collect();
+            Some(crate::lua_bindings::LuaBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
 
         let file_claim = FileIdentityClaim {
             file: file.id,
@@ -1301,7 +1332,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .flatten()
                     .and_then(|local_id| materialized.get(&local_id))
                     .map(|entity| entity.record.id);
-                let occurrence = unresolved_occurrence(
+                let mut occurrence = unresolved_occurrence(
                     fact,
                     role,
                     enclosing,
@@ -1310,6 +1341,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     source.clone(),
                     resolution_text,
                 )?;
+                if let Some(bindings) = &lua_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
                 let occurrence_id = occurrence.id;
                 occurrences.insert(occurrence_id, occurrence);
                 if fact.kind() == SyntaxFactKind::Comment
@@ -1567,7 +1607,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             (self.request.language().as_str() == "lua"
                                 && matches!(
                                     fact.syntax_kind().as_str(),
-                                    "lua.file.scope" | "lua.block.scope" | "lua.function.scope"
+                                    "lua.file.scope"
+                                        | "lua.block.scope"
+                                        | "lua.function.scope"
+                                        | "lua.for.scope"
+                                        | "lua.repeat.scope"
                                 ))
                             .then(|| *blake3::hash(b"rootlight.lua-lexical-scope/1\0").as_bytes())
                         });
@@ -2149,7 +2193,11 @@ fn scope_identity(
 ) -> Result<[u8; 32], AdapterError> {
     if matches!(
         syntax_kind,
-        "lua.file.scope" | "lua.block.scope" | "lua.function.scope"
+        "lua.file.scope"
+            | "lua.block.scope"
+            | "lua.function.scope"
+            | "lua.for.scope"
+            | "lua.repeat.scope"
     ) {
         let mut hasher = blake3::Hasher::new_derive_key("rootlight.lua-lexical-scope-identity/1");
         if let Some(parent) = parent {
@@ -2324,6 +2372,27 @@ fn terminal_call_names(
         .into_iter()
         .filter_map(|(call, name)| name.map(|name| (call, name)))
         .collect())
+}
+
+fn lexical_reference_relation(
+    occurrence: &OccurrenceRecord,
+    symbol: SymbolId,
+) -> Result<RelationRecord, AdapterError> {
+    let mut record = RelationRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: occurrence.source.repository(),
+        generation: occurrence.source.generation(),
+        subject: RelationEndpoint::Occurrence(occurrence.id),
+        predicate: RelationPredicate::RefersTo,
+        object: RelationEndpoint::Entity(symbol),
+        confidence: occurrence.confidence,
+        evidence_kind: EvidenceKind::Derived,
+        provenance: occurrence.provenance,
+        evidence: direct_evidence(occurrence.source.clone()),
+    };
+    record.id = derive_relation_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+    Ok(record)
 }
 
 fn containment_relation(

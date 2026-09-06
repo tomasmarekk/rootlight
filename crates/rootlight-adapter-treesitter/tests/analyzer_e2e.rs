@@ -24,8 +24,8 @@ use rootlight_ids::{GenerationId, RepositoryId, SymbolId, content_hash, derive_r
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
     ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, OccurrenceRole,
-    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate, SkippedRegionReason,
-    SourceRef, SourceSpan, decode_ir_document, validate_ir_document,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationEndpoint, RelationPredicate,
+    SkippedRegionReason, SourceRef, SourceSpan, decode_ir_document, validate_ir_document,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -425,6 +425,174 @@ fn reviewed_queries_preserve_explicit_call_sites() {
             "{} reviewed query omitted every call site",
             case.name
         );
+    }
+}
+
+#[test]
+fn lua_local_references_obey_visibility_shadowing_and_closure_boundaries() {
+    let source = "local outer = 1\nlocal index = 4\ndo\n  local outer = outer\n  local function capture(parameter)\n    local snapshot = outer\n    local recursive = capture\n    return parameter\n  end\n  local assigned = function() return assigned end\nend\nrepeat\n  local ready = outer\nuntil ready\nfor index = index, 8 do\n  consume(index)\nend\nreturn outer\n";
+    assert_lua_reference_bindings(
+        source,
+        &[
+            ("local outer = outer", "outer", Some("local outer = 1")),
+            (
+                "local snapshot = outer",
+                "outer",
+                Some("local outer = outer"),
+            ),
+            (
+                "local recursive = capture",
+                "capture",
+                Some("local function capture"),
+            ),
+            ("return parameter", "parameter", Some("parameter)")),
+            ("return assigned", "assigned", None),
+            ("local ready = outer", "outer", Some("local outer = 1")),
+            ("until ready", "ready", Some("local ready")),
+            ("for index = index", "index", Some("local index")),
+            ("consume(index)", "index", Some("index = index")),
+            ("return outer", "outer", Some("local outer = 1")),
+        ],
+    );
+}
+
+#[test]
+fn lua_implicit_self_and_unavailable_inner_bindings_do_not_resolve_to_outer_names() {
+    let source = "local self = {}\nlocal value = 0\nfunction M:run() return self end\nfunction M:explicit(self) return self end\ndo local value = 1; consume(value) end\ndo local value = 2; consume(value) end\nreturn value\n";
+    assert_lua_reference_bindings(
+        source,
+        &[
+            ("return self", "self", None),
+            (
+                "explicit(self) return self",
+                "self",
+                Some("self) return self"),
+            ),
+            ("value = 1; consume(value)", "value", None),
+            ("value = 2; consume(value)", "value", None),
+            ("return value", "value", Some("local value = 0")),
+        ],
+    );
+}
+
+#[test]
+fn lua_computed_keys_resolve_but_literal_keys_and_runtime_calls_do_not() {
+    let source = "local key = 1\nlocal record = { key = key, [key] = key }\nlocal literal = record.key\nlocal method = record:key()\n::key::\ngoto key\n";
+    assert_lua_reference_bindings(
+        source,
+        &[
+            ("key = key,", "key", Some("local key")),
+            ("[key]", "key", Some("local key")),
+            ("[key] = key", "key", Some("local key")),
+            ("literal = record", "record", Some("local record")),
+            ("method = record", "record", Some("local record")),
+        ],
+    );
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(LUA_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, LUA_CASE);
+    let request = request(&fixture.snapshot, &fixture.source, LUA_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    for (marker, offset) in [
+        ("key = key,", 0),
+        ("record.key", "record.".len()),
+        ("::key::", 2),
+        ("goto key", "goto ".len()),
+    ] {
+        let start = source.find(marker).expect("literal key exists") + offset;
+        assert!(!output.document().occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Reference
+                && occurrence.source.span().start_byte()
+                    == u64::try_from(start).expect("offset fits")
+        }));
+    }
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+}
+
+#[test]
+fn lua_bounded_capture_plans_do_not_assert_exact_lexical_targets() {
+    let source = format!(
+        "local value = 0\ndo\n local value = value\n{}end\nreturn value\n",
+        " value = value\n".repeat(40)
+    );
+    let provider = Arc::new(provider());
+    let limits = limits_with_syntax_records(48);
+    let fixture = Fixture::new(LUA_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, LUA_CASE);
+    let request = request(&fixture.snapshot, &fixture.source, LUA_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+    let references = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect::<Vec<_>>();
+    assert!(
+        !references.is_empty(),
+        "bounded text references remain available"
+    );
+    assert!(
+        references
+            .iter()
+            .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+fn assert_lua_reference_bindings(source: &str, expected: &[(&str, &str, Option<&str>)]) {
+    let case = LUA_CASE;
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(case, source.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let document = output.document();
+    for &(marker, name, declaration) in expected {
+        let start = source.find(marker).expect("reference marker exists")
+            + marker.rfind(name).expect("reference name exists");
+        let occurrence = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.source.span().start_byte()
+                        == u64::try_from(start).expect("fixture offset fits")
+                    && occurrence.source.span().end_byte()
+                        == u64::try_from(start + name.len()).expect("fixture end fits")
+            })
+            .expect("exact Lua reference is retained");
+        if let Some(declaration) = declaration {
+            let expected_start =
+                u64::try_from(source.find(declaration).expect("declaration marker exists"))
+                    .expect("fixture offset fits");
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == name
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().start_byte() == expected_start)
+                })
+                .expect("source-backed lexical binding exists");
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol: entity.id },
+                "{marker}"
+            );
+        } else {
+            assert!(
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+                "{marker}"
+            );
+        }
     }
 }
 
@@ -1276,12 +1444,27 @@ fn assert_contract(
             && entity.provenance == provenance.id
             && entity.evidence.source.is_some()
     }));
-    assert!(
-        document
-            .relations
+    for relation in &document.relations {
+        if relation.predicate == RelationPredicate::Contains {
+            continue;
+        }
+        assert_eq!(case.name, "lua");
+        assert_eq!(relation.predicate, RelationPredicate::RefersTo);
+        let RelationEndpoint::Occurrence(id) = relation.subject else {
+            panic!("lexical relationship retains an occurrence endpoint");
+        };
+        let occurrence = document
+            .occurrences
             .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
-    );
+            .find(|occurrence| occurrence.id == id)
+            .expect("lexical relationship occurrence exists");
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            panic!("lexical relationship has an exact binding target");
+        };
+        assert_eq!(occurrence.role, OccurrenceRole::Reference);
+        assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
+        assert_eq!(relation.evidence.source.as_ref(), Some(&occurrence.source));
+    }
     assert!(
         document
             .relations

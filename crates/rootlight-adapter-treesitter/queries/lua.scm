@@ -5,6 +5,9 @@
 (chunk) @root @module @scope
 (block) @scope
 (for_statement) @scope
+(repeat_statement) @scope
+; This boundary keeps initializer reads outside the newly declared bindings.
+(variable_declaration) @scope
 (parameters name: (identifier) @declaration @definition)
 (for_numeric_clause name: (identifier) @declaration @definition)
 (for_generic_clause (variable_list name: (identifier) @declaration @definition))
@@ -56,6 +59,8 @@
 (function_call name: (dot_index_expression field: (identifier) @call_name))
 (function_call name: (method_index_expression method: (identifier) @call_name))
 (identifier) @reference
+(dot_index_expression) @reference
+(method_index_expression) @reference
 (comment) @comment
 ((comment) @documentation (#match? @documentation "^---"))
 (string) @string

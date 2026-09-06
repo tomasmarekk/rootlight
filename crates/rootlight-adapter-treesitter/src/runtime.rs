@@ -1604,7 +1604,7 @@ fn normalize_query_candidates(
     })
 }
 
-fn sort_cancellable_by<T: Copy>(
+pub(super) fn sort_cancellable_by<T: Copy>(
     values: &mut Vec<T>,
     cancellation: &Cancellation,
     compare: impl Fn(&T, &T) -> std::cmp::Ordering + Copy,

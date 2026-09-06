@@ -499,12 +499,10 @@ impl QueryPack {
                     .ok_or_else(|| query_failure("query-capture-role"))?;
                 if input.family == GrammarFamily::Lua
                     && role == StructuralRole::Reference
-                    && capture
-                        .node
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == "attribute")
+                    && lua_nonlexical_identifier(capture.node)
                 {
-                    // Attribute identifiers describe a binding, not a lexical reference.
+                    // Member accesses retain their complete qualified capture;
+                    // literal keys, labels and binding attributes are not lexical reads.
                     continue;
                 }
                 retain(candidate_for_capture(
@@ -678,7 +676,9 @@ fn is_c_function_prototype(node: tree_sitter::Node<'_>) -> bool {
 fn lua_declaration_syntax(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<&'static str> {
     Some(match node.kind() {
         "function_declaration" => {
-            if node
+            if node.child(0).is_some_and(|child| child.kind() == "local") {
+                "lua.local_function"
+            } else if node
                 .child_by_field_name("name")
                 .is_some_and(|name| name.kind() == "method_index_expression")
             {
@@ -687,7 +687,8 @@ fn lua_declaration_syntax(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<
                 "lua.function"
             }
         }
-        "assignment_statement" | "field" => "lua.function",
+        "assignment_statement" => "lua.function",
+        "field" => "lua.field_function",
         "identifier"
             if node
                 .parent()
@@ -712,6 +713,22 @@ fn lua_declaration_syntax(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<
             })
         }
         _ => return None,
+    })
+}
+
+fn lua_nonlexical_identifier(node: tree_sitter::Node<'_>) -> bool {
+    if node.kind() != "identifier" {
+        return false;
+    }
+    node.parent().is_some_and(|parent| match parent.kind() {
+        "attribute" | "label_statement" | "goto_statement" => true,
+        "dot_index_expression" => parent.child_by_field_name("field") == Some(node),
+        "method_index_expression" => parent.child_by_field_name("method") == Some(node),
+        "field" => {
+            parent.child_by_field_name("name") == Some(node)
+                && parent.child(0).is_some_and(|child| child.kind() != "[")
+        }
+        _ => false,
     })
 }
 
@@ -749,14 +766,15 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
         (GrammarFamily::Lua, "chunk") => Some("lua.file"),
-        (GrammarFamily::Lua, "block" | "for_statement") => Some("lua.block"),
+        (GrammarFamily::Lua, "block") => Some("lua.block"),
+        (GrammarFamily::Lua, "for_statement") => Some("lua.for"),
+        (GrammarFamily::Lua, "repeat_statement") => Some("lua.repeat"),
         (GrammarFamily::Lua, "function_declaration" | "function_definition") => {
             Some("lua.function")
         }
         (GrammarFamily::Lua, "parameters") => Some("lua.parameters"),
-        (GrammarFamily::Lua, "variable_declaration" | "assignment_statement") => {
-            Some("lua.variable")
-        }
+        (GrammarFamily::Lua, "variable_declaration") => Some("lua.local_binding"),
+        (GrammarFamily::Lua, "assignment_statement") => Some("lua.variable"),
         (GrammarFamily::Lua, "field") => Some("lua.field"),
         (GrammarFamily::Lua, "identifier") => Some("lua.identifier"),
         (GrammarFamily::Lua, "dot_index_expression" | "method_index_expression") => {

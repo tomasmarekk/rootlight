@@ -8,6 +8,7 @@
 mod config;
 mod incremental;
 mod lowering;
+mod lua_bindings;
 mod pool;
 mod query_pack;
 mod registry;

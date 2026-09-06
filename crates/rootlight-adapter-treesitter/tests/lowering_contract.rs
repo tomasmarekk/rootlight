@@ -284,6 +284,124 @@ fn missing_java_field_definition_is_reserved_in_preflight_quotas() {
 }
 
 #[test]
+fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
+    const LUA: &str = "local value = 1\nreturn value\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(LUA, "src/module.lua", b"lua-lexical-quota-fixture");
+    let facts = [
+        (1, None, SyntaxFactKind::Root, LUA, 0, 0, "lua.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            LUA,
+            0,
+            1,
+            "lua.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            LUA,
+            0,
+            2,
+            "lua.file.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "local value = 1",
+            0,
+            3,
+            "lua.local_binding.scope",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Declaration,
+            "local value = 1",
+            0,
+            4,
+            "lua.variable.declaration",
+        ),
+        (
+            6,
+            Some(5),
+            SyntaxFactKind::Occurrence,
+            "value",
+            0,
+            5,
+            "lua.identifier.definition",
+        ),
+        (
+            7,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            3,
+            "lua.identifier.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(LUA, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect::<Vec<_>>();
+    let language = LanguageId::new("lua").expect("Lua language is valid");
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        language.clone(),
+        &limits(IrLimits::default()),
+        facts.clone(),
+    )
+    .expect("source-backed Lua references lower");
+    assert_eq!(
+        output
+            .document()
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+            .count(),
+        1
+    );
+    for total_quota in [false, true] {
+        let mut ir = IrLimits::default();
+        let (expected_observed, expected_limit) = if total_quota {
+            ir.max_total_records = 22;
+            (23, 22)
+        } else {
+            ir.max_relations = 2;
+            (3, 2)
+        };
+        let error = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(ir),
+            facts.clone(),
+        )
+        .expect_err("lexical relation is reserved before output materializes");
+        assert!(
+            matches!(error, AdapterError::Sink(SinkError::StreamLimit {
+            resource: rootlight_adapter_sdk::ResourceKind::Records, observed, limit,
+        }) if observed == expected_observed && limit == expected_limit),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn rust_impl_without_reviewed_owner_capture_becomes_an_explicit_gap() {
     const RUST: &str = "impl A { fn same(&self) {} }\n";
     let (_temporary, snapshot, source) =

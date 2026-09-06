@@ -205,7 +205,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/9";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/10";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -25515,6 +25515,77 @@ mod tests {
             )
             .expect("Lua structural symbol explains");
         assert_eq!(explained.data.entity.canonical_name, "transform");
+        let reference_start = u64::try_from(source.rfind("transform").expect("reference exists"))
+            .expect("fixture offset fits");
+        let bound_reference = explained
+            .data
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.source.span().start_byte() == reference_start
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: explained.data.entity.id,
+                        }
+            })
+            .expect("published query retains the exact lexical target outside its declaration");
+        assert_eq!(bound_reference.source.generation(), receipt.generation);
+        let reference_read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![bound_reference.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("published lexical reference reads exactly");
+        assert_eq!(reference_read.data.chunks[0].bytes, b"transform");
+        let parameter = generation
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "value")
+            .expect("Lua parameter has a source-backed identity");
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([explained.data.entity.id]),
+                vec![RelationFamily::References],
+                Some(RelationDirection::Outbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("Lua lexical relationships query succeeds");
+        let edge = relationships
+            .data
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .find(|edge| edge.symbol == parameter.id)
+            .expect("function reference to its lexical parameter is queryable");
+        let value_start = u64::try_from(
+            source
+                .find("return value")
+                .expect("parameter reference exists")
+                + "return ".len(),
+        )
+        .expect("fixture offset fits");
+        assert!(
+            edge.source_refs
+                .iter()
+                .any(|reference| reference.generation() == receipt.generation
+                    && reference.span().start_byte() == value_start
+                    && reference.span().end_byte() == value_start + 5)
+        );
+        assert!(
+            !relationships.data.exact,
+            "local bindings do not prove complete Lua semantics"
+        );
         let definition = service
             .source_read_with_options_and_budget(
                 receipt.generation,

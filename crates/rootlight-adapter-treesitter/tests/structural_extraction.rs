@@ -152,14 +152,7 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
             references.sort_unstable();
             assert_eq!(
                 references,
-                [
-                    b"M".as_slice(),
-                    b"M",
-                    b"dependency",
-                    b"require",
-                    b"run",
-                    b"value"
-                ]
+                [b"M".as_slice(), b"M", b"dependency", b"require", b"value"]
             );
         }
     }
@@ -994,7 +987,8 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("lua.file.scope", 1),
             ("lua.function.scope", 1),
             ("lua.identifier.definition", 3),
-            ("lua.identifier.reference", 6),
+            ("lua.identifier.reference", 5),
+            ("lua.local_binding.scope", 2),
             ("lua.method.declaration", 1),
             ("lua.parameter.declaration", 1),
             ("lua.parameters.signature", 1),
