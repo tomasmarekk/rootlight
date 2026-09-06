@@ -10931,7 +10931,7 @@ impl FirstSliceService {
             language.push_str(canonical);
         }
         if mode == LocateMode::Text && path_prefixes.len() == 1 {
-            let source_documents = self.scoped_partial_source_documents(
+            let source_documents = self.scoped_source_documents(
                 lease.generation(),
                 generation,
                 &path_prefixes[0],
@@ -10981,7 +10981,7 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))
     }
 
-    fn scoped_partial_source_documents(
+    fn scoped_source_documents(
         &self,
         snapshot: &rootlight_storage::GenerationSnapshot,
         generation: GenerationId,
@@ -11007,16 +11007,9 @@ impl FirstSliceService {
         if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64 {
             return Ok(None);
         }
-        let has_partial_diagnostic = snapshot.document().diagnostics.iter().any(|diagnostic| {
-            diagnostic.coverage_effect != CoverageStatus::Complete
-                && diagnostic
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.span().file() == file.id)
-        });
-        if !has_partial_diagnostic {
-            return Ok(None);
-        }
+        // Structural completeness does not imply that comments or body text
+        // were projected into the symbol index. An exact file scope admits the
+        // same bounded immutable source lookup regardless of parser diagnostics.
         let retained = self
             .source_snapshots
             .snapshots(generation)
@@ -25452,6 +25445,69 @@ mod tests {
                 && gap.language.as_deref() == Some("css")
                 && gap.files == 1
         }));
+    }
+
+    #[test]
+    fn scoped_text_retrieves_source_without_partial_diagnostics() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "// headerOnlyToken\npub fn ordinary_value() -> u32 { 1 }\n";
+        fs::write(fixture.path().join("value.rs"), source).expect("source writes");
+        fs::write(
+            fixture.path().join("other.rs"),
+            "// foreignOnlyToken\npub fn unrelated_value() -> u32 { 2 }\n",
+        )
+        .expect("negative-control source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("structural fixture publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable source restores");
+            }
+            for (query, expected) in [("headerOnlyToken", true), ("foreignOnlyToken", false)] {
+                let located = service
+                    .code_locate_with_filters_and_budget(
+                        receipt.generation,
+                        query.to_owned(),
+                        LocateMode::Text,
+                        Vec::new(),
+                        vec!["value.rs".to_owned()],
+                        8,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("exact source scope executes");
+                let hit = located.data.hits.iter().find(|hit| hit.symbol.is_none());
+                assert_eq!(
+                    hit.is_some(),
+                    expected,
+                    "restored={restored}, query={query}"
+                );
+                if let Some(hit) = hit {
+                    assert_eq!(hit.path, "value.rs");
+                    let reference = hit.source.clone().expect("file hit has source evidence");
+                    let read = service
+                        .source_read(receipt.generation, vec![reference], &deadline())
+                        .expect("generation-bound source read executes");
+                    assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+                }
+            }
+        }
     }
 
     #[test]

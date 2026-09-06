@@ -384,7 +384,7 @@ pub fn project_lexical_documents_with_sources(
 ///
 /// Keeping both document kinds in one ephemeral index lets a path-scoped text
 /// query recover omitted source while preserving any structural symbols that
-/// were successfully indexed for the same partially covered file.
+/// were successfully indexed for the same file.
 ///
 /// # Errors
 ///
