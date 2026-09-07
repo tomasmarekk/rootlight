@@ -16,7 +16,8 @@ pub(super) struct Anchor {
     pub(super) ordinal: u64,
 }
 
-pub(super) struct Bindings {
+#[derive(Default)]
+pub(in super::super) struct Bindings {
     pub(super) anchors: HashMap<u64, Anchor>,
     pub(super) aliases: HashMap<u64, u64>,
 }

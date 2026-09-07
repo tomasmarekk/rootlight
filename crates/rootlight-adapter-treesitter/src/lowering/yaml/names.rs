@@ -12,6 +12,7 @@ pub(in super::super) struct Key {
 
 #[derive(Default)]
 pub(in super::super) struct Names {
+    pub(in super::super) bindings: super::Bindings,
     pub(in super::super) keys: HashMap<u64, Option<Key>>,
     pub(in super::super) owners: HashMap<u64, u64>,
     pub(in super::super) warnings: Vec<(SourceSpan, &'static str)>,
@@ -29,6 +30,7 @@ impl Names {
         facts: &[SyntaxFact],
         source: &str,
         maximum: usize,
+        complete_parse: bool,
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
         let mut ordered: Vec<_> = facts.iter().collect();
@@ -37,10 +39,14 @@ impl Names {
         })?;
         let mut documents = HashMap::<u64, Option<u64>>::new();
         let mut properties = HashMap::<u64, Option<SourceSpan>>::new();
+        let mut collections = HashMap::<u64, Option<SourceSpan>>::new();
         let mut property_ids = HashMap::<u64, Option<u64>>::new();
         let mut contexts = HashMap::<u64, Document<'_>>::new();
         let mut document_spans = HashMap::new();
-        let mut result = Self::default();
+        let mut result = Self {
+            bindings: super::Bindings::new(facts, source, maximum, cancellation)?,
+            ..Self::default()
+        };
         for fact in &ordered {
             cancellation.check()?;
             let mut document = fact
@@ -49,14 +55,21 @@ impl Names {
             let mut property = fact
                 .parent()
                 .and_then(|parent| properties.get(&parent).copied().flatten());
+            let mut collection = fact
+                .parent()
+                .and_then(|parent| collections.get(&parent).copied().flatten());
             let mut property_id = fact
                 .parent()
                 .and_then(|parent| property_ids.get(&parent).copied().flatten());
             match fact.syntax_kind().as_str() {
                 "yaml.document.scope" => {
                     document = Some(fact.local_id());
+                    collection = None;
                     contexts.entry(fact.local_id()).or_default();
                     document_spans.insert(fact.local_id(), fact.span());
+                }
+                "yaml.mapping.scope" | "yaml.sequence.scope" => {
+                    collection = Some(fact.span());
                 }
                 "yaml.property.declaration" => {
                     property = Some(fact.span());
@@ -97,6 +110,7 @@ impl Names {
             }
             documents.insert(fact.local_id(), document);
             properties.insert(fact.local_id(), property);
+            collections.insert(fact.local_id(), collection);
             property_ids.insert(fact.local_id(), property_id);
         }
         let mut decoded = HashMap::new();
@@ -116,6 +130,24 @@ impl Names {
             }
             decoded.insert(id, context);
         }
+        let mut anchor_nodes = HashMap::new();
+        let mut alias_nodes = HashMap::new();
+        if complete_parse {
+            for fact in facts {
+                cancellation.check()?;
+                if result.bindings.anchors.contains_key(&fact.local_id()) {
+                    anchor_nodes.insert(fact.local_id(), fact);
+                }
+                if let Some(target) = result.bindings.aliases.get(&fact.local_id())
+                    && let Some(start) = fact.span().start_byte().checked_sub(1)
+                {
+                    alias_nodes.insert((start, fact.span().end_byte()), *target);
+                }
+            }
+        }
+        // A scalar anchor is decoded at most once, even when many keys use it.
+        // Alias and target evidence remain distinct; no alias graph is expanded.
+        let mut anchor_values = HashMap::new();
         for fact in ordered {
             cancellation.check()?;
             if !matches!(
@@ -132,7 +164,29 @@ impl Names {
                 .and_then(Option::as_ref)
                 .and_then(|context| {
                     let parent = properties.get(&fact.local_id()).copied().flatten()?;
-                    let (scalar, span) = node_scalar(context, source, fact, parent, maximum)?;
+                    let (scalar, span) = if let Some(target) =
+                        alias_nodes.get(&(fact.span().start_byte(), fact.span().end_byte()))
+                    {
+                        let scalar = anchor_values
+                            .entry(*target)
+                            .or_insert_with(|| {
+                                let anchor = anchor_nodes.get(target)?;
+                                let context = documents
+                                    .get(target)
+                                    .copied()
+                                    .flatten()
+                                    .and_then(|id| decoded.get(&id))?
+                                    .as_ref()?;
+                                let parent = collections.get(target).copied().flatten();
+                                node_scalar(context, source, anchor, parent, maximum)
+                                    .map(|(scalar, _)| scalar)
+                            })
+                            .as_ref()?
+                            .clone();
+                        (scalar, fact.span())
+                    } else {
+                        node_scalar(context, source, fact, Some(parent), maximum)?
+                    };
                     if scalar.has_unrecognized_tag() {
                         result
                             .warnings
@@ -153,7 +207,7 @@ fn node_scalar(
     context: &YamlDocumentContext<'_>,
     source: &str,
     fact: &SyntaxFact,
-    parent: SourceSpan,
+    parent: Option<SourceSpan>,
     maximum: usize,
 ) -> Option<(rootlight_adapter_sdk::YamlScalarIdentity, SourceSpan)> {
     if fact.syntax_kind().as_str() == "yaml.empty_key.definition" {
@@ -200,7 +254,10 @@ fn node_scalar(
         let block = YamlBlockScalar::parse(
             source,
             start..end,
-            Some(column(source, parent.start_byte())?),
+            match parent {
+                Some(parent) => Some(column(source, parent.start_byte())?),
+                None => None,
+            },
             maximum,
         )?;
         let span = SourceSpan::new(

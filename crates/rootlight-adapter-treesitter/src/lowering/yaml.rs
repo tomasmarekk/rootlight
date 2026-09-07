@@ -6,6 +6,7 @@ use super::*;
 
 mod bindings;
 pub(super) mod names;
+pub(super) use bindings::Bindings;
 
 pub(super) struct Plan {
     pub(super) duplicates: BTreeSet<u64>,
@@ -21,14 +22,13 @@ struct Address {
 
 pub(super) fn resolve(
     facts: &[SyntaxFact],
-    source: &str,
+    bindings: Bindings,
     drafts: &mut HashMap<u64, EntityDraft>,
     unsupported: &mut BTreeSet<u64>,
     strings: &mut usize,
     limits: &IrLimits,
     cancellation: &Cancellation,
 ) -> Result<Plan, AdapterError> {
-    let bindings = bindings::Bindings::new(facts, source, limits.max_string_bytes, cancellation)?;
     let mut arena = Arena(vec![Address {
         digest: [0; 32],
         qualified: String::new(),

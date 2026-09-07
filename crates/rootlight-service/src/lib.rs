@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/22";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/23";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -26037,6 +26037,16 @@ mod tests {
             "yaml",
             "data.yaml",
             "key: 101\nitems: [null, &entry {key: 303}, {\"k\\u0065y\": 202}, {key: 404}, *entry]\n'': 5\n' ': 6\n",
+            ["key: 303", "key: 3030"],
+        );
+    }
+
+    #[test]
+    fn yaml_scalar_alias_keys_survive_durable_restore() {
+        data_properties_survive_durable_restore(
+            "yaml",
+            "data.yaml",
+            "key: 101\nitems: [null, {&entry key: 303}, {\"k\\u0065y\": 202}, {*entry : 404}]\n'': 5\n' ': 6\n",
             ["key: 303", "key: 3030"],
         );
     }

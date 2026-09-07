@@ -352,3 +352,223 @@ fn yaml_native_anchor_keys_and_cycles_keep_separate_definition_owners() {
             .all(|alias| matches!(alias.target, OccurrenceTarget::Resolved { .. }))
     );
 }
+
+#[test]
+fn yaml_native_scalar_alias_keys_construct_the_anchored_value_and_keep_alias_sources() {
+    for (source, expected) in [
+        ("base: &key name\n*key : value\n", "str:\"name\""),
+        ("base: &key !!int '0xB'\n*key : value\n", "int:11"),
+        ("base: &key\n*key : value\n", "null:null"),
+        ("base: &key !!str\n*key : value\n", "str:\"\""),
+        (
+            "base: &key |+\n  first\n\n*key : value\n",
+            "str:\"first\\u000a\\u000a\"",
+        ),
+        (
+            "base:\n  - &key >-\n    first\n    second\n*key : value\n",
+            "str:\"first second\"",
+        ),
+        (
+            "%TAG !e! tag:yaml.org,2002:\n---\nbase: &key !e!str true\n*key : value\n",
+            "str:\"true\"",
+        ),
+        (
+            "first: &key old\nsecond: &key new\n*key : value\n",
+            "str:\"new\"",
+        ),
+        ("{base: &key name, *key : value}", "str:\"name\""),
+        ("{base: &key name, *key}", "str:\"name\""),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{source:?}: {:?}",
+            document.diagnostics
+        );
+        assert!(
+            document.skipped_regions.is_empty(),
+            "{source:?}: {:?}",
+            document.skipped_regions
+        );
+        let key = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Property && entity.canonical_name == expected)
+            .unwrap_or_else(|| panic!("missing {expected:?} in {source:?}"));
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: key.id })
+            })
+            .unwrap();
+        let start = usize::try_from(definition.source.span().start_byte()).unwrap();
+        let end = usize::try_from(definition.source.span().end_byte()).unwrap();
+        assert_eq!(&source[start..end], "*key");
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .any(
+                    |occurrence| occurrence.syntax_kind == "yaml.alias.reference"
+                        && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+                )
+        );
+    }
+}
+
+#[test]
+fn yaml_native_scalar_alias_key_identity_matches_literal_and_changes_with_target() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, YAML);
+    let mut fixture = Fixture::new(YAML, b"base: &key name\nname: one\n");
+    let mut ids = Vec::new();
+    for source in [
+        "base: &key name\nname: one\n",
+        "base: &key name\n*key : two\n",
+        "base: &key 'name'\n*key : three\n",
+        "base: &key other\n*key : three\n",
+    ] {
+        fixture = fixture.rewrite(source.as_bytes());
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, YAML, &limits()),
+            &ExtensionSupport::default(),
+        );
+        assert!(result.document().diagnostics.is_empty());
+        assert!(
+            result.document().skipped_regions.is_empty(),
+            "{:?}",
+            result.document().skipped_regions
+        );
+        let key = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Property && entity.canonical_name != "str:\"base\""
+            })
+            .unwrap();
+        ids.push(key.id);
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .all(|occurrence| occurrence.source.generation() == fixture.source.generation())
+        );
+    }
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(ids[1], ids[2]);
+    assert_ne!(ids[2], ids[3]);
+}
+
+#[test]
+fn yaml_native_unavailable_or_nonscalar_alias_keys_leave_local_gaps() {
+    for source in [
+        "base: &key name\n---\n*key : value\nsafe: value\n",
+        "*key : value\nbase: &key name\nsafe: value\n",
+        "base: &key [name]\n*key : value\nsafe: value\n",
+        "base: &key {*key : value}\nsafe: value\n",
+    ] {
+        let result = output(source);
+        assert!(result.document().diagnostics.is_empty(), "{source:?}");
+        assert!(!result.document().skipped_regions.is_empty(), "{source:?}");
+        assert!(
+            result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "str:\"safe\"")
+        );
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Property
+                    && entity.canonical_name == "str:\"name\"")
+        );
+    }
+}
+
+#[test]
+fn yaml_native_alias_key_duplicates_and_unknown_tags_remain_source_scoped() {
+    for (source, detail) in [
+        (
+            "&key name: first\n*key : second\n",
+            "yaml-duplicate-mapping-key",
+        ),
+        (
+            "base: &key !custom name\n*key : value\n",
+            "yaml-key-tag-semantics-unknown",
+        ),
+    ] {
+        let result = output(source);
+        assert!(result.document().diagnostics.is_empty());
+        let gap = result
+            .document()
+            .skipped_regions
+            .iter()
+            .find(|gap| gap.detail == detail)
+            .unwrap();
+        let span = gap.source.span();
+        let start = usize::try_from(span.start_byte()).unwrap();
+        let end = usize::try_from(span.end_byte()).unwrap();
+        assert!(source[start..end].starts_with("*key"));
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Property)
+                .count(),
+            2
+        );
+    }
+}
+
+#[test]
+fn yaml_native_alias_key_artifacts_rebind_source_generation_without_reparsing() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, YAML);
+    let fixture = Fixture::new(YAML, b"base: &key !!int '0xB'\n*key : value\n");
+    let initial_limits = limits();
+    let memory = MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
+    let (initial, artifact) = analyzer
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, YAML, &initial_limits),
+            ExtensionSupport::default(),
+            memory,
+            &deadline(),
+        )
+        .unwrap();
+    let changed = fixture.next_generation();
+    let request = request(&changed.snapshot, &changed.source, YAML, &initial_limits);
+    let fresh = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let replay = analyzer
+        .analyze_from_artifact(
+            &request,
+            &artifact,
+            ExtensionSupport::default(),
+            memory,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    assert_eq!(
+        symbol_ids(initial.document()),
+        symbol_ids(replay.document())
+    );
+    assert!(replay.document().skipped_regions.is_empty());
+    assert!(
+        replay
+            .document()
+            .occurrences
+            .iter()
+            .all(|occurrence| occurrence.source.generation() == changed.source.generation())
+    );
+}

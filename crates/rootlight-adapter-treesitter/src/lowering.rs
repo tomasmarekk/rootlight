@@ -1640,6 +1640,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.parse_output.facts(),
                 self.source_text,
                 self.request.limits().ir().max_string_bytes,
+                self.parse_output.report().coverage().status() == CoverageStatus::Complete,
                 cancellation,
             )?
         } else {
@@ -2016,7 +2017,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let (duplicate_data_keys, yaml_aliases) = if self.request.language().as_str() == "yaml" {
             let plan = yaml::resolve(
                 self.parse_output.facts(),
-                self.source_text,
+                yaml_names.bindings,
                 &mut drafts,
                 &mut unsupported_scope_entities,
                 total_string_bytes,

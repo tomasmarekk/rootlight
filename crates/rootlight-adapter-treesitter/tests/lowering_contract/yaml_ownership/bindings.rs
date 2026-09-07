@@ -379,6 +379,75 @@ fn cached_alias_edges_rebind_generation_and_incomplete_parses_do_not_resolve() {
 }
 
 #[test]
+fn scalar_alias_key_names_require_complete_parse_and_retained_binding_evidence() {
+    let text = "base: &x first\n*x : value\nsafe: value\n";
+    let mut fixture = Fixture::new(text);
+    let document = fixture.add(2, "yaml.document.scope", text, 0);
+    let mapping = fixture.add(document, "yaml.mapping.scope", text, 0);
+    let base = fixture.property(mapping, "base: &x first", "base", 0);
+    fixture.anchor(base, "&x first", "&x", 0);
+    let key = fixture.add(mapping, "yaml.property.declaration", "*x : value", 0);
+    let definition = fixture.add(key, "yaml.node_key.definition", "*x", 0);
+    let reference = fixture.binding_name(definition, "*x", 0);
+    fixture.property(mapping, "safe: value", "safe", 0);
+    let language = LanguageId::new("yaml").unwrap();
+    let limits = limits(IrLimits::default());
+    let request = AnalysisRequest::new(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language.clone(),
+        AnalysisTier::TierD,
+        BuildContextIdentity::new(content_hash(b"build-context")),
+        &limits,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    for (status, retain_reference, expected) in [
+        (CoverageStatus::Complete, true, true),
+        (CoverageStatus::Complete, false, false),
+        (CoverageStatus::Bounded, true, false),
+        (CoverageStatus::Unknown, true, false),
+    ] {
+        let complete = status == CoverageStatus::Complete;
+        let coverage = CoverageReport::new(
+            AnalysisTier::TierD,
+            status,
+            text.len(),
+            text.len() - usize::from(!complete),
+            usize::from(!complete),
+            Vec::new(),
+        )
+        .unwrap();
+        let facts = fixture
+            .facts
+            .iter()
+            .filter(|fact| retain_reference || fact.local_id() != reference)
+            .cloned()
+            .collect();
+        let analyzer = custom_analyzer_with_coverage(language.clone(), facts, coverage);
+        let result = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        assert_eq!(
+            properties(result.document())
+                .iter()
+                .any(|property| property.canonical_name == "str:\"first\""),
+            expected
+        );
+        assert!(
+            properties(result.document())
+                .iter()
+                .any(|property| property.canonical_name == "str:\"safe\"")
+        );
+        assert_eq!(result.document().skipped_regions.is_empty(), expected);
+    }
+}
+
+#[test]
 fn literal_names_and_binding_evidence_obey_existing_output_quotas() {
     for name in [r#"str:"literal""#, "🌍", "a\u{85}b", r"a\u0062"] {
         let text = format!("[&{name} value, *{name}]");
