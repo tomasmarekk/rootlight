@@ -60,11 +60,12 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 5] = [
+const DISTRIBUTION_LICENSES: [&str; 6] = [
     "tree-sitter-cpp-0.23.4-LICENSE",
     "tree-sitter-java-0.23.5-LICENSE",
     "tree-sitter-kotlin-ng-1.1.0-LICENSE",
     "tree-sitter-lua-0.5.0-LICENSE",
+    "tree-sitter-ruby-0.23.1-LICENSE",
     "tree-sitter-typescript-0.23.2-LICENSE",
 ];
 const EXPECTED_WEB_ASSET_TREE: &str = "rootlight-web-ui";

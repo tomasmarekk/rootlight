@@ -292,3 +292,26 @@ offline_behavior = "builds from the Cargo cache without network access; build.rs
 capabilities = ["declarations", "scopes", "occurrences", "call-sites", "comments", "strings"]
 semantic_depth = "structural-only; receiver evaluation, module loading, reference resolution and dynamic dispatch are unresolved"
 audit_notes = ["published crate omits LICENSE.md", "all 18 comparable published files are byte-identical to the release commit", "exact release LICENSE.md is copied into Rootlight distribution notices and hash-verified"]
+
+[[grammars]]
+language = "ruby"
+crate_name = "tree-sitter-ruby"
+crate_version = "0.23.1"
+crates_io_checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
+repository = "https://github.com/tree-sitter/tree-sitter-ruby"
+tag = "v0.23.1"
+commit = "71bd32fb7607035768799732addba884a37a6210"
+parser_sha256 = "4ce468358b6f4e25a35c8cf6bc0eaf60665bc22d602f8c939323c2347255cd15"
+scanner_sha256 = "e7a6196d6e78bf4c6728502e924c867dee5d851c6253e43fcdb8ba169009bc58"
+abi = 14
+analysis_tier = "D"
+license = "MIT"
+license_source = "adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE"
+license_sha256 = "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight Ruby structural and source-identity fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c and scanner.c"
+capabilities = ["declarations", "namespaces", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "structural-only; module loading, metaprogramming, mixins, reference resolution and dynamic dispatch are unresolved"
+audit_notes = ["published crate omits LICENSE", "parser, scanner, grammar and Rust build script are byte-identical to the release commit", "exact release LICENSE is copied into Rootlight distribution notices and hash-verified"]

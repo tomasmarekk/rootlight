@@ -32,7 +32,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 12] = [
+const CASES: [LanguageCase; 13] = [
     LanguageCase {
         name: "structural.rs",
         language: "rust",
@@ -92,6 +92,11 @@ const CASES: [LanguageCase; 12] = [
         name: "structural.lua",
         language: "lua",
         source: include_str!("fixtures/structural/lua_golden.lua"),
+    },
+    LanguageCase {
+        name: "structural.rb",
+        language: "ruby",
+        source: include_str!("fixtures/structural/ruby.rb"),
     },
 ];
 
@@ -156,6 +161,44 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
             );
         }
     }
+}
+
+#[test]
+fn ruby_class_signatures_include_inheritance_without_the_body() {
+    const SOURCE: &[u8] =
+        b"class Simple\n VALUE = 1\nend\nclass Child < Parent::Base\n VALUE = 2\nend\n";
+    let fixture = Fixture::new("models.rb", SOURCE);
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "ruby",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("Ruby class headers parse");
+    assert!(output.diagnostics().is_empty());
+    let headers = output
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "ruby.class.signature")
+        .map(|fact| {
+            let start = usize::try_from(fact.span().start_byte()).expect("span start fits");
+            let end = usize::try_from(fact.span().end_byte()).expect("span end fits");
+            SOURCE.get(start..end).expect("header span is in source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        headers,
+        [b"class Simple".as_slice(), b"class Child < Parent::Base"]
+    );
 }
 
 #[test]
@@ -996,6 +1039,29 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("lua.string.string", 1),
             ("lua.variable.declaration", 2),
         ],
+        "ruby" => &[
+            ("ruby.file.root", 1),
+            ("ruby.file.module", 1),
+            ("ruby.file.scope", 1),
+            ("ruby.block.scope", 4),
+            ("ruby.namespace.declaration", 1),
+            ("ruby.namespace.scope", 1),
+            ("ruby.class.declaration", 1),
+            ("ruby.class.scope", 1),
+            ("ruby.class.signature", 1),
+            ("ruby.method.declaration", 2),
+            ("ruby.method.scope", 2),
+            ("ruby.constant.declaration", 1),
+            ("ruby.variable.declaration", 1),
+            ("ruby.parameter.declaration", 3),
+            ("ruby.parameters.signature", 2),
+            ("ruby.identifier.definition", 9),
+            ("ruby.identifier.reference", 8),
+            ("ruby.call.call", 3),
+            ("ruby.call_name.call_name", 3),
+            ("ruby.comment.documentation", 2),
+            ("ruby.string.string", 3),
+        ],
         _ => panic!("unexpected fixture language"),
     };
     entries
@@ -1030,13 +1096,13 @@ fn assert_required_roles(output: &ParseOutput, language: &str) {
             "fixture omitted required {kind:?} evidence"
         );
     }
-    // Lua module loading is an ordinary, shadowable call, not an import node.
+    // Lua and Ruby module loading use ordinary calls, not import nodes.
     assert_eq!(
         output
             .facts()
             .iter()
             .any(|fact| fact.kind() == SyntaxFactKind::Import),
-        language != "lua"
+        !matches!(language, "lua" | "ruby")
     );
 }
 

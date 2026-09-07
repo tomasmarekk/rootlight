@@ -205,7 +205,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/11";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/12";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -25314,6 +25314,7 @@ mod tests {
             "sample.lua",
             "sample.php",
             "sample.py",
+            "sample.rb",
             "sample.rs",
             "sample.ts",
         ]
@@ -25370,7 +25371,6 @@ mod tests {
             ("script.sh", "bash"),
             ("page.html", "html"),
             ("client.swift", "swift"),
-            ("model.rb", "ruby"),
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("build.scala", "scala"),
@@ -25425,11 +25425,6 @@ mod tests {
                 "classify.m",
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
-            ),
-            (
-                "rails_application.rb",
-                "class RailsApplication\nend\n",
-                "ruby",
             ),
             ("script.pl", "sub render { return 1; }\n", "perl"),
             (
@@ -25513,13 +25508,129 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["css", "swift", "objective-c", "matlab", "ruby", "perl"] {
+        for language in ["css", "swift", "objective-c", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn ruby_published_declarations_preserve_symbols_and_exact_source() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n end\nend\n";
+        fs::write(fixture.path().join("store.rb"), source).expect("Ruby source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Ruby index publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        assert!(generation.document().diagnostics.is_empty());
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "store.rb")
+            .expect("Ruby source file remains represented");
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .expect("Ruby file coverage resolves");
+        assert_eq!(coverage.language, "ruby");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(
+            coverage.status,
+            CoverageStatus::Complete,
+            "{:?}",
+            generation.document().skipped_regions
+        );
+        assert_eq!(coverage.reason, None);
+        let source_read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().expect("Ruby file has source")],
+                &deadline(),
+            )
+            .expect("complete Ruby source reads");
+        assert_eq!(source_read.data.chunks[0].bytes, source.as_bytes());
+        assert_eq!(source_read.data.chunks[0].language, "ruby");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("Ruby repository status resolves");
+        let indexed = status
+            .coverage
+            .iter()
+            .find(|entry| entry.language == "ruby")
+            .expect("Ruby indexing is accounted");
+        assert_eq!((indexed.discovered_files, indexed.indexed_files), (1, 1));
+        for name in ["Garden", "Store", "DEFAULT", "lookup", "self.lookup", "[]"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("Ruby symbol locates");
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .expect("Ruby declaration has a symbol identity");
+            let explained = service
+                .symbol_explain(
+                    receipt.generation,
+                    hit.symbol.expect("symbol exists"),
+                    &deadline(),
+                )
+                .expect("Ruby symbol explains");
+            assert_eq!(explained.data.entity.language, "ruby");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("symbol source exists");
+            assert_eq!(reference.generation(), receipt.generation);
+            let start =
+                usize::try_from(reference.span().start_byte()).expect("fixture offset fits");
+            let end = usize::try_from(reference.span().end_byte()).expect("fixture offset fits");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("Ruby source reads");
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                source
+                    .as_bytes()
+                    .get(start..end)
+                    .expect("source range exists")
+            );
+        }
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("capabilities resolve");
+        let capability = inventory
+            .languages
+            .iter()
+            .find(|entry| entry.language == "ruby")
+            .expect("Ruby capability exists");
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
     }
 
     #[test]

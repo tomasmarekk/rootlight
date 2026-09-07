@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "f81f8163749efbd1902def242e1466507b5626abd5a5fac19783a23ede632674";
+    "735314fb58a3bacb8d2f27fd60adc498d293c6461ab311837caa32f1bbf4c4ca";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -33,7 +33,11 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 const LUA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-lua-0.5.0-LICENSE";
 const LUA_LICENSE_SHA256: &str = "9a32b02e4c917b1ce6b5e79d8ea81e25cefd7f27d89c7235f2afb262c06cf32e";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 12] = [
+const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE";
+const RUBY_LICENSE_SHA256: &str =
+    "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
+
+const EXPECTED_PACKAGES: [(&str, &str, &str); 13] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -90,6 +94,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 12] = [
         "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45",
     ),
     (
+        "tree-sitter-ruby",
+        "0.23.1",
+        "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95",
+    ),
+    (
         "tree-sitter-typescript",
         "0.23.2",
         "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
@@ -120,6 +129,7 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, CPP_LICENSE_PATH, CPP_LICENSE_SHA256)?;
     validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     validate_local_license(root, LUA_LICENSE_PATH, LUA_LICENSE_SHA256)?;
+    validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     Ok(())
 }
 
@@ -140,7 +150,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 12 {
+    if manifest.grammars.len() != 13 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -171,6 +181,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "lua",
         "php",
         "python",
+        "ruby",
         "rust",
         "typescript",
     ]);
@@ -280,6 +291,11 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         && (grammar.audit_notes.len() != 3 || grammar.license_source != LUA_LICENSE_PATH)
     {
         return Err(GrammarLockError::MissingAuditCaveat("lua"));
+    }
+    if grammar.language == "ruby"
+        && (grammar.audit_notes.len() != 3 || grammar.license_source != RUBY_LICENSE_PATH)
+    {
+        return Err(GrammarLockError::MissingAuditCaveat("ruby"));
     }
     Ok(())
 }

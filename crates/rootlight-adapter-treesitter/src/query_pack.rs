@@ -286,8 +286,8 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
-        if family == GrammarFamily::Lua {
-            // Lua's shadowable require function is not an import statement.
+        if matches!(family, GrammarFamily::Lua | GrammarFamily::Ruby) {
+            // A shadowable require call is not a language import statement.
             expected.retain(|name| *name != "import");
         }
         if family == GrammarFamily::Rust {
@@ -614,6 +614,20 @@ fn candidate_for_capture(
             lua_declaration_syntax(capture.node, source)
                 .ok_or_else(|| query_failure("query-lua-declaration-kind"))?
         }
+        StructuralRole::Declaration if family == GrammarFamily::Ruby => match capture.node.kind() {
+            "assignment" => match capture
+                .node
+                .child_by_field_name("left")
+                .map(|node| node.kind())
+            {
+                Some("constant" | "scope_resolution") => "ruby.constant",
+                Some("instance_variable" | "class_variable") => "ruby.field",
+                _ => "ruby.variable",
+            },
+            "identifier" => "ruby.parameter",
+            kind => canonical_syntax(family, kind)
+                .ok_or_else(|| query_failure("query-ruby-declaration-kind"))?,
+        },
         StructuralRole::Declaration
             if family == GrammarFamily::C && is_c_function_prototype(capture.node) =>
         {
@@ -636,6 +650,7 @@ fn candidate_for_capture(
             GrammarFamily::Java => "java.call_name",
             GrammarFamily::Php => "php.call_name",
             GrammarFamily::Lua => "lua.call_name",
+            GrammarFamily::Ruby => "ruby.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -651,13 +666,40 @@ fn candidate_for_capture(
             GrammarFamily::Kotlin => "kotlin.call",
             GrammarFamily::Php => "php.call",
             GrammarFamily::Lua => "lua.call",
+            GrammarFamily::Ruby => "ruby.call",
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
     };
+    let mut start = capture.node.start_byte();
+    let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Ruby
+        && role == StructuralRole::Signature
+        && capture.node.kind() == "class"
+    {
+        // The class header includes inheritance, but body edits must not change
+        // its declaration identity or enter the compact signature projection.
+        end = capture
+            .node
+            .child_by_field_name("superclass")
+            .or_else(|| capture.node.child_by_field_name("name"))
+            .ok_or_else(|| query_failure("query-ruby-class-header"))?
+            .end_byte();
+    }
+    if family == GrammarFamily::Ruby
+        && role == StructuralRole::Definition
+        && let Some(parent) = capture.node.parent()
+        && parent.kind() == "singleton_method"
+        && let Some(receiver) = parent.child_by_field_name("object")
+    {
+        // Singleton and instance methods with the same name are distinct bindings.
+        // Keep the receiver in source-backed identity; dynamic receivers fail the
+        // shared static-name boundary rather than aliasing an instance method.
+        start = receiver.start_byte();
+    }
     Ok(QueryCandidate {
-        start: capture.node.start_byte(),
-        end: capture.node.end_byte(),
+        start,
+        end,
         role,
         syntax,
         required: false,
@@ -768,6 +810,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Java
             | GrammarFamily::Php
             | GrammarFamily::Lua
+            | GrammarFamily::Ruby
     )
 }
 
@@ -777,6 +820,24 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Ruby, "program") => Some("ruby.file"),
+        (GrammarFamily::Ruby, "class") => Some("ruby.class"),
+        (GrammarFamily::Ruby, "module") => Some("ruby.namespace"),
+        (GrammarFamily::Ruby, "method" | "singleton_method") => Some("ruby.method"),
+        (GrammarFamily::Ruby, "singleton_class") => Some("ruby.singleton_class"),
+        (GrammarFamily::Ruby, "body_statement" | "block" | "do_block") => Some("ruby.block"),
+        (GrammarFamily::Ruby, "method_parameters" | "block_parameters") => Some("ruby.parameters"),
+        (
+            GrammarFamily::Ruby,
+            "identifier" | "constant" | "instance_variable" | "class_variable" | "global_variable"
+            | "operator" | "setter",
+        ) => Some("ruby.identifier"),
+        (GrammarFamily::Ruby, "scope_resolution") => Some("ruby.qualified_identifier"),
+        (GrammarFamily::Ruby, "assignment") => Some("ruby.variable"),
+        (GrammarFamily::Ruby, "comment") => Some("ruby.comment"),
+        (GrammarFamily::Ruby, "string" | "heredoc_body" | "simple_symbol" | "delimited_symbol") => {
+            Some("ruby.string")
+        }
         (GrammarFamily::Lua, "chunk") => Some("lua.file"),
         (GrammarFamily::Lua, "block") => Some("lua.block"),
         (GrammarFamily::Lua, "for_statement") => Some("lua.for"),
@@ -1025,7 +1086,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(12);
+        let mut packs = Vec::with_capacity(13);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1045,6 +1106,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Kotlin, include_str!("../queries/kotlin.scm")),
             (GrammarFamily::Php, include_str!("../queries/php.scm")),
             (GrammarFamily::Lua, include_str!("../queries/lua.scm")),
+            (GrammarFamily::Ruby, include_str!("../queries/ruby.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1110,12 +1172,13 @@ mod tests {
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
             GrammarFamily::Lua,
+            GrammarFamily::Ruby,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
-            if family == GrammarFamily::Lua {
+            if matches!(family, GrammarFamily::Lua | GrammarFamily::Ruby) {
                 expected.retain(|name| *name != "import");
             }
             if family == GrammarFamily::Rust {

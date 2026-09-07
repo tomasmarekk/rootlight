@@ -7,3 +7,5 @@
 *.pdf binary
 *.bin binary
 *.desc binary
+# Preserve the audited upstream license bytes, including its final blank line.
+adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE whitespace=-blank-at-eof

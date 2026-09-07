@@ -16,6 +16,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "ruby.namespace.declaration" => {
+            Some(EntityKind::Namespace)
+        }
         SyntaxFactKind::Declaration if label == "java.annotation.declaration" => {
             Some(EntityKind::Interface)
         }
@@ -105,8 +108,10 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 ///
 /// Lua member captures may contain formatting or comments between qualifiers.
 /// Their canonical identity removes only that trivia; the caller must preserve
-/// the original source span. Other languages retain the shared borrowed-name
-/// contract. Non-static or invalid names return `None`, never an invented name.
+/// the original source span. Ruby additionally admits its bracket and division
+/// method operators, including a static singleton receiver. Other languages
+/// retain the shared borrowed-name contract. Non-static or invalid names return
+/// `None`, never an invented name.
 #[must_use]
 pub fn structural_captured_name_for_language<'a>(
     language: &str,
@@ -115,6 +120,22 @@ pub fn structural_captured_name_for_language<'a>(
 ) -> Option<Cow<'a, str>> {
     if language == "lua" {
         crate::lua_names::canonical_lua_name(text, maximum_bytes)
+    } else if language == "ruby" {
+        let candidate = text.trim();
+        let operator = candidate
+            .rsplit_once('.')
+            .map_or(candidate, |(_, name)| name);
+        let static_receiver = candidate.rsplit_once('.').is_none_or(|(receiver, _)| {
+            structural_captured_name(receiver, maximum_bytes) == Some(receiver)
+        });
+        if candidate.len() <= maximum_bytes
+            && static_receiver
+            && matches!(operator, "/" | "[]" | "[]=")
+        {
+            Some(Cow::Borrowed(candidate))
+        } else {
+            structural_captured_name(candidate, maximum_bytes).map(Cow::Borrowed)
+        }
     } else {
         structural_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     }
@@ -156,5 +177,42 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
         SyntaxFactKind::StringLiteral => 9,
         SyntaxFactKind::EmbeddedRegion => 10,
         SyntaxFactKind::ErrorRecovery => 11,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ruby_operator_names_are_bounded_and_do_not_relax_other_languages() {
+        for name in ["/", "[]", "[]=", "self.[]", "Store./"] {
+            assert_eq!(
+                structural_captured_name_for_language("ruby", name, 64),
+                Some(Cow::Borrowed(name))
+            );
+            assert_eq!(
+                structural_captured_name_for_language("ruby", name, name.len() - 1),
+                None
+            );
+            assert_eq!(
+                structural_captured_name_for_language("rust", name, 64),
+                None
+            );
+        }
+        for name in [
+            "./",
+            "factory().[]",
+            "self.[value]",
+            "[ ]",
+            "Store .[]",
+            "self.[]\0",
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("ruby", name, 64),
+                None,
+                "{name:?}"
+            );
+        }
     }
 }

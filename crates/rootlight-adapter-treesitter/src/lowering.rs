@@ -2835,8 +2835,12 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "javascript.file.module"
                 | "typescript.file.module"
                 | "lua.file.module"
+                | "ruby.file.module"
         )
-        && matches!(language, "python" | "javascript" | "typescript" | "lua")
+        && matches!(
+            language,
+            "python" | "javascript" | "typescript" | "lua" | "ruby"
+        )
 }
 
 fn is_definition_capture(fact: &SyntaxFact) -> bool {
@@ -3277,6 +3281,7 @@ mod tests {
             &module("typescript.file.module"),
             "typescript"
         ));
+        assert!(is_explicit_file_module(&module("ruby.file.module"), "ruby"));
         assert!(!is_explicit_file_module(&module("python.module"), "python"));
         assert!(!is_explicit_file_module(
             &module("java.file.module"),

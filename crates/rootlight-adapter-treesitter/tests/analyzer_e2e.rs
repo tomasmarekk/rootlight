@@ -57,7 +57,17 @@ const LUA_CASE: LanguageCase = LanguageCase {
     body_after: "return  value + limit",
 };
 
-const CASES: [LanguageCase; 12] = [
+const RUBY_CASE: LanguageCase = LanguageCase {
+    name: "ruby",
+    path: "src/example.rb",
+    frontend: "tree-sitter-ruby-0.23.1",
+    source: include_str!("fixtures/structural/ruby.rb"),
+    generated: false,
+    body_before: "puts(name)",
+    body_after: "puts( name )",
+};
+
+const CASES: [LanguageCase; 13] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -158,6 +168,7 @@ const CASES: [LanguageCase; 12] = [
         body_after: "public function greet(string $name): string\r\n    {\r\n            return Formatter::format(\"olá\", $name);\r\n    }",
     },
     LUA_CASE,
+    RUBY_CASE,
 ];
 
 #[derive(Clone, Copy)]
@@ -454,6 +465,48 @@ fn lua_local_references_obey_visibility_shadowing_and_closure_boundaries() {
             ("return outer", "outer", Some("local outer = 1")),
         ],
     );
+}
+
+#[test]
+fn ruby_declarations_and_operator_methods_preserve_exact_identities() {
+    let source = "module Garden\n class Store\n  DEFAULT = 1\n  def read(key)\n   @value = key\n  end\n  def self.read(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def []=(key, value)\n   value\n  end\n  def /(other)\n   other\n  end\n end\nend\n";
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(RUBY_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, RUBY_CASE);
+    let request = request(&fixture.snapshot, &fixture.source, RUBY_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    assert!(output.document().diagnostics.is_empty());
+    for (name, kind, marker) in [
+        ("Garden", EntityKind::Namespace, "module Garden"),
+        ("Store", EntityKind::Class, "class Store"),
+        ("DEFAULT", EntityKind::Constant, "DEFAULT = 1"),
+        ("read", EntityKind::Method, "def read(key)"),
+        ("self.read", EntityKind::Method, "def self.read(key)"),
+        ("[]", EntityKind::Method, "def [](key)"),
+        ("[]=", EntityKind::Method, "def []=(key, value)"),
+        ("/", EntityKind::Method, "def /(other)"),
+        ("@value", EntityKind::Field, "@value = key"),
+    ] {
+        let matches = output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{name}");
+        let reference = matches[0]
+            .evidence
+            .source
+            .as_ref()
+            .expect("declaration has source");
+        assert_eq!(reference.generation(), fixture.source.generation());
+        assert_eq!(
+            reference.span().start_byte(),
+            u64::try_from(source.find(marker).expect("declaration marker exists"))
+                .expect("fixture offset fits")
+        );
+    }
 }
 
 #[test]
@@ -1506,7 +1559,12 @@ fn assert_contract(
 
     let coverage = output.report().coverage();
     assert_eq!(coverage.tier(), AnalysisTier::TierD);
-    assert_eq!(coverage.status(), CoverageStatus::Bounded);
+    let expected_status = if case.name == "ruby" {
+        CoverageStatus::Complete
+    } else {
+        CoverageStatus::Bounded
+    };
+    assert_eq!(coverage.status(), expected_status);
     assert_eq!(
         coverage.total_source_bytes(),
         fixture.snapshot.content().len()
@@ -1581,8 +1639,8 @@ fn assert_contract(
     let unresolved_import = document.skipped_regions.iter().any(|region| {
         region.domain == FactDomain::Relations && region.detail == "unresolved-import-target"
     });
-    // Lua module loading is a shadowable call, not a grammar import statement.
-    assert_eq!(unresolved_import, case.name != "lua");
+    // Lua and Ruby module loading use ordinary calls, not grammar import statements.
+    assert_eq!(unresolved_import, !matches!(case.name, "lua" | "ruby"));
     assert!(document.entities.iter().all(|entity| {
         entity.tier == AnalysisTier::TierD
             && entity.provenance == provenance.id
@@ -1615,7 +1673,7 @@ fn assert_contract(
             .iter()
             .all(|relation| relation.predicate != RelationPredicate::Calls)
     );
-    if matches!(case.name, "python" | "javascript" | "typescript") {
+    if matches!(case.name, "python" | "javascript" | "typescript" | "ruby") {
         let file_module = document
             .entities
             .iter()

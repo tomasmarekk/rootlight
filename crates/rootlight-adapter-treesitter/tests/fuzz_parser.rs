@@ -25,6 +25,40 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
 // CI replays one reviewed corpus; broader random campaigns use a separate runner config.
 const FUZZ_SEED: u64 = 202_607_170_404;
+const FUZZ_ROUTES: [(&str, &str); 14] = [
+    ("fuzz.rs", "rust"),
+    ("fuzz.py", "python"),
+    ("fuzz.js", "javascript"),
+    ("Fuzz.java", "java"),
+    ("fuzz.go", "go"),
+    ("fuzz.ts", "typescript"),
+    ("fuzz.tsx", "typescript"),
+    ("fuzz.rb", "ruby"),
+    ("fuzz.c", "c"),
+    ("fuzz.cpp", "cpp"),
+    ("Fuzz.cs", "csharp"),
+    ("fuzz.kt", "kotlin"),
+    ("fuzz.php", "php"),
+    ("fuzz.lua", "lua"),
+];
+
+#[test]
+fn cleanup_fixtures_fit_the_bounded_parser_budget() {
+    let provider = provider();
+    let limits = limits(256, 32);
+    for (name, language) in FUZZ_ROUTES {
+        let fixture = Fixture::new(name, cleanup_source(name, language));
+        let request = request(&fixture, &limits, language);
+        let result = execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        );
+        assert!(result.is_ok(), "{name}: {result:?}");
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -42,21 +76,7 @@ proptest! {
         max_nodes in 1usize..=256,
         max_depth in 1usize..=32,
     ) {
-        for (name, language) in [
-            ("fuzz.rs", "rust"),
-            ("fuzz.py", "python"),
-            ("fuzz.js", "javascript"),
-            ("Fuzz.java", "java"),
-            ("fuzz.go", "go"),
-            ("fuzz.ts", "typescript"),
-            ("fuzz.tsx", "typescript"),
-            ("fuzz.c", "c"),
-            ("fuzz.cpp", "cpp"),
-            ("Fuzz.cs", "csharp"),
-            ("fuzz.kt", "kotlin"),
-            ("fuzz.php", "php"),
-            ("fuzz.lua", "lua"),
-        ] {
+        for (name, language) in FUZZ_ROUTES {
             let provider = provider();
             let fixture = Fixture::new(name, &input);
             let fuzz_limits = limits(max_nodes, max_depth);
@@ -119,21 +139,17 @@ proptest! {
             );
             prop_assert!(cancellation_observed);
 
-            let cleanup_bytes = if name.ends_with(".tsx") {
-                b"function Cleanup() { return <span />; }\n".as_slice()
-            } else {
-                cleanup_source(language)
-            };
+            let cleanup_bytes = cleanup_source(name, language);
             let cleanup = Fixture::new(name, cleanup_bytes);
             let cleanup_limits = limits(256, 32);
             let cleanup_request = request(&cleanup, &cleanup_limits, language);
-            prop_assert!(execute_parse(
+            let cleanup_result = execute_parse(
                 &provider,
                 &cleanup_request,
                 MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &deadline(),
-            )
-            .is_ok());
+            );
+            prop_assert!(cleanup_result.is_ok(), "{}: {:?}", name, cleanup_result);
             prop_assert_eq!(provider.stats().checked_out_parsers, 0);
         }
     }
@@ -228,7 +244,12 @@ fn deadline() -> Cancellation {
     )
 }
 
-fn cleanup_source(language: &str) -> &'static [u8] {
+// Cleanup probes must fit the unchanged eight-fact identity budget themselves;
+// otherwise shrinking the unrelated adversarial input cannot explain failure.
+fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
+    if name.ends_with(".tsx") {
+        return b"function Cleanup() { return <span />; }\n";
+    }
     match language {
         "rust" => b"fn cleanup() {}\n",
         "python" => b"def cleanup():\n    pass\n",
@@ -242,6 +263,7 @@ fn cleanup_source(language: &str) -> &'static [u8] {
         "kotlin" => b"class Cleanup\n",
         "php" => b"<?php class Cleanup {}\n",
         "lua" => b"local function cleanup() return 1 end\n",
+        "ruby" => b"def cleanup()\nend\n",
         _ => b"",
     }
 }
