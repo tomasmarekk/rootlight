@@ -36,7 +36,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
-                "json.property.declaration" | "toml.property.declaration"
+                "json.property.declaration"
+                    | "toml.property.declaration"
+                    | "yaml.property.declaration"
             ) =>
         {
             Some(EntityKind::Property)
@@ -154,6 +156,11 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// each decoded segment independently: `a.b` differs from `"a.b"`, while bare,
 /// basic and literal spellings of the same segment agree. TOML rejects non-scalar
 /// escapes; this validates key syntax, not table ownership or document semantics.
+/// YAML untagged flow scalars use YAML 1.2 Core resolution and a type-prefixed
+/// canonical identity. Plain, single-quoted and double-quoted strings fold lines
+/// and decode their own escapes; numeric identities do not round through floats.
+/// This scalar boundary does not resolve document directives, tags, anchors,
+/// aliases, block scalars or collection keys; those require document context.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -167,6 +174,8 @@ pub fn structural_captured_name_for_language<'a>(
         crate::json_names::canonical_json_key(text, maximum_bytes)
     } else if language == "toml" {
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
+    } else if language == "yaml" {
+        crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
     } else if language == "css" {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
@@ -199,6 +208,8 @@ pub fn structural_captured_name_for_language<'a>(
 /// escapes. Empty, boundary-whitespace, control-bearing and unpaired-UTF-16 keys
 /// retain the canonical quoted identity. TOML uses the same display rule for a
 /// single segment; multi-segment paths stay quoted to preserve boundaries.
+/// YAML string identities use the same readable-string rule; other scalar types
+/// keep their type prefix so a boolean or number cannot masquerade as a string.
 /// Other languages are unchanged. The input must already be a
 /// bounded canonical name from [`structural_captured_name_for_language`]; display
 /// text is no longer than that input and must never replace the durable identity.
@@ -209,6 +220,11 @@ pub fn structural_display_name_for_language<'a>(
 ) -> Cow<'a, str> {
     if matches!(language, "json" | "toml") {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
+    } else if language == "yaml" {
+        canonical
+            .strip_prefix("str:")
+            .and_then(crate::json_names::display_json_key)
+            .unwrap_or(Cow::Borrowed(canonical))
     } else {
         Cow::Borrowed(canonical)
     }

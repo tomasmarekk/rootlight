@@ -18,6 +18,7 @@ mod sink;
 mod structural;
 pub mod testkit;
 mod toml_names;
+mod yaml_names;
 
 pub use descriptor::{
     EncodingId, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,

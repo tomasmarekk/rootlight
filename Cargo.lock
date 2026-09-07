@@ -2149,8 +2149,10 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vfs",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "yaml-rust2",
 ]
 
 [[package]]

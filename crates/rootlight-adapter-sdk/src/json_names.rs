@@ -138,7 +138,7 @@ pub(crate) fn append(output: &mut String, text: &str, maximum_bytes: usize) -> O
     Some(())
 }
 
-/// Uses the same injective quoted scalar spelling for JSON and TOML data keys.
+/// Uses one injective quoted scalar spelling for JSON, TOML and YAML data keys.
 pub(crate) fn append_character(
     output: &mut String,
     character: char,

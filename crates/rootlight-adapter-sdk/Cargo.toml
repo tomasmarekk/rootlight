@@ -15,7 +15,9 @@ rootlight-vfs = { path = "../rootlight-vfs" }
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
+yaml-rust2.workspace = true
 
 [lints]
 workspace = true

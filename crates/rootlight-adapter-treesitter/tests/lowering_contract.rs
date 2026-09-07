@@ -72,15 +72,61 @@ fn toml_key_paths_lower_without_merging_quoted_dots_or_losing_source() {
 }
 
 #[test]
+fn yaml_flow_keys_lower_with_typed_identity_and_exact_source() {
+    assert_data_key_captures(
+        "yaml",
+        &[
+            ("name", "str:\"name\""),
+            ("'name'", "str:\"name\""),
+            (r#""\u006eame""#, "str:\"name\""),
+            ("''", "str:\"\""),
+            ("' '", "str:\" \""),
+            (r#""\0""#, r#"str:"\u0000""#),
+            (r#"'\0'"#, r#"str:"\\0""#),
+            ("true", "bool:true"),
+            ("TRUE", "bool:true"),
+            ("'true'", "str:\"true\""),
+            ("null", "null:null"),
+            ("~", "null:null"),
+            ("11", "int:11"),
+            ("0xB", "int:11"),
+            ("11.0", "float:11e0"),
+            ("1.1e1", "float:11e0"),
+            ("'🌍'", "str:\"🌍\""),
+            (r#""\U0001F30D""#, "str:\"🌍\""),
+        ],
+    );
+}
+
+#[test]
 fn invalid_toml_scalar_names_remain_explicit_source_bound_gaps() {
-    for key in [r#""\uD800""#, r#""\U00110000""#, "a..b"] {
-        let text = format!("{key} = 1\n");
+    assert_unavailable_data_names("toml", &[r#""\uD800""#, r#""\U00110000""#, "a..b"]);
+}
+
+#[test]
+fn yaml_context_dependent_keys_and_invalid_scalars_remain_explicit_gaps() {
+    assert_unavailable_data_names(
+        "yaml",
+        &[
+            r#""\uD800""#,
+            "!!str true",
+            "*key",
+            "[one, two]",
+            "|\n  key",
+        ],
+    );
+}
+
+fn assert_unavailable_data_names(language: &str, keys: &[&str]) {
+    for key in keys {
+        let separator = if language == "yaml" { ":" } else { " =" };
+        let text = format!("{key}{separator} 1\n");
         let (_directory, snapshot, source) =
-            source_fixture_for(&text, "data.toml", b"invalid-data-key");
+            source_fixture_for(&text, &format!("data.{language}"), b"invalid-data-key");
         let output = analyze_custom(
             &snapshot,
             &source,
-            LanguageId::new("toml").unwrap(),
+            LanguageId::new(language).unwrap(),
             &limits(IrLimits::default()),
             vec![
                 SyntaxFact::new(
@@ -89,7 +135,7 @@ fn invalid_toml_scalar_names_remain_explicit_source_bound_gaps() {
                     SyntaxFactKind::Root,
                     source.span(),
                     0,
-                    label("toml.file.root"),
+                    label(&format!("{language}.file.root")),
                 ),
                 SyntaxFact::new(
                     2,
@@ -97,7 +143,7 @@ fn invalid_toml_scalar_names_remain_explicit_source_bound_gaps() {
                     SyntaxFactKind::Declaration,
                     source.span(),
                     1,
-                    label("toml.property.declaration"),
+                    label(&format!("{language}.property.declaration")),
                 ),
                 SyntaxFact::new(
                     3,
@@ -105,7 +151,7 @@ fn invalid_toml_scalar_names_remain_explicit_source_bound_gaps() {
                     SyntaxFactKind::Occurrence,
                     span_in(&text, &source, key, 0),
                     2,
-                    label("toml.property.definition"),
+                    label(&format!("{language}.property.definition")),
                 ),
             ],
         )
@@ -136,7 +182,8 @@ fn assert_data_key_captures(language: &str, cases: &[(&str, &str)]) {
                 let text = format!("{{{member}}}");
                 (member, text)
             } else {
-                let member = format!("{key} = {value}");
+                let separator = if language == "yaml" { ":" } else { " =" };
+                let member = format!("{key}{separator} {value}");
                 let text = format!("{member}\n");
                 (member, text)
             };
