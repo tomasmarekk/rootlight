@@ -4,7 +4,7 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
-    BuildBudget, LexicalDocument, SearchBudget, SearchError, project_source_term_chunks,
+    BuildBudget, LexicalDocument, SearchBudget, SearchError, project_source_terms_with_coverage,
     select_query_source_text, validate_build_admission,
 };
 use rootlight_storage::GenerationSnapshot;
@@ -219,14 +219,14 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             self.budget,
             cancellation,
         )?;
-        if self.full_source_terms
-            && let Ok(text) = std::str::from_utf8(source.content())
-        {
-            projected.source_term_chunks = project_source_term_chunks(
-                text,
+        if self.full_source_terms {
+            let terms = project_source_terms_with_coverage(
+                source.content(),
                 self.budget.max_text_bytes.saturating_sub(next_text_bytes),
                 cancellation,
             )?;
+            projected.source_term_chunks = terms.chunks;
+            projected.source_coverage = Some(terms.coverage);
             for chunk in &projected.source_term_chunks {
                 next_text_bytes = chunk
                     .iter()
@@ -309,13 +309,13 @@ pub fn project_source_document_with_full_terms(
     validate_build_admission(budget)?;
     let (mut document, bytes) =
         project_source_document(generation, source, 0, 0, None, budget, cancellation)?;
-    if let Ok(text) = std::str::from_utf8(source.content()) {
-        document.source_term_chunks = project_source_term_chunks(
-            text,
-            budget.max_text_bytes.saturating_sub(bytes),
-            cancellation,
-        )?;
-    }
+    let terms = project_source_terms_with_coverage(
+        source.content(),
+        budget.max_text_bytes.saturating_sub(bytes),
+        cancellation,
+    )?;
+    document.source_term_chunks = terms.chunks;
+    document.source_coverage = Some(terms.coverage);
     Ok(document)
 }
 
@@ -448,6 +448,7 @@ fn project_source_document(
             source_identifiers,
             source_text,
             source_term_chunks: Vec::new(),
+            source_coverage: None,
             generated: file.generated,
             test: false,
             declaration_only: false,
@@ -755,6 +756,7 @@ fn project_entity_document(
             source_identifiers: Vec::new(),
             source_text: None,
             source_term_chunks: Vec::new(),
+            source_coverage: None,
             generated: file.generated,
             test: matches!(entity.kind, EntityKind::Test)
                 || entity.flags.contains(&EntityFlag::Test),

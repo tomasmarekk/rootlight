@@ -110,6 +110,23 @@ fn global_source_chunks_preserve_pagination_and_exact_tail_reads(fixture: &mut R
         assert_success(&response, "code.locate");
         let output = &response["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
+        let warnings = output["warnings"].as_array().expect("coverage warnings");
+        let truncated = warnings
+            .iter()
+            .filter(|warning| warning["code"] == "coverage_truncated")
+            .map(|warning| warning["message"].as_str().expect("warning message"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            truncated,
+            [
+                "a bounded limit omitted part of the available evidence affected-files 1 language yaml"
+            ]
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "coverage_unsupported")
+        );
         let matches = output["data"]["matches"].as_array().expect("source hits");
         assert_eq!(matches.len(), 1, "full-source response: {output:#}");
         let matched = &matches[0];
@@ -1285,6 +1302,11 @@ impl RetrievalFixture {
             fs::write(repository_root.join(path), &full_source)
                 .expect("tail source fixture writes");
         }
+        fs::write(
+            repository_root.join("omitted-word.yaml"),
+            format!("# {}\n", "x".repeat(241)),
+        )
+        .expect("omitted-word source writes");
 
         let state_dir = root.path().join("state");
         let runtime_dir = root.path().join("runtime");

@@ -4649,9 +4649,9 @@ fn restored_generation_memory_bytes(
     generation_resident_memory_bytes(serialized_document_bytes, restored.verified.snapshot())
 }
 
-/// Resident payload cache with normalized-IR admission charges.
+/// Resident payload cache with normalized-IR and lexical-accounting admission charges.
 ///
-/// Charges deliberately use the stable serialized generation measure. Backend
+/// Charges use the stable serialized generation measure plus per-file accounting. Backend
 /// reader allocations remain an observability concern rather than being
 /// misreported as mapped or fully resident bytes.
 struct FirstSliceGenerationCache {
@@ -7890,7 +7890,11 @@ impl FirstSliceService {
             normalized_fact_work(&document, &reused_normalized_records, cancellation)?;
         let mut incremental = incremental_plan.state;
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
-        let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
+        let memory_bytes = ensure_generation_memory_admission(
+            serialized_document_bytes
+                .checked_add(source_lexical_coverage_memory_bytes(document.files.len())?)
+                .ok_or(FirstSliceError::Limits)?,
+        )?;
         let logical_workspace_bytes =
             generation_neutral_workspace_bytes(&document, || cancellation.check().is_ok())
                 .map_err(|_| {
@@ -12570,6 +12574,31 @@ impl FirstSliceService {
         })
     }
 
+    /// Returns exact whole-input lexical omission accounting for one retained file.
+    ///
+    /// `None` means the generation uses a legacy projection without accounting.
+    /// The result says nothing about structural or semantic language coverage.
+    ///
+    /// # Errors
+    /// Returns a typed generation, file-selection, cancellation or catalog error.
+    pub fn source_file_lexical_coverage_until(
+        &self,
+        generation: GenerationId,
+        file: FileId,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_search::SourceLexicalCoverage>, FirstSliceError> {
+        let lease = self.generation_lease(generation, cancellation)?;
+        let record = lease
+            .generation()
+            .find_file(file)
+            .ok_or(FirstSliceError::Query)?;
+        let coverage = lease.source_lexical_coverage(file);
+        if coverage.is_some_and(|coverage| coverage.source_bytes != record.byte_length) {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(coverage)
+    }
+
     /// Returns bounded source-free reasons that a generation is only partially covered.
     ///
     /// An unloaded durable generation is hydrated under a fixed 30-second
@@ -12708,7 +12737,11 @@ impl FirstSliceService {
                     {
                         observe(FirstSliceCoverageGapReason::Generated, Some(file.id));
                     }
-                    if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64 {
+                    let lexical_incomplete = lease.source_lexical_coverage(file.id).map_or(
+                        file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64,
+                        |coverage| !coverage.is_complete(),
+                    );
+                    if lexical_incomplete {
                         observe(FirstSliceCoverageGapReason::Truncated, Some(file.id));
                     }
                 }
@@ -15547,6 +15580,9 @@ fn source_file_fallback_resident_memory_bytes(
     serialized_document_bytes: u64,
     snapshot: &rootlight_storage::GenerationSnapshot,
 ) -> Result<u64, FirstSliceError> {
+    let serialized_document_bytes = serialized_document_bytes
+        .checked_add(source_lexical_coverage_memory_bytes(snapshot.file_count())?)
+        .ok_or(FirstSliceError::Limits)?;
     let entry_bytes = u64::try_from(snapshot.file_count())
         .map_err(|_| FirstSliceError::Limits)?
         .checked_mul(SOURCE_FILE_FALLBACK_ENTRY_MEMORY_BYTES)
@@ -15592,11 +15628,29 @@ fn source_file_fallback_resident_memory_bytes(
     ensure_generation_memory_admission(observed)
 }
 
+fn source_lexical_coverage_memory_bytes(file_count: usize) -> Result<u64, FirstSliceError> {
+    // The lexical reader retains a compact sorted accounting entry per file;
+    // reserve it for legacy generations too so hydration cannot undercharge.
+    u64::try_from(file_count)
+        .map_err(|_| FirstSliceError::Limits)?
+        .checked_mul(
+            u64::try_from(std::mem::size_of::<(
+                FileId,
+                rootlight_search::SourceLexicalCoverage,
+            )>())
+            .map_err(|_| FirstSliceError::Limits)?,
+        )
+        .ok_or(FirstSliceError::Limits)
+}
+
 fn generation_resident_memory_bytes(
     serialized_document_bytes: u64,
     snapshot: &rootlight_storage::GenerationSnapshot,
 ) -> Result<u64, FirstSliceError> {
     if snapshot.source_files().is_empty() {
+        let serialized_document_bytes = serialized_document_bytes
+            .checked_add(source_lexical_coverage_memory_bytes(snapshot.file_count())?)
+            .ok_or(FirstSliceError::Limits)?;
         ensure_generation_memory_admission(serialized_document_bytes)
     } else {
         source_file_fallback_resident_memory_bytes(serialized_document_bytes, snapshot)
@@ -24984,7 +25038,10 @@ mod tests {
                 .expect("generation cache remains available")
                 .logical_charge_bytes_by_generation
                 .get(&receipt.semantic().generation),
-            Some(&semantic_serialized_document_bytes)
+            Some(
+                &(semantic_serialized_document_bytes
+                    + source_lexical_coverage_memory_bytes(1).expect("one file accounting charge"))
+            )
         );
         drop(recomputed);
         fs::write(&logical_sidecar_path, logical_sidecar)
@@ -26462,6 +26519,64 @@ mod tests {
     }
 
     #[test]
+    fn short_source_with_oversized_word_reports_lexical_gap() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths");
+        paths.prepare_owner().expect("private paths");
+        fs::write(
+            fixture.path().join("config.yaml"),
+            format!("# {}\n", "x".repeat(241)),
+        )
+        .expect("source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("source publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("service restores");
+            }
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "config.yaml".to_owned(),
+                    LocateMode::Exact,
+                    4,
+                    0,
+                    &deadline(),
+                )
+                .expect("file locates");
+            let reference = located.data.hits[0].source.clone().expect("file reference");
+            let coverage = service
+                .source_file_lexical_coverage_until(
+                    receipt.generation,
+                    reference.span().file(),
+                    &deadline(),
+                )
+                .expect("coverage resolves")
+                .expect("coverage retained");
+            assert_eq!(coverage.source_bytes, 244);
+            assert_eq!(coverage.omitted_words, 1);
+            assert_eq!(coverage.omitted_word_bytes, 241);
+            assert!(!coverage.is_complete());
+            let gaps = service
+                .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+                .expect("gaps resolve");
+            assert!(
+                gaps.iter()
+                    .any(|gap| gap.reason == FirstSliceCoverageGapReason::Truncated
+                        && gap.language.as_deref() == Some("yaml")
+                        && gap.files == 1)
+            );
+        }
+    }
+
+    #[test]
     fn bounded_source_fallback_reports_truncated_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = format!(
@@ -26630,6 +26745,21 @@ mod tests {
                         source.replace("//", "#")
                     };
                     assert_eq!(reference.content_hash(), content_hash(expected.as_bytes()));
+                    let coverage = service
+                        .source_file_lexical_coverage_until(
+                            receipt.generation,
+                            reference.span().file(),
+                            &deadline(),
+                        )
+                        .expect("lexical accounting resolves")
+                        .expect("full-source accounting retained");
+                    assert_eq!(
+                        coverage.source_bytes,
+                        u64::try_from(expected.len()).expect("source length")
+                    );
+                    assert_eq!(coverage.omitted_word_bytes, 0);
+                    assert_eq!(coverage.omitted_words, 0);
+                    assert!(coverage.is_complete());
                     let mut bytes = Vec::new();
                     for start in (0..expected.len()).step_by(16 * 1024) {
                         let end = (start + 16 * 1024).min(expected.len());
@@ -26693,7 +26823,7 @@ mod tests {
             let gaps = service
                 .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
                 .expect("supported source projection gaps resolve");
-            assert!(gaps.iter().any(|gap| {
+            assert!(!gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Truncated
                     && gap.language.as_deref() == Some("css")
                     && gap.files == 1

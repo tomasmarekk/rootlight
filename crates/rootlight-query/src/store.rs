@@ -3,8 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use rootlight_ids::GenerationId;
-use rootlight_search::LexicalSearch;
+use rootlight_ids::{FileId, GenerationId};
+use rootlight_search::{LexicalSearch, SourceLexicalCoverage};
 use rootlight_storage::{GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration};
 
 use crate::{QueryError, QueryService};
@@ -51,6 +51,13 @@ where
     #[must_use]
     pub fn generation(&self) -> &GenerationSnapshot {
         &self.retained.snapshot
+    }
+
+    /// Returns generation-pinned lexical accounting without rereading source bytes.
+    /// Legacy projections and backends without accounting return `None`.
+    #[must_use]
+    pub fn source_lexical_coverage(&self, file: FileId) -> Option<SourceLexicalCoverage> {
+        self.retained.search.source_coverage(file)
     }
 }
 

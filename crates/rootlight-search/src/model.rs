@@ -8,6 +8,39 @@ pub(crate) const MAX_TERM_BYTES: usize = 240;
 /// Tokenizer name persisted in the Tantivy schema.
 pub(crate) const CODE_TOKENIZER: &str = "rootlight_code_v2";
 
+/// Source-free accounting from one complete lexical projection scan.
+///
+/// Counts describe original word occurrences, not distinct postings. Delimiters
+/// are not words; deduplication is not an omission. This is not semantic coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLexicalCoverage {
+    /// Exact input byte length, including delimiters.
+    pub source_bytes: u64,
+    /// Original bytes in words excluded by the term-size bound.
+    pub omitted_word_bytes: u64,
+    /// Number of excluded word occurrences, including repetitions.
+    pub omitted_words: u64,
+    /// Whether the entire input could be decoded as UTF-8.
+    pub valid_utf8: bool,
+}
+
+impl SourceLexicalCoverage {
+    /// Whether every source word was admitted to the lexical vocabulary.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.valid_utf8 && self.omitted_words == 0
+    }
+}
+
+/// Bounded source vocabulary and accounting produced in the same scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTermProjection {
+    /// Whole-word batches sharing one file identity.
+    pub chunks: Vec<Vec<String>>,
+    /// Exact source-free omission accounting.
+    pub coverage: SourceLexicalCoverage,
+}
+
 /// A bounded lexical document for one semantic symbol or retained source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexicalDocument {
@@ -46,6 +79,8 @@ pub struct LexicalDocument {
     /// These extend the legacy prefix fields without creating extra search
     /// hits. Each batch retains whole words so token boundaries are not cut.
     pub source_term_chunks: Vec<Vec<String>>,
+    /// Whole-input accounting, absent for legacy or symbol projections.
+    pub source_coverage: Option<SourceLexicalCoverage>,
     /// Whether the declaring file is generated.
     pub generated: bool,
     /// Whether the entity is test-only or test-related.

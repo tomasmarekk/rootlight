@@ -27,6 +27,7 @@ use crate::{
     model::{
         BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, QueryViolation,
         SearchBudget, SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
+        SourceLexicalCoverage, SourceTermProjection,
     },
     tokenizer::{CodeTokenizer, has_oversized_term, is_mark, normalize_text, token_texts},
 };
@@ -200,6 +201,12 @@ pub trait LexicalSearch: Send + Sync {
 
     /// Returns the currently visible document count.
     fn document_count(&self) -> u64;
+
+    /// Returns whole-input lexical accounting when the backend retained it.
+    /// Missing accounting means unknown, never complete.
+    fn source_coverage(&self, _file: FileId) -> Option<SourceLexicalCoverage> {
+        None
+    }
 }
 
 /// Validates a lexical construction budget without creating an artifact.
@@ -263,6 +270,7 @@ pub struct LexicalIndex {
     fields: Fields,
     reader: IndexReader,
     _artifact: Option<VerifiedLexicalArtifact>,
+    source_coverage: Vec<(FileId, SourceLexicalCoverage)>,
 }
 
 /// Incremental in-memory lexical builder for independently bounded partitions.
@@ -278,6 +286,7 @@ pub struct EphemeralLexicalIndexBuilder {
     targets: BTreeSet<LexicalTarget>,
     document_count: u64,
     text_bytes: u64,
+    source_coverage: Vec<(FileId, SourceLexicalCoverage)>,
 }
 
 impl EphemeralLexicalIndexBuilder {
@@ -311,6 +320,7 @@ impl EphemeralLexicalIndexBuilder {
             targets: BTreeSet::new(),
             document_count: 0,
             text_bytes: 0,
+            source_coverage: Vec::new(),
         })
     }
 
@@ -349,6 +359,16 @@ impl EphemeralLexicalIndexBuilder {
         {
             return Err(SearchError::DuplicateSymbol);
         }
+        self.source_coverage
+            .try_reserve_exact(
+                documents
+                    .iter()
+                    .filter(|document| document.source_coverage.is_some())
+                    .count(),
+            )
+            .map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            })?;
         let writer = self.writer.as_mut().ok_or_else(|| operation("writer"))?;
         for document in &documents {
             cancellation.check()?;
@@ -357,6 +377,12 @@ impl EphemeralLexicalIndexBuilder {
                 .map_err(|_| operation("add_document"))?;
         }
         self.targets.extend(documents.iter().map(document_target));
+        self.source_coverage
+            .extend(documents.iter().filter_map(|document| {
+                document
+                    .source_coverage
+                    .map(|coverage| (document.file_id, coverage))
+            }));
         self.document_count = document_count;
         self.text_bytes = text_bytes;
         cancellation.check()?;
@@ -386,11 +412,13 @@ impl EphemeralLexicalIndexBuilder {
             Some(self.document_count),
             || cancellation.check().map_err(SearchError::from),
         )?;
+        self.source_coverage.sort_unstable_by_key(|(file, _)| *file);
         Ok(LexicalIndex {
             generation: actual_generation,
             fields: self.fields,
             reader,
             _artifact: None,
+            source_coverage: self.source_coverage,
         })
     }
 }
@@ -431,6 +459,7 @@ impl LexicalIndex {
             fields,
             reader,
             _artifact: Some(artifact),
+            source_coverage: Vec::new(),
         })
     }
 
@@ -673,6 +702,13 @@ impl LexicalSearch for LexicalIndex {
 
     fn document_count(&self) -> u64 {
         self.document_count()
+    }
+
+    fn source_coverage(&self, file: FileId) -> Option<SourceLexicalCoverage> {
+        self.source_coverage
+            .binary_search_by_key(&file, |(file, _)| *file)
+            .ok()
+            .map(|index| self.source_coverage[index].1)
     }
 }
 
@@ -1815,7 +1851,40 @@ pub fn project_source_term_chunks(
     maximum_text_bytes: usize,
     cancellation: &Cancellation,
 ) -> Result<Vec<Vec<String>>, SearchError> {
+    project_source_terms_with_coverage(source.as_bytes(), maximum_text_bytes, cancellation)
+        .map(|projection| projection.chunks)
+}
+
+/// Scans the entire source once, retaining bounded words and exact omission counts.
+///
+/// Invalid UTF-8 retains no vocabulary and reports its encoding explicitly.
+/// Budget exhaustion fails construction instead of silently dropping batches.
+///
+/// # Errors
+/// Returns [`SearchError`] for cancellation, allocation failure, or exhausted bounds.
+pub fn project_source_terms_with_coverage(
+    source: &[u8],
+    maximum_text_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<SourceTermProjection, SearchError> {
     cancellation.check()?;
+    let mut coverage = SourceLexicalCoverage {
+        source_bytes: u64::try_from(source.len()).map_err(|_| {
+            SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            }
+        })?,
+        omitted_word_bytes: 0,
+        omitted_words: 0,
+        valid_utf8: true,
+    };
+    let Ok(source) = std::str::from_utf8(source) else {
+        coverage.valid_utf8 = false;
+        return Ok(SourceTermProjection {
+            chunks: Vec::new(),
+            coverage,
+        });
+    };
     let maximum_text_bytes = maximum_text_bytes.min(HARD_MAX_TEXT_BYTES);
     let mut chunks = Vec::new();
     let mut words = BTreeSet::new();
@@ -1825,11 +1894,21 @@ pub fn project_source_term_chunks(
         !(character == '_' || character.is_alphanumeric() || is_mark(character))
     }) {
         cancellation.check()?;
-        if word.is_empty()
-            || word.len() > MAX_SOURCE_IDENTIFIER_BYTES
+        if word.is_empty() {
+            continue;
+        }
+        if word.len() > MAX_SOURCE_IDENTIFIER_BYTES
             || normalize_text(word).len() > MAX_SOURCE_IDENTIFIER_BYTES
-            || words.contains(word)
         {
+            // Disjoint nonempty input slices bound both counters by source_bytes.
+            coverage.omitted_word_bytes +=
+                u64::try_from(word.len()).map_err(|_| SearchError::BuildBudgetExceeded {
+                    resource: "text_bytes",
+                })?;
+            coverage.omitted_words += 1;
+            continue;
+        }
+        if words.contains(word) {
             continue;
         }
         let additional = word
@@ -1891,7 +1970,7 @@ pub fn project_source_term_chunks(
         chunks.push(words.into_iter().collect());
     }
     cancellation.check()?;
-    Ok(chunks)
+    Ok(SourceTermProjection { chunks, coverage })
 }
 
 /// Selects bounded, genuinely occurring source words relevant to one text query.
@@ -2120,6 +2199,18 @@ fn validate_document(
     document: &LexicalDocument,
     cancellation: &Cancellation,
 ) -> Result<usize, SearchError> {
+    if let Some(coverage) = document.source_coverage
+        && (document.symbol_id.is_some()
+            || coverage.omitted_word_bytes > coverage.source_bytes
+            || coverage.omitted_words > coverage.omitted_word_bytes
+            || (coverage.omitted_words == 0) != (coverage.omitted_word_bytes == 0)
+            || (!coverage.valid_utf8
+                && (!document.source_term_chunks.is_empty() || coverage.omitted_words != 0)))
+    {
+        return Err(SearchError::InvalidDocument {
+            field: DocumentField::SourceText,
+        });
+    }
     let mut bytes = 0usize;
     bytes = add_required(
         bytes,
@@ -2719,6 +2810,98 @@ mod tests {
     }
 
     #[test]
+    fn source_projection_accounts_for_omitted_occurrences_and_encoding() {
+        let cancellation = Cancellation::new();
+        let oversized = "x".repeat(241);
+        let expanded = "İ".repeat(81);
+        let source = format!("needle needle {oversized} {oversized} {expanded} tail");
+        let projection = project_source_terms_with_coverage(source.as_bytes(), 4096, &cancellation)
+            .expect("bounded projection");
+        assert_eq!(
+            projection.coverage.source_bytes,
+            u64::try_from(source.len()).expect("length")
+        );
+        assert_eq!(projection.coverage.omitted_words, 3);
+        assert_eq!(projection.coverage.omitted_word_bytes, 644);
+        assert!(!projection.coverage.is_complete());
+        assert_eq!(projection.chunks.concat(), ["needle", "tail"]);
+        for source in [b"".as_slice(), b" \n\t", b"needle needle"] {
+            let projection = project_source_terms_with_coverage(source, 4096, &cancellation)
+                .expect("complete projection");
+            assert!(projection.coverage.is_complete());
+            assert_eq!(projection.coverage.omitted_word_bytes, 0);
+        }
+        let invalid = project_source_terms_with_coverage(&[b'a', 0xff], 4096, &cancellation)
+            .expect("encoding accounting");
+        assert!(!invalid.coverage.valid_utf8);
+        assert!(!invalid.coverage.is_complete());
+        assert_eq!(invalid.coverage.source_bytes, 2);
+        assert_eq!(invalid.coverage.omitted_words, 0);
+        assert!(invalid.chunks.is_empty());
+
+        let mut doc = document(45, "config.yaml", "config.yaml");
+        doc.symbol_id = None;
+        doc.source_term_chunks = projection.chunks;
+        doc.source_coverage = Some(projection.coverage);
+        let file = doc.file_id;
+        let index = LexicalIndex::build_ephemeral(
+            GenerationId::from_bytes([1; 20]),
+            vec![doc],
+            BuildBudget::default(),
+            &cancellation,
+        )
+        .expect("accounting index");
+        assert_eq!(index.source_coverage(file), Some(projection.coverage));
+        assert_eq!(index.source_coverage(FileId::from_bytes([0; 20])), None);
+    }
+
+    #[test]
+    fn source_accounting_rejects_inconsistent_counts_and_symbol_claims() {
+        let coverage = SourceLexicalCoverage {
+            source_bytes: 241,
+            omitted_word_bytes: 241,
+            omitted_words: 1,
+            valid_utf8: true,
+        };
+        let mut doc = document(47, "config.yaml", "config.yaml");
+        doc.source_coverage = Some(coverage);
+        assert!(validate_document(&doc, &Cancellation::new()).is_err());
+        doc.symbol_id = None;
+        assert!(validate_document(&doc, &Cancellation::new()).is_ok());
+        for invalid in [
+            SourceLexicalCoverage {
+                source_bytes: 240,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                omitted_words: 242,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                omitted_words: 0,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                valid_utf8: false,
+                ..coverage
+            },
+        ] {
+            doc.source_coverage = Some(invalid);
+            assert!(validate_document(&doc, &Cancellation::new()).is_err());
+        }
+        doc.source_coverage = None;
+        let file = doc.file_id;
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![doc],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("legacy index");
+        assert_eq!(index.source_coverage(file), None);
+    }
+
+    #[test]
     fn full_source_chunks_preserve_terms_and_single_file_hits() {
         let mut terms = (0..8_000)
             .map(|index| format!("record{index:05}value{index:05}"))
@@ -2926,6 +3109,7 @@ mod tests {
             source_identifiers: Vec::new(),
             source_text: None,
             source_term_chunks: Vec::new(),
+            source_coverage: None,
             generated: false,
             test: false,
             declaration_only: false,
