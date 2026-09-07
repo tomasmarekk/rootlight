@@ -457,6 +457,56 @@ fn lua_local_references_obey_visibility_shadowing_and_closure_boundaries() {
 }
 
 #[test]
+fn lua_callee_reads_resolve_bindings_without_claiming_runtime_call_targets() {
+    let source = "local callback = factory()\ncallback()\ndo\n  local callback = callback()\n  callback(1)\nend\nlocal function recurse(value)\n  recurse(value)\nend\nlocal record = {}\nrecord.callback()\nrecord:callback()\n";
+    assert_lua_reference_bindings(
+        source,
+        &[
+            ("factory()", "factory", None),
+            ("\ncallback()", "callback", Some("local callback = factory")),
+            (
+                "local callback = callback()",
+                "callback",
+                Some("local callback = factory"),
+            ),
+            ("callback(1)", "callback", Some("local callback = callback")),
+            (
+                "recurse(value)\nend",
+                "recurse",
+                Some("local function recurse"),
+            ),
+            ("record.callback()", "record", Some("local record")),
+            ("record:callback()", "record", Some("local record")),
+        ],
+    );
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(LUA_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, LUA_CASE);
+    let request = request(&fixture.snapshot, &fixture.source, LUA_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let calls = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 7);
+    assert!(
+        calls
+            .iter()
+            .all(|call| matches!(call.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(
+        !output
+            .document()
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == rootlight_ir::RelationPredicate::Calls)
+    );
+}
+
+#[test]
 fn lua_implicit_self_and_unavailable_inner_bindings_do_not_resolve_to_outer_names() {
     let source = "local self = {}\nlocal value = 0\nfunction M:run() return self end\nfunction M:explicit(self) return self end\ndo local value = 1; consume(value) end\ndo local value = 2; consume(value) end\nreturn value\n";
     assert_lua_reference_bindings(
@@ -585,6 +635,15 @@ fn assert_lua_reference_bindings(source: &str, expected: &[(&str, &str, Option<&
             assert_eq!(
                 occurrence.target,
                 OccurrenceTarget::Resolved { symbol: entity.id },
+                "{marker}"
+            );
+            assert!(
+                document.relations.iter().any(|relation| {
+                    relation.subject == rootlight_ir::RelationEndpoint::Occurrence(occurrence.id)
+                        && relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(entity.id)
+                        && relation.evidence.source.as_ref() == Some(&occurrence.source)
+                }),
                 "{marker}"
             );
         } else {

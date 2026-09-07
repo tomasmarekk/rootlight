@@ -25525,7 +25525,8 @@ mod tests {
     #[test]
     fn lua_structural_index_preserves_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let source = "local function transform(value)\n  return value\nend\nreturn transform\n";
+        let source =
+            "local function transform(value)\n  return value()\nend\nreturn transform(1)\n";
         fs::write(fixture.path().join("module.lua"), source).expect("Lua fixture writes");
         let mut service = FirstSliceService::new(2).expect("service initializes");
         let receipt = service
@@ -25661,6 +25662,35 @@ mod tests {
             !relationships.data.exact,
             "local bindings do not prove complete Lua semantics"
         );
+        let calls = generation
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call.target, OccurrenceTarget::Resolved { .. })),
+            "lexical binding identity does not prove a runtime call target"
+        );
+        assert!(
+            !generation
+                .document()
+                .relations
+                .iter()
+                .any(|relation| { relation.predicate == RelationPredicate::Calls })
+        );
+        let possible_transform = calls
+            .iter()
+            .find(|call| call.source.span().start_byte() == reference_start)
+            .expect("published transform call retains exact source position");
+        assert!(matches!(
+            &possible_transform.target,
+            OccurrenceTarget::Candidates { symbols, total_count: 1, completeness: CoverageStatus::Complete }
+                if symbols == &[explained.data.entity.id]
+        ));
         let definition = service
             .source_read_with_options_and_budget(
                 receipt.generation,
@@ -25681,7 +25711,7 @@ mod tests {
             .expect("Lua declaration source reads");
         assert_eq!(
             definition.data.chunks[0].bytes,
-            b"local function transform(value)\n  return value\nend"
+            b"local function transform(value)\n  return value()\nend"
         );
         let inventory = service
             .support_inventory_snapshot()
