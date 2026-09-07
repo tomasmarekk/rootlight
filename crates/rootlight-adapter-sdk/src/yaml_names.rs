@@ -6,11 +6,25 @@ use std::{iter::Peekable, str::Chars};
 
 use crate::json_names::{append, append_character};
 
+mod context;
 mod numbers;
 
+pub use context::{YamlDocumentContext, YamlScalarIdentity};
+
 pub(crate) fn canonical_flow_key(text: &str, maximum: usize) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    let (value, plain) = decode_flow(text, maximum)?;
+    canonical_value(&value, plain, maximum)
+}
+
+fn decode_flow(text: &str, maximum: usize) -> Option<(String, bool)> {
     if text.len() > maximum {
         return None;
+    }
+    if text.is_empty() {
+        return Some((String::new(), true));
     }
     let (body, quote) = match text.chars().next()? {
         quote @ ('\'' | '"') => (text.strip_prefix(quote)?.strip_suffix(quote)?, Some(quote)),
@@ -19,10 +33,13 @@ pub(crate) fn canonical_flow_key(text: &str, maximum: usize) -> Option<String> {
             (text, None)
         }
     };
-    let value = decode(body, quote, maximum)?;
-    if quote.is_none() {
-        if let Some(value) = match value.as_str() {
-            "~" | "null" | "Null" | "NULL" => Some("null:null"),
+    Some((decode(body, quote, maximum)?, quote.is_none()))
+}
+
+fn canonical_value(value: &str, plain: bool, maximum: usize) -> Option<String> {
+    if plain {
+        if let Some(value) = match value {
+            "" | "~" | "null" | "Null" | "NULL" => Some("null:null"),
             "true" | "True" | "TRUE" => Some("bool:true"),
             "false" | "False" | "FALSE" => Some("bool:false"),
             _ => None,
@@ -33,17 +50,22 @@ pub(crate) fn canonical_flow_key(text: &str, maximum: usize) -> Option<String> {
         }
         // Classification is separate from normalization failure: a numeric
         // value exceeding the output budget must never become a string key.
-        if let Some(number) = numbers::classify(&value) {
+        if let Some(number) = numbers::classify(value) {
             return number.canonical(maximum);
         }
     }
     let mut result = String::new();
-    append(&mut result, "str:\"", maximum)?;
-    for character in value.chars() {
-        append_character(&mut result, character, maximum)?;
-    }
-    append(&mut result, "\"", maximum)?;
+    append(&mut result, "str:", maximum)?;
+    append_quoted(&mut result, value, maximum)?;
     Some(result)
+}
+
+fn append_quoted(result: &mut String, value: &str, maximum: usize) -> Option<()> {
+    append(result, "\"", maximum)?;
+    for character in value.chars() {
+        append_character(result, character, maximum)?;
+    }
+    append(result, "\"", maximum)
 }
 
 fn printable(character: char) -> bool {

@@ -53,3 +53,4 @@ pub use structural::{
     structural_display_name_for_language, structural_entity_kind,
     structural_entity_kind_from_source, structural_syntax_fact_order,
 };
+pub use yaml_names::{YamlDocumentContext, YamlScalarIdentity};

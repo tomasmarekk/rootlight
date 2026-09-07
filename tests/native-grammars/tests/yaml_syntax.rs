@@ -101,6 +101,38 @@ fn yaml_scalar_styles_preserve_source_without_claiming_schema_validation() {
 }
 
 #[test]
+fn yaml_block_scalar_nodes_omit_value_significant_trailing_lines() {
+    for line_break in ["\n", "\r\n"] {
+        for style in ["|+", ">+"] {
+            let mut node_spellings = Vec::new();
+            for trailing in [1, 3] {
+                let source = format!(
+                    "first: {style}{line_break}  alpha{}next: done{line_break}",
+                    line_break.repeat(trailing)
+                );
+                let tree = parser().parse(&source, None).unwrap();
+                let root = tree.root_node();
+                assert!(!root.has_error(), "{source:?}");
+                let scalars = nodes(root, "block_scalar");
+                assert_eq!(scalars.len(), 1);
+                let scalar = scalars[0];
+                let spelling = scalar.utf8_text(source.as_bytes()).unwrap();
+                assert_eq!(spelling, format!("{style}{line_break}  alpha"));
+                let next = source.find("next:").unwrap();
+                assert_eq!(
+                    &source[scalar.end_byte()..next],
+                    line_break.repeat(trailing)
+                );
+                node_spellings.push(spelling.to_owned());
+            }
+            // Keep-chomping values differ, although the native node text agrees.
+            // Lowering must account for source beyond this capture before decoding.
+            assert_eq!(node_spellings[0], node_spellings[1]);
+        }
+    }
+}
+
+#[test]
 fn yaml_state_capacity_reports_errors_instead_of_truncating_indentation() {
     let mut parser = parser();
     for depth in [1, 128, 199, 200, 201, 260] {
