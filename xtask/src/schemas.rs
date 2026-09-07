@@ -68,11 +68,12 @@ const GENERATED_RUST_FILES: [&str; 4] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
-const STORAGE_COMPATIBILITY_BASELINES: [&str; 4] = [
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 5] = [
     "storage/1.0/schema-fingerprints.json",
     "storage/1.1/schema-fingerprints.json",
     "storage/1.2/schema-fingerprints.json",
     "storage/1.2/oracle-4-schema-fingerprints.json",
+    "storage/1.2/oracle-5-schema-fingerprints.json",
 ];
 const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
     "crates/rootlight-catalog/src/schema.rs",
@@ -327,7 +328,7 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
                 )
             })
             .collect::<Vec<_>>()
-            != [(1, 0), (1, 1), (1, 2), (1, 2)]
+            != [(1, 0), (1, 1), (1, 2), (1, 2), (1, 2)]
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.catalog)
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.oracle)
     {
@@ -866,6 +867,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "mcp-code-dead-input-1.0.schema.json",
         "mcp-code-dead-output-1.0.schema.json",
         "ir-1.1.schema.json",
+        "ir-1.2.schema.json",
         "mcp-symbol-explain-input-1.0.schema.json",
         "mcp-symbol-explain-output-1.0.schema.json",
         "mcp-symbol-relationships-input-1.0.schema.json",
@@ -899,7 +901,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<ConfigDocumentSchemaV1_2>(&schema_root.join("config-1.2.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_3>(&schema_root.join("config-1.3.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
-    write_normalized_ir_schema(&schema_root.join("ir-1.2.schema.json"))?;
+    write_normalized_ir_schema(&schema_root.join("ir-1.3.schema.json"))?;
     write_schema::<LexicalEvidenceV1>(
         &schema_root.join("ir-extension-rootlight-lexical-1.schema.json"),
     )?;
@@ -1105,8 +1107,8 @@ fn write_normalized_ir_schema(path: &Path) -> Result<(), SchemaError> {
         .for_deserialize()
         .into_generator()
         .into_root_schema_for::<NormalizedIrDocument>();
-    // Runtime readers accept both normalized versions, but each published
-    // schema names exactly one contract. The 1.1 artifact remains frozen.
+    // Runtime readers accept supported normalized versions, but each published
+    // schema names exactly one contract. The 1.1 and 1.2 artifacts remain frozen.
     let minor = schema
         .as_object_mut()
         .and_then(|object| object.get_mut("$defs"))
@@ -1116,7 +1118,7 @@ fn write_normalized_ir_schema(path: &Path) -> Result<(), SchemaError> {
                 "normalized IR schema is missing its exact version marker".to_owned(),
             )
         })?;
-    *minor = serde_json::json!({"type": "integer", "const": 2});
+    *minor = serde_json::json!({"type": "integer", "const": 3});
     write_schema_value(path, schema)
 }
 
@@ -1186,6 +1188,25 @@ fn write_mcp_tool_schema_version<T: JsonSchema>(
 }
 
 fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), SchemaError> {
+    // Markup requires a separately versioned MCP response contract. Retained
+    // tool schemas must not widen merely because the internal IR enum grows.
+    if path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.starts_with("mcp-"))
+        && let Some(variants) = schema
+            .as_object_mut()
+            .and_then(|object| object.get_mut("$defs"))
+            .and_then(|definitions| definitions.pointer_mut("/EntityKind/oneOf"))
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        variants.retain(|variant| {
+            !matches!(
+                variant.get("const").and_then(serde_json::Value::as_str),
+                Some("markup_element" | "markup_attribute")
+            )
+        });
+    }
     if path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
@@ -1458,6 +1479,13 @@ fn validate_generated_json_schemas(
     let mut keyframes_ir = stylesheet_ir.clone();
     keyframes_ir["entities"][0]["kind"] = serde_json::json!("keyframes");
     let mut downgraded_stylesheet_ir = stylesheet_ir.clone();
+    let mut markup_ir = stylesheet_ir.clone();
+    markup_ir["version"]["minor"] = serde_json::json!(3);
+    markup_ir["entities"][0]["kind"] = serde_json::json!("markup_element");
+    let mut attribute_ir = markup_ir.clone();
+    attribute_ir["entities"][0]["kind"] = serde_json::json!("markup_attribute");
+    let mut downgraded_markup_ir = markup_ir.clone();
+    downgraded_markup_ir["version"]["minor"] = serde_json::json!(2);
     downgraded_stylesheet_ir["version"]["minor"] = serde_json::json!(1);
     let lexical_envelope = read_json_value(
         &workspace_root
@@ -1660,6 +1688,22 @@ fn validate_generated_json_schemas(
             "ir-1.2.schema.json",
             "stylesheet entity document",
             stylesheet_ir,
+        ),
+        SchemaSemanticCase::valid("ir-1.3.schema.json", "markup element document", markup_ir),
+        SchemaSemanticCase::valid(
+            "ir-1.3.schema.json",
+            "markup attribute document",
+            attribute_ir,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.2.schema.json",
+            "markup kind in older vocabulary",
+            downgraded_markup_ir.clone(),
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.3.schema.json",
+            "markup contract version downgrade",
+            downgraded_markup_ir,
         ),
         SchemaSemanticCase::valid(
             "ir-1.2.schema.json",
@@ -1932,6 +1976,18 @@ fn validate_generated_json_schemas(
                             &ExtensionSupport::default()
                         ),
                         Ok(IrDocument::NormalizedV1_2(_))
+                    )
+                }
+                "ir-1.3.schema.json" => {
+                    let encoded =
+                        serde_json::to_vec(&case.instance).map_err(SchemaError::SerializeJson)?;
+                    matches!(
+                        decode_ir_document(
+                            &encoded,
+                            &IrLimits::default(),
+                            &ExtensionSupport::default()
+                        ),
+                        Ok(IrDocument::NormalizedV1_3(_))
                     )
                 }
                 _ => case.expected_valid,
@@ -2341,6 +2397,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),

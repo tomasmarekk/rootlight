@@ -252,7 +252,9 @@ pub(crate) fn decode(
     if document_bytes.len() > limits.max_document_bytes {
         return Err(SegmentError::Corrupt);
     }
-    let (IrDocument::NormalizedV1_1(document) | IrDocument::NormalizedV1_2(document)) =
+    let (IrDocument::NormalizedV1_1(document)
+    | IrDocument::NormalizedV1_2(document)
+    | IrDocument::NormalizedV1_3(document)) =
         decode_ir_document(document_bytes, limits, extensions)
             .map_err(|_| SegmentError::Corrupt)?
     else {

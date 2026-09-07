@@ -9,8 +9,7 @@ use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 
 use crate::{
     ContainerRef, CoverageScope, EntityKind, ExtensionCriticality, ExtensionEnvelope, FactEvidence,
-    FactRef, NormalizedIrDocument, NormalizedIrVersion, OccurrenceTarget, RelationEndpoint,
-    SourceRef,
+    FactRef, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, SourceRef,
 };
 
 const DEFAULT_MAX_NESTED_ITEMS_PER_RECORD: usize = 4_096;
@@ -352,9 +351,7 @@ fn validate_limits(
         budget.string("file.encoding", &file.encoding, limits)?;
     }
     for entity in &document.entities {
-        if document.version == NormalizedIrVersion::V1_1
-            && matches!(entity.kind, EntityKind::StyleRule | EntityKind::Keyframes)
-        {
+        if document.version < entity.kind.minimum_ir_version() {
             return Err(IrDocumentValidationError::EntityKindVersion { kind: entity.kind });
         }
         budget.nested("entity.flags", entity.flags.len(), limits)?;
@@ -1402,8 +1399,8 @@ pub enum IrDocumentValidationError {
         /// Unsupported minor component.
         minor: u16,
     },
-    /// A stylesheet kind was supplied under the baseline 1.1 contract.
-    #[error("entity kind {kind:?} requires normalized IR version 1.2")]
+    /// An entity kind was supplied under an older document contract.
+    #[error("entity kind {kind:?} requires a newer normalized IR version")]
     EntityKindVersion {
         /// Kind requiring the newer document version.
         kind: EntityKind,

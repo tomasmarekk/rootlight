@@ -7,10 +7,10 @@ use std::{cmp::Ordering, convert::Infallible, fmt, mem};
 
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityKind,
+    AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
     EntityRecord, ExtensionEnvelope, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
-    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, ProvenanceRecord, RelationRecord,
-    SkippedRegion, SourceMappingRecord, SourceRef, SourceSpan, canonicalize_ir_document,
+    NormalizedIrDocument, OccurrenceRecord, ProvenanceRecord, RelationRecord, SkippedRegion,
+    SourceMappingRecord, SourceRef, SourceSpan, canonicalize_ir_document,
 };
 
 use crate::{
@@ -1783,9 +1783,7 @@ fn append_ir_record(document: &mut NormalizedIrDocument, record: IrRecord) {
             // Record streams have no document-version header. Select the minimum
             // wire version that can represent the accepted records, without
             // changing baseline-only output or relaxing commit-time validation.
-            if matches!(record.kind, EntityKind::StyleRule | EntityKind::Keyframes) {
-                document.version = NormalizedIrVersion::V1_2;
-            }
+            document.version = document.version.max(record.kind.minimum_ir_version());
             document.entities.push(record);
         }
         IrRecord::Occurrence(record) => document.occurrences.push(record),
@@ -1889,6 +1887,43 @@ fn evidence_matches_sources(evidence: &FactEvidence, sources: &[SourceRef]) -> b
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markup_stream_version_never_downgrades_with_record_order() {
+        use rootlight_ir::{EntityKind, IrDocument, NormalizedIrVersion};
+        let IrDocument::NormalizedV1_1(fixture) = rootlight_ir::decode_ir_document(
+            include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap() else {
+            panic!("frozen normalized fixture");
+        };
+        for kinds in [
+            [
+                EntityKind::MarkupElement,
+                EntityKind::Keyframes,
+                EntityKind::MarkupAttribute,
+                EntityKind::Function,
+            ],
+            [
+                EntityKind::Function,
+                EntityKind::StyleRule,
+                EntityKind::MarkupAttribute,
+                EntityKind::MarkupElement,
+            ],
+        ] {
+            let mut document = NormalizedIrDocument::empty(fixture.repository, fixture.generation);
+            let mut expected = NormalizedIrVersion::V1_1;
+            for kind in kinds {
+                let mut entity = fixture.entities[0].clone();
+                entity.kind = kind;
+                expected = expected.max(kind.minimum_ir_version());
+                append_ir_record(&mut document, IrRecord::Entity(entity));
+                assert_eq!(document.version, expected);
+                assert_eq!(document.entities.last().unwrap().kind, kind);
+            }
+        }
+    }
     use super::*;
     use rootlight_cancel::CancellationReason;
 

@@ -904,6 +904,8 @@ pub const fn entity_kind_identity_label(kind: EntityKind) -> &'static str {
         EntityKind::ConfigurationKey => "configuration-key",
         EntityKind::StyleRule => "style-rule",
         EntityKind::Keyframes => "keyframes",
+        EntityKind::MarkupElement => "markup-element",
+        EntityKind::MarkupAttribute => "markup-attribute",
         EntityKind::Commit => "commit",
         EntityKind::Change => "change",
         EntityKind::CommunityView => "community-view",

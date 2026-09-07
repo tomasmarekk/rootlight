@@ -320,7 +320,9 @@ pub fn import_shared_generation(
     let document = match decode_ir_document(document_bytes, ir_limits, extensions)
         .map_err(|_| SharedGenerationError::Document)?
     {
-        IrDocument::NormalizedV1_1(document) | IrDocument::NormalizedV1_2(document) => document,
+        IrDocument::NormalizedV1_1(document)
+        | IrDocument::NormalizedV1_2(document)
+        | IrDocument::NormalizedV1_3(document) => document,
         IrDocument::LegacyV1_0(_) => return Err(SharedGenerationError::Document),
     };
     if document.repository != manifest.repository || document.generation != manifest.generation {
@@ -551,31 +553,35 @@ mod tests {
 
     #[test]
     fn shared_generation_preserves_explicit_normalized_version() {
-        let (generation, cancellation, limits, extensions) =
-            fixture_for_version(rootlight_ir::NormalizedIrVersion::V1_2);
-        let source_set_hash = shared_generation_source_set_hash(generation.document())
-            .expect("versioned source set hashes");
-        let encoded = export_shared_generation(
-            &generation,
-            SharedGenerationLimits::default(),
-            &cancellation,
-        )
-        .expect("versioned generation exports");
-        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
-        let imported = import_shared_generation(
-            &encoded,
-            SharedGenerationExpectation::new(generation.metadata().repository(), source_set_hash),
-            SharedGenerationLimits::default(),
-            &limits,
-            &extensions,
-            &context,
-        )
-        .expect("versioned generation imports");
-        assert_eq!(imported.generation().document(), generation.document());
-        assert_eq!(
-            imported.generation().document().version,
-            rootlight_ir::NormalizedIrVersion::V1_2
-        );
+        for version in [
+            rootlight_ir::NormalizedIrVersion::V1_2,
+            rootlight_ir::NormalizedIrVersion::V1_3,
+        ] {
+            let (generation, cancellation, limits, extensions) = fixture_for_version(version);
+            let source_set_hash = shared_generation_source_set_hash(generation.document())
+                .expect("versioned source set hashes");
+            let encoded = export_shared_generation(
+                &generation,
+                SharedGenerationLimits::default(),
+                &cancellation,
+            )
+            .expect("versioned generation exports");
+            let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+            let imported = import_shared_generation(
+                &encoded,
+                SharedGenerationExpectation::new(
+                    generation.metadata().repository(),
+                    source_set_hash,
+                ),
+                SharedGenerationLimits::default(),
+                &limits,
+                &extensions,
+                &context,
+            )
+            .expect("versioned generation imports");
+            assert_eq!(imported.generation().document(), generation.document());
+            assert_eq!(imported.generation().document().version, version);
+        }
     }
 
     #[test]

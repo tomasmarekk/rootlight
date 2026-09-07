@@ -17698,29 +17698,24 @@ fn merged_document_version(
     if source.repository != target.repository || source.generation != target.generation {
         return Err(FirstSliceError::Identity);
     }
-    match (target.version, source.version) {
-        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_1) => Ok(NormalizedIrVersion::V1_1),
-        (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_2) => Ok(NormalizedIrVersion::V1_2),
-        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2)
-        | (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_1) => {
-            // Promotion must not legalize a kind that was invalid in its input
-            // contract. Only the baseline partition needs this transition check;
-            // repeatedly rescanning the growing 1.2 aggregate would be quadratic.
-            let baseline = if target.version == NormalizedIrVersion::V1_1 {
-                target
-            } else {
-                source
-            };
-            if baseline
-                .entities
-                .iter()
-                .any(|entity| matches!(entity.kind, EntityKind::StyleRule | EntityKind::Keyframes))
-            {
-                return Err(FirstSliceError::Identity);
-            }
-            Ok(NormalizedIrVersion::V1_2)
-        }
+    if target.version == source.version {
+        return Ok(target.version);
     }
+    // Only the lower-version partition needs a transition check. Rescanning
+    // the growing higher-version aggregate for every file would be quadratic.
+    let lower = if target.version < source.version {
+        target
+    } else {
+        source
+    };
+    if lower
+        .entities
+        .iter()
+        .any(|entity| entity.kind.minimum_ir_version() > lower.version)
+    {
+        return Err(FirstSliceError::Identity);
+    }
+    Ok(target.version.max(source.version))
 }
 
 fn append_normalized_document(

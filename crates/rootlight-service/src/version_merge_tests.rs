@@ -19,8 +19,16 @@ fn fixture(version: NormalizedIrVersion) -> NormalizedIrDocument {
 
 #[test]
 fn mixed_version_appends_preserve_every_fact_and_required_version() {
-    for target_version in [NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2] {
-        for source_version in [NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2] {
+    for target_version in [
+        NormalizedIrVersion::V1_1,
+        NormalizedIrVersion::V1_2,
+        NormalizedIrVersion::V1_3,
+    ] {
+        for source_version in [
+            NormalizedIrVersion::V1_1,
+            NormalizedIrVersion::V1_2,
+            NormalizedIrVersion::V1_3,
+        ] {
             for path in ["structural", "project", "partition"] {
                 let source = fixture(source_version);
                 let mut target = NormalizedIrDocument::empty(source.repository, source.generation);
@@ -200,5 +208,36 @@ fn promotion_does_not_legalize_an_invalid_baseline_target() {
             ),
             Err(FirstSliceError::Identity),
         );
+    }
+}
+
+#[test]
+fn markup_promotion_rejects_invalid_lower_version_entities_without_mutation() {
+    for lower in [NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2] {
+        for kind in [EntityKind::MarkupElement, EntityKind::MarkupAttribute] {
+            for invalid_target in [false, true] {
+                let mut invalid = fixture(lower);
+                invalid.entities[0].kind = kind;
+                let mut valid = NormalizedIrDocument::empty(invalid.repository, invalid.generation);
+                valid.version = NormalizedIrVersion::V1_3;
+                let (mut target, source) = if invalid_target {
+                    (invalid, valid)
+                } else {
+                    (valid, invalid)
+                };
+                let before = target.clone();
+                let mut state = DocumentAppendState::from_document(&target).unwrap();
+                assert_eq!(
+                    append_normalized_document(
+                        &mut target,
+                        source,
+                        &IrLimits::default(),
+                        &mut state
+                    ),
+                    Err(FirstSliceError::Identity)
+                );
+                assert_eq!(target, before);
+            }
+        }
     }
 }

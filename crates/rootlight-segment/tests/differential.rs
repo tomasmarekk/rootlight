@@ -40,6 +40,10 @@ fn context(cancellation: &Cancellation) -> GenerationContext<'_> {
 }
 
 fn fixture() -> (GenerationMetadata, NormalizedIrDocument) {
+    fixture_with_kind(EntityKind::Function)
+}
+
+fn fixture_with_kind(kind: EntityKind) -> (GenerationMetadata, NormalizedIrDocument) {
     const SOURCE: &[u8] = b"pub fn answer() -> u32 { answer() }\n";
     const PATH: &str = "src/lib.rs";
     let repository = derive_repository(b"rootlight-segment-differential").id();
@@ -148,7 +152,7 @@ fn fixture() -> (GenerationMetadata, NormalizedIrDocument) {
         symbol: rootlight_ids::SymbolId::from_bytes([0; 20]),
         repository,
         language: "rust".to_owned(),
-        kind: EntityKind::Function,
+        kind,
         container: Some(ContainerRef::File(file)),
         container_identity: file.as_bytes().to_vec(),
         declared_identity: "answer".to_owned(),
@@ -160,7 +164,7 @@ fn fixture() -> (GenerationMetadata, NormalizedIrDocument) {
         id: symbol_claim.symbol,
         repository,
         generation,
-        kind: EntityKind::Function,
+        kind,
         language: "rust".to_owned(),
         tier: AnalysisTier::TierB,
         canonical_name: "answer".to_owned(),
@@ -530,39 +534,55 @@ fn segment_reader_matches_sqlite_for_every_indexed_operation() {
 
 #[test]
 fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
-    let cancellation = Cancellation::new();
-    let context = context(&cancellation);
-    let (metadata, mut document) = fixture();
-    document.version = rootlight_ir::NormalizedIrVersion::V1_2;
-    let oracle = EphemeralOracleWriter::create()
-        .expect("oracle initializes")
-        .seal(verify(metadata, document.clone(), &context), &context)
-        .expect("versioned fixture seals");
-    let segment = Segment::encode(
-        verify(metadata, document, &context),
-        oracle.stats(),
-        &context,
-    )
-    .expect("versioned fixture encodes");
-    let reader = SegmentReader::open(
-        segment.into_bytes(),
-        &IrLimits::default(),
-        &ExtensionSupport::default(),
-        &context,
-    )
-    .expect("versioned segment opens");
-    let actual = reader
-        .read_generation(&context)
-        .expect("segment generation reads")
-        .into_snapshot()
-        .into_document();
-    let expected = oracle
-        .read_generation(&context)
-        .expect("oracle generation reads")
-        .into_snapshot()
-        .into_document();
-    assert_eq!(actual, expected);
-    assert_eq!(actual.version, rootlight_ir::NormalizedIrVersion::V1_2);
+    for (kind, version) in [
+        (
+            EntityKind::Function,
+            rootlight_ir::NormalizedIrVersion::V1_2,
+        ),
+        (
+            EntityKind::MarkupElement,
+            rootlight_ir::NormalizedIrVersion::V1_3,
+        ),
+        (
+            EntityKind::MarkupAttribute,
+            rootlight_ir::NormalizedIrVersion::V1_3,
+        ),
+    ] {
+        let cancellation = Cancellation::new();
+        let context = context(&cancellation);
+        let (metadata, mut document) = fixture_with_kind(kind);
+        document.version = version;
+        let oracle = EphemeralOracleWriter::create()
+            .expect("oracle initializes")
+            .seal(verify(metadata, document.clone(), &context), &context)
+            .expect("versioned fixture seals");
+        let segment = Segment::encode(
+            verify(metadata, document, &context),
+            oracle.stats(),
+            &context,
+        )
+        .expect("versioned fixture encodes");
+        let reader = SegmentReader::open(
+            segment.into_bytes(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("versioned segment opens");
+        let actual = reader
+            .read_generation(&context)
+            .expect("segment generation reads")
+            .into_snapshot()
+            .into_document();
+        let expected = oracle
+            .read_generation(&context)
+            .expect("oracle generation reads")
+            .into_snapshot()
+            .into_document();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.version, version);
+        assert_eq!(actual.entities[0].kind, kind);
+    }
 }
 
 #[test]
