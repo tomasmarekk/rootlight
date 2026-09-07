@@ -46,6 +46,8 @@ impl<'a> Fixture<'a> {
             SyntaxFactKind::Module
         } else if syntax.ends_with(".definition") {
             SyntaxFactKind::Occurrence
+        } else if syntax.ends_with(".signature") {
+            SyntaxFactKind::Signature
         } else {
             SyntaxFactKind::Declaration
         };
@@ -118,6 +120,77 @@ fn properties(document: &NormalizedIrDocument) -> Vec<&rootlight_ir::EntityRecor
         .collect();
     properties.sort_by_key(|entity| entity.evidence.source.as_ref().unwrap().span().start_byte());
     properties
+}
+
+#[test]
+fn tagged_value_warnings_are_reserved_in_preflight_quotas() {
+    for value in ["!custom text", "!!int text"] {
+        let mut fixture = Fixture::new(value);
+        let document = fixture.add(2, "yaml.document.scope", value, 0);
+        let node = fixture.add(document, "yaml.node.scope", value, 0);
+        fixture.add(
+            node,
+            "yaml.tag.signature",
+            value.split_once(' ').unwrap().0,
+            0,
+        );
+        let full = fixture.analyze();
+        assert_eq!(full.skipped_regions.len(), 1);
+        let mut enough = IrLimits::default();
+        // Module, document and lexical-signature reservations cannot substitute
+        // for the separate node-tag semantic gap, even if unused in this input.
+        enough.max_skipped_regions = 4;
+        assert_eq!(
+            fixture
+                .analyze_with(fixture.facts.clone(), enough)
+                .unwrap()
+                .document(),
+            &full
+        );
+        let mut insufficient = IrLimits::default();
+        insufficient.max_skipped_regions = 3;
+        let error = fixture
+            .analyze_with(fixture.facts.clone(), insufficient)
+            .expect_err("tag semantics reserve their own skipped-region quota");
+        assert!(
+            matches!(
+                error,
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: rootlight_adapter_sdk::ResourceKind::Records,
+                    observed: 4,
+                    limit: 3,
+                })
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn tagged_values_obey_the_existing_name_budget_without_losing_keys() {
+    let value = format!("!!str '{}'", "x".repeat(100));
+    let text = format!("affected: {value}\nsafe: readable\n");
+    let mut fixture = Fixture::new(&text);
+    let document = fixture.add(2, "yaml.document.scope", &text, 0);
+    let mapping = fixture.add(document, "yaml.mapping.scope", &text, 0);
+    let property = fixture.property(mapping, &format!("affected: {value}"), "affected", 0);
+    let node = fixture.add(property, "yaml.node.scope", &value, 0);
+    fixture.add(node, "yaml.tag.signature", "!!str", 0);
+    fixture.property(mapping, "safe: readable", "safe", 0);
+    let full = fixture.analyze();
+    assert!(full.skipped_regions.is_empty());
+    let mut small = IrLimits::default();
+    small.max_string_bytes = 64;
+    let bounded = fixture.analyze_with(fixture.facts.clone(), small).unwrap();
+    assert_eq!(properties(bounded.document()), properties(&full));
+    let gaps = &bounded.document().skipped_regions;
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].detail, "yaml-node-tag-construction-unavailable");
+    assert_eq!(gaps[0].source.span().start_byte(), 10);
+    assert_eq!(
+        gaps[0].source.span().end_byte(),
+        u64::try_from(10 + value.len()).unwrap()
+    );
 }
 
 #[test]

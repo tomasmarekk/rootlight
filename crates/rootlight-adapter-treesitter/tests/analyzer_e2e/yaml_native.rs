@@ -6,6 +6,144 @@
 mod collections;
 
 #[test]
+fn yaml_native_valid_value_tags_preserve_complete_core_coverage() {
+    for source in [
+        "!!map {key: !!int '0xB', nested: !!seq [!!bool 'true', !!null '', ! 12]}\n",
+        "!!seq\n- !!map {key: !!float '1.5'}\n- !!str |\n    line\n\n",
+        "value: !!str |+\n  line\n\nnext: !!str ''\n",
+        "%TAG !e! tag:yaml.org,2002:\n---\nvalue: !e!seq [!e!str true]\n---\nvalue: !!int 12\n",
+        "value: ! {key: ! [one, two]}\n",
+        "value: &anchor !!str text\nnext: !!str &other text\n",
+    ] {
+        let result = output(source);
+        assert!(
+            result.document().diagnostics.is_empty(),
+            "{source:?}: {:?}",
+            result.document().diagnostics
+        );
+        assert!(
+            result.document().skipped_regions.is_empty(),
+            "{source:?}: {:?}",
+            result.document().skipped_regions
+        );
+    }
+}
+
+#[test]
+fn yaml_native_value_tag_context_resets_and_artifacts_retain_exact_gaps() {
+    let source = "%TAG !e! tag:yaml.org,2002:\n---\nvalue: !e!str text\n---\nvalue: !e!str text\nblock: !custom |+\n  text\n\nsafe: readable\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, YAML);
+    let fixture = Fixture::new(YAML, source.as_bytes());
+    let budget = limits();
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, YAML, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(first.document().diagnostics.is_empty());
+    let gaps = &first.document().skipped_regions;
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    let invalid = gaps
+        .iter()
+        .find(|gap| gap.detail == "yaml-node-tag-construction-unavailable")
+        .unwrap();
+    assert_eq!(
+        invalid.source.span().start_byte(),
+        u64::try_from(source.rfind("!e!str").unwrap()).unwrap()
+    );
+    let block = gaps
+        .iter()
+        .find(|gap| gap.detail == "yaml-node-tag-semantics-unknown")
+        .unwrap();
+    assert_eq!(
+        block.source.span().end_byte(),
+        u64::try_from(source.find("safe:").unwrap()).unwrap()
+    );
+    let changed = fixture.next_generation();
+    let required = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    let bounded_limits = limits_with_syntax_records(required);
+    let (bounded, retained) = analyzer
+        .analyze_and_capture(
+            &request(&changed.snapshot, &changed.source, YAML, &bounded_limits),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let replay = analyzer
+        .analyze_from_artifact(
+            &request(&changed.snapshot, &changed.source, YAML, &bounded_limits),
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(replay.document(), bounded.document());
+    assert_eq!(replay.report(), bounded.report());
+    for original in gaps {
+        let rebound = replay
+            .document()
+            .skipped_regions
+            .iter()
+            .find(|gap| gap.detail == original.detail)
+            .unwrap();
+        assert_eq!(rebound.source.span(), original.source.span());
+        assert_eq!(rebound.source.generation(), changed.source.generation());
+    }
+}
+
+#[test]
+fn yaml_native_value_tags_report_local_semantic_gaps_without_losing_properties() {
+    for (value, detail) in [
+        ("!custom text", "yaml-node-tag-semantics-unknown"),
+        ("!custom [one, two]", "yaml-node-tag-semantics-unknown"),
+        ("!custom {nested: value}", "yaml-node-tag-semantics-unknown"),
+        (
+            "!!int 'not an integer'",
+            "yaml-node-tag-construction-unavailable",
+        ),
+        ("!!map [one, two]", "yaml-node-tag-construction-unavailable"),
+        (
+            "!!seq {nested: value}",
+            "yaml-node-tag-construction-unavailable",
+        ),
+        (
+            "!missing!str text",
+            "yaml-node-tag-construction-unavailable",
+        ),
+    ] {
+        let source = format!("affected: {value}\nsafe: readable\n");
+        let result = output(&source);
+        let document = result.document();
+        assert!(document.diagnostics.is_empty(), "{source:?}");
+        let gap = document
+            .skipped_regions
+            .iter()
+            .find(|gap| gap.detail == detail)
+            .unwrap_or_else(|| panic!("{source:?}: {:?}", document.skipped_regions));
+        assert_eq!(gap.source.span().start_byte(), 10);
+        assert_eq!(
+            gap.source.span().end_byte(),
+            u64::try_from(10 + value.len()).unwrap()
+        );
+        for name in [r#"str:"affected""#, r#"str:"safe""#] {
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == name),
+                "{source:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn yaml_native_wide_integer_spellings_share_identity_but_keep_exact_sources() {
     // 2^1024 - 1, independently constructed as a decimal golden.
     let decimal = concat!(

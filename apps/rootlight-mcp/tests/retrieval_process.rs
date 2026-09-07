@@ -78,6 +78,85 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn yaml_scalar_alias_keys_cross_real_process_boundaries() {
+    data_properties_cross_process_boundaries(
+        "yaml",
+        "data.yaml",
+        "key: 101\nitems: [null, {&entry key: 303}, {\"k\\u0065y\": 202}, {*entry : 404}]\n'': 5\n' ': 6\n",
+        &[("key", 4), (r#"str:"""#, 1), (r#"str:" ""#, 1)],
+    );
+}
+
+#[test]
+fn yaml_tagged_value_gaps_cross_real_process_boundaries_with_exact_sources() {
+    let source = "affected: !custom secret_value\nsafe: readable\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("data.yaml", source)), FixtureLayout::Data);
+    for (index, (query, modes, path, partial)) in [
+        ("affected", json!(["exact"]), "data.yaml", true),
+        ("secret_value", json!(["lexical"]), "data.yaml", true),
+        ("matrix_target_alpha", json!(["exact"]), "src/lib.rs", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let language = if partial { "yaml" } else { "rust" };
+        let arguments = json!({"query": query, "search_modes": modes, "languages": [language],
+            "scope": {"paths": [path]}, "response_profile": "evidence"});
+        let located = fixture.standalone(
+            &format!("yaml-tag-locate-{index}"),
+            "code.locate",
+            arguments.clone(),
+        );
+        let batch = fixture.batch(
+            &format!("yaml-tag-batch-{index}"),
+            "code.locate",
+            arguments,
+            "evidence",
+        );
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert_eq!(
+            output["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["code"] == "coverage_unsupported"),
+            partial,
+            "{output:#}"
+        );
+        if !partial {
+            continue;
+        }
+        let matches = output["data"]["matches"].as_array().unwrap();
+        assert!(!matches.is_empty(), "{output:#}");
+        for (ordinal, hit) in matches.iter().enumerate() {
+            assert_eq!(hit["path"], path);
+            let reference = &hit["source_ref"];
+            let read = fixture.standalone(
+                &format!("yaml-tag-read-{index}-{ordinal}"),
+                "source.read",
+                json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                    "context_lines_after": 0, "response_profile": "evidence"}),
+            );
+            assert_success(&read, "source.read");
+            let read = &read["result"]["structuredContent"];
+            assert_common_read_contract(read, &fixture.repository_id);
+            assert_eq!(read["generation"], output["generation"]);
+            let chunk = &read["data"]["chunks"][0];
+            for field in ["content_hash", "generation", "repository", "span"] {
+                assert_eq!(chunk["source_ref"][field], reference[field]);
+            }
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+            assert_eq!(chunk["content"].as_str(), source.get(start..end));
+        }
+    }
+    fixture.finish();
+}
+
+#[test]
 fn json_duplicate_and_escaped_members_cross_real_process_boundaries() {
     let source = r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6," ":7," key ":8}"#;
     data_properties_cross_process_boundaries(
@@ -117,7 +196,8 @@ fn data_properties_cross_process_boundaries(
     source: &str,
     queries: &[(&str, usize)],
 ) {
-    let mut fixture = RetrievalFixture::spawn_with_source(Some((path, source)));
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for (index, &(query, expected)) in queries.iter().enumerate() {
         let arguments = json!({"query": query, "search_modes": ["exact"], "languages": [language], "response_profile": "evidence"});
         let located = fixture.standalone(
@@ -139,7 +219,8 @@ fn data_properties_cross_process_boundaries(
                 .as_array()
                 .expect("warnings")
                 .iter()
-                .all(|warning| warning["code"] != "coverage_unsupported")
+                .all(|warning| warning["code"] != "coverage_unsupported"),
+            "{output:#}"
         );
         let matches: Vec<_> = output["data"]["matches"]
             .as_array()
@@ -268,7 +349,7 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
             .is_empty()
     );
     for (id, languages, expects_toml) in [
-        ("filtered-empty", json!(["yaml"]), false),
+        ("filtered-empty", json!(["sql"]), false),
         ("unfiltered-empty", json!([]), false),
     ] {
         let absent = fixture.standalone(
@@ -287,7 +368,7 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
             warning["code"] == "coverage_unsupported"
                 && warning["message"]
                     .as_str()
-                    .is_some_and(|message| message.ends_with("language yaml"))
+                    .is_some_and(|message| message.ends_with("language sql"))
         }));
         assert_eq!(
             warnings
@@ -355,7 +436,7 @@ fn global_source_chunks_preserve_pagination_and_exact_tail_reads(fixture: &mut R
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning["code"] == "coverage_unsupported")
+                .all(|warning| warning["code"] != "coverage_unsupported")
         );
         let matches = output["data"]["matches"].as_array().expect("source hits");
         assert_eq!(matches.len(), 1, "full-source response: {output:#}");
@@ -1393,7 +1474,10 @@ fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str)
     );
     assert!(operation.get("error").is_none());
     assert_eq!(operation["data"], standalone["data"]);
-    assert_eq!(operation["truncated"], standalone["truncated"]);
+    assert_eq!(
+        operation["truncated"], standalone["truncated"],
+        "standalone: {standalone:#}\nbatch: {batch:#}"
+    );
     assert_eq!(operation["next_cursor"], standalone["next_cursor"]);
     assert_eq!(
         batch["repository"]["repository_id"],
@@ -1488,6 +1572,11 @@ fn assert_public_error(response: &Value, expected: &str) {
     );
 }
 
+enum FixtureLayout {
+    Full,
+    Data,
+}
+
 struct RetrievalFixture {
     _root: tempfile::TempDir,
     daemon: DaemonProcess,
@@ -1503,6 +1592,10 @@ impl RetrievalFixture {
     }
 
     fn spawn_with_source(extra_source: Option<(&str, &str)>) -> Self {
+        Self::spawn_with_layout(extra_source, FixtureLayout::Full)
+    }
+
+    fn spawn_with_layout(extra_source: Option<(&str, &str)>, layout: FixtureLayout) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
@@ -1530,20 +1623,24 @@ impl RetrievalFixture {
         )
         .expect("scoped test fixture is written");
 
-        let terms = (0..5_000)
-            .map(|index| format!("item{index:05}value{index:05}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let full_source = format!("# globalheadmarker\n# {terms}\n# globaltailmarker\n");
-        for path in ["source-tail-a.yaml", "source-tail-b.yaml"] {
-            fs::write(repository_root.join(path), &full_source)
-                .expect("tail source fixture writes");
+        if matches!(layout, FixtureLayout::Full) {
+            fs::write(repository_root.join("unsupported.sql"), "SELECT 1;\n")
+                .expect("source-fallback fixture writes");
+            let terms = (0..5_000)
+                .map(|index| format!("item{index:05}value{index:05}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let full_source = format!("# globalheadmarker\n# {terms}\n# globaltailmarker\n");
+            for path in ["source-tail-a.yaml", "source-tail-b.yaml"] {
+                fs::write(repository_root.join(path), &full_source)
+                    .expect("tail source fixture writes");
+            }
+            fs::write(
+                repository_root.join("omitted-word.yaml"),
+                format!("# {}\n", "x".repeat(241)),
+            )
+            .expect("omitted-word source writes");
         }
-        fs::write(
-            repository_root.join("omitted-word.yaml"),
-            format!("# {}\n", "x".repeat(241)),
-        )
-        .expect("omitted-word source writes");
 
         let state_dir = root.path().join("state");
         let runtime_dir = root.path().join("runtime");

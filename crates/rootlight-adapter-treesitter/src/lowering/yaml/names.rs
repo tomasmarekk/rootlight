@@ -6,6 +6,7 @@ use super::super::*;
 use rootlight_adapter_sdk::{YamlBlockScalar, YamlDocumentContext};
 
 mod collections;
+mod tags;
 
 pub(in super::super) struct Key {
     pub(in super::super) name: String,
@@ -218,6 +219,18 @@ impl Names {
                 cancellation,
             )?;
         }
+        tags::validate(
+            tags::Input {
+                ordered: &ordered,
+                source,
+                maximum,
+                documents: &documents,
+                contexts: &decoded,
+                parents: &collections,
+            },
+            &mut result.warnings,
+            cancellation,
+        )?;
         Ok(result)
     }
 }

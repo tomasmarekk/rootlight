@@ -859,6 +859,18 @@ fn preflight_lowering_limits(
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
         if request.language().as_str() == "yaml"
+            && fact.syntax_kind().as_str() == "yaml.tag.signature"
+        {
+            // Tag construction can be unavailable even when lexical signature
+            // retention succeeds; both gaps require independent reservations.
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "yaml-node-tag-construction-unavailable".len(),
+                limits,
+            )?;
+        }
+        if request.language().as_str() == "yaml"
             && matches!(
                 fact.syntax_kind().as_str(),
                 "yaml.document.scope" | "yaml.node_key.definition"
