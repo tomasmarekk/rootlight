@@ -45,6 +45,8 @@ pub enum GrammarFamily {
     Css,
     /// Bash grammar with checked scanner restoration and ordered heredoc inputs.
     Bash,
+    /// JSON grammar with source-bound object members and array elements.
+    Json,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -124,7 +126,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(16);
+        let mut descriptors = Vec::with_capacity(17);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -142,6 +144,7 @@ impl GrammarRegistry {
             GrammarFamily::Swift,
             GrammarFamily::Css,
             GrammarFamily::Bash,
+            GrammarFamily::Json,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -254,6 +257,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Swift => tree_sitter_swift::LANGUAGE.into(),
         GrammarFamily::Css => tree_sitter_css::LANGUAGE.into(),
         GrammarFamily::Bash => tree_sitter_bash::LANGUAGE.into(),
+        GrammarFamily::Json => tree_sitter_json::LANGUAGE.into(),
     }
 }
 
@@ -276,6 +280,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             scanner_sha256: Some(
                 "21f30fedabfa6a43bfddebf3ac59154b44c77b81fe42d23ff22bb2c0c3254ccc",
             ),
+        },
+        GrammarFamily::Json => GrammarIdentity {
+            language_id: "json",
+            grammar_version: "0.24.8",
+            source_package_sha256: "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471",
+            parser_sha256: "a3d0a4fbefb13d518e8e46b9b18b9b8bb16ece184faa3a543a4bbe18b466f7db",
+            scanner_sha256: None,
         },
         GrammarFamily::Css => GrammarIdentity {
             language_id: "css",
@@ -454,7 +465,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 16);
+        assert_eq!(registry.descriptors().len(), 17);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -472,6 +483,7 @@ mod tests {
             GrammarFamily::Swift,
             GrammarFamily::Css,
             GrammarFamily::Bash,
+            GrammarFamily::Json,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -537,6 +549,7 @@ mod tests {
             (GrammarFamily::Swift, "swift", "tree-sitter-swift"),
             (GrammarFamily::Css, "css", "tree-sitter-css"),
             (GrammarFamily::Bash, "bash", "tree-sitter-bash"),
+            (GrammarFamily::Json, "json", "tree-sitter-json"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

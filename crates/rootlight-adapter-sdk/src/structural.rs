@@ -174,6 +174,25 @@ pub fn structural_captured_name_for_language<'a>(
     }
 }
 
+/// Returns readable display text for a canonical structural identity.
+///
+/// JSON scalar keys omit their enclosing quotes and decode quote/backslash
+/// escapes. Empty, boundary-whitespace, control-bearing and unpaired-UTF-16 keys
+/// retain the canonical quoted identity. Other languages are unchanged. The input must already be a
+/// bounded canonical name from [`structural_captured_name_for_language`]; display
+/// text is no longer than that input and must never replace the durable identity.
+#[must_use]
+pub fn structural_display_name_for_language<'a>(
+    language: &str,
+    canonical: &'a str,
+) -> Cow<'a, str> {
+    if language == "json" {
+        crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
+    } else {
+        Cow::Borrowed(canonical)
+    }
+}
+
 /// Orders syntax facts exactly as structural declaration association consumes them.
 ///
 /// Whole-project analyzers must use this order before resolving nearest
@@ -216,6 +235,35 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_display_names_decode_only_readable_canonical_keys() {
+        for (raw, display) in [
+            (r#""name""#, "name"),
+            (r#""\u006eame""#, "name"),
+            (r#""\ud83e\udd80""#, "🦀"),
+            (r#""a\"b""#, "a\"b"),
+            (r#""a\\b""#, "a\\b"),
+            (r#""""#, r#""""#),
+            (r#""\u0000""#, r#""\u0000""#),
+            (r#""\ud800""#, r#""\ud800""#),
+            (r#"" ""#, r#"" ""#),
+            (r#"" name ""#, r#"" name ""#),
+            ("\"\u{2003}name\"", "\"\u{2003}name\""),
+        ] {
+            let canonical =
+                structural_captured_name_for_language("json", raw, 64).expect("valid key");
+            assert_eq!(
+                structural_display_name_for_language("json", &canonical),
+                display
+            );
+            assert_eq!(
+                structural_display_name_for_language("rust", &canonical),
+                canonical
+            );
+            assert!(display.len() <= canonical.len());
+        }
+    }
 
     #[test]
     fn ruby_operator_names_are_bounded_and_do_not_relax_other_languages() {

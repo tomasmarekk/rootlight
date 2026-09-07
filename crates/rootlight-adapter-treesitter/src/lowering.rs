@@ -520,7 +520,7 @@ fn required_syntax_fact_count_from_output(
                 | SyntaxFactKind::Declaration
                 | SyntaxFactKind::Signature
         ) || (fact.kind() == SyntaxFactKind::Scope
-            && contains_declaration[index])
+            && (contains_declaration[index] || fact.syntax_kind().as_str().starts_with("json.")))
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && fact.syntax_kind().as_str().ends_with(".definition"));
         if identity_fact {
@@ -1585,6 +1585,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut nearest_entity_ancestor = HashMap::new();
         let mut nearest_scope_ancestor = HashMap::<u64, Option<ScopeContext>>::new();
         let mut unsupported_scope_entities = BTreeSet::new();
+        let mut json_positions = HashMap::<Option<u64>, u64>::new();
+        let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1608,6 +1610,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 parent_entity = None;
             }
             if fact.kind() == SyntaxFactKind::Scope {
+                let json_position = if matches!(
+                    fact.syntax_kind().as_str(),
+                    "json.array_element.scope" | "json.document_value.scope"
+                ) {
+                    let next = json_positions.entry(fact.parent()).or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(position)
+                } else {
+                    None
+                };
                 let stable_header =
                     self.stable_scope_header(fact, scope_identity_captures.get(&fact.local_id()))?;
                 let unsupported_semantic_identity = parent_scope
@@ -1641,28 +1654,43 @@ impl<'context, 'source> Lowering<'context, 'source> {
                                 ))
                             .then(|| *blake3::hash(b"rootlight.lua-lexical-scope/1\0").as_bytes())
                         });
-                // Positional ordinals would rebind unchanged symbols after sibling edits.
-                let stable_identity = scope_digest
-                    .map(|digest| {
-                        scope_identity(
+                // Lexical bindings must not depend on sibling positions. JSON
+                // data is different: array positions are part of its address,
+                // while whitespace and value-body edits are not.
+                let stable_identity = json_position
+                    .map(|position| {
+                        json_data_identity(
                             parent_scope
                                 .as_ref()
                                 .and_then(|scope| scope.stable_identity),
                             fact.syntax_kind().as_str(),
-                            digest,
+                            position,
                         )
                     })
-                    .transpose()?
-                    .or_else(|| {
-                        parent_scope
-                            .as_ref()
-                            .and_then(|scope| scope.stable_identity)
-                    });
+                    .or(scope_digest
+                        .map(|digest| {
+                            scope_identity(
+                                parent_scope
+                                    .as_ref()
+                                    .and_then(|scope| scope.stable_identity),
+                                fact.syntax_kind().as_str(),
+                                digest,
+                            )
+                        })
+                        .transpose()?
+                        .or_else(|| {
+                            parent_scope
+                                .as_ref()
+                                .and_then(|scope| scope.stable_identity)
+                        }));
                 // CSS groups repeated declarations by raw name and enclosing
                 // headers; each declaration retains its source-bound occurrence.
+                // JSON data positions already distinguish repeated members.
                 // Lexical bindings in other languages need a span-local ambiguity
                 // guard without making position part of their durable SymbolId.
-                let collision_guard = if fact.syntax_kind().as_str().starts_with("css.") {
+                let collision_guard = if fact.syntax_kind().as_str().starts_with("css.")
+                    || self.request.language().as_str() == "json"
+                {
                     None
                 } else {
                     Some(scope_collision_guard(
@@ -1762,6 +1790,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 continue;
             };
             let signature_capture = select_unique_capture(&capture.signatures);
+            // JSON permits duplicate keys. Distinguish their source-order
+            // occurrences within this object, without hashing offsets or values.
+            let member_scope_identity =
+                if fact.syntax_kind().as_str() == "json.property.declaration" {
+                    let next = json_members
+                        .entry((fact.parent(), name.to_string()))
+                        .or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(json_data_identity(
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.stable_identity),
+                        "json.property",
+                        position,
+                    ))
+                } else {
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity)
+                };
             let (signature, signature_evidence, signature_span) = if supports_signature(kind)
                 && let Some(signature) = signature_capture
             {
@@ -1806,9 +1855,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 EntityDraft {
                     local_id: fact.local_id(),
                     parent_entity,
-                    scope_identity: parent_scope
-                        .as_ref()
-                        .and_then(|scope| scope.stable_identity),
+                    scope_identity: member_scope_identity,
                     scope_collision_guard: parent_scope
                         .as_ref()
                         .and_then(|scope| scope.collision_guard),
@@ -2139,7 +2186,15 @@ fn materialize_entity(
         language: draft.language.clone(),
         tier,
         canonical_name: draft.name.clone(),
-        display_name: draft.name.clone(),
+        display_name: if draft.kind == EntityKind::Property {
+            rootlight_adapter_sdk::structural_display_name_for_language(
+                &draft.language,
+                &draft.name,
+            )
+            .into_owned()
+        } else {
+            draft.name.clone()
+        },
         qualified_name,
         container: Some(container),
         visibility: EntityVisibility::Unknown,
@@ -2277,6 +2332,22 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.visibility == right.visibility
         && left.flags == right.flags
         && left.provenance == right.provenance
+}
+
+fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("rootlight.json-data-position/1");
+    match parent {
+        Some(parent) => {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(&position.to_be_bytes());
+    hasher.update(kind.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 fn scope_identity(
@@ -2948,10 +3019,19 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "swift.file.module"
                 | "css.file.module"
                 | "bash.file.module"
+                | "json.file.module"
         )
         && matches!(
             language,
-            "python" | "javascript" | "typescript" | "lua" | "ruby" | "swift" | "css" | "bash"
+            "python"
+                | "javascript"
+                | "typescript"
+                | "lua"
+                | "ruby"
+                | "swift"
+                | "css"
+                | "bash"
+                | "json"
         )
 }
 

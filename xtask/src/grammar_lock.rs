@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "0cb55a02a85c81be06f54b85d2da7a807fc790d553549abb6a8353cce726ae7b";
+    "2a1a0f36f502ab1d724eee3144999ad5d4234e88a35d5ac7d943646769c38ce4";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,7 +37,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 16] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 17] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -72,6 +72,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 16] = [
         "tree-sitter-java",
         "0.23.5",
         "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6",
+    ),
+    (
+        "tree-sitter-json",
+        "0.24.8",
+        "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471",
     ),
     (
         "tree-sitter-kotlin-ng",
@@ -148,6 +153,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-json-0.24.8-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-bash-0.25.1-LICENSE",
         "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559",
     )?;
@@ -181,7 +191,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 16 {
+    if manifest.grammars.len() != 17 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -210,6 +220,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "go",
         "java",
         "javascript",
+        "json",
         "kotlin",
         "lua",
         "php",
@@ -579,8 +590,9 @@ fn validate_vendored_tree(
     if observed != vendored.files.keys().cloned().collect() || !observed.contains("Cargo.toml") {
         return Err(invalid());
     }
+    let scanner = (grammar.scanner_sha256 != "none").then_some(&grammar.scanner_sha256);
     if vendored.files.get("src/parser.c") != Some(&grammar.parser_sha256)
-        || vendored.files.get("src/scanner.c") != Some(&grammar.scanner_sha256)
+        || vendored.files.get("src/scanner.c") != scanner
         || vendored.files.get("LICENSE") != Some(&grammar.license_sha256)
     {
         return Err(invalid());
@@ -828,6 +840,52 @@ mod tests {
             ),
             Err(GrammarLockError::PackageEvidence { .. })
         ));
+    }
+
+    #[test]
+    fn scannerless_vendor_requires_both_absent_file_and_absent_descriptor() {
+        let (directory, mut grammar) = vendored_fixture();
+        grammar.scanner_sha256 = "none".into();
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().expect("evidence")
+            )
+            .is_err()
+        );
+        grammar
+            .vendored
+            .as_mut()
+            .expect("evidence")
+            .files
+            .remove("src/scanner.c");
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().expect("evidence")
+            )
+            .is_err(),
+            "undeclared scanner still exists"
+        );
+        fs::remove_file(directory.path().join("src/scanner.c")).expect("remove fixture scanner");
+        validate_vendored_tree(
+            directory.path(),
+            &grammar,
+            grammar.vendored.as_ref().expect("evidence"),
+        )
+        .expect("scannerless grammar passes");
+        grammar.scanner_sha256 = sha256_hex(b"scanner");
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().expect("evidence")
+            )
+            .is_err(),
+            "declared scanner is missing"
+        );
     }
 
     fn vendored_fixture() -> (tempfile::TempDir, GrammarEvidence) {

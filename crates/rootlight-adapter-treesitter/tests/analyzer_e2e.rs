@@ -97,6 +97,222 @@ const BASH_CASE: LanguageCase = LanguageCase {
     body_after: "changed $ROOT",
 };
 
+const JSON_CASE: LanguageCase = LanguageCase {
+    name: "json",
+    path: "src/settings.json",
+    frontend: "tree-sitter-json-0.24.8",
+    source: r#"{"name":1,"name":2,"items":[{"id":3},null,{"id":4}],"nested":{"id":5},"":6,"\u0061":7}"#,
+    generated: false,
+    body_before: ":3",
+    body_after: ":30",
+};
+
+#[test]
+fn json_native_preserves_every_member_and_distinct_data_container() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(JSON_CASE, JSON_CASE.source.as_bytes());
+    let analyzer = analyzer(&provider, JSON_CASE);
+    let initial_request = request(&fixture.snapshot, &fixture.source, JSON_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    let document = output.document();
+    validate_ir_document(document, limits.ir(), &ExtensionSupport::default())
+        .expect("valid JSON IR");
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    assert!(
+        document.skipped_regions.is_empty(),
+        "{:?}",
+        document.skipped_regions
+    );
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    let properties: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .collect();
+    assert_eq!(properties.len(), 9, "{:?}", properties);
+    let ids: BTreeSet<_> = properties.iter().map(|entity| entity.id).collect();
+    assert_eq!(ids.len(), properties.len());
+    for entity in properties {
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        let span = definition.source.span();
+        let raw = &JSON_CASE.source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert_eq!(definition.syntactic_text_hash, content_hash(raw.as_bytes()));
+        assert_eq!(definition.evidence.source, entity.evidence.source);
+        assert_eq!(definition.source.generation(), fixture.source.generation());
+    }
+    let edited = JSON_CASE
+        .source
+        .replace(JSON_CASE.body_before, JSON_CASE.body_after);
+    let changed = fixture.rewrite(edited.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, JSON_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert_eq!(symbol_ids(document), symbol_ids(reparsed.document()));
+}
+
+#[test]
+fn json_addresses_follow_values_not_comments_or_object_member_order() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, JSON_CASE);
+    let limits = limits();
+    for (before, after, stable) in [
+        (
+            r#"[{"key":101},null,{"key":202}]"#,
+            r#"[ { "key" : 101 },false,/*gap*/{"key":202}]"#,
+            true,
+        ),
+        (
+            r#"[[{"key":101}],null,[{"key":202}]]"#,
+            r#"[[{"key":101}],"gap",[{"key":202}]]"#,
+            true,
+        ),
+        (
+            r#"{"other":0,"key":101,"key":202}"#,
+            r#"{"key":101,"key":202,"other":99}"#,
+            true,
+        ),
+        (
+            r#"{"key":101,"key":202}"#,
+            r#"{"k\u0065y":101,"key":202}"#,
+            true,
+        ),
+        (
+            r#"[{"key":101},null,{"key":202}]"#,
+            r#"[false,{"key":101},null,{"key":202}]"#,
+            false,
+        ),
+        (
+            r#"{"key":101} {"key":202}"#,
+            r#"null {"key":101} {"key":202}"#,
+            false,
+        ),
+    ] {
+        let fixture = Fixture::new(JSON_CASE, before.as_bytes());
+        let first = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, JSON_CASE, &limits),
+            &ExtensionSupport::default(),
+        );
+        let changed = fixture.rewrite(after.as_bytes());
+        let second = analyze(
+            &analyzer,
+            &request(&changed.snapshot, &changed.source, JSON_CASE, &limits),
+            &ExtensionSupport::default(),
+        );
+        let select = |output: &AnalysisOutput| {
+            assert!(output.document().skipped_regions.is_empty());
+            assert!(output.document().diagnostics.is_empty());
+            output
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == r#""key""#)
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+        };
+        let first = select(&first);
+        let second = select(&second);
+        assert_eq!(first.len(), 2, "{before}");
+        assert_eq!(second.len(), 2, "{after}");
+        assert_eq!(first == second, stable, "{before} -> {after}");
+    }
+}
+
+#[test]
+fn json_artifacts_preserve_position_accounting_at_the_required_fact_boundary() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, JSON_CASE);
+    let fixture = Fixture::new(JSON_CASE, JSON_CASE.source.as_bytes());
+    let initial_limits = limits();
+    let initial = request(
+        &fixture.snapshot,
+        &fixture.source,
+        JSON_CASE,
+        &initial_limits,
+    );
+    let (_, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("complete JSON artifact");
+    let required = artifact
+        .required_syntax_fact_count(&deadline())
+        .expect("required facts");
+    assert_eq!(
+        required,
+        provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .expect("independent native preflight")
+    );
+    let changed = fixture.next_generation();
+    let bounded_limits = limits_with_syntax_records(required);
+    let bounded_request = request(
+        &changed.snapshot,
+        &changed.source,
+        JSON_CASE,
+        &bounded_limits,
+    );
+    let (_, bounded_artifact) = analyzer
+        .analyze_and_capture(
+            &bounded_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("fresh bounded capture retains all positions");
+    let reused = analyzer
+        .analyze_from_artifact(
+            &bounded_request,
+            &bounded_artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("identity closure fits");
+    let clean = analyze(&analyzer, &bounded_request, &ExtensionSupport::default());
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(
+        reused
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property)
+            .count(),
+        9
+    );
+    let too_small = limits_with_syntax_records(required - 1);
+    let rejected = analyzer.analyze_and_capture(
+        &request(&changed.snapshot, &changed.source, JSON_CASE, &too_small),
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    );
+    assert!(
+        rejected.is_err(),
+        "never drop scalar position evidence to fit a budget"
+    );
+}
+
 const CASES: [LanguageCase; 15] = [
     LanguageCase {
         name: "rust",

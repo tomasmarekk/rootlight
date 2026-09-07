@@ -16,6 +16,7 @@ rootlight-ir = { path = "../rootlight-ir" }
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
+tree-sitter-json.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-c-sharp.workspace = true
 tree-sitter-cpp.workspace = true

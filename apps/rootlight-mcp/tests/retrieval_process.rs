@@ -78,11 +78,87 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn json_duplicate_and_escaped_members_cross_real_process_boundaries() {
+    let source = r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6," ":7," key ":8}"#;
+    let mut fixture = RetrievalFixture::spawn_with_source(Some(("data.json", source)));
+    for (index, (query, expected)) in [
+        ("key", 4),
+        (r#""""#, 1),
+        (r#""\ud800""#, 1),
+        (r#"" ""#, 1),
+        (r#"" key ""#, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let arguments = json!({"query": query, "search_modes": ["exact"], "languages": ["json"], "response_profile": "evidence"});
+        let located = fixture.standalone(
+            &format!("json-locate-{index}"),
+            "code.locate",
+            arguments.clone(),
+        );
+        let batch = fixture.batch(
+            &format!("json-batch-{index}"),
+            "code.locate",
+            arguments,
+            "evidence",
+        );
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert!(
+            output["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .all(|warning| warning["code"] != "coverage_unsupported")
+        );
+        let matches: Vec<_> = output["data"]["matches"]
+            .as_array()
+            .expect("matches")
+            .iter()
+            .filter(|hit| hit["symbol_id"].is_string())
+            .collect();
+        assert_eq!(matches.len(), expected, "{output:#}");
+        let mut symbols = std::collections::BTreeSet::new();
+        for (member, found) in matches.into_iter().enumerate() {
+            assert!(symbols.insert(found["symbol_id"].as_str().expect("symbol")));
+            let explained = fixture.standalone(
+                &format!("json-explain-{index}-{member}"),
+                "symbol.explain",
+                json!({"symbol_ids": [found["symbol_id"]], "response_profile": "evidence"}),
+            );
+            assert_success(&explained, "symbol.explain");
+            assert_common_read_contract(
+                &explained["result"]["structuredContent"],
+                &fixture.repository_id,
+            );
+            let read = fixture.standalone(&format!("json-read-{index}-{member}"), "source.read", json!({"references": [{"symbol_id": found["symbol_id"]}], "response_profile": "evidence"}));
+            assert_success(&read, "source.read");
+            let read = &read["result"]["structuredContent"];
+            assert_common_read_contract(read, &fixture.repository_id);
+            let chunks = read["data"]["chunks"].as_array().expect("chunks");
+            assert_eq!(chunks.len(), 1);
+            let reference = &chunks[0]["source_ref"];
+            for field in ["content_hash", "generation", "repository", "span"] {
+                assert_eq!(reference[field], found["source_ref"][field]);
+            }
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().expect("start"))
+                .expect("offset");
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().expect("end"))
+                .expect("offset");
+            assert_eq!(chunks[0]["content"].as_str(), source.get(start..end));
+        }
+    }
+    fixture.finish();
+}
+
+#[test]
 fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
     let source = include_str!(
         "../../../crates/rootlight-adapter-treesitter/tests/fixtures/structural/bash.sh"
     );
-    let mut fixture = RetrievalFixture::spawn_with_bash_source(Some(source));
+    let mut fixture = RetrievalFixture::spawn_with_source(Some(("commands.sh", source)));
     for name in [
         "emit", "process", "render", "ROOT", "ITEMS", "message", "pending", "item",
     ] {
@@ -1395,18 +1471,18 @@ struct RetrievalFixture {
 
 impl RetrievalFixture {
     fn spawn() -> Self {
-        Self::spawn_with_bash_source(None)
+        Self::spawn_with_source(None)
     }
 
-    fn spawn_with_bash_source(bash_source: Option<&str>) -> Self {
+    fn spawn_with_source(extra_source: Option<(&str, &str)>) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
             .expect("fixture source directory is created");
         fs::create_dir_all(repository_root.join("tests"))
             .expect("fixture test directory is created");
-        if let Some(source) = bash_source {
-            fs::write(repository_root.join("commands.sh"), source).expect("Bash source fixture");
+        if let Some((path, source)) = extra_source {
+            fs::write(repository_root.join(path), source).expect("extra source fixture");
         }
         fs::write(
             repository_root.join("Cargo.toml"),

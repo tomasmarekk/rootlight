@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/19";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/20";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25384,6 +25384,7 @@ mod tests {
             "sample.go",
             "sample.java",
             "sample.js",
+            "sample.json",
             "sample.kt",
             "sample.lua",
             "sample.php",
@@ -26011,6 +26012,137 @@ mod tests {
     }
 
     #[test]
+    fn json_duplicate_members_and_decoded_names_survive_durable_restore() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("paths");
+        paths.prepare_owner().expect("private runtime");
+        let fixture = durable_test_tempdir();
+        let source =
+            r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6}"#;
+        let path = fixture.path().join("data.json");
+        fs::write(&path, source).expect("JSON fixture");
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("service");
+        let support = service.support_inventory_snapshot().expect("support");
+        let json = support
+            .languages
+            .iter()
+            .find(|entry| entry.language == "json")
+            .expect("JSON capability");
+        assert_eq!(json.maximum_tier, "tier_d");
+        assert_eq!(json.analyzers, ["treesitter"]);
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("index");
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op");
+        assert_eq!(initial.generation, no_op.generation);
+        let edited = source.replace(":303", ":3030");
+        fs::write(&path, &edited).expect("value edit");
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("incremental");
+        assert_ne!(initial.generation, updated.generation);
+        drop(service);
+        let service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("restore");
+        let mut previous = None;
+        for (receipt, source) in [(&initial, source), (&updated, edited.as_str())] {
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("generation");
+            let document = generation.document();
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.kind == EntityKind::Property)
+                    .count(),
+                7
+            );
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "data.json")
+                .expect("file");
+            let full = service
+                .source_read(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().expect("full source")],
+                    &deadline(),
+                )
+                .expect("whole source");
+            assert_eq!(full.data.chunks[0].bytes, source.as_bytes());
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "key".to_owned(),
+                    LocateMode::Exact,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .expect("decoded exact locate");
+            let symbols: BTreeSet<_> = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect();
+            assert_eq!(symbols.len(), 4);
+            for symbol in &symbols {
+                let explained = service
+                    .symbol_explain(receipt.generation, *symbol, &deadline())
+                    .expect("explain");
+                assert_eq!(explained.data.entity.canonical_name, r#""key""#);
+                assert_eq!(explained.data.entity.display_name, "key");
+                let occurrence = document
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target == (OccurrenceTarget::Resolved { symbol: *symbol })
+                    })
+                    .expect("definition");
+                let name_ref = occurrence.source.clone();
+                let declaration_ref = occurrence
+                    .evidence
+                    .source
+                    .clone()
+                    .expect("full declaration");
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![name_ref.clone(), declaration_ref.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("exact source");
+                for reference in [name_ref, declaration_ref] {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).expect("start");
+                    let end = usize::try_from(reference.span().end_byte()).expect("end");
+                    assert!(
+                        read.data
+                            .chunks
+                            .iter()
+                            .any(|chunk| chunk.bytes == source.as_bytes()[start..end])
+                    );
+                }
+            }
+            if let Some(previous) = previous {
+                assert_eq!(symbols, previous);
+            }
+            previous = Some(symbols);
+        }
+    }
+
+    #[test]
     fn css_published_rules_preserve_sources_identity_and_durable_versions() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -26574,7 +26706,7 @@ mod tests {
                     .expect("configuration source reads");
                 assert_eq!(read.data.chunks[0].bytes, source.as_bytes(), "{path}");
                 assert_eq!(read.data.chunks[0].language, language, "{path}");
-                if language != "rust" {
+                if !matches!(language, "rust" | "json") {
                     assert!(
                         !generation.document().entities.iter().any(|entity| {
                             entity
@@ -26608,8 +26740,16 @@ mod tests {
                     coverage.discovered_files,
                     u64::try_from(expected).expect("count fits")
                 );
-                assert_eq!(coverage.indexed_files, 0);
-                assert_eq!(coverage.status, "unknown");
+                if language == "json" {
+                    assert_eq!(
+                        coverage.indexed_files,
+                        u64::try_from(expected).expect("count fits")
+                    );
+                    assert_eq!(coverage.status, "complete");
+                } else {
+                    assert_eq!(coverage.indexed_files, 0);
+                    assert_eq!(coverage.status, "unknown");
+                }
             }
             for (language, expected) in [
                 (

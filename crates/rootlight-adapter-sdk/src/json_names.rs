@@ -44,6 +44,35 @@ struct Units<'a> {
     pending: Option<u16>,
 }
 
+pub(crate) fn display_json_key(canonical: &str) -> Option<Cow<'_, str>> {
+    let body = canonical.strip_prefix('"')?.strip_suffix('"')?;
+    if body.is_empty() || body.trim() != body || body.chars().any(char::is_control) {
+        return None;
+    }
+    if !body.contains('\\') {
+        return Some(Cow::Borrowed(body));
+    }
+    // Canonical keys have already decoded scalar escapes. The remaining
+    // Unicode escapes represent controls or unpaired UTF-16 units; keep them
+    // quoted so display text cannot misrepresent their identity.
+    let mut decoded = String::new();
+    let mut characters = body.chars();
+    while let Some(character) = characters.next() {
+        let character = if character == '\\' {
+            match characters.next()? {
+                '"' => '"',
+                '\\' => '\\',
+                _ => return None,
+            }
+        } else {
+            character
+        };
+        decoded.try_reserve(character.len_utf8()).ok()?;
+        decoded.push(character);
+    }
+    Some(Cow::Owned(decoded))
+}
+
 impl Iterator for Units<'_> {
     type Item = Result<u16, ()>;
 

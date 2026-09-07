@@ -1822,7 +1822,7 @@ fn mark_required_scope_closure(
         }
         let first = declarations.partition_point(|(start, _)| *start < candidate.start);
         let after_last = declarations.partition_point(|(start, _)| *start <= candidate.end);
-        candidate.required = first < after_last
+        candidate.required |= first < after_last
             && minimum_in_range(&minimum_ends, leaf_count, first, after_last)? <= candidate.end;
     }
     cancellation.check()?;

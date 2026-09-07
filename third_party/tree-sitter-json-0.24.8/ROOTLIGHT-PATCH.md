@@ -1,8 +1,8 @@
 # JSON lexical grammar corrections
 
 This directory retains the parser inputs and Rust bindings from the MIT-licensed
-`tree-sitter-json` crate version `0.24.8`. It is an isolated native candidate;
-the production Rootlight grammar registry does not consume it yet.
+`tree-sitter-json` crate version `0.24.8`. Rootlight's production grammar registry
+uses these checked inputs for structural JSON indexing.
 
 ## Provenance
 
@@ -44,5 +44,7 @@ The upstream editor extensions remain intentional: comments, empty documents and
 multiple top-level values are accepted. An error-free syntax tree is not proof of
 strict JSON validity. Four hexadecimal digits describe a UTF-16 code unit; this
 grammar does not validate surrogate pairing or decode keys into Unicode scalars.
-No complete language semantics, production adapter, MCP or corpus-wide coverage
-claim follows from these native tests.
+The production query pack separately captures object members and data-container
+scopes; adapter tests verify distinct duplicate keys and array elements. No
+complete language semantics, MCP or corpus-wide coverage claim follows from the
+isolated native tests alone.

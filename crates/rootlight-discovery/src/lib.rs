@@ -1607,7 +1607,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "kotlin",
@@ -2462,7 +2462,14 @@ max_source_file_bytes = 2097152
                 .iter()
                 .find(|capability| capability.language == syntax)
                 .expect("source capability is declared");
-            assert_eq!(capability.analyzers, ["source-fallback"]);
+            assert_eq!(
+                capability.analyzers,
+                if syntax == "json" {
+                    &["treesitter"][..]
+                } else {
+                    &["source-fallback"][..]
+                }
+            );
         }
         assert_eq!(canonical_language("yml"), Some("yaml"));
         for path in [

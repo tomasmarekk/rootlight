@@ -286,6 +286,9 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Json {
+            expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
+        }
         if matches!(
             family,
             GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
@@ -460,9 +463,12 @@ impl QueryPack {
             limits,
             |mut candidate| {
                 if candidate.role.belongs_to_identity_closure() {
-                    // Only scopes that contain a declaration are mandatory.
-                    // Runtime marks that subset after canonical deduplication.
-                    candidate.required = candidate.role != StructuralRole::Scope;
+                    // Ordinary scopes become mandatory only when they contain a
+                    // declaration; runtime marks those after deduplication.
+                    // JSON scalar siblings are needed to count array positions,
+                    // even when they contain no named declaration themselves.
+                    candidate.required =
+                        candidate.role != StructuralRole::Scope || family == GrammarFamily::Json;
                     push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
                 }
                 Ok(())
@@ -620,6 +626,14 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Scope if family == GrammarFamily::Json => {
+            match capture.node.parent().map(|node| node.kind()) {
+                Some("array") => "json.array_element",
+                Some("document") => "json.document_value",
+                _ => canonical_syntax(family, capture.node.kind())
+                    .ok_or_else(|| query_failure("query-json-scope-kind"))?,
+            }
+        }
         StructuralRole::ScopeTrait if family == GrammarFamily::Swift => "swift.extension_target",
         StructuralRole::ScopeType if family == GrammarFamily::Swift => "swift.extension_header",
         StructuralRole::ScopeType if family == GrammarFamily::Css => "css.context_header",
@@ -728,6 +742,7 @@ fn candidate_for_capture(
             GrammarFamily::Swift => "swift.call",
             GrammarFamily::Bash => "bash.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
+            GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -906,6 +921,12 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Json, "document") => Some("json.file"),
+        (GrammarFamily::Json, "pair") => Some("json.property"),
+        (GrammarFamily::Json, "object") => Some("json.object"),
+        (GrammarFamily::Json, "array") => Some("json.array"),
+        (GrammarFamily::Json, "string") => Some("json.string"),
+        (GrammarFamily::Json, "comment") => Some("json.comment"),
         (GrammarFamily::Bash, "program") => Some("bash.file"),
         (GrammarFamily::Bash, "function_definition") => Some("bash.function"),
         (GrammarFamily::Bash, "variable_assignment") => Some("bash.variable"),
@@ -1221,7 +1242,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(16);
+        let mut packs = Vec::with_capacity(17);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1245,6 +1266,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Swift, include_str!("../queries/swift.scm")),
             (GrammarFamily::Css, include_str!("../queries/css.scm")),
             (GrammarFamily::Bash, include_str!("../queries/bash.scm")),
+            (GrammarFamily::Json, include_str!("../queries/json.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1314,11 +1336,16 @@ mod tests {
             GrammarFamily::Swift,
             GrammarFamily::Css,
             GrammarFamily::Bash,
+            GrammarFamily::Json,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Json {
+                expected
+                    .retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
+            }
             if matches!(
                 family,
                 GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
