@@ -4,6 +4,13 @@
 
 use super::*;
 
+mod bindings;
+
+pub(super) struct Plan {
+    pub(super) duplicates: BTreeSet<u64>,
+    pub(super) aliases: HashMap<u64, u64>,
+}
+
 struct Address {
     digest: [u8; 32],
     qualified: String,
@@ -13,12 +20,14 @@ struct Address {
 
 pub(super) fn resolve(
     facts: &[SyntaxFact],
+    source: &str,
     drafts: &mut HashMap<u64, EntityDraft>,
     unsupported: &mut BTreeSet<u64>,
     strings: &mut usize,
     limits: &IrLimits,
     cancellation: &Cancellation,
-) -> Result<BTreeSet<u64>, AdapterError> {
+) -> Result<Plan, AdapterError> {
+    let bindings = bindings::Bindings::new(facts, source, limits.max_string_bytes, cancellation)?;
     let mut arena = Arena(vec![Address {
         digest: [0; 32],
         qualified: String::new(),
@@ -39,6 +48,40 @@ pub(super) fn resolve(
             Some(parent) => contexts.get(&parent).copied().flatten(),
             None => Some(0),
         };
+        if label == "yaml.anchor.declaration" && fact.kind() == SyntaxFactKind::Declaration {
+            // Anchors annotate a node; they do not own or rename its data path.
+            // Their serialization bindings remain valid even when a containing
+            // complex key has no materializable data identity.
+            if let Some(draft) = drafts.get_mut(&fact.local_id()) {
+                if let Some(anchor) = bindings.anchors.get(&fact.local_id()) {
+                    let document = arena.extend(
+                        0,
+                        Component::Position("document", anchor.document.ordinal),
+                        strings,
+                        limits,
+                    )?;
+                    let address = arena.extend(
+                        document,
+                        Component::Anchor(&draft.name, anchor.ordinal),
+                        strings,
+                        limits,
+                    )?;
+                    let node = arena.get(address)?;
+                    draft.parent_entity = anchor.document.module;
+                    draft.scope_identity = None;
+                    draft.scope_collision_guard = None;
+                    draft.data_identity = Some(node.digest);
+                    account_string(strings, node.qualified.len(), limits)?;
+                    draft.data_qualified_name = Some(node.qualified.clone());
+                    draft.qualified_length = node.qualified.len();
+                    draft.depth = node.depth;
+                } else {
+                    unsupported.insert(fact.local_id());
+                }
+            }
+            contexts.insert(fact.local_id(), parent);
+            continue;
+        }
         let Some(parent) = parent else {
             if drafts.contains_key(&fact.local_id()) {
                 unsupported.insert(fact.local_id());
@@ -139,7 +182,10 @@ pub(super) fn resolve(
         contexts.insert(fact.local_id(), Some(address));
     }
     drafts.retain(|local, _| !unsupported.contains(local));
-    Ok(duplicates)
+    Ok(Plan {
+        duplicates,
+        aliases: bindings.aliases,
+    })
 }
 
 enum Component<'a> {
@@ -147,6 +193,7 @@ enum Component<'a> {
     Position(&'static str, u64),
     KeyNode,
     Member(&'a str, u64),
+    Anchor(&'a str, u64),
 }
 
 // Arena indices keep shared scope context cheap and destruction non-recursive.
@@ -200,6 +247,17 @@ impl Arena {
                 require_resource_limit(ResourceKind::StringBytes, length, limits.max_string_bytes)?;
                 display = format!("{separator}{name}{extra}");
                 ("member", name, ordinal, display.as_str())
+            }
+            Component::Anchor(name, ordinal) => {
+                let extra = format!("#occurrence[{ordinal}]");
+                let length = name
+                    .len()
+                    .checked_add(2)
+                    .and_then(|length| length.checked_add(extra.len()))
+                    .ok_or(SinkError::AccountingOverflow)?;
+                require_resource_limit(ResourceKind::StringBytes, length, limits.max_string_bytes)?;
+                display = format!(".&{name}{extra}");
+                ("anchor", name, ordinal, display.as_str())
             }
         };
         let length = parent

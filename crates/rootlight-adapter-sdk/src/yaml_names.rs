@@ -13,6 +13,17 @@ mod numbers;
 pub use block::YamlBlockScalar;
 pub use context::{YamlDocumentContext, YamlScalarIdentity};
 
+pub(crate) fn anchor_name(text: &str, maximum: usize) -> Option<&str> {
+    (!text.is_empty()
+        && text.len() <= maximum
+        && text.chars().all(|character| {
+            printable(character)
+                && !white(character)
+                && !matches!(character, '\u{feff}' | '[' | ']' | '{' | '}' | ',')
+        }))
+    .then_some(text)
+}
+
 pub(crate) fn canonical_flow_key(text: &str, maximum: usize) -> Option<String> {
     if text.is_empty() {
         return None;

@@ -1926,8 +1926,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         break 'draft None;
                     };
                     let Some(name) = source_text(bytes, definition.span()).and_then(|name| {
-                        rootlight_adapter_sdk::structural_captured_name_for_language(
+                        rootlight_adapter_sdk::structural_captured_name_for_fact(
                             self.analyzer.language.as_str(),
+                            definition,
                             name,
                             self.request.limits().ir().max_string_bytes,
                         )

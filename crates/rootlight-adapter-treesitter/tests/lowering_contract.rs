@@ -2220,6 +2220,14 @@ fn custom_analyzer(
     language: LanguageId,
     facts: Vec<SyntaxFact>,
 ) -> TreeSitterAnalyzer {
+    custom_analyzer_with_coverage(language, facts, complete_coverage(snapshot.content().len()))
+}
+
+fn custom_analyzer_with_coverage(
+    language: LanguageId,
+    facts: Vec<SyntaxFact>,
+    coverage: CoverageReport,
+) -> TreeSitterAnalyzer {
     let capabilities = ParseCapabilities::new(
         vec![language.clone()],
         vec![EncodingId::utf8()],
@@ -2234,12 +2242,7 @@ fn custom_analyzer(
         MemoryEnforcement::AccountedInProcess,
     )
     .expect("custom parser capabilities are valid");
-    let provider = MockParseProvider::new(
-        capabilities,
-        facts,
-        Vec::new(),
-        complete_coverage(snapshot.content().len()),
-    );
+    let provider = MockParseProvider::new(capabilities, facts, Vec::new(), coverage);
     TreeSitterAnalyzer::new(
         Arc::new(provider),
         ProducerIdentity::new(

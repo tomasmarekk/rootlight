@@ -20,7 +20,7 @@ use rootlight_ir::{
 use crate::{
     AppliedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
     ResolutionEngine, ResolutionError, ResolutionOutcome, ResolutionRule, ResolverFactContext,
-    engine::{CandidateIndex, ResolutionWorkBudget, resolvable_role},
+    engine::{CandidateIndex, ResolutionWorkBudget, resolvable_occurrence},
 };
 
 impl ResolutionEngine {
@@ -232,7 +232,7 @@ impl ResolutionEngine {
         for occurrence in &mut document.occurrences {
             cancellation.check()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                || !resolvable_role(occurrence.role)
+                || !resolvable_occurrence(occurrence)
             {
                 continue;
             }

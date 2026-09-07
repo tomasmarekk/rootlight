@@ -86,7 +86,7 @@ impl ResolutionEngine {
         for occurrence in &document.occurrences {
             cancellation.check()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                || !resolvable_role(occurrence.role)
+                || !resolvable_occurrence(occurrence)
             {
                 continue;
             }
@@ -140,7 +140,7 @@ impl ResolutionEngine {
             .try_fold(0_usize, |required, occurrence| {
                 cancellation.check()?;
                 if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                    || !resolvable_role(occurrence.role)
+                    || !resolvable_occurrence(occurrence)
                 {
                     return Ok(required);
                 }
@@ -494,7 +494,7 @@ impl<'a> CandidateIndex<'a> {
         occurrence: &OccurrenceRecord,
     ) -> Result<Option<usize>, ResolutionError> {
         if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            || !resolvable_role(occurrence.role)
+            || !resolvable_occurrence(occurrence)
         {
             return Ok(None);
         }
@@ -648,9 +648,14 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
     }
 }
 
-pub(crate) fn resolvable_role(role: OccurrenceRole) -> bool {
+pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // YAML serialization bindings depend on source order within one document.
+    // A name/scope score cannot recover a binding the adapter could not prove.
+    if occurrence.syntax_kind == "yaml.alias.reference" {
+        return false;
+    }
     !matches!(
-        role,
+        occurrence.role,
         OccurrenceRole::Definition
             | OccurrenceRole::Declaration
             | OccurrenceRole::Documentation

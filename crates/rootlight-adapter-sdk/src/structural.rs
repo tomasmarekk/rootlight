@@ -33,6 +33,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "css.property.declaration" => {
             Some(EntityKind::Property)
         }
+        SyntaxFactKind::Declaration if label == "yaml.anchor.declaration" => {
+            Some(EntityKind::Variable)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -199,6 +202,34 @@ pub fn structural_captured_name_for_language<'a>(
         }
     } else {
         structural_captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    }
+}
+
+/// Interprets a reviewed name capture with its structural role and language.
+///
+/// YAML anchor definitions and alias references are serialization names, not
+/// scalar values: `true`, `11` and quote characters retain their exact spelling.
+/// Their captures exclude the `&` or `*` indicator. No trimming, escape decoding
+/// or Unicode normalization occurs; malformed or oversized names return `None`.
+/// Other roles use [`structural_captured_name_for_language`]. The caller retains
+/// the original source span and validates its association with its declaration.
+#[must_use]
+pub fn structural_captured_name_for_fact<'a>(
+    language: &str,
+    fact: &SyntaxFact,
+    text: &'a str,
+    maximum_bytes: usize,
+) -> Option<Cow<'a, str>> {
+    if language == "yaml"
+        && fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "yaml.anchor.definition" | "yaml.alias.reference"
+        )
+    {
+        crate::yaml_names::anchor_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else {
+        structural_captured_name_for_language(language, text, maximum_bytes)
     }
 }
 

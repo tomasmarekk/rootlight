@@ -5,6 +5,9 @@
 use super::*;
 use rootlight_ir::{ContainerRef, EntityKind, FactDomain, NormalizedIrDocument};
 
+#[path = "yaml_ownership/bindings.rs"]
+mod bindings;
+
 struct Fixture<'a> {
     text: &'a str,
     source: SourceRef,

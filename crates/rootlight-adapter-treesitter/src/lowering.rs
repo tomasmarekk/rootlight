@@ -900,6 +900,17 @@ fn preflight_lowering_limits(
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
+            if request.language().as_str() == "yaml"
+                && fact.syntax_kind().as_str() == "yaml.alias.reference"
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                account_string(
+                    &mut string_bytes,
+                    "yaml-alias-target-unavailable".len(),
+                    limits,
+                )?;
+            }
         }
         if is_definition_capture(fact) {
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
@@ -1373,6 +1384,34 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
+                if self.request.language().as_str() == "yaml"
+                    && fact.syntax_kind().as_str() == "yaml.alias.reference"
+                {
+                    let target = (self.parse_output.report().coverage().status()
+                        == CoverageStatus::Complete)
+                        .then(|| entity_plan.yaml_aliases.get(&fact.local_id()))
+                        .flatten()
+                        .and_then(|local| materialized.get(local));
+                    if let Some(target) = target {
+                        occurrence.target = OccurrenceTarget::Resolved {
+                            symbol: target.record.id,
+                        };
+                        occurrence.id = derive_occurrence_record_id(&occurrence)
+                            .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                        let relation = lexical_reference_relation(&occurrence, target.record.id)?;
+                        relations.insert(relation.id, relation);
+                    } else {
+                        let region = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Relations,
+                            SkippedRegionReason::UnsupportedConstruct,
+                            "yaml-alias-target-unavailable",
+                            provenance_id,
+                        )?;
+                        skipped.insert(region.id, region);
+                    }
+                }
                 let occurrence_id = occurrence.id;
                 occurrences.insert(occurrence_id, occurrence);
                 if fact.kind() == SyntaxFactKind::Comment
@@ -1791,8 +1830,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
-                let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_language(
+                let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
                     language_for_fact(self.request, definition).as_str(),
+                    definition,
                     text,
                     self.request.limits().ir().max_string_bytes,
                 ) else {
@@ -1916,17 +1956,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation,
             )?;
         }
-        let duplicate_data_keys = if self.request.language().as_str() == "yaml" {
-            yaml::resolve(
+        let (duplicate_data_keys, yaml_aliases) = if self.request.language().as_str() == "yaml" {
+            let plan = yaml::resolve(
                 self.parse_output.facts(),
+                self.source_text,
                 &mut drafts,
                 &mut unsupported_scope_entities,
                 total_string_bytes,
                 self.request.limits().ir(),
                 cancellation,
-            )?
+            )?;
+            (plan.duplicates, plan.aliases)
         } else {
-            BTreeSet::new()
+            (BTreeSet::new(), HashMap::new())
         };
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
@@ -1952,6 +1994,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             nearest_entity_ancestor,
             unsupported_scope_entities,
             duplicate_data_keys,
+            yaml_aliases,
         })
     }
 
@@ -2068,6 +2111,7 @@ struct EntityPlan {
     nearest_entity_ancestor: HashMap<u64, Option<u64>>,
     unsupported_scope_entities: BTreeSet<u64>,
     duplicate_data_keys: BTreeSet<u64>,
+    yaml_aliases: HashMap<u64, u64>,
 }
 
 #[derive(Clone)]

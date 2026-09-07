@@ -26,6 +26,77 @@ use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 const SOURCE_BYTES: u64 = 64;
 
 #[test]
+fn yaml_serialization_aliases_are_not_promoted_by_name_scoring() {
+    for resolved in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.document.files[0].language = "yaml".to_owned();
+        let target = fixture.add_entity(
+            10,
+            "anchor",
+            fixture.primary_file,
+            EntityKind::Variable,
+            None,
+        );
+        fixture.add_occurrence(
+            20,
+            "anchor",
+            fixture.primary_file,
+            OccurrenceRole::Reference,
+            None,
+        );
+        let alias = fixture.document.occurrences.last_mut().unwrap();
+        alias.syntax_kind = "yaml.alias.reference".to_owned();
+        if resolved {
+            alias.target = OccurrenceTarget::Resolved { symbol: target };
+        }
+        let alias = alias.clone();
+        fixture.validate();
+        let engine = ResolutionEngine::default();
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap()
+                .required,
+            0
+        );
+        assert!(
+            engine
+                .resolve(&fixture.document, &cancellation)
+                .unwrap()
+                .decisions
+                .is_empty()
+        );
+        let applied = engine
+            .apply(
+                fixture.document.clone(),
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        let streamed = engine
+            .apply_document(
+                fixture.document.clone(),
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        let (bounded, estimate) = engine
+            .apply_document_bounded(
+                fixture.document,
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(estimate.required, 0);
+        assert_eq!(streamed, applied.document);
+        assert_eq!(bounded, streamed);
+        assert_eq!(bounded.occurrences, [alias]);
+        assert!(bounded.relations.is_empty());
+    }
+}
+
+#[test]
 fn resolves_a_unique_same_file_declaration() {
     let mut fixture = Fixture::new();
     let target = fixture.add_entity(
