@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/20";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/21";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25393,6 +25393,7 @@ mod tests {
             "sample.rs",
             "sample.sh",
             "sample.swift",
+            "sample.toml",
             "sample.ts",
         ]
         .into_iter()
@@ -26013,25 +26014,47 @@ mod tests {
 
     #[test]
     fn json_duplicate_members_and_decoded_names_survive_durable_restore() {
+        data_properties_survive_durable_restore(
+            "json",
+            "data.json",
+            r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6}"#,
+            [":303", ":3030"],
+        );
+    }
+
+    #[test]
+    fn toml_table_array_and_decoded_names_survive_durable_restore() {
+        data_properties_survive_durable_restore(
+            "toml",
+            "data.toml",
+            "key=101\nitems=[1,{key=303}]\n[[tables]]\n\"k\\x65y\"=202\n[[tables]]\nkey=404\n\"\"=5\n\" \"=6\n",
+            ["key=303", "key=3030"],
+        );
+    }
+
+    fn data_properties_survive_durable_restore(
+        language: &str,
+        relative: &str,
+        source: &str,
+        edit: [&str; 2],
+    ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("paths");
         paths.prepare_owner().expect("private runtime");
         let fixture = durable_test_tempdir();
-        let source =
-            r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6}"#;
-        let path = fixture.path().join("data.json");
-        fs::write(&path, source).expect("JSON fixture");
+        let path = fixture.path().join(relative);
+        fs::write(&path, source).expect("data fixture");
         let mut service =
             FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("service");
         let support = service.support_inventory_snapshot().expect("support");
-        let json = support
+        let capability = support
             .languages
             .iter()
-            .find(|entry| entry.language == "json")
-            .expect("JSON capability");
-        assert_eq!(json.maximum_tier, "tier_d");
-        assert_eq!(json.analyzers, ["treesitter"]);
+            .find(|entry| entry.language == language)
+            .expect("data capability");
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
         let initial = service
             .index_repository(fixture.path(), &deadline())
             .expect("index");
@@ -26039,7 +26062,7 @@ mod tests {
             .index_repository(fixture.path(), &deadline())
             .expect("no-op");
         assert_eq!(initial.generation, no_op.generation);
-        let edited = source.replace(":303", ":3030");
+        let edited = source.replace(edit[0], edit[1]);
         fs::write(&path, &edited).expect("value edit");
         let updated = service
             .index_repository(fixture.path(), &deadline())
@@ -26065,7 +26088,7 @@ mod tests {
             let file = document
                 .files
                 .iter()
-                .find(|file| file.path == "data.json")
+                .find(|file| file.path == relative)
                 .expect("file");
             let full = service
                 .source_read(
@@ -26706,7 +26729,7 @@ mod tests {
                     .expect("configuration source reads");
                 assert_eq!(read.data.chunks[0].bytes, source.as_bytes(), "{path}");
                 assert_eq!(read.data.chunks[0].language, language, "{path}");
-                if !matches!(language, "rust" | "json") {
+                if !matches!(language, "rust" | "json" | "toml") {
                     assert!(
                         !generation.document().entities.iter().any(|entity| {
                             entity
@@ -26740,7 +26763,7 @@ mod tests {
                     coverage.discovered_files,
                     u64::try_from(expected).expect("count fits")
                 );
-                if language == "json" {
+                if matches!(language, "json" | "toml") {
                     assert_eq!(
                         coverage.indexed_files,
                         u64::try_from(expected).expect("count fits")

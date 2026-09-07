@@ -286,7 +286,7 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
-        if family == GrammarFamily::Json {
+        if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
         if matches!(
@@ -465,10 +465,10 @@ impl QueryPack {
                 if candidate.role.belongs_to_identity_closure() {
                     // Ordinary scopes become mandatory only when they contain a
                     // declaration; runtime marks those after deduplication.
-                    // JSON scalar siblings are needed to count array positions,
+                    // Data scalar siblings are needed to count array positions,
                     // even when they contain no named declaration themselves.
-                    candidate.required =
-                        candidate.role != StructuralRole::Scope || family == GrammarFamily::Json;
+                    candidate.required = candidate.role != StructuralRole::Scope
+                        || matches!(family, GrammarFamily::Json | GrammarFamily::Toml);
                     push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
                 }
                 Ok(())
@@ -626,6 +626,18 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Scope if family == GrammarFamily::Toml => {
+            if capture
+                .node
+                .parent()
+                .is_some_and(|node| node.kind() == "array")
+            {
+                "toml.array_element"
+            } else {
+                canonical_syntax(family, capture.node.kind())
+                    .ok_or_else(|| query_failure("query-toml-scope-kind"))?
+            }
+        }
         StructuralRole::Scope if family == GrammarFamily::Json => {
             match capture.node.parent().map(|node| node.kind()) {
                 Some("array") => "json.array_element",
@@ -743,6 +755,7 @@ fn candidate_for_capture(
             GrammarFamily::Bash => "bash.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
+            GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -921,6 +934,15 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Toml, "document") => Some("toml.file"),
+        (GrammarFamily::Toml, "table") => Some("toml.table"),
+        (GrammarFamily::Toml, "table_array_element") => Some("toml.table_array_element"),
+        (GrammarFamily::Toml, "pair") => Some("toml.property"),
+        (GrammarFamily::Toml, "array") => Some("toml.array"),
+        (GrammarFamily::Toml, "inline_table") => Some("toml.inline_table"),
+        (GrammarFamily::Toml, "bare_key" | "quoted_key" | "dotted_key") => Some("toml.key"),
+        (GrammarFamily::Toml, "string") => Some("toml.string"),
+        (GrammarFamily::Toml, "comment") => Some("toml.comment"),
         (GrammarFamily::Json, "document") => Some("json.file"),
         (GrammarFamily::Json, "pair") => Some("json.property"),
         (GrammarFamily::Json, "object") => Some("json.object"),
@@ -1242,7 +1264,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(17);
+        let mut packs = Vec::with_capacity(18);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1267,6 +1289,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Css, include_str!("../queries/css.scm")),
             (GrammarFamily::Bash, include_str!("../queries/bash.scm")),
             (GrammarFamily::Json, include_str!("../queries/json.scm")),
+            (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1337,12 +1360,13 @@ mod tests {
             GrammarFamily::Css,
             GrammarFamily::Bash,
             GrammarFamily::Json,
+            GrammarFamily::Toml,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
-            if family == GrammarFamily::Json {
+            if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
                 expected
                     .retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
             }

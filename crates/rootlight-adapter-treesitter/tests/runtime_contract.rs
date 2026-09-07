@@ -89,7 +89,8 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 17] = [
+    let cases: [(&str, &str, &[u8]); 18] = [
+        ("sample.toml", "toml", b"name = 'sample'\n"),
         ("sample.json", "json", br#"{"name":"sample"}"#),
         ("sample.sh", "bash", b"sample() { :; }\n"),
         (

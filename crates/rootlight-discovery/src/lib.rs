@@ -1743,7 +1743,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "typescript",
@@ -2464,7 +2464,7 @@ max_source_file_bytes = 2097152
                 .expect("source capability is declared");
             assert_eq!(
                 capability.analyzers,
-                if syntax == "json" {
+                if matches!(syntax, "json" | "toml") {
                     &["treesitter"][..]
                 } else {
                     &["source-fallback"][..]

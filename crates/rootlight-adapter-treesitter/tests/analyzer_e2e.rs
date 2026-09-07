@@ -313,6 +313,287 @@ fn json_artifacts_preserve_position_accounting_at_the_required_fact_boundary() {
     );
 }
 
+const TOML_CASE: LanguageCase = LanguageCase {
+    name: "toml",
+    path: "src/settings.toml",
+    frontend: "tree-sitter-toml-ng-0.7.0",
+    source: r#"title = "demo"
+mixed = [1, 2.0, true, 1979-05-27T07:32Z, 1979-05-27T07:32, 1979-05-27, 07:32, "text", [{"key" = 9}], {key = 10}]
+[[items]]
+name = "first"
+[[items.children]]
+name = "child"
+[[items]]
+name = "second"
+[items.meta]
+"" = 11
+"a.b" = 12
+a.b = 13
+"k\x65y" = 14
+" = " = 15
+"#,
+    generated: false,
+    body_before: "key = 10",
+    body_after: "key = 100",
+};
+
+#[test]
+fn toml_native_resolves_full_key_paths_and_latest_table_array_parents() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, TOML_CASE);
+    let fixture = Fixture::new(TOML_CASE, TOML_CASE.source.as_bytes());
+    let limits = limits();
+    let output = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, TOML_CASE, &limits),
+        &ExtensionSupport::default(),
+    );
+    let document = output.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    assert!(
+        document.skipped_regions.is_empty(),
+        "{:?}",
+        document.skipped_regions
+    );
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    let expected = [
+        (r#""title""#, TOML_CASE.path),
+        (r#""mixed""#, TOML_CASE.path),
+        (r#""mixed"[8][0]."key""#, r#""mixed""#),
+        (r#""mixed"[9]."key""#, r#""mixed""#),
+        (r#""items"[0]"#, TOML_CASE.path),
+        (r#""items"[0]."name""#, r#""items"[0]"#),
+        (r#""items"[0]."children"[0]"#, r#""items"[0]"#),
+        (
+            r#""items"[0]."children"[0]."name""#,
+            r#""items"[0]."children"[0]"#,
+        ),
+        (r#""items"[1]"#, TOML_CASE.path),
+        (r#""items"[1]."name""#, r#""items"[1]"#),
+        (r#""items"[1]."meta""#, r#""items"[1]"#),
+        (r#""items"[1]."meta"."""#, r#""items"[1]."meta""#),
+        (r#""items"[1]."meta"."a.b""#, r#""items"[1]."meta""#),
+        (r#""items"[1]."meta"."a"."b""#, r#""items"[1]."meta""#),
+        (r#""items"[1]."meta"."key""#, r#""items"[1]."meta""#),
+        (r#""items"[1]."meta"." = ""#, r#""items"[1]."meta""#),
+    ];
+    assert_eq!(
+        document.entities.len(),
+        expected.len() + 1,
+        "{:?}",
+        document.entities
+    );
+    for (qualified, parent) in expected {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == qualified)
+            .unwrap_or_else(|| panic!("missing {qualified}: {:?}", document.entities));
+        let parent = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == parent)
+            .expect("written parent is retained");
+        assert!(
+            document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(parent.id)
+                    && relation.object == RelationEndpoint::Entity(entity.id)
+            }),
+            "{qualified}"
+        );
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "{qualified}");
+        let definition = definitions[0];
+        let span = definition.source.span();
+        let raw = &TOML_CASE.source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert_eq!(definition.syntactic_text_hash, content_hash(raw.as_bytes()));
+        assert_eq!(definition.source.generation(), fixture.source.generation());
+        assert_eq!(definition.evidence.source, entity.evidence.source);
+    }
+    let edited = TOML_CASE
+        .source
+        .replace(TOML_CASE.body_before, TOML_CASE.body_after);
+    let changed = fixture.rewrite(edited.as_bytes());
+    let reparsed = analyze(
+        &analyzer,
+        &request(&changed.snapshot, &changed.source, TOML_CASE, &limits),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(symbol_ids(document), symbol_ids(reparsed.document()));
+}
+
+#[test]
+fn toml_artifacts_keep_scalar_positions_at_the_required_fact_boundary() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, TOML_CASE);
+    let fixture = Fixture::new(TOML_CASE, TOML_CASE.source.as_bytes());
+    let initial_limits = limits();
+    let initial = request(
+        &fixture.snapshot,
+        &fixture.source,
+        TOML_CASE,
+        &initial_limits,
+    );
+    let (full, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("complete TOML artifact");
+    let required = artifact
+        .required_syntax_fact_count(&deadline())
+        .expect("required facts");
+    assert_eq!(
+        required,
+        provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .expect("native preflight")
+    );
+    let changed = fixture.next_generation();
+    let bounded_limits = limits_with_syntax_records(required);
+    let bounded = request(
+        &changed.snapshot,
+        &changed.source,
+        TOML_CASE,
+        &bounded_limits,
+    );
+    let (_, artifact) = analyzer
+        .analyze_and_capture(
+            &bounded,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("bounded identity capture");
+    let reused = analyzer
+        .analyze_from_artifact(
+            &bounded,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("bounded identity replay");
+    let clean = analyze(&analyzer, &bounded, &ExtensionSupport::default());
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(symbol_ids(full.document()), symbol_ids(reused.document()));
+    let too_small = limits_with_syntax_records(required - 1);
+    assert!(
+        analyzer
+            .analyze_and_capture(
+                &request(&changed.snapshot, &changed.source, TOML_CASE, &too_small),
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .is_err(),
+        "never omit scalar positions to meet a budget"
+    );
+}
+
+#[test]
+fn toml_native_identity_tracks_data_addresses_instead_of_lexical_headers() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, TOML_CASE);
+    let limits = limits();
+    for (before, after, stable) in [
+        ("a.key=1\n", "[a]\nkey=2\n", true),
+        ("a.key=1\n", "a.key=2\n[a]\n", true),
+        ("key=1\n", "\"k\\x65y\" = 2\n", true),
+        (
+            "a=[1,[{key=2}]]\n",
+            "a=[false, [ # gap\n {key=3} ]]\n",
+            true,
+        ),
+        ("a=[1,[{key=2}]]\n", "a=[1,2,[{key=2}]]\n", false),
+        ("[[a]]\nkey=1\n", "[[a]]\nother=0\n[[a]]\nkey=1\n", false),
+    ] {
+        let fixture = Fixture::new(TOML_CASE, before.as_bytes());
+        let first = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, TOML_CASE, &limits),
+            &ExtensionSupport::default(),
+        );
+        let changed = fixture.rewrite(after.as_bytes());
+        let second = analyze(
+            &analyzer,
+            &request(&changed.snapshot, &changed.source, TOML_CASE, &limits),
+            &ExtensionSupport::default(),
+        );
+        for output in [&first, &second] {
+            assert!(
+                output.document().skipped_regions.is_empty(),
+                "{before} -> {after}"
+            );
+            assert!(
+                output.document().diagnostics.is_empty(),
+                "{before} -> {after}"
+            );
+        }
+        assert_eq!(
+            symbol_id_named(first.document(), r#""key""#)
+                == symbol_id_named(second.document(), r#""key""#),
+            stable,
+            "{before} -> {after}"
+        );
+    }
+}
+
+#[test]
+fn toml_native_ambiguous_tables_and_invalid_keys_leave_explicit_gaps() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, TOML_CASE);
+    let limits = limits();
+    for source in [
+        "[bad]\nkey=1\n[bad]\nkey=2\n[good]\nkey=3\n",
+        "[\"\\uD800\"]\nkey=1\n[good]\nkey=3\n",
+    ] {
+        let fixture = Fixture::new(TOML_CASE, source.as_bytes());
+        let output = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, TOML_CASE, &limits),
+            &ExtensionSupport::default(),
+        );
+        let document = output.document();
+        assert!(!document.skipped_regions.is_empty(), "{source}");
+        assert_ne!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        let properties: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property)
+            .collect();
+        assert_eq!(properties.len(), 1, "{source}: {properties:?}");
+        assert_eq!(properties[0].qualified_name, r#""good"."key""#);
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .all(|region| { region.source.generation() == fixture.source.generation() })
+        );
+    }
+}
+
 const CASES: [LanguageCase; 15] = [
     LanguageCase {
         name: "rust",

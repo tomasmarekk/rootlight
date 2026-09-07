@@ -80,25 +80,53 @@ pub fn scope_page_candidate() -> usize {
 #[test]
 fn json_duplicate_and_escaped_members_cross_real_process_boundaries() {
     let source = r#"{"key":101,"k\u0065y":202,"items":[{"key":303},null,{"key":404}],"":5,"\ud800":6," ":7," key ":8}"#;
-    let mut fixture = RetrievalFixture::spawn_with_source(Some(("data.json", source)));
-    for (index, (query, expected)) in [
-        ("key", 4),
-        (r#""""#, 1),
-        (r#""\ud800""#, 1),
-        (r#"" ""#, 1),
-        (r#"" key ""#, 1),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let arguments = json!({"query": query, "search_modes": ["exact"], "languages": ["json"], "response_profile": "evidence"});
+    data_properties_cross_process_boundaries(
+        "json",
+        "data.json",
+        source,
+        &[
+            ("key", 4),
+            (r#""""#, 1),
+            (r#""\ud800""#, 1),
+            (r#"" ""#, 1),
+            (r#"" key ""#, 1),
+        ],
+    );
+}
+
+#[test]
+fn toml_table_arrays_and_escaped_keys_cross_real_process_boundaries() {
+    let source = "key=101\nitems=[1,{key=303}]\n[[tables]]\n\"k\\x65y\"=202\n[[tables]]\nkey=404\n\"\"=5\n\" \"=7\n\" key \"=8\n";
+    data_properties_cross_process_boundaries(
+        "toml",
+        "data.toml",
+        source,
+        &[
+            ("key", 4),
+            (r#""""#, 1),
+            (r#"" ""#, 1),
+            (r#"" key ""#, 1),
+            ("tables", 2),
+        ],
+    );
+}
+
+fn data_properties_cross_process_boundaries(
+    language: &str,
+    path: &str,
+    source: &str,
+    queries: &[(&str, usize)],
+) {
+    let mut fixture = RetrievalFixture::spawn_with_source(Some((path, source)));
+    for (index, &(query, expected)) in queries.iter().enumerate() {
+        let arguments = json!({"query": query, "search_modes": ["exact"], "languages": [language], "response_profile": "evidence"});
         let located = fixture.standalone(
-            &format!("json-locate-{index}"),
+            &format!("data-locate-{index}"),
             "code.locate",
             arguments.clone(),
         );
         let batch = fixture.batch(
-            &format!("json-batch-{index}"),
+            &format!("data-batch-{index}"),
             "code.locate",
             arguments,
             "evidence",
@@ -124,7 +152,7 @@ fn json_duplicate_and_escaped_members_cross_real_process_boundaries() {
         for (member, found) in matches.into_iter().enumerate() {
             assert!(symbols.insert(found["symbol_id"].as_str().expect("symbol")));
             let explained = fixture.standalone(
-                &format!("json-explain-{index}-{member}"),
+                &format!("data-explain-{index}-{member}"),
                 "symbol.explain",
                 json!({"symbol_ids": [found["symbol_id"]], "response_profile": "evidence"}),
             );
@@ -133,7 +161,7 @@ fn json_duplicate_and_escaped_members_cross_real_process_boundaries() {
                 &explained["result"]["structuredContent"],
                 &fixture.repository_id,
             );
-            let read = fixture.standalone(&format!("json-read-{index}-{member}"), "source.read", json!({"references": [{"symbol_id": found["symbol_id"]}], "response_profile": "evidence"}));
+            let read = fixture.standalone(&format!("data-read-{index}-{member}"), "source.read", json!({"references": [{"symbol_id": found["symbol_id"]}], "response_profile": "evidence"}));
             assert_success(&read, "source.read");
             let read = &read["result"]["structuredContent"];
             assert_common_read_contract(read, &fixture.repository_id);
@@ -241,7 +269,7 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
     );
     for (id, languages, expects_toml) in [
         ("filtered-empty", json!(["yaml"]), false),
-        ("unfiltered-empty", json!([]), true),
+        ("unfiltered-empty", json!([]), false),
     ] {
         let absent = fixture.standalone(
             id,

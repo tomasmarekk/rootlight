@@ -1,7 +1,7 @@
-# TOML native syntax qualification
+# TOML native syntax and structural adapter
 
 This directory retains the MIT-licensed `tree-sitter-toml-ng` crate `0.7.0`
-for isolated native tests. It is not yet registered in the production adapter.
+for the production structural adapter and isolated native tests.
 
 ## Provenance
 

@@ -522,7 +522,9 @@ fn required_syntax_fact_count_from_output(
                 | SyntaxFactKind::Declaration
                 | SyntaxFactKind::Signature
         ) || (fact.kind() == SyntaxFactKind::Scope
-            && (contains_declaration[index] || fact.syntax_kind().as_str().starts_with("json.")))
+            && (contains_declaration[index]
+                || fact.syntax_kind().as_str().starts_with("json.")
+                || fact.syntax_kind().as_str().starts_with("toml.")))
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && fact.syntax_kind().as_str().ends_with(".definition"));
         if identity_fact {
@@ -3068,6 +3070,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "css.file.module"
                 | "bash.file.module"
                 | "json.file.module"
+                | "toml.file.module"
         )
         && matches!(
             language,
@@ -3080,6 +3083,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "css"
                 | "bash"
                 | "json"
+                | "toml"
         )
 }
 
