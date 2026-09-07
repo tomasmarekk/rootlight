@@ -39,6 +39,8 @@ pub enum GrammarFamily {
     Lua,
     /// Ruby grammar.
     Ruby,
+    /// Swift grammar with checked scanner state restoration.
+    Swift,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -118,7 +120,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(13);
+        let mut descriptors = Vec::with_capacity(14);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -133,6 +135,7 @@ impl GrammarRegistry {
             GrammarFamily::Php,
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
+            GrammarFamily::Swift,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -242,6 +245,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         GrammarFamily::Lua => tree_sitter_lua::LANGUAGE.into(),
         GrammarFamily::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        GrammarFamily::Swift => tree_sitter_swift::LANGUAGE.into(),
     }
 }
 
@@ -256,6 +260,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Swift => GrammarIdentity {
+            language_id: "swift",
+            grammar_version: "0.7.3",
+            source_package_sha256: "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c",
+            parser_sha256: "d3edff6effe31b9a507f496577407987343b101b23eb7bee7a9b050e8ab5d27a",
+            scanner_sha256: Some(
+                "de87dbc697465445bb45e86dc002859eaae6f64bf102acd3beeab4e044c906e7",
+            ),
+        },
         GrammarFamily::Ruby => GrammarIdentity {
             language_id: "ruby",
             grammar_version: "0.23.1",
@@ -415,7 +428,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 13);
+        assert_eq!(registry.descriptors().len(), 14);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -430,6 +443,7 @@ mod tests {
             GrammarFamily::Php,
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
+            GrammarFamily::Swift,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -454,6 +468,7 @@ mod tests {
         let grammar_lock = fs::read_to_string(workspace.join("adapters/grammars.lock"))
             .expect("grammar lockfile is readable");
         let (runtime_version, runtime_checksum) = locked_package(&lock, "tree-sitter");
+        let runtime_checksum = runtime_checksum.expect("runtime stays registry-backed");
         assert_eq!(runtime_version, crate::TREE_SITTER_RUNTIME_VERSION);
         let runtime_block = grammar_lock
             .split_once("[[grammars]]")
@@ -491,16 +506,23 @@ mod tests {
             (GrammarFamily::Php, "php", "tree-sitter-php"),
             (GrammarFamily::Lua, "lua", "tree-sitter-lua"),
             (GrammarFamily::Ruby, "ruby", "tree-sitter-ruby"),
+            (GrammarFamily::Swift, "swift", "tree-sitter-swift"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);
             let grammar = locked_grammar(&grammar_lock, language);
             assert_eq!(descriptor.grammar_version(), version);
-            assert_eq!(descriptor.grammar_source_sha256(), source_package_checksum);
+            if let Some(checksum) = source_package_checksum {
+                assert_eq!(descriptor.grammar_source_sha256(), checksum);
+            } else {
+                // Local overrides retain the upstream archive identity, while
+                // xtask verifies every vendored byte against the grammar lock.
+                assert!(quoted_field(grammar, "manifest_path").starts_with("third_party/"));
+            }
             assert_eq!(quoted_field(grammar, "crate_version"), version);
             assert_eq!(
                 quoted_field(grammar, "crates_io_checksum"),
-                source_package_checksum
+                descriptor.grammar_source_sha256()
             );
             assert_eq!(
                 descriptor.parser_sha256(),
@@ -527,7 +549,7 @@ mod tests {
         &block_tail[..block_end]
     }
 
-    fn locked_package<'a>(lock: &'a str, package: &str) -> (&'a str, &'a str) {
+    fn locked_package<'a>(lock: &'a str, package: &str) -> (&'a str, Option<&'a str>) {
         let marker = format!("name = \"{package}\"");
         let marker_start = lock.find(&marker).expect("locked package is present");
         let block_start = lock[..marker_start]
@@ -540,7 +562,10 @@ mod tests {
         let block = &block_tail[..block_end];
         (
             quoted_field(block, "version"),
-            quoted_field(block, "checksum"),
+            block.lines().find_map(|line| {
+                line.strip_prefix("checksum = \"")
+                    .and_then(|value| value.strip_suffix('"'))
+            }),
         )
     }
 

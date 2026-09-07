@@ -9,3 +9,5 @@
 *.desc binary
 # Preserve the audited upstream license bytes, including its final blank line.
 adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE whitespace=-blank-at-eof
+# Vendored query bytes are pinned to the published upstream archive.
+third_party/tree-sitter-swift-0.7.3/queries/*.scm whitespace=-blank-at-eof

@@ -16,6 +16,16 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "swift.protocol.declaration" => {
+            Some(EntityKind::Protocol)
+        }
+        // Actors are reference types; the syntax label retains their concurrency distinction.
+        SyntaxFactKind::Declaration if label == "swift.actor.declaration" => {
+            Some(EntityKind::Class)
+        }
+        SyntaxFactKind::Declaration if label == "swift.property.declaration" => {
+            Some(EntityKind::Property)
+        }
         SyntaxFactKind::Declaration if label == "ruby.namespace.declaration" => {
             Some(EntityKind::Namespace)
         }

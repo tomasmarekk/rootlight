@@ -4,7 +4,7 @@
 //! canonical normalized IR, and explicit validation without native parser types.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::Arc,
@@ -67,7 +67,17 @@ const RUBY_CASE: LanguageCase = LanguageCase {
     body_after: "puts( name )",
 };
 
-const CASES: [LanguageCase; 13] = [
+const SWIFT_CASE: LanguageCase = LanguageCase {
+    name: "swift",
+    path: "src/example.swift",
+    frontend: "tree-sitter-swift-0.7.3",
+    source: include_str!("fixtures/structural/swift.swift"),
+    generated: false,
+    body_before: "return self",
+    body_after: "return  self",
+};
+
+const CASES: [LanguageCase; 14] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -169,6 +179,7 @@ const CASES: [LanguageCase; 13] = [
     },
     LUA_CASE,
     RUBY_CASE,
+    SWIFT_CASE,
 ];
 
 #[derive(Clone, Copy)]
@@ -574,6 +585,169 @@ fn ruby_declarations_and_operator_methods_preserve_exact_identities() {
                 .expect("fixture offset fits")
         );
     }
+}
+
+#[test]
+fn swift_kinds_and_extension_methods_preserve_source_and_body_stable_identity() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let source = SWIFT_CASE.source;
+    let fixture = Fixture::new(SWIFT_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, SWIFT_CASE);
+    let initial_request = request(&fixture.snapshot, &fixture.source, SWIFT_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    assert_contract(
+        &output,
+        &fixture,
+        SWIFT_CASE,
+        &limits,
+        &ExtensionSupport::default(),
+    );
+    for (name, kind, marker) in [
+        ("Store", EntityKind::Protocol, "protocol Store"),
+        ("Entry", EntityKind::Struct, "struct Entry"),
+        ("Cache", EntityKind::Class, "class Cache"),
+        ("Worker", EntityKind::Class, "actor Worker"),
+        ("Result", EntityKind::Enum, "enum Result"),
+        ("render", EntityKind::Method, "func render"),
+        ("copy", EntityKind::Method, "func copy"),
+        ("greet", EntityKind::Function, "func greet"),
+        ("load", EntityKind::Method, "func load"),
+        ("init", EntityKind::Constructor, "init()"),
+        ("deinit", EntityKind::Method, "deinit {}"),
+        ("value", EntityKind::Property, "value: String"),
+        ("size", EntityKind::Property, "size = 1"),
+        ("title", EntityKind::Variable, "title ="),
+        ("Label", EntityKind::TypeAlias, "typealias Label"),
+        ("ready", EntityKind::Constant, "ready, missing"),
+        ("missing", EntityKind::Constant, "missing\n"),
+        ("loaded", EntityKind::Constructor, "loaded(String)"),
+        ("key", EntityKind::Parameter, "_ key: String"),
+        ("name", EntityKind::Parameter, "_ name: String"),
+    ] {
+        let matches = output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "{name}: {:?}",
+            output
+                .document()
+                .entities
+                .iter()
+                .map(|e| (&e.canonical_name, e.kind))
+                .collect::<Vec<_>>()
+        );
+        let reference = matches[0]
+            .evidence
+            .source
+            .as_ref()
+            .expect("declaration has exact source");
+        assert_eq!(reference.generation(), fixture.source.generation());
+        assert_eq!(
+            reference.span().start_byte(),
+            u64::try_from(source.find(marker).expect("marker exists")).expect("offset fits"),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "Entry")
+            .count(),
+        1,
+        "extension is not another type definition"
+    );
+    let method = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "copy")
+        .expect("extension method");
+    assert!(
+        method.qualified_name.contains("Entry"),
+        "{}",
+        method.qualified_name
+    );
+    let changed_source = source.replace("return self", "return  self");
+    let changed = Fixture::new(SWIFT_CASE, changed_source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, SWIFT_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert_eq!(
+        symbol_ids(output.document()),
+        symbol_ids(reparsed.document())
+    );
+}
+
+#[test]
+fn swift_mixed_enum_cases_and_constrained_extensions_keep_distinct_identity() {
+    let source = "struct Box<T> {}\nextension Box where T: Equatable {\n  func matches() -> Bool {\n    func helper() -> Bool { return true }\n    return helper()\n  }\n}\nextension Box where T: Hashable {\n  func matches() -> Bool { return false }\n}\nenum Response { case empty, value(Int), missing, pair(Int, Int) }\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, SWIFT_CASE);
+    let limits = limits();
+    let fixture = Fixture::new(SWIFT_CASE, source.as_bytes());
+    let initial_request = request(&fixture.snapshot, &fixture.source, SWIFT_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    for (name, kind) in [
+        ("empty", EntityKind::Constant),
+        ("value", EntityKind::Constructor),
+        ("missing", EntityKind::Constant),
+        ("pair", EntityKind::Constructor),
+        ("helper", EntityKind::Function),
+    ] {
+        let entities = output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(entities.len(), 1, "{name}");
+        assert_eq!(entities[0].kind, kind, "{name}");
+    }
+    let methods = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "matches")
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 2);
+    assert!(methods.iter().all(|entity| {
+        entity.kind == EntityKind::Method && entity.qualified_name.contains("Box")
+    }));
+    assert_ne!(methods[0].id, methods[1].id);
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "Box")
+            .count(),
+        1
+    );
+    let changed_source = source.replace("return true", "return false");
+    let changed = Fixture::new(SWIFT_CASE, changed_source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, SWIFT_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>(),
+        reparsed
+            .document()
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    );
 }
 
 #[test]

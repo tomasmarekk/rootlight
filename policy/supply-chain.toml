@@ -6,6 +6,7 @@ allowed_registries = ["registry+https://github.com/rust-lang/crates.io-index"]
 allowed_git_sources = []
 allowed_path_dependencies = [
   "lru@0.16.4:third_party/lru-0.16.4/Cargo.toml",
+  "tree-sitter-swift@0.7.3:third_party/tree-sitter-swift-0.7.3/Cargo.toml",
 ]
 
 allowed_build_scripts = [
@@ -65,6 +66,7 @@ allowed_build_scripts = [
   "tree-sitter-python@0.25.0",
   "tree-sitter-ruby@0.23.1",
   "tree-sitter-rust@0.24.2",
+  "tree-sitter-swift@0.7.3",
   "tree-sitter-typescript@0.23.2",
   "typeid@1.0.3",
   "typetag@0.2.22",

@@ -47,6 +47,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-features --locked
+      - name: Native scanner state contracts
+        run: |
+          cargo fmt --manifest-path tests/native-grammars/Cargo.toml --check
+          cargo clippy --manifest-path tests/native-grammars/Cargo.toml --target-dir target/native-grammars --all-targets --locked -- -D warnings
+          cargo test --manifest-path tests/native-grammars/Cargo.toml --target-dir target/native-grammars --locked
       - name: Architecture and contracts
         run: |
           cargo run --locked --quiet --package xtask -- architecture-check
@@ -411,6 +416,7 @@ jobs:
         run: |
           cargo check --workspace --all-targets --all-features --locked
           cargo test --workspace --all-features --locked
+          cargo test --manifest-path tests/native-grammars/Cargo.toml --target-dir target/native-grammars --locked
           cargo run --locked --quiet --package xtask -- architecture-check
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check

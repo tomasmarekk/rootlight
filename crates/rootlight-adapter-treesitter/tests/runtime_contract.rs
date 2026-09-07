@@ -4,6 +4,7 @@
 //! eviction, malformed input, and cancellation cross the complete SDK boundary.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     sync::Arc,
@@ -16,7 +17,8 @@ use rootlight_adapter_sdk::{
     RequestError, ResourceKind, SinkError, StreamLimits, execute_parse,
 };
 use rootlight_adapter_treesitter::{
-    ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit, TreeSitterProvider,
+    GrammarRegistry, ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit,
+    TreeSitterProvider,
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::content_hash;
@@ -87,13 +89,15 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 12] = [
+    let cases: [(&str, &str, &[u8]); 14] = [
         (
             "sample.lua",
             "lua",
             b"local function sample(value) return value end\n",
         ),
         ("sample.rs", "rust", b"fn sample() {}\n"),
+        ("sample.rb", "ruby", b"def sample\n nil\nend\n"),
+        ("sample.swift", "swift", b"func sample() {}\n"),
         ("sample.py", "python", b"def sample():\n    return None\n"),
         (
             "sample.js",
@@ -127,6 +131,19 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
     ];
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
     let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+
+    let registry = GrammarRegistry::audited().expect("audited registry initializes");
+    assert_eq!(
+        cases
+            .iter()
+            .map(|(_, language, _)| *language)
+            .collect::<BTreeSet<_>>(),
+        registry
+            .descriptors()
+            .iter()
+            .map(|entry| entry.language().as_str())
+            .collect::<BTreeSet<_>>()
+    );
 
     for (name, language, source) in cases {
         let fixture = Fixture::new(name, source);

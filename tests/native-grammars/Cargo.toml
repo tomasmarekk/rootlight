@@ -1,0 +1,22 @@
+# Isolated FFI regression tests for pinned native scanners.
+# Production workspace crates retain their forbid-unsafe policy.
+[package]
+name = "rootlight-native-grammar-tests"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+license = "AGPL-3.0-only"
+
+[workspace]
+resolver = "3"
+
+[dev-dependencies]
+tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+tree-sitter-swift = { path = "../../third_party/tree-sitter-swift-0.7.3", version = "=0.7.3", default-features = false }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

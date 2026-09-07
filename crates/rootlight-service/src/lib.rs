@@ -205,7 +205,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/13";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/14";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25316,6 +25316,7 @@ mod tests {
             "sample.py",
             "sample.rb",
             "sample.rs",
+            "sample.swift",
             "sample.ts",
         ]
         .into_iter()
@@ -25370,7 +25371,6 @@ mod tests {
             ("schema.sql", "sql"),
             ("script.sh", "bash"),
             ("page.html", "html"),
-            ("client.swift", "swift"),
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("build.scala", "scala"),
@@ -25412,9 +25412,9 @@ mod tests {
         let sources = [
             ("normalize.css", "html { line-height: 1.15; }\n", "css"),
             (
-                "Alamofire.swift",
-                "public final class SessionDelegate { let requestAdapter = 1 }\n",
-                "swift",
+                "client.dart",
+                "class Transport { final int retryCount = 1; }\n",
+                "dart",
             ),
             (
                 "Session.m",
@@ -25508,7 +25508,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["css", "swift", "objective-c", "matlab", "perl"] {
+        for language in ["css", "dart", "objective-c", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
@@ -25639,6 +25639,151 @@ mod tests {
             .iter()
             .find(|entry| entry.language == "ruby")
             .expect("Ruby capability exists");
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+    }
+
+    #[test]
+    fn swift_published_symbols_retain_exact_sources_and_incremental_identity() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = include_str!(
+            "../../rootlight-adapter-treesitter/tests/fixtures/structural/swift.swift"
+        );
+        let path = fixture.path().join("store.swift");
+        fs::write(&path, source).expect("Swift source writes");
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Swift index publishes");
+        let generation = service
+            .loaded_generation_snapshot(initial.generation)
+            .expect("generation retained");
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "store.swift")
+            .expect("source file retained");
+        let full_source = file.evidence.source.clone().expect("full file source");
+        let full = service
+            .source_read(initial.generation, vec![full_source.clone()], &deadline())
+            .expect("full source reads");
+        assert_eq!(full.data.chunks[0].bytes, source.as_bytes());
+        assert_eq!(full.data.chunks[0].language, "swift");
+        let coverage = service
+            .source_file_coverage_until(initial.generation, file.id, &deadline())
+            .expect("coverage resolves");
+        assert_eq!(coverage.language, "swift");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(
+            coverage.status,
+            CoverageStatus::Bounded,
+            "external import remains unresolved"
+        );
+        let status = service
+            .repository_status(initial.repository, None)
+            .expect("status resolves");
+        let count = status
+            .coverage
+            .iter()
+            .find(|entry| entry.language == "swift")
+            .expect("Swift counted");
+        assert_eq!((count.discovered_files, count.indexed_files), (1, 1));
+        let mut symbols = BTreeMap::new();
+        for name in [
+            "Store", "Entry", "Cache", "Worker", "Result", "render", "copy", "greet", "load",
+            "init", "deinit", "value", "size", "title", "Label", "ready", "missing", "loaded",
+            "key", "name",
+        ] {
+            let located = service
+                .code_locate(
+                    initial.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("Swift name locates");
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .expect("symbol identity exists");
+            let symbol = hit.symbol.expect("symbol exists");
+            let explained = service
+                .symbol_explain(initial.generation, symbol, &deadline())
+                .expect("symbol explains");
+            assert_eq!(explained.data.entity.language, "swift");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("declaration source exists");
+            assert_eq!(reference.generation(), initial.generation);
+            let start = usize::try_from(reference.span().start_byte()).expect("offset fits");
+            let end = usize::try_from(reference.span().end_byte()).expect("offset fits");
+            let read = service
+                .source_read_with_options_and_budget(
+                    initial.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("exact declaration reads");
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                source
+                    .as_bytes()
+                    .get(start..end)
+                    .expect("exact source range")
+            );
+            symbols.insert(name, symbol);
+        }
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op indexes");
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = source.replace("return self", "return  self");
+        fs::write(&path, &changed).expect("body edit writes");
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("body edit indexes");
+        assert_ne!(updated.generation, initial.generation);
+        for (name, symbol) in symbols {
+            let explained = service
+                .symbol_explain(updated.generation, symbol, &deadline())
+                .expect("body edit retains symbol identity");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            assert_eq!(
+                explained
+                    .data
+                    .entity
+                    .evidence
+                    .source
+                    .expect("updated source")
+                    .generation(),
+                updated.generation
+            );
+        }
+        let retained = service
+            .source_read(initial.generation, vec![full_source], &deadline())
+            .expect("old generation source stays exact");
+        assert_eq!(retained.data.chunks[0].bytes, source.as_bytes());
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("capability inventory");
+        let capability = inventory
+            .languages
+            .iter()
+            .find(|entry| entry.language == "swift")
+            .expect("Swift capability");
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, ["treesitter"]);
     }

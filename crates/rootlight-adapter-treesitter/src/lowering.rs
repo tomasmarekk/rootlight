@@ -1571,6 +1571,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 match fact.syntax_kind().as_str() {
                     "rust.impl_trait.scope_trait" => identity.insert_trait(fact),
                     "rust.impl_type.scope_type" => identity.insert_type(fact),
+                    "swift.extension_target.scope_trait" => identity.insert_trait(fact),
+                    "swift.extension_header.scope_type" => identity.insert_type(fact),
                     _ => {}
                 }
             }
@@ -1581,7 +1583,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut unsupported_scope_entities = BTreeSet::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
-            let parent_entity = fact.parent().and_then(|parent| {
+            let mut parent_entity = fact.parent().and_then(|parent| {
                 drafts
                     .contains_key(&parent)
                     .then_some(parent)
@@ -1590,13 +1592,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let parent_scope = fact
                 .parent()
                 .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
+            if parent_scope.as_ref().and_then(|scope| scope.kind)
+                == Some(StableScopeKind::SwiftExtension)
+                && parent_entity
+                    .and_then(|parent| drafts.get(&parent))
+                    .is_some_and(|parent| parent.kind == EntityKind::Module)
+            {
+                // An extension names a target type without defining it. Keep its
+                // members file-contained with the reviewed target prefix; a file
+                // module must not override that prefix or invent type ownership.
+                parent_entity = None;
+            }
             if fact.kind() == SyntaxFactKind::Scope {
                 let stable_header =
                     self.stable_scope_header(fact, scope_identity_captures.get(&fact.local_id()))?;
                 let unsupported_semantic_identity = parent_scope
                     .as_ref()
                     .is_some_and(|scope| scope.unsupported_semantic_identity)
-                    || fact.syntax_kind().as_str() == "rust.impl.scope" && stable_header.is_none();
+                    || matches!(
+                        fact.syntax_kind().as_str(),
+                        "rust.impl.scope" | "swift.extension.scope"
+                    ) && stable_header.is_none();
                 // Lua lexical boundaries distinguish nested bindings without offsets or
                 // body text. Identical sibling scopes remain guarded as ambiguous below.
                 let scope_digest =
@@ -1680,6 +1696,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
             if parent_scope.as_ref().and_then(|scope| scope.kind) == Some(StableScopeKind::RustImpl)
                 && fact.syntax_kind().as_str() == "rust.function.declaration"
+            {
+                kind = EntityKind::Method;
+            }
+            if parent_scope.as_ref().and_then(|scope| scope.kind)
+                == Some(StableScopeKind::SwiftExtension)
+                && fact.syntax_kind().as_str() == "swift.function.declaration"
+                && parent_entity.is_none()
             {
                 kind = EntityKind::Method;
             }
@@ -1832,7 +1855,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
         scope: &SyntaxFact,
         captures: Option<&ScopeIdentityCaptures<'_>>,
     ) -> Result<Option<StableScopeHeader>, AdapterError> {
-        if scope.syntax_kind().as_str() != "rust.impl.scope" {
+        if !matches!(
+            scope.syntax_kind().as_str(),
+            "rust.impl.scope" | "swift.extension.scope"
+        ) {
             return Ok(None);
         }
         let Some(captures) = captures.filter(|captures| !captures.invalid) else {
@@ -1846,6 +1872,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .trait_type
             .map(|fact| self.text_for_span(fact.span()))
             .transpose()?;
+        if scope.syntax_kind().as_str() == "swift.extension.scope" {
+            let maximum = self.request.limits().ir().max_string_bytes;
+            let Some(target) = trait_type
+                .and_then(|text| rootlight_adapter_sdk::structural_captured_name(text, maximum))
+            else {
+                return Ok(None);
+            };
+            if self_type.len() > maximum {
+                return Ok(None);
+            }
+            // Conformance and where-clauses distinguish extension scopes; their
+            // bounded header is retained while body edits leave identity stable.
+            let header = self_type.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut digest = blake3::Hasher::new();
+            digest.update(b"rootlight.swift-extension-scope/1\0");
+            digest.update(header.as_bytes());
+            return Ok(Some(StableScopeHeader {
+                digest: *digest.finalize().as_bytes(),
+                qualified_prefix: target.to_owned(),
+                kind: StableScopeKind::SwiftExtension,
+            }));
+        }
         let identity = canonical_rust_impl_scope(
             self_type,
             trait_type,
@@ -1946,6 +1994,7 @@ struct StableScopeHeader {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StableScopeKind {
     RustImpl,
+    SwiftExtension,
 }
 
 fn materialize_entity(
@@ -2198,8 +2247,14 @@ fn scope_identity(
             | "lua.function.scope"
             | "lua.for.scope"
             | "lua.repeat.scope"
+            | "swift.extension.scope"
     ) {
-        let mut hasher = blake3::Hasher::new_derive_key("rootlight.lua-lexical-scope-identity/1");
+        let context = if syntax_kind == "swift.extension.scope" {
+            "rootlight.swift-extension-scope-identity/1"
+        } else {
+            "rootlight.lua-lexical-scope-identity/1"
+        };
+        let mut hasher = blake3::Hasher::new_derive_key(context);
         if let Some(parent) = parent {
             hasher.update(&[1]);
             hasher.update(&parent);
@@ -2836,10 +2891,11 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "typescript.file.module"
                 | "lua.file.module"
                 | "ruby.file.module"
+                | "swift.file.module"
         )
         && matches!(
             language,
-            "python" | "javascript" | "typescript" | "lua" | "ruby"
+            "python" | "javascript" | "typescript" | "lua" | "ruby" | "swift"
         )
 }
 

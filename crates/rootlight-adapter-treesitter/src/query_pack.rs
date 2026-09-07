@@ -294,6 +294,9 @@ impl QueryPack {
             expected.extend(RUST_SPECIAL_CAPTURES);
             expected.sort_unstable();
         } else {
+            if family == GrammarFamily::Swift {
+                expected.extend(["scope_trait", "scope_type"]);
+            }
             if supports_terminal_call_name(family) {
                 expected.push(TERMINAL_CALL_NAME_CAPTURE);
             }
@@ -610,6 +613,52 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::ScopeTrait if family == GrammarFamily::Swift => "swift.extension_target",
+        StructuralRole::ScopeType if family == GrammarFamily::Swift => "swift.extension_header",
+        _ if family == GrammarFamily::Swift && capture.node.kind() == "class_declaration" => {
+            match capture
+                .node
+                .child_by_field_name("declaration_kind")
+                .map(|node| node.kind())
+            {
+                Some("class") => "swift.class",
+                Some("struct") => "swift.struct",
+                Some("actor") => "swift.actor",
+                Some("enum") => "swift.enum",
+                Some("extension") => "swift.extension",
+                _ => return Err(query_failure("query-swift-type-kind")),
+            }
+        }
+        StructuralRole::Declaration if family == GrammarFamily::Swift => {
+            match capture.node.kind() {
+                "pattern" => {
+                    let owner = capture.node.parent().and_then(|node| node.parent());
+                    if owner.is_some_and(|node| {
+                        matches!(
+                            node.kind(),
+                            "class_body" | "enum_class_body" | "protocol_body"
+                        )
+                    }) {
+                        "swift.property"
+                    } else {
+                        "swift.variable"
+                    }
+                }
+                "simple_identifier" => {
+                    if capture
+                        .node
+                        .next_named_sibling()
+                        .is_some_and(|node| node.kind() == "enum_type_parameters")
+                    {
+                        "swift.constructor"
+                    } else {
+                        "swift.constant"
+                    }
+                }
+                kind => canonical_syntax(family, kind)
+                    .ok_or_else(|| query_failure("query-swift-declaration-kind"))?,
+            }
+        }
         StructuralRole::Declaration if family == GrammarFamily::Lua => {
             lua_declaration_syntax(capture.node, source)
                 .ok_or_else(|| query_failure("query-lua-declaration-kind"))?
@@ -667,12 +716,24 @@ fn candidate_for_capture(
             GrammarFamily::Php => "php.call",
             GrammarFamily::Lua => "lua.call",
             GrammarFamily::Ruby => "ruby.call",
+            GrammarFamily::Swift => "swift.call",
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Swift
+        && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
+    {
+        if let Some(body) = capture.node.child_by_field_name("body") {
+            end = body.start_byte();
+        }
+        // Bodies never participate in signatures or extension scope identity.
+        while end > start && source.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
+            end -= 1;
+        }
+    }
     if family == GrammarFamily::Ruby && role == StructuralRole::Signature {
         let header_field = match capture.node.kind() {
             "class" => "superclass",
@@ -822,6 +883,31 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Swift, "source_file") => Some("swift.file"),
+        (GrammarFamily::Swift, "class_declaration") => Some("swift.type_scope"),
+        (GrammarFamily::Swift, "protocol_declaration") => Some("swift.protocol"),
+        (GrammarFamily::Swift, "function_declaration" | "protocol_function_declaration") => {
+            Some("swift.function")
+        }
+        (GrammarFamily::Swift, "init_declaration") => Some("swift.constructor"),
+        (GrammarFamily::Swift, "deinit_declaration") => Some("swift.method"),
+        (GrammarFamily::Swift, "pattern") => Some("swift.binding"),
+        (GrammarFamily::Swift, "parameter") => Some("swift.parameter"),
+        (GrammarFamily::Swift, "typealias_declaration") => Some("swift.type_alias"),
+        (GrammarFamily::Swift, "simple_identifier" | "type_identifier" | "init" | "deinit") => {
+            Some("swift.identifier")
+        }
+        (GrammarFamily::Swift, "import_declaration") => Some("swift.import"),
+        (
+            GrammarFamily::Swift,
+            "class_body" | "enum_class_body" | "protocol_body" | "function_body" | "statements"
+            | "lambda_literal",
+        ) => Some("swift.block"),
+        (GrammarFamily::Swift, "comment" | "multiline_comment") => Some("swift.comment"),
+        (
+            GrammarFamily::Swift,
+            "line_string_literal" | "multi_line_string_literal" | "raw_string_literal",
+        ) => Some("swift.string"),
         (GrammarFamily::Ruby, "program") => Some("ruby.file"),
         (GrammarFamily::Ruby, "class") => Some("ruby.class"),
         (GrammarFamily::Ruby, "module") => Some("ruby.namespace"),
@@ -1088,7 +1174,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(13);
+        let mut packs = Vec::with_capacity(14);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1109,6 +1195,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Php, include_str!("../queries/php.scm")),
             (GrammarFamily::Lua, include_str!("../queries/lua.scm")),
             (GrammarFamily::Ruby, include_str!("../queries/ruby.scm")),
+            (GrammarFamily::Swift, include_str!("../queries/swift.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1175,6 +1262,7 @@ mod tests {
             GrammarFamily::Php,
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
+            GrammarFamily::Swift,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1187,6 +1275,9 @@ mod tests {
                 expected.extend(RUST_SPECIAL_CAPTURES);
                 expected.sort_unstable();
             } else {
+                if family == GrammarFamily::Swift {
+                    expected.extend(["scope_trait", "scope_type"]);
+                }
                 if supports_terminal_call_name(family) {
                     expected.push(TERMINAL_CALL_NAME_CAPTURE);
                 }

@@ -25,7 +25,7 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
 // CI replays one reviewed corpus; broader random campaigns use a separate runner config.
 const FUZZ_SEED: u64 = 202_607_170_404;
-const FUZZ_ROUTES: [(&str, &str); 14] = [
+const FUZZ_ROUTES: [(&str, &str); 15] = [
     ("fuzz.rs", "rust"),
     ("fuzz.py", "python"),
     ("fuzz.js", "javascript"),
@@ -40,6 +40,7 @@ const FUZZ_ROUTES: [(&str, &str); 14] = [
     ("fuzz.kt", "kotlin"),
     ("fuzz.php", "php"),
     ("fuzz.lua", "lua"),
+    ("fuzz.swift", "swift"),
 ];
 
 #[test]
@@ -264,6 +265,7 @@ fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
         "php" => b"<?php class Cleanup {}\n",
         "lua" => b"local function cleanup() return 1 end\n",
         "ruby" => b"def cleanup()\nend\n",
+        "swift" => b"func cleanup() {}\n",
         _ => b"",
     }
 }

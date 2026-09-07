@@ -32,7 +32,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 13] = [
+const CASES: [LanguageCase; 14] = [
     LanguageCase {
         name: "structural.rs",
         language: "rust",
@@ -97,6 +97,11 @@ const CASES: [LanguageCase; 13] = [
         name: "structural.rb",
         language: "ruby",
         source: include_str!("fixtures/structural/ruby.rb"),
+    },
+    LanguageCase {
+        name: "structural.swift",
+        language: "swift",
+        source: include_str!("fixtures/structural/swift.swift"),
     },
 ];
 
@@ -1109,6 +1114,51 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("ruby.comment.documentation", 2),
             ("ruby.string.string", 3),
         ],
+        "swift" => &[
+            ("swift.file.root", 1),
+            ("swift.file.module", 1),
+            ("swift.file.scope", 1),
+            ("swift.actor.declaration", 1),
+            ("swift.actor.scope", 1),
+            ("swift.actor.signature", 1),
+            ("swift.block.scope", 15),
+            ("swift.call.call", 1),
+            ("swift.class.declaration", 1),
+            ("swift.class.scope", 1),
+            ("swift.class.signature", 1),
+            ("swift.comment.comment", 2),
+            ("swift.comment.documentation", 1),
+            ("swift.constant.declaration", 2),
+            ("swift.constructor.declaration", 2),
+            ("swift.constructor.scope", 1),
+            ("swift.constructor.signature", 1),
+            ("swift.enum.declaration", 1),
+            ("swift.enum.scope", 1),
+            ("swift.enum.signature", 1),
+            ("swift.extension.scope", 1),
+            ("swift.extension_header.scope_type", 1),
+            ("swift.extension_target.scope_trait", 1),
+            ("swift.function.declaration", 5),
+            ("swift.function.scope", 5),
+            ("swift.function.signature", 5),
+            ("swift.identifier.definition", 21),
+            ("swift.identifier.reference", 16),
+            ("swift.import.import", 1),
+            ("swift.method.declaration", 1),
+            ("swift.method.scope", 1),
+            ("swift.method.signature", 1),
+            ("swift.parameter.declaration", 2),
+            ("swift.property.declaration", 2),
+            ("swift.protocol.declaration", 1),
+            ("swift.protocol.scope", 1),
+            ("swift.protocol.signature", 1),
+            ("swift.string.string", 2),
+            ("swift.struct.declaration", 1),
+            ("swift.struct.scope", 1),
+            ("swift.struct.signature", 1),
+            ("swift.type_alias.declaration", 1),
+            ("swift.variable.declaration", 1),
+        ],
         _ => panic!("unexpected fixture language"),
     };
     entries
@@ -1187,7 +1237,21 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
             .get(&fact.parent().expect("name/signature has a parent"))
             .expect("name/signature parent resolves");
         if fact.kind() == SyntaxFactKind::Signature {
-            assert_eq!(parent.kind(), SyntaxFactKind::Declaration);
+            let scope_kind = match fact.syntax_kind().as_str() {
+                "swift.extension_header.scope_type" | "swift.extension_target.scope_trait" => {
+                    Some("swift.extension.scope")
+                }
+                "rust.impl_type.scope_type" | "rust.impl_trait.scope_trait" => {
+                    Some("rust.impl.scope")
+                }
+                _ => None,
+            };
+            if let Some(scope_kind) = scope_kind {
+                assert_eq!(parent.kind(), SyntaxFactKind::Scope);
+                assert_eq!(parent.syntax_kind().as_str(), scope_kind);
+            } else {
+                assert_eq!(parent.kind(), SyntaxFactKind::Declaration);
+            }
         } else {
             assert!(matches!(
                 parent.kind(),

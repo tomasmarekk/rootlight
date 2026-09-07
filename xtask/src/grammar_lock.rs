@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "735314fb58a3bacb8d2f27fd60adc498d293c6461ab311837caa32f1bbf4c4ca";
+    "d3fa673f292e3864a8951b07d78603ae6c86ae2d0015fbb5a9f6e67cf7d6cc0a";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,7 +37,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 13] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 14] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -103,6 +103,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 13] = [
         "0.23.2",
         "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
     ),
+    (
+        "tree-sitter-swift",
+        "0.7.3",
+        "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c",
+    ),
 ];
 
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
@@ -123,6 +128,7 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_manifest(&manifest)?;
     validate_direct_dependencies(metadata)?;
     validate_cargo_lock(root, &manifest)?;
+    validate_vendored_sources(metadata, root, &manifest)?;
 
     validate_local_license(root, JAVA_LICENSE_PATH, JAVA_LICENSE_SHA256)?;
     validate_local_license(root, TYPESCRIPT_LICENSE_PATH, TYPESCRIPT_LICENSE_SHA256)?;
@@ -130,6 +136,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     validate_local_license(root, LUA_LICENSE_PATH, LUA_LICENSE_SHA256)?;
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-swift-0.7.3-LICENSE",
+        "3533cec129bb4bba015c0d61d86dd7c3b7e82110e4d2ff7837a01eff5bad5ccc",
+    )?;
     Ok(())
 }
 
@@ -150,7 +161,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 13 {
+    if manifest.grammars.len() != 14 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -183,6 +194,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "python",
         "ruby",
         "rust",
+        "swift",
         "typescript",
     ]);
     if languages != expected_languages {
@@ -418,12 +430,138 @@ fn validate_cargo_lock(root: &Path, manifest: &GrammarLock) -> Result<(), Gramma
         )
     }));
     for (name, version, checksum) in expected {
+        if manifest
+            .grammars
+            .iter()
+            .any(|grammar| grammar.crate_name == name && grammar.vendored.is_some())
+        {
+            let local = lock
+                .package
+                .iter()
+                .filter(|package| package.name == name && package.version == version)
+                .collect::<Vec<_>>();
+            if local.len() != 1 || local[0].checksum.is_some() || local[0].source.is_some() {
+                return Err(GrammarLockError::CargoLockChecksum {
+                    package: name.to_owned(),
+                    version: version.to_owned(),
+                });
+            }
+            continue;
+        }
         if observed.get(&(name, version)) != Some(&checksum) {
             return Err(GrammarLockError::CargoLockChecksum {
                 package: name.to_owned(),
                 version: version.to_owned(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_vendored_sources(
+    metadata: &Metadata,
+    root: &Path,
+    manifest: &GrammarLock,
+) -> Result<(), GrammarLockError> {
+    for grammar in &manifest.grammars {
+        let Some(vendored) = &grammar.vendored else {
+            continue;
+        };
+        let invalid = || GrammarLockError::PackageEvidence {
+            package: grammar.crate_name.clone(),
+        };
+        let manifest_path = Path::new(&vendored.manifest_path);
+        if manifest_path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(invalid());
+        }
+        let expected_manifest = root.join(manifest_path);
+        let package = metadata
+            .packages
+            .iter()
+            .find(|package| {
+                package.name.as_str() == grammar.crate_name
+                    && package.version.to_string() == grammar.crate_version
+            })
+            .ok_or_else(invalid)?;
+        if package.source.is_some() || package.manifest_path.as_std_path() != expected_manifest {
+            return Err(invalid());
+        }
+        let directory = expected_manifest.parent().ok_or_else(invalid)?;
+        validate_vendored_tree(directory, grammar, vendored)?;
+    }
+    Ok(())
+}
+
+fn validate_vendored_tree(
+    directory: &Path,
+    grammar: &GrammarEvidence,
+    vendored: &VendoredGrammarEvidence,
+) -> Result<(), GrammarLockError> {
+    let invalid = || GrammarLockError::PackageEvidence {
+        package: grammar.crate_name.clone(),
+    };
+    let mut observed = BTreeSet::new();
+    let mut pending = vec![directory.to_owned()];
+    while let Some(path) = pending.pop() {
+        let kind = fs::symlink_metadata(&path)
+            .map_err(|source| GrammarLockError::Read {
+                path: path.clone(),
+                source,
+            })?
+            .file_type();
+        if kind.is_symlink() || !kind.is_dir() {
+            return Err(invalid());
+        }
+        let entries = fs::read_dir(&path).map_err(|source| GrammarLockError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| GrammarLockError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|source| GrammarLockError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            if kind.is_symlink() {
+                return Err(invalid());
+            }
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                return Err(invalid());
+            }
+            let relative = path
+                .strip_prefix(directory)
+                .map_err(|_| invalid())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let digest = vendored.files.get(&relative).ok_or_else(invalid)?;
+            validate_sha256("vendored source", digest)?;
+            let bytes = fs::read(&path).map_err(|source| GrammarLockError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            require_digest("vendored grammar source", &bytes, digest)?;
+            observed.insert(relative);
+        }
+    }
+    if observed != vendored.files.keys().cloned().collect() || !observed.contains("Cargo.toml") {
+        return Err(invalid());
+    }
+    if vendored.files.get("src/parser.c") != Some(&grammar.parser_sha256)
+        || vendored.files.get("src/scanner.c") != Some(&grammar.scanner_sha256)
+        || vendored.files.get("LICENSE") != Some(&grammar.license_sha256)
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -539,6 +677,15 @@ struct GrammarEvidence {
     capabilities: Vec<String>,
     semantic_depth: String,
     audit_notes: Vec<String>,
+    #[serde(default)]
+    vendored: Option<VendoredGrammarEvidence>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VendoredGrammarEvidence {
+    manifest_path: String,
+    files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,6 +698,7 @@ struct LockedPackage {
     name: String,
     version: String,
     checksum: Option<String>,
+    source: Option<String>,
 }
 
 /// Failure to verify the audited grammar dependency lock.
@@ -616,6 +764,85 @@ pub(crate) enum GrammarLockError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn vendored_tree_rejects_modified_missing_and_extra_inputs() {
+        let (directory, grammar) = vendored_fixture();
+        let vendored = grammar
+            .vendored
+            .as_ref()
+            .expect("fixture has local evidence");
+        validate_vendored_tree(directory.path(), &grammar, vendored).expect("exact tree passes");
+        fs::write(directory.path().join("src/scanner.c"), b"changed").expect("mutation writes");
+        assert!(matches!(
+            validate_vendored_tree(directory.path(), &grammar, vendored),
+            Err(GrammarLockError::DigestMismatch { .. })
+        ));
+        fs::write(directory.path().join("src/scanner.c"), b"scanner").expect("scanner restores");
+        fs::remove_file(directory.path().join("src/parser.c")).expect("fixture parser removes");
+        assert!(validate_vendored_tree(directory.path(), &grammar, vendored).is_err());
+        fs::write(directory.path().join("src/parser.c"), b"parser").expect("parser restores");
+        fs::write(directory.path().join("src/extra.h"), b"extra")
+            .expect("unreviewed header writes");
+        assert!(validate_vendored_tree(directory.path(), &grammar, vendored).is_err());
+    }
+
+    #[test]
+    fn vendored_tree_binds_file_hashes_to_the_published_descriptor() {
+        let (directory, mut grammar) = vendored_fixture();
+        grammar.scanner_sha256 = sha256_hex(b"different descriptor");
+        assert!(matches!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().expect("local evidence")
+            ),
+            Err(GrammarLockError::PackageEvidence { .. })
+        ));
+    }
+
+    fn vendored_fixture() -> (tempfile::TempDir, GrammarEvidence) {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        fs::create_dir(directory.path().join("src")).expect("source directory");
+        let mut files = BTreeMap::new();
+        for (path, bytes) in [
+            ("Cargo.toml", b"manifest".as_slice()),
+            ("src/parser.c", b"parser"),
+            ("src/scanner.c", b"scanner"),
+            ("LICENSE", b"license"),
+        ] {
+            fs::write(directory.path().join(path), bytes).expect("fixture source writes");
+            files.insert(path.to_owned(), sha256_hex(bytes));
+        }
+        let grammar = GrammarEvidence {
+            language: "fixture".into(),
+            crate_name: "tree-sitter-fixture".into(),
+            crate_version: "1.0.0".into(),
+            crates_io_checksum: sha256_hex(b"archive"),
+            repository: "https://example.invalid/grammar".into(),
+            tag: "v1.0.0".into(),
+            commit: "fixture".into(),
+            parser_sha256: sha256_hex(b"parser"),
+            scanner_sha256: sha256_hex(b"scanner"),
+            abi: 15,
+            analysis_tier: "D".into(),
+            license: "MIT".into(),
+            license_source: "LICENSE".into(),
+            license_sha256: sha256_hex(b"license"),
+            modifications: "fixture".into(),
+            test_corpus: "fixture".into(),
+            msrv: "1.90".into(),
+            offline_behavior: "fixture".into(),
+            capabilities: vec!["fixture".into()],
+            semantic_depth: "fixture".into(),
+            audit_notes: Vec::new(),
+            vendored: Some(VendoredGrammarEvidence {
+                manifest_path: "third_party/grammar/Cargo.toml".into(),
+                files,
+            }),
+        };
+        (directory, grammar)
+    }
 
     #[test]
     fn digest_validation_rejects_truncated_and_uppercase_values() {
