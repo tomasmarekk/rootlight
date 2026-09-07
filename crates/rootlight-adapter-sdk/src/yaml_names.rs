@@ -6,9 +6,11 @@ use std::{iter::Peekable, str::Chars};
 
 use crate::json_names::{append, append_character};
 
+mod block;
 mod context;
 mod numbers;
 
+pub use block::YamlBlockScalar;
 pub use context::{YamlDocumentContext, YamlScalarIdentity};
 
 pub(crate) fn canonical_flow_key(text: &str, maximum: usize) -> Option<String> {

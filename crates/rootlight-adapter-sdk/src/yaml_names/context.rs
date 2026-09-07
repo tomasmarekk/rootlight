@@ -1,10 +1,10 @@
-//! Document-local tag resolution for grammar-reviewed YAML flow scalars.
+//! Document-local tag resolution for grammar-reviewed YAML scalars.
 //! Unknown application tags retain exact evidence, never invented constructors
 //! or an assertion of semantic key equivalence.
 
 use std::collections::HashMap;
 
-use super::{append, append_quoted, canonical_value, decode_flow, numbers};
+use super::{YamlBlockScalar, append, append_quoted, canonical_value, decode_flow, numbers};
 
 const CORE: &str = "tag:yaml.org,2002:";
 
@@ -139,12 +139,46 @@ impl<'a> YamlDocumentContext<'a> {
             return None;
         }
         let (value, plain) = decode_flow(text, self.maximum_bytes)?;
+        self.scalar_value(&value, plain, tag)
+    }
+
+    /// Assigns a type-preserving identity to a source-complete block scalar.
+    ///
+    /// Untagged block values are strings, never implicitly Core numbers or null.
+    /// Explicit tags use the same document context as [`Self::flow_scalar`].
+    /// Preserve [`YamlBlockScalar::lexical_range`] as value evidence in addition
+    /// to the original parser capture. Invalid tags, type mismatches, excess
+    /// combined lexical/tag bytes, expanded names or allocation failure return
+    /// `None`; unknown tags retain the explicit semantic-opacity flag.
+    #[must_use]
+    pub fn block_scalar(
+        &self,
+        block: &YamlBlockScalar<'_>,
+        tag: Option<&str>,
+    ) -> Option<YamlScalarIdentity> {
+        if block
+            .source_text()
+            .len()
+            .checked_add(tag.map_or(0, str::len))?
+            > self.maximum_bytes
+        {
+            return None;
+        }
+        self.scalar_value(block.value(), false, tag)
+    }
+
+    fn scalar_value(
+        &self,
+        value: &str,
+        plain: bool,
+        tag: Option<&str>,
+    ) -> Option<YamlScalarIdentity> {
         let (name, unrecognized_tag) = match tag {
-            None => (canonical_value(&value, plain, self.maximum_bytes)?, false),
-            Some("!") => (canonical_value(&value, false, self.maximum_bytes)?, false),
+            None => (canonical_value(value, plain, self.maximum_bytes)?, false),
+            Some("!") => (canonical_value(value, false, self.maximum_bytes)?, false),
             Some(tag) => {
                 let resolved = self.resolve_tag(tag)?;
-                self.tagged_value(&value, &resolved)?
+                self.tagged_value(value, &resolved)?
             }
         };
         Some(YamlScalarIdentity {

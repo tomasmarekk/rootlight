@@ -133,6 +133,47 @@ fn yaml_block_scalar_nodes_omit_value_significant_trailing_lines() {
 }
 
 #[test]
+fn yaml_root_block_values_stop_before_both_document_markers() {
+    for style in ["|+", ">+"] {
+        for marker in ["---", "...", "--- # next", "...\t# end"] {
+            let source = format!("{style}\nfirst\nsecond\n\n{marker}\n");
+            let tree = parser().parse(&source, None).unwrap();
+            let root = tree.root_node();
+            assert!(!root.has_error(), "{source:?}: {}", root.to_sexp());
+            let scalars = nodes(root, "block_scalar");
+            assert_eq!(scalars.len(), 1);
+            assert_eq!(
+                scalars[0].utf8_text(source.as_bytes()).unwrap(),
+                format!("{style}\nfirst\nsecond")
+            );
+            assert_eq!(
+                nodes(root, "document").len(),
+                if marker.starts_with("---") { 2 } else { 1 }
+            );
+        }
+    }
+}
+
+#[test]
+fn yaml_empty_blocks_exclude_dedented_trailing_comments() {
+    for chomp in ["", "-", "+"] {
+        let source = format!("empty: |{chomp}\n    \n   # trailing comment\nnext: done\n");
+        let tree = parser().parse(&source, None).unwrap();
+        let root = tree.root_node();
+        assert!(!root.has_error(), "{source:?}: {}", root.to_sexp());
+        let scalars = nodes(root, "block_scalar");
+        assert_eq!(scalars.len(), 1);
+        assert_eq!(
+            scalars[0].utf8_text(source.as_bytes()).unwrap(),
+            format!("|{chomp}")
+        );
+        let comments = nodes(root, "comment");
+        assert_eq!(comments.len(), 1);
+        assert!(comments[0].start_byte() > scalars[0].end_byte());
+    }
+}
+
+#[test]
 fn yaml_state_capacity_reports_errors_instead_of_truncating_indentation() {
     let mut parser = parser();
     for depth in [1, 128, 199, 200, 201, 260] {
