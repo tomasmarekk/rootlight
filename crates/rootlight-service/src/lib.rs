@@ -25369,6 +25369,22 @@ mod tests {
     }
 
     #[test]
+    fn advertised_structural_languages_match_installed_analyzers() {
+        let registry = GrammarRegistry::audited().expect("audited registry initializes");
+        let installed = registry
+            .descriptors()
+            .iter()
+            .map(|descriptor| descriptor.language().as_str())
+            .collect::<BTreeSet<_>>();
+        let advertised = language_capabilities()
+            .iter()
+            .filter(|capability| capability.analyzers.contains(&"treesitter"))
+            .map(|capability| capability.language)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(advertised, installed);
+    }
+
+    #[test]
     fn every_audited_grammar_has_a_fail_closed_source_suffix() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
         let mapped = [
@@ -25377,6 +25393,7 @@ mod tests {
             "sample.cs",
             "sample.css",
             "sample.go",
+            "sample.html",
             "sample.java",
             "sample.js",
             "sample.json",
@@ -25441,7 +25458,6 @@ mod tests {
             ("script.pl", "perl"),
             ("plot.R", "r"),
             ("schema.sql", "sql"),
-            ("page.html", "html"),
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("build.scala", "scala"),
@@ -26302,6 +26318,156 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn html_sources_and_markup_survive_incremental_publication_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = "<main><item key='one' key='two'>first</item><item key='three'>second</item><script>const embedded = '<fake />';</script></main>\n";
+        let context =
+            "<svg><title><b>foreign</b></title></svg><noscript><b>conditional</b></noscript>";
+        fs::write(fixture.path().join("view.html"), source).unwrap();
+        fs::write(fixture.path().join("context.HTM"), context).unwrap();
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 3);
+        let status = service.repository_status(initial.repository, None).unwrap();
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|row| row.language == "html")
+            .unwrap();
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (2, 2));
+        assert_eq!(coverage.tier, "tier_d");
+        assert_ne!(coverage.status, "complete");
+        let original = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let identities = original
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "html")
+            .map(|entity| (entity.id, (entity.kind, entity.canonical_name.clone())))
+            .collect::<BTreeMap<_, _>>();
+        assert!(!identities.values().any(|(_, name)| name == "fake"));
+        for detail in [
+            "html-dom-semantics-unavailable",
+            "html-embedded-analysis-unavailable",
+            "html-foreign-context-unavailable",
+            "html-scripting-mode-unavailable",
+        ] {
+            assert!(
+                original
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == detail)
+            );
+        }
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = source.replace("second", "updated source text");
+        fs::write(fixture.path().join("view.html"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(original);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected_source) in [(&initial, source), (&updated, changed.as_str())] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert_eq!(document.version, NormalizedIrVersion::V1_3);
+            assert_eq!(document.files.len(), 3);
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.language == "html")
+                    .map(|entity| (entity.id, (entity.kind, entity.canonical_name.clone())))
+                    .collect::<BTreeMap<_, _>>(),
+                identities
+            );
+            for (path, expected) in [("view.html", expected_source), ("context.HTM", context)] {
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap();
+                let reference = file.evidence.source.clone().unwrap();
+                assert_eq!(reference.generation(), receipt.generation);
+                let read = restored
+                    .source_read(receipt.generation, vec![reference], &deadline())
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
+                assert_eq!(read.data.chunks[0].language, "html");
+            }
+            for (name, kind, count) in [
+                ("item", EntityKind::MarkupElement, 2),
+                ("key", EntityKind::MarkupAttribute, 3),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), count);
+                for symbol in symbols {
+                    let explained = restored
+                        .symbol_explain(receipt.generation, symbol, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.kind, kind);
+                    let reference = explained.data.entity.evidence.source.unwrap();
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    let end = usize::try_from(reference.span().end_byte()).unwrap();
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        expected_source.as_bytes()[start..end]
+                    );
+                }
+            }
         }
     }
 

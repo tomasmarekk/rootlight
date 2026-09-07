@@ -90,18 +90,120 @@ fn yaml_scalar_alias_keys_cross_real_process_boundaries() {
 #[test]
 fn stylesheet_entities_cross_real_process_boundaries() {
     let source = ".highlight { color: red; }\n@keyframes pulse { from { opacity: 0; } to { opacity: 1; } }\n";
+    source_entities_cross_process_boundaries(
+        "css",
+        "style.css",
+        source,
+        &[(".highlight", "style_rule", 1), ("pulse", "keyframes", 1)],
+    );
+}
+
+#[test]
+fn markup_entities_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "html",
+        "view.html",
+        "<main><item key='one' key='two'>first</item><item key='three'>second</item><script>const embedded = '<fake />';</script></main>\n",
+        &[
+            ("item", "markup_element", 2),
+            ("key", "markup_attribute", 3),
+        ],
+    );
+}
+
+#[test]
+fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
+    let source = "<main><script>const embedded = '<fake />';</script><noscript><b>conditional</b></noscript><svg><title>foreign</title></svg></main>\n";
     let mut fixture =
-        RetrievalFixture::spawn_with_layout(Some(("style.css", source)), FixtureLayout::Data);
-    for (name, kind) in [(".highlight", "style_rule"), ("pulse", "keyframes")] {
-        let arguments = json!({"query": name, "search_modes": ["exact"],
-            "languages": ["css"], "scope": {"paths": ["style.css"]}, "response_profile": "evidence"});
+        RetrievalFixture::spawn_with_layout(Some(("view.html", source)), FixtureLayout::Data);
+    for (ordinal, (query, mode, language, path, partial)) in [
+        ("embedded", "lexical", "html", "view.html", true),
+        ("view.html", "path", "html", "view.html", true),
+        ("matrix_target_alpha", "exact", "rust", "src/lib.rs", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let located = fixture.standalone(
-            &format!("css-locate-{kind}"),
+            &format!("markup-gap-{ordinal}"),
+            "code.locate",
+            json!({"query": query, "search_modes": [mode], "languages": [language],
+                "scope": {"paths": [path]}, "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert_eq!(
+            output["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["code"] == "coverage_unsupported"),
+            partial,
+            "{output:#}"
+        );
+        let matches = output["data"]["matches"].as_array().unwrap();
+        assert!(!matches.is_empty(), "{output:#}");
+        if !partial {
+            continue;
+        }
+        for (hit_ordinal, hit) in matches.iter().enumerate() {
+            assert_eq!(hit["path"], path);
+            let reference = &hit["source_ref"];
+            let read = fixture.standalone(
+                &format!("markup-gap-read-{ordinal}-{hit_ordinal}"),
+                "source.read",
+                json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                    "context_lines_after": 0, "response_profile": "evidence"}),
+            );
+            assert_success(&read, "source.read");
+            let output = &read["result"]["structuredContent"];
+            assert_common_read_contract(output, &fixture.repository_id);
+            let chunk = &output["data"]["chunks"][0];
+            for field in ["repository", "generation", "content_hash", "span"] {
+                assert_eq!(chunk["source_ref"][field], reference[field]);
+            }
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+            assert_eq!(chunk["content"].as_str(), source.get(start..end));
+        }
+    }
+    let absent = fixture.standalone(
+        "markup-literal-is-not-an-element",
+        "code.locate",
+        json!({"query": "fake", "search_modes": ["exact"], "languages": ["html"],
+            "scope": {"paths": ["view.html"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&absent, "code.locate");
+    let matches = absent["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap();
+    // The literal remains an exact file-text hit, never an authored element.
+    assert_eq!(matches.len(), 1, "{absent:#}");
+    assert_eq!(matches[0]["kind"], "file");
+    assert!(matches[0]["symbol_id"].is_null());
+    assert_eq!(matches[0]["path"], "view.html");
+    fixture.finish();
+}
+
+fn source_entities_cross_process_boundaries(
+    language: &str,
+    path: &str,
+    source: &str,
+    queries: &[(&str, &str, usize)],
+) {
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
+    for &(name, kind, count) in queries {
+        let arguments = json!({"query": name, "search_modes": ["exact"],
+            "languages": [language], "scope": {"paths": [path]}, "response_profile": "evidence"});
+        let located = fixture.standalone(
+            &format!("source-locate-{kind}"),
             "code.locate",
             arguments.clone(),
         );
         let batch = fixture.batch(
-            &format!("css-batch-{kind}"),
+            &format!("source-batch-{kind}"),
             "code.locate",
             arguments.clone(),
             "evidence",
@@ -110,52 +212,59 @@ fn stylesheet_entities_cross_real_process_boundaries() {
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.1");
-        let found = output["data"]["matches"]
+        let matches: Vec<_> = output["data"]["matches"]
             .as_array()
             .expect("matches")
             .iter()
-            .find(|item| item["kind"] == kind)
-            .expect("exact source kind");
-        let symbol = found["symbol_id"].clone();
-        let reference = found["source_ref"].clone();
-        let explained = fixture.standalone(
-            &format!("css-explain-{kind}"),
-            "symbol.explain",
-            json!({"symbol_ids": [symbol.clone()], "response_profile": "evidence"}),
-        );
-        assert_success(&explained, "symbol.explain");
-        let explanation = &explained["result"]["structuredContent"];
-        assert_eq!(explanation["schema_version"], "1.2");
-        assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
-        assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
-        let read = fixture.standalone(&format!("css-read-{kind}"), "source.read",
+            .filter(|item| item["kind"] == kind)
+            .collect();
+        assert_eq!(matches.len(), count, "{output:#}");
+        let identities: std::collections::BTreeSet<_> = matches
+            .iter()
+            .map(|item| item["symbol_id"].as_str().expect("symbol identity"))
+            .collect();
+        assert_eq!(identities.len(), count);
+        for (ordinal, found) in matches.into_iter().enumerate() {
+            let symbol = found["symbol_id"].clone();
+            let reference = found["source_ref"].clone();
+            let explained = fixture.standalone(
+                &format!("source-explain-{kind}-{ordinal}"),
+                "symbol.explain",
+                json!({"symbol_ids": [symbol.clone()], "response_profile": "evidence"}),
+            );
+            assert_success(&explained, "symbol.explain");
+            let explanation = &explained["result"]["structuredContent"];
+            assert_eq!(explanation["schema_version"], "1.2");
+            assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
+            assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
+            let read = fixture.standalone(&format!("source-read-{kind}-{ordinal}"), "source.read",
             json!({"references": [{"source_ref": reference.clone()}], "response_profile": "evidence"}));
-        assert_success(&read, "source.read");
-        let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
-        for field in ["repository", "generation", "content_hash", "span"] {
-            assert_eq!(chunk["source_ref"][field], reference[field]);
+            assert_success(&read, "source.read");
+            let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+            for field in ["repository", "generation", "content_hash", "span"] {
+                assert_eq!(chunk["source_ref"][field], reference[field]);
+            }
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().expect("start"))
+                .expect("offset");
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().expect("end"))
+                .expect("offset");
+            assert_eq!(chunk["content"].as_str(), source.get(start..end));
+            let advanced = fixture.standalone(
+                &format!("source-scan-{kind}-{ordinal}"),
+                "query.advanced",
+                json!({"query": {"op": "scan", "entity": kind}}),
+            );
+            assert_success(&advanced, "query.advanced");
+            let rows = advanced["result"]["structuredContent"]["data"]["rows"]
+                .as_array()
+                .expect("scan rows");
+            assert!(
+                rows.iter()
+                    .any(|row| row["id"] == symbol && row["kind"] == kind && row["path"] == path)
+            );
         }
-        let start = usize::try_from(reference["span"]["start_byte"].as_u64().expect("start"))
-            .expect("offset");
-        let end =
-            usize::try_from(reference["span"]["end_byte"].as_u64().expect("end")).expect("offset");
-        assert_eq!(chunk["content"].as_str(), source.get(start..end));
-        let advanced = fixture.standalone(
-            &format!("css-scan-{kind}"),
-            "query.advanced",
-            json!({"query": {"op": "scan", "entity": kind}}),
-        );
-        assert_success(&advanced, "query.advanced");
-        let rows = advanced["result"]["structuredContent"]["data"]["rows"]
-            .as_array()
-            .expect("scan rows");
-        assert!(
-            rows.iter().any(|row| row["id"] == symbol
-                && row["kind"] == kind
-                && row["path"] == "style.css")
-        );
         let retained = fixture.standalone_version(
-            &format!("css-retained-{kind}"),
+            &format!("source-retained-{kind}"),
             "code.locate",
             arguments,
             "1.0",
