@@ -1235,12 +1235,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let definition_fact = facts_by_id
                         .get(&definition_local_id)
                         .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?;
+                    // The entity retains the full declaration for source.read;
+                    // its definition occurrence identifies the original name token.
                     let occurrence = declaration_occurrence(
                         definition_fact,
                         entity,
                         provenance_id,
                         syntax_confidence,
-                        &entity_source,
+                        &source_for_span(self.full_source, definition_fact.span()),
+                        content_hash(self.text_for_span(definition_fact.span())?.as_bytes()),
                     )?;
                     occurrences.insert(occurrence.id, occurrence);
                 }
@@ -2354,6 +2357,7 @@ fn declaration_occurrence(
     provenance: FactId,
     confidence: Confidence,
     source: &SourceRef,
+    spelling_hash: ContentHash,
 ) -> Result<OccurrenceRecord, AdapterError> {
     let mut record = OccurrenceRecord {
         id: FactId::from_bytes([0; 20]),
@@ -2369,11 +2373,13 @@ fn declaration_occurrence(
         target: OccurrenceTarget::Resolved {
             symbol: entity.record.id,
         },
-        syntactic_text_hash: content_hash(entity.record.display_name.as_bytes()),
+        syntactic_text_hash: spelling_hash,
         syntax_kind: fact.syntax_kind().as_str().to_owned(),
         provenance,
         confidence,
-        evidence: direct_evidence(source.clone()),
+        // Keep each full declaration as context, including repeated definitions
+        // whose shared entity retains only one representative declaration.
+        evidence: entity.record.evidence.clone(),
     };
     record.id = derive_occurrence_record_id(&record)
         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;

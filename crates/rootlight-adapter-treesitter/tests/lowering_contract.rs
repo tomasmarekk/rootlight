@@ -32,6 +32,107 @@ use tempfile::{TempDir, tempdir_in};
 const SOURCE: &str =
     "mod api {\n    /// docs for alpha\n    pub fn alpha() { beta(); }\n    use crate::dep;\n}\n";
 
+#[test]
+fn json_key_captures_lower_to_exact_source_bound_properties() {
+    let mut identities = Vec::new();
+    for (key, canonical) in [
+        (r#""a""#, r#""a""#),
+        (r#""\u0061""#, r#""a""#),
+        (r#""""#, r#""""#),
+        (r#"" a/b~c ""#, r#"" a/b~c ""#),
+        (r#""\u0000""#, r#""\u0000""#),
+        (r#""\\u0000""#, r#""\\u0000""#),
+        (r#""\uD800""#, r#""\ud800""#),
+        (r#""\uD83C\uDF0D""#, r#""🌍""#),
+        (r#""🌍""#, r#""🌍""#),
+    ] {
+        for value in ["1", "[true, null]"] {
+            let member = format!("{key}:{value}");
+            let text = format!("{{{member}}}");
+            let (_directory, snapshot, source) =
+                source_fixture_for(&text, "data.json", b"json-key-lowering");
+            let captured = vec![
+                SyntaxFact::new(
+                    1,
+                    None,
+                    SyntaxFactKind::Root,
+                    source.span(),
+                    0,
+                    label("json.file.root"),
+                ),
+                SyntaxFact::new(
+                    2,
+                    Some(1),
+                    SyntaxFactKind::Declaration,
+                    span_in(&text, &source, &member, 0),
+                    1,
+                    label("json.property.declaration"),
+                ),
+                SyntaxFact::new(
+                    3,
+                    Some(2),
+                    SyntaxFactKind::Occurrence,
+                    span_in(&text, &source, key, 0),
+                    2,
+                    label("json.property.definition"),
+                ),
+            ];
+            let output = analyze_custom(
+                &snapshot,
+                &source,
+                LanguageId::new("json").expect("language"),
+                &limits(IrLimits::default()),
+                captured,
+            )
+            .expect("property lowering");
+            let document = output.document();
+            assert_eq!(document.entities.len(), 1, "{text}");
+            assert!(
+                document.skipped_regions.is_empty(),
+                "{:?}",
+                document.skipped_regions
+            );
+            let entity = &document.entities[0];
+            assert_eq!(entity.kind, rootlight_ir::EntityKind::Property);
+            assert_eq!(entity.canonical_name, canonical);
+            assert_eq!(entity.language, "json");
+            assert_eq!(
+                entity.evidence.source,
+                Some(source_for_span(
+                    &source,
+                    span_in(&text, &source, &member, 0)
+                ))
+            );
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.role == OccurrenceRole::Definition)
+                .expect("definition evidence");
+            assert_eq!(definition.syntactic_text_hash, content_hash(key.as_bytes()));
+            assert_eq!(
+                definition.source,
+                source_for_span(&source, span_in(&text, &source, key, 0))
+            );
+            assert_eq!(definition.evidence.source, entity.evidence.source);
+            let encoded = serde_json::to_vec(document).expect("canonical document encodes");
+            let decoded =
+                decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default())
+                    .expect("canonical IR round trip");
+            assert_eq!(decoded, IrDocument::NormalizedV1_1(document.clone()));
+            identities.push((canonical, entity.id));
+        }
+    }
+    for (name, identity) in &identities {
+        for (other_name, other_identity) in &identities {
+            assert_eq!(
+                name == other_name,
+                identity == other_identity,
+                "identity equality must follow canonical key equality"
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LocalIds {
     root: u64,
@@ -505,7 +606,8 @@ fn lowering_emits_only_evidence_backed_conservative_relations() {
     );
     assert!(document.occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::Definition
-            && occurrence.source.span() == span_for(&source, "pub fn alpha() { beta(); }")
+            && occurrence.source.span() == span_for_nth(&source, "alpha", 1)
+            && occurrence.syntactic_text_hash == content_hash(b"alpha")
     }));
     assert!(document.occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::CallSite
@@ -998,7 +1100,8 @@ fn annotated_java_uses_definition_and_signature_captures_only() {
     assert!(!names.contains(&"Override"));
     assert!(output.document().occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::Definition
-            && occurrence.source.span() == span_in(JAVA, &source, "@Override() void foo() {}", 0)
+            && occurrence.source.span() == span_in(JAVA, &source, "foo", 0)
+            && occurrence.syntactic_text_hash == content_hash(b"foo")
     }));
 }
 

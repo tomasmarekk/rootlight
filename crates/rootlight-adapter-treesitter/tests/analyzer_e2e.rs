@@ -771,8 +771,16 @@ fn css_declarations_preserve_exact_sources_and_body_stable_identity() {
             let span = definition.source.span();
             let start = usize::try_from(span.start_byte()).expect("fixture offset fits");
             let end = usize::try_from(span.end_byte()).expect("fixture offset fits");
+            assert_eq!(CSS_CASE.source.get(start..end), Some(name));
+            assert_eq!(
+                definition.syntactic_text_hash,
+                content_hash(name.as_bytes())
+            );
+            assert_eq!(definition.evidence.source.as_ref(), Some(evidence));
+            let declaration_span = evidence.span();
+            let start = usize::try_from(declaration_span.start_byte()).expect("offset");
+            let end = usize::try_from(declaration_span.end_byte()).expect("offset");
             assert_eq!(CSS_CASE.source.get(start..end), Some(declaration));
-            assert_eq!(&definition.source, evidence);
         }
     }
     assert!(
@@ -855,8 +863,13 @@ fn css_conditional_rules_keep_distinct_contexts_and_all_definition_sources() {
         if occurrence.role != OccurrenceRole::Definition {
             continue;
         }
-        let start = usize::try_from(occurrence.source.span().start_byte()).expect("fixture offset");
-        let end = usize::try_from(occurrence.source.span().end_byte()).expect("fixture offset");
+        let context = occurrence
+            .evidence
+            .source
+            .as_ref()
+            .expect("declaration context");
+        let start = usize::try_from(context.span().start_byte()).expect("fixture offset");
+        let end = usize::try_from(context.span().end_byte()).expect("fixture offset");
         if let Some(declaration) = source
             .get(start..end)
             .filter(|text| text.starts_with("--accent:"))
@@ -933,8 +946,26 @@ fn css_conditional_rules_keep_distinct_contexts_and_all_definition_sources() {
                     fixture.source.content_hash()
                 );
                 (
-                    usize::try_from(occurrence.source.span().start_byte()).expect("fixture offset"),
-                    usize::try_from(occurrence.source.span().end_byte()).expect("fixture offset"),
+                    usize::try_from(
+                        occurrence
+                            .evidence
+                            .source
+                            .as_ref()
+                            .expect("declaration context")
+                            .span()
+                            .start_byte(),
+                    )
+                    .expect("fixture offset"),
+                    usize::try_from(
+                        occurrence
+                            .evidence
+                            .source
+                            .as_ref()
+                            .expect("declaration context")
+                            .span()
+                            .end_byte(),
+                    )
+                    .expect("fixture offset"),
                 )
             })
             .collect::<BTreeSet<_>>();
