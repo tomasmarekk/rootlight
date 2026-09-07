@@ -25,6 +25,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "css.property.declaration" => {
             Some(EntityKind::Property)
         }
+        SyntaxFactKind::Declaration if label == "json.property.declaration" => {
+            Some(EntityKind::Property)
+        }
         SyntaxFactKind::Declaration if label == "swift.protocol.declaration" => {
             Some(EntityKind::Protocol)
         }
@@ -131,15 +134,21 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// method operators, including a static singleton receiver. CSS preserves raw
 /// grammar-reviewed selectors and identifiers: whitespace, escapes and Unicode
 /// normalization can change their meaning. This boundary bounds those captures;
-/// it does not validate arbitrary CSS text. Other languages retain the shared
-/// borrowed-name contract. Non-static or invalid names return `None`.
+/// it does not validate arbitrary CSS text. JSON keys retain a canonical quoted
+/// JSON string, so empty keys and controls cannot collide with ordinary names.
+/// Equivalent escapes have the same identity; unpaired UTF-16 units remain
+/// escaped rather than becoming replacement characters. Other languages retain
+/// the shared borrowed-name contract. Source and canonical output must both fit
+/// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
 #[must_use]
 pub fn structural_captured_name_for_language<'a>(
     language: &str,
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "css" {
+    if language == "json" {
+        crate::json_names::canonical_json_key(text, maximum_bytes)
+    } else if language == "css" {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {

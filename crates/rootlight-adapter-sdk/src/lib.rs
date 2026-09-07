@@ -9,6 +9,7 @@
 mod descriptor;
 mod error;
 mod ir_accounting;
+mod json_names;
 mod limits;
 mod lua_names;
 mod report;
