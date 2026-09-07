@@ -513,7 +513,7 @@ pub enum LanguageEvidence {
     Extension,
     /// Interpreter shebang.
     Shebang,
-    /// Well-known language manifest name.
+    /// Project/toolchain context from a manifest name, not the file's source syntax.
     Manifest,
     /// Bounded deterministic content signal.
     Content,
@@ -1602,6 +1602,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "json",
+        suffixes: &[".json"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "kotlin",
         suffixes: &[".kt", ".kts"],
         aliases: &[],
@@ -1730,12 +1738,28 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "toml",
+        suffixes: &[".toml"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "typescript",
         suffixes: &[".d.ts", ".cts", ".mts", ".ts", ".tsx"],
         aliases: &["ts"],
         detectors: &["extension", "manifest"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "yaml",
+        suffixes: &[".yaml", ".yml"],
+        aliases: &["yml"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
 ];
 
@@ -2405,6 +2429,53 @@ max_source_file_bytes = 2097152
             assert_eq!(content_language(source), Some("python"));
         }
         assert_eq!(extension_language("include/reader.h"), Some("c"));
+    }
+
+    #[test]
+    fn configuration_syntax_remains_distinct_from_project_manifest_context() {
+        for (path, syntax, project) in [
+            ("Cargo.toml", "toml", Some("rust")),
+            ("pyproject.toml", "toml", Some("python")),
+            ("package.json", "json", Some("typescript")),
+            ("settings.JSON", "json", None),
+            ("pipeline.yaml", "yaml", None),
+            ("pipeline.yml", "yaml", None),
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"",
+            );
+            assert!(
+                signals.iter().any(|signal| {
+                    signal.language == syntax && signal.evidence == LanguageEvidence::Extension
+                }),
+                "{path}: {signals:?}"
+            );
+            let projects = signals
+                .iter()
+                .filter(|signal| signal.evidence == LanguageEvidence::Manifest)
+                .map(|signal| signal.language.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(projects, project.into_iter().collect::<Vec<_>>(), "{path}");
+            assert_eq!(canonical_language(syntax), Some(syntax));
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == syntax)
+                .expect("source capability is declared");
+            assert_eq!(capability.analyzers, ["source-fallback"]);
+        }
+        assert_eq!(canonical_language("yml"), Some("yaml"));
+        for path in [
+            "sample.json5",
+            "sample.jsonc",
+            "sample.yaml.bak",
+            "sample.toml.rs",
+        ] {
+            assert!(!matches!(
+                extension_language(path),
+                Some("json" | "yaml" | "toml")
+            ));
+        }
     }
 
     #[test]

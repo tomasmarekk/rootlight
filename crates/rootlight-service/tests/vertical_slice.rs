@@ -658,6 +658,11 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
         "nested_ignore_sentinel\n",
     )
     .expect("fixture ignore file writes");
+    fs::write(
+        fixture.path().join("src/nested/nested_ignore_sentinel"),
+        "excluded_file_sentinel\n",
+    )
+    .expect("excluded negative-control file writes");
     fs::write(fixture.path().join("src/lib.rs"), BEFORE).expect("primary source writes");
     fs::write(fixture.path().join("src/nested/kept.rs"), KEPT).expect("kept source writes");
     fs::write(fixture.path().join("src/malformed.rs"), MALFORMED).expect("malformed source writes");
@@ -706,10 +711,9 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
     assert_eq!(kept.data.hits.len(), 1);
     assert_eq!(kept.data.hits[0].path, "src/nested/kept.rs");
 
-    for sentinel in [
-        "cargo_manifest_sentinel",
-        "nested_ignore_sentinel",
-        "malformed_source_sentinel",
+    for (sentinel, path, language) in [
+        ("cargo_manifest_sentinel", "Cargo.toml", "toml"),
+        ("nested_ignore_sentinel", "src/nested/.gitignore", "unknown"),
     ] {
         let located = service
             .code_locate(
@@ -720,7 +724,36 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
                 0,
                 &cancellation,
             )
-            .expect("non-source sentinel locate succeeds");
+            .expect("admitted metadata is globally queryable");
+        assert_eq!(located.data.hits.len(), 1, "{path}");
+        let hit = &located.data.hits[0];
+        assert_eq!(hit.path, path);
+        assert_eq!(hit.language, language);
+        assert!(hit.symbol.is_none());
+        let reference = hit
+            .source
+            .clone()
+            .expect("metadata hit has source evidence");
+        assert_eq!(reference.generation(), first.generation);
+        let read = service
+            .source_read(first.generation, vec![reference], &cancellation)
+            .expect("metadata hit reads exact source");
+        assert_eq!(
+            read.data.chunks[0].bytes,
+            fs::read(fixture.path().join(path)).expect("fixture source reads")
+        );
+    }
+    for sentinel in ["malformed_source_sentinel", "excluded_file_sentinel"] {
+        let located = service
+            .code_locate(
+                first.generation,
+                sentinel.to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("unindexed sentinel locate succeeds");
         assert!(
             located.data.hits.is_empty(),
             "{sentinel} must not be indexed"

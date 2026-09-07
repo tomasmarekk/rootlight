@@ -208,8 +208,8 @@ const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-trunca
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/13";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
-const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/2";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
+const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
 const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
@@ -220,7 +220,7 @@ const DERIVED_PASS_ID: &str = "first-slice.derived";
 const SEARCH_PASS_ID: &str = "first-slice.search";
 const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/3";
 const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
-const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/1";
+const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/2";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
@@ -14846,6 +14846,7 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
         SEARCH_REVISION_SEED,
         INCREMENTAL_SCHEMA_VERSION.as_bytes(),
         DERIVED_PLAN_REVISION_SEED,
+        LANGUAGE_DISPOSITION_PROVIDER_SEED,
         SOURCE_FILE_FALLBACK_PROVIDER_SEED,
     ])
 }
@@ -15053,10 +15054,10 @@ fn supported_source_language<'a>(
     input: &'a ManifestInput,
     analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
 ) -> Option<&'a str> {
-    if let Some(language) = source_language_from_path(&input.path)
-        && analyzers.contains_key(language)
-    {
-        return Some(language);
+    if let Some(language) = source_language_from_path(&input.path) {
+        // A known source format must not fall through to another parser merely
+        // because its contents include a shebang or embedded language signal.
+        return analyzers.contains_key(language).then_some(language);
     }
     // A header's C-family evidence can override its C extension default.
     // Unsupported Objective-C must retain file-only evidence, not enter the C parser.
@@ -15122,18 +15123,17 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     }
     // `.m` is shared by Objective-C and MATLAB, so bounded content evidence
     // resolves that suffix before the fallback extension claim.
+    // Manifest signals describe the toolchain, never the manifest's own syntax.
     let evidence_order = if extension_language(&input.path) == Some("objective-c") {
         [
             LanguageEvidence::Content,
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
-            LanguageEvidence::Manifest,
         ]
     } else {
         [
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
-            LanguageEvidence::Manifest,
             LanguageEvidence::Content,
         ]
     };
@@ -25844,6 +25844,154 @@ mod tests {
             .expect("Lua capability exists");
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, ["treesitter"]);
+    }
+
+    #[test]
+    fn configuration_source_identity_is_not_project_language() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("private runtime paths prepare");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let sources = [
+            ("Cargo.toml", "toml", "[package]\nname = 'sample'\n"),
+            ("pyproject.toml", "toml", "[project]\nname = 'sample'\n"),
+            ("package.json", "json", "{\"name\":\"sample\"}\n"),
+            ("settings.JSON", "json", "{\"name\":\"sample\"}\n"),
+            (".settings.json", "json", "{\"name\":\"sample\"}\n"),
+            (
+                "pipeline.yaml",
+                "yaml",
+                "#!/usr/bin/env python\nname: sample\n",
+            ),
+            ("pipeline.yml", "yaml", "name: sample\n"),
+            ("requirements.txt", "unknown", "sample>=1\n"),
+            ("go.mod", "unknown", "module sample\n"),
+            ("lib.rs", "rust", "pub fn sample() {}\n"),
+        ];
+        for (path, _, source) in sources {
+            fs::write(fixture.path().join(path), source).expect("fixture source writes");
+        }
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("mixed source generation publishes");
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("configuration source restores");
+            }
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("generation remains retained");
+            assert_eq!(generation.document().files.len(), sources.len());
+            for (path, language, source) in sources {
+                let file = generation
+                    .document()
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .expect("source is represented");
+                assert_eq!(file.language, language, "{path}");
+                let reference = file.evidence.source.clone().expect("file has exact source");
+                assert_eq!(reference.generation(), receipt.generation);
+                let read = service
+                    .source_read(receipt.generation, vec![reference], &deadline())
+                    .expect("configuration source reads");
+                assert_eq!(read.data.chunks[0].bytes, source.as_bytes(), "{path}");
+                assert_eq!(read.data.chunks[0].language, language, "{path}");
+                if language != "rust" {
+                    assert!(
+                        !generation.document().entities.iter().any(|entity| {
+                            entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|reference| reference.span().file() == file.id)
+                        }),
+                        "{path} must not enter a foreign parser"
+                    );
+                    let coverage = service
+                        .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                        .expect("configuration coverage resolves");
+                    assert_eq!(coverage.status, CoverageStatus::Unknown, "{path}");
+                }
+            }
+            let status = service
+                .repository_status(receipt.repository, None)
+                .expect("configuration accounting resolves");
+            for language in ["json", "toml", "yaml", "unknown"] {
+                let coverage = status
+                    .coverage
+                    .iter()
+                    .find(|entry| entry.language == language)
+                    .expect("configuration language remains accounted");
+                let expected = sources
+                    .iter()
+                    .filter(|(_, syntax, _)| *syntax == language)
+                    .count();
+                assert_eq!(
+                    coverage.discovered_files,
+                    u64::try_from(expected).expect("count fits")
+                );
+                assert_eq!(coverage.indexed_files, 0);
+                assert_eq!(coverage.status, "unknown");
+            }
+            for (language, expected) in [
+                (
+                    "json",
+                    &[".settings.json", "package.json", "settings.JSON"][..],
+                ),
+                ("toml", &["Cargo.toml", "pyproject.toml"][..]),
+                ("yaml", &["pipeline.yaml", "pipeline.yml"][..]),
+                ("yml", &["pipeline.yaml", "pipeline.yml"][..]),
+                ("unknown", &["go.mod", "requirements.txt"][..]),
+            ] {
+                let located = service
+                    .code_locate_with_languages_and_budget(
+                        receipt.generation,
+                        "sample".to_owned(),
+                        LocateMode::Text,
+                        vec![language.to_owned()],
+                        16,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("source-language filter executes");
+                let paths = located
+                    .data
+                    .hits
+                    .iter()
+                    .map(|hit| hit.path.as_str())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(paths, expected.iter().copied().collect(), "{language}");
+                assert!(located.data.hits.iter().all(|hit| hit.symbol.is_none()));
+            }
+            for language in ["typescript", "python", "go"] {
+                let located = service
+                    .code_locate_with_languages_and_budget(
+                        receipt.generation,
+                        "sample".to_owned(),
+                        LocateMode::Text,
+                        vec![language.to_owned()],
+                        16,
+                        0,
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("project-language negative filter executes");
+                assert!(located.data.hits.is_empty(), "{language}");
+            }
+            let repeated = service
+                .index_repository(fixture.path(), &deadline())
+                .expect("unchanged configuration scan succeeds");
+            assert_eq!(repeated.generation, receipt.generation);
+        }
     }
 
     #[test]

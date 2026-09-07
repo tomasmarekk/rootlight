@@ -283,13 +283,12 @@ fn fixture_snapshot() -> GenerationSnapshot {
     .expect("query fixture is canonical")
 }
 
-fn fallback_fixture() -> (GenerationSnapshot, SourceSnapshot) {
+fn fallback_fixture(path: &str) -> (GenerationSnapshot, SourceSnapshot) {
     let base = fixture_snapshot();
     let metadata = base.metadata();
     let mut document = base.document().clone();
     let content = b"fallback_identifier { color: green; }\n".to_vec();
-    let path = RelativePath::parse(Path::new("styles/example.sourceblob"))
-        .expect("synthetic fallback path is valid");
+    let path = RelativePath::parse(Path::new(path)).expect("synthetic fallback path is valid");
     let file = derive_file(FileIdentity {
         repository: document.repository,
         path_identity: path.identity_bytes(),
@@ -356,8 +355,51 @@ fn fallback_fixture() -> (GenerationSnapshot, SourceSnapshot) {
 }
 
 #[test]
+fn admitted_metadata_and_hidden_files_retain_global_source_projection() {
+    for path in [
+        "Cargo.toml",
+        "nested/go.mod",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "tsconfig.json",
+        "src/.gitignore",
+        ".settings.json",
+        "mystery.sourceblob",
+        "normalize.css",
+    ] {
+        let (snapshot, source) = fallback_fixture(path);
+        let projected = project_lexical_documents_with_sources(
+            &snapshot,
+            &[&source],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("admitted source projects");
+        let files = projected
+            .iter()
+            .filter(|document| document.file_id == source.file() && document.symbol_id.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1, "{path}");
+        assert_eq!(files[0].path, path);
+        assert!(
+            files[0]
+                .source_identifiers
+                .iter()
+                .any(|identifier| identifier == "fallback_identifier")
+        );
+        assert!(
+            files[0]
+                .source_text
+                .as_deref()
+                .is_some_and(|text| text.contains("fallback_identifier"))
+        );
+    }
+}
+
+#[test]
 fn streaming_fallback_projection_matches_batch_and_fails_closed() {
-    let (snapshot, source) = fallback_fixture();
+    let (snapshot, source) = fallback_fixture("styles/example.sourceblob");
     let cancellation = Cancellation::new();
     let expected = project_lexical_documents_with_sources(
         &snapshot,

@@ -111,9 +111,9 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             let file = generation
                 .find_file(file_id)
                 .ok_or(QueryError::IndexDrift)?;
-            if source_fallback_eligible(&file.path) {
-                required_source_files.push(file.id);
-            }
+            // Discovery already controls admission. Filtering accepted files by
+            // name here would silently remove their text from global queries.
+            required_source_files.push(file.id);
         }
         projected
             .try_reserve(required_source_files.len())
@@ -661,20 +661,6 @@ fn bounded_source_projection(source: &str) -> (Vec<String>, String) {
     (identifiers, output)
 }
 
-fn source_fallback_eligible(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    !name.starts_with('.')
-        && !matches!(
-            name.to_ascii_lowercase().as_str(),
-            "cargo.toml"
-                | "go.mod"
-                | "package.json"
-                | "pyproject.toml"
-                | "requirements.txt"
-                | "tsconfig.json"
-        )
-}
-
 fn entity_is_declaration_only(
     document: &NormalizedIrDocument,
     entity: &EntityRecord,
@@ -729,7 +715,7 @@ fn try_clone(value: &str) -> Result<String, QueryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_source_projection, bounded_utf8_prefix, source_fallback_eligible};
+    use super::{bounded_source_projection, bounded_utf8_prefix};
 
     #[test]
     fn fallback_prefix_respects_tighter_utf8_boundaries() {
@@ -759,22 +745,5 @@ mod tests {
 
         assert_eq!(identifiers, ["after".to_owned(), "before".to_owned()]);
         assert_eq!(text, "before after");
-    }
-
-    #[test]
-    fn project_metadata_is_not_promoted_to_source_fallback() {
-        for path in [
-            "Cargo.toml",
-            "go.mod",
-            "package.json",
-            "pyproject.toml",
-            "requirements.txt",
-            "tsconfig.json",
-            "src/.gitignore",
-        ] {
-            assert!(!source_fallback_eligible(path), "{path}");
-        }
-        assert!(source_fallback_eligible("mystery.sourceblob"));
-        assert!(source_fallback_eligible("normalize.css"));
     }
 }
