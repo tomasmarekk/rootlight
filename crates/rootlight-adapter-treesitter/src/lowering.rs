@@ -1573,6 +1573,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "rust.impl_type.scope_type" => identity.insert_type(fact),
                     "swift.extension_target.scope_trait" => identity.insert_trait(fact),
                     "swift.extension_header.scope_type" => identity.insert_type(fact),
+                    "css.context_header.scope_type" => identity.insert_type(fact),
                     _ => {}
                 }
             }
@@ -1611,7 +1612,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .is_some_and(|scope| scope.unsupported_semantic_identity)
                     || matches!(
                         fact.syntax_kind().as_str(),
-                        "rust.impl.scope" | "swift.extension.scope"
+                        "rust.impl.scope"
+                            | "swift.extension.scope"
+                            | "css.media.scope"
+                            | "css.supports.scope"
+                            | "css.scope.scope"
+                            | "css.at_rule.scope"
+                            | "css.keyframe_step.scope"
                     ) && stable_header.is_none();
                 // Lua lexical boundaries distinguish nested bindings without offsets or
                 // body text. Identical sibling scopes remain guarded as ambiguous below.
@@ -1648,21 +1655,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .as_ref()
                             .and_then(|scope| scope.stable_identity)
                     });
-                // Anonymous scopes intentionally inherit their nearest stable identity. The
-                // span-local guard prevents distinct anonymous declarations from coalescing
-                // silently without making source position part of the durable SymbolId.
-                let collision_guard = scope_collision_guard(
-                    parent_scope
-                        .as_ref()
-                        .and_then(|scope| scope.collision_guard),
-                    fact.syntax_kind().as_str(),
-                    fact.span(),
-                )?;
+                // CSS groups repeated declarations by raw name and enclosing
+                // headers; each declaration retains its source-bound occurrence.
+                // Lexical bindings in other languages need a span-local ambiguity
+                // guard without making position part of their durable SymbolId.
+                let collision_guard = if fact.syntax_kind().as_str().starts_with("css.") {
+                    None
+                } else {
+                    Some(scope_collision_guard(
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.collision_guard),
+                        fact.syntax_kind().as_str(),
+                        fact.span(),
+                    )?)
+                };
                 let context = ScopeContext {
                     stable_identity,
-                    collision_guard: Some(collision_guard),
+                    collision_guard,
                     qualified_prefix: stable_header
                         .as_ref()
+                        .filter(|header| header.kind != StableScopeKind::CssContext)
                         .map(|header| Arc::<str>::from(header.qualified_prefix.as_str()))
                         .or_else(|| {
                             parent_scope
@@ -1855,6 +1868,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
         scope: &SyntaxFact,
         captures: Option<&ScopeIdentityCaptures<'_>>,
     ) -> Result<Option<StableScopeHeader>, AdapterError> {
+        if matches!(
+            scope.syntax_kind().as_str(),
+            "css.media.scope"
+                | "css.supports.scope"
+                | "css.scope.scope"
+                | "css.at_rule.scope"
+                | "css.keyframe_step.scope"
+        ) {
+            let Some(header) = captures
+                .filter(|captures| !captures.invalid)
+                .and_then(|captures| captures.self_type)
+            else {
+                return Ok(None);
+            };
+            let text = self.text_for_span(header.span())?;
+            if text.is_empty() || text.len() > self.request.limits().ir().max_string_bytes {
+                return Ok(None);
+            }
+            let mut digest = blake3::Hasher::new();
+            digest.update(b"rootlight.css-context-scope/1\0");
+            digest.update(text.as_bytes());
+            return Ok(Some(StableScopeHeader {
+                digest: *digest.finalize().as_bytes(),
+                qualified_prefix: String::new(),
+                kind: StableScopeKind::CssContext,
+            }));
+        }
         if !matches!(
             scope.syntax_kind().as_str(),
             "rust.impl.scope" | "swift.extension.scope"
@@ -1995,6 +2035,7 @@ struct StableScopeHeader {
 enum StableScopeKind {
     RustImpl,
     SwiftExtension,
+    CssContext,
 }
 
 fn materialize_entity(
@@ -2248,9 +2289,16 @@ fn scope_identity(
             | "lua.for.scope"
             | "lua.repeat.scope"
             | "swift.extension.scope"
+            | "css.media.scope"
+            | "css.supports.scope"
+            | "css.scope.scope"
+            | "css.at_rule.scope"
+            | "css.keyframe_step.scope"
     ) {
         let context = if syntax_kind == "swift.extension.scope" {
             "rootlight.swift-extension-scope-identity/1"
+        } else if syntax_kind.starts_with("css.") {
+            "rootlight.css-context-scope-identity/1"
         } else {
             "rootlight.lua-lexical-scope-identity/1"
         };

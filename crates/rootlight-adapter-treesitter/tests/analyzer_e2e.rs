@@ -731,6 +731,253 @@ fn css_selector_identity_preserves_escape_terminators_and_non_ascii_whitespace()
 }
 
 #[test]
+fn css_conditional_rules_keep_distinct_contexts_and_all_definition_sources() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    let source = concat!(
+        ".card { --accent: red; }\n",
+        ".card { --accent: blue; --accent: green; }\n",
+        "@media screen { .card { --accent: yellow; } }\n",
+        "@media print { .card { --accent: black; } }\n",
+        "@supports (display: grid) { .card { --accent: purple; } }\n",
+        "@media screen { .card { --accent: orange; } }\n",
+    );
+    let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+    let initial_request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    let document = output.document();
+    let mut property_groups = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            continue;
+        };
+        if occurrence.role != OccurrenceRole::Definition {
+            continue;
+        }
+        let start = usize::try_from(occurrence.source.span().start_byte()).expect("fixture offset");
+        let end = usize::try_from(occurrence.source.span().end_byte()).expect("fixture offset");
+        if let Some(declaration) = source
+            .get(start..end)
+            .filter(|text| text.starts_with("--accent:"))
+        {
+            property_groups.insert(declaration, symbol);
+        }
+    }
+    assert_eq!(property_groups.len(), 7);
+    assert_eq!(
+        property_groups["--accent: red;"],
+        property_groups["--accent: blue;"]
+    );
+    assert_eq!(
+        property_groups["--accent: red;"],
+        property_groups["--accent: green;"]
+    );
+    assert_eq!(
+        property_groups["--accent: yellow;"],
+        property_groups["--accent: orange;"]
+    );
+    assert_eq!(
+        ["red", "yellow", "black", "purple"]
+            .map(|value| { property_groups[format!("--accent: {value};").as_str()] })
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+    for (kind, expected_symbols, expected_definitions) in
+        [(EntityKind::StyleRule, 4, 6), (EntityKind::Property, 4, 7)]
+    {
+        let symbols = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == kind)
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            symbols.len(),
+            expected_symbols,
+            "{kind:?}: {:?}",
+            document.entities
+        );
+        let definitions = document.occurrences.iter().filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition && matches!(
+                occurrence.target, OccurrenceTarget::Resolved { symbol } if symbols.contains(&symbol)
+            )
+        }).collect::<Vec<_>>();
+        assert_eq!(definitions.len(), expected_definitions, "{kind:?}");
+        let expected_spans = if kind == EntityKind::Property {
+            source
+                .match_indices("--accent:")
+                .map(|(start, _)| {
+                    let end =
+                        start + source[start..].find(';').expect("declaration terminator") + 1;
+                    (start, end)
+                })
+                .collect::<BTreeSet<_>>()
+        } else {
+            source
+                .match_indices(".card {")
+                .map(|(start, _)| {
+                    let end = start + source[start..].find('}').expect("rule terminator") + 1;
+                    (start, end)
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let observed_spans = definitions
+            .iter()
+            .map(|occurrence| {
+                assert_eq!(occurrence.source.generation(), fixture.source.generation());
+                assert_eq!(
+                    occurrence.source.content_hash(),
+                    fixture.source.content_hash()
+                );
+                (
+                    usize::try_from(occurrence.source.span().start_byte()).expect("fixture offset"),
+                    usize::try_from(occurrence.source.span().end_byte()).expect("fixture offset"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(observed_spans, expected_spans);
+    }
+    let changed_text = format!(
+        ".unrelated {{ color: pink; }}\n{}",
+        source.replace("yellow", "gold")
+    );
+    let changed = fixture.rewrite(changed_text.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, CSS_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    let old_ids = document
+        .entities
+        .iter()
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    let new_ids = reparsed
+        .document()
+        .entities
+        .iter()
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        old_ids.is_subset(&new_ids),
+        "body and unrelated sibling edits preserve all groups"
+    );
+}
+
+#[test]
+fn css_nested_context_headers_preserve_raw_identity_without_body_offsets() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    let contexts = [
+        "@layer base { @media screen { .card { --accent: red; } } }",
+        "@layer theme { @media screen { .card { --accent: red; } } }",
+        "@media screen { @layer base { .card { --accent: red; } } }",
+        "@container narrow (width > 20px) { .card { --accent: red; } }",
+        "@container wide (width > 20px) { .card { --accent: red; } }",
+        "@scope (.panel) { .card { --accent: red; } }",
+        "@scope (.dialog) { .card { --accent: red; } }",
+        "@supports (content: \"{\") { .card { --accent: red; } }",
+        r"@layer \31 a { .card { --accent: red; } }",
+        r"@layer \31  a { .card { --accent: red; } }",
+    ];
+    let source = contexts.join("\n");
+    let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+    let initial_request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    let ids = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), contexts.len());
+    let changed_source = contexts
+        .iter()
+        .rev()
+        .map(|context| context.replace("red", "purple"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let changed = fixture.rewrite(changed_source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    let changed_ids = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids, changed_ids);
+}
+
+#[test]
+fn css_keyframe_steps_keep_each_custom_property_definition() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    let source = "@keyframes pulse { from { --accent: red; } 50% { --accent: blue; } to { --accent: green; } }";
+    let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+    let request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let symbols = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .map(|entity| entity.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(symbols.len(), 3);
+    assert_eq!(
+        output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && matches!(occurrence.target,
+            OccurrenceTarget::Resolved { symbol } if symbols.contains(&symbol))
+            })
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn css_incomplete_contexts_keep_file_evidence_without_fabricated_definitions() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    for source in [
+        "@media screen",
+        "@supports (display:",
+        "@scope (.card)",
+        "@layer base;",
+        "@layer base {",
+        "@keyframes pulse { from",
+    ] {
+        let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+        let request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+        let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+        assert_eq!(output.document().files.len(), 1, "{source}");
+        assert_eq!(
+            output.document().files[0].content_hash,
+            fixture.source.content_hash()
+        );
+        assert!(
+            !output
+                .document()
+                .entities
+                .iter()
+                .any(|entity| matches!(entity.kind, EntityKind::StyleRule | EntityKind::Property)),
+            "{source}"
+        );
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+}
+
+#[test]
 fn css_custom_properties_preserve_case_and_unicode_codepoint_identity() {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, CSS_CASE);

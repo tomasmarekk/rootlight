@@ -6,6 +6,8 @@
 ((declaration (property_name) @definition) @declaration
  (#match? @definition "^--"))
 (import_statement) @import
+[(media_statement) (supports_statement) (scope_statement)
+ (at_rule (block)) (keyframe_block)] @scope @scope_type
 (block) @scope
 (keyframe_block_list) @scope
 (comment) @comment @documentation

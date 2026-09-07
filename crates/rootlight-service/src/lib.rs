@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/15";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/16";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25657,6 +25657,119 @@ mod tests {
             .expect("Ruby capability exists");
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, ["treesitter"]);
+    }
+
+    #[test]
+    fn css_repeated_definitions_survive_locate_explain_and_durable_restore() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = concat!(
+            ".card { --accent: red; }\n",
+            ".card { --accent: blue; }\n",
+            "@media print { .card { --accent: black; } }\n",
+            "@media print { .card { --accent: gray; } }\n",
+        );
+        let path = fixture.path().join("theme.css");
+        fs::write(&path, source).expect("stylesheet writes");
+        let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &deadline())
+            .expect("service initializes");
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("CSS publishes");
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("CSS no-op publishes");
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = format!(
+            ".unrelated {{ color: pink; }}\n{}",
+            source.replace("gray", "silver")
+        );
+        fs::write(&path, &changed).expect("body and sibling edit writes");
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("CSS edit publishes");
+        assert_ne!(updated.generation, initial.generation);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline())
+            .expect("both generations restore");
+        let mut initial_symbols = None;
+        for (receipt, expected_source) in [(&initial, source), (&updated, changed.as_str())] {
+            let located = restored
+                .code_locate(
+                    receipt.generation,
+                    "--accent".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("both contexts locate");
+            assert!(!located.data.truncated);
+            let symbols = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(symbols.len(), 2);
+            if let Some(previous) = &initial_symbols {
+                assert_eq!(previous, &symbols);
+            } else {
+                initial_symbols = Some(symbols.clone());
+            }
+            let mut declarations = BTreeSet::new();
+            for symbol in symbols {
+                let explained = restored
+                    .symbol_explain(receipt.generation, symbol, &deadline())
+                    .expect("context group explains");
+                assert!(!explained.data.truncated);
+                let definitions = explained
+                    .data
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| {
+                        occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target == OccurrenceTarget::Resolved { symbol }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(definitions.len(), 2);
+                for definition in definitions {
+                    assert_eq!(definition.source.generation(), receipt.generation);
+                    assert_eq!(
+                        definition.source.content_hash(),
+                        content_hash(expected_source.as_bytes())
+                    );
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![definition.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .expect("every declaration reads");
+                    assert_eq!(read.data.chunks.len(), 1);
+                    declarations.insert(
+                        String::from_utf8(read.data.chunks[0].bytes.clone()).expect("CSS is UTF-8"),
+                    );
+                }
+            }
+            let final_value = if receipt.generation == initial.generation {
+                "gray"
+            } else {
+                "silver"
+            };
+            let expected = ["red", "blue", "black", final_value]
+                .into_iter()
+                .map(|value| format!("--accent: {value};"))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(declarations, expected);
+        }
     }
 
     #[test]

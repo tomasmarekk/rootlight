@@ -292,6 +292,7 @@ impl QueryPack {
         }
         if family == GrammarFamily::Css {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature"));
+            expected.push("scope_type");
         }
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
@@ -618,6 +619,7 @@ fn candidate_for_capture(
     let syntax = match role {
         StructuralRole::ScopeTrait if family == GrammarFamily::Swift => "swift.extension_target",
         StructuralRole::ScopeType if family == GrammarFamily::Swift => "swift.extension_header",
+        StructuralRole::ScopeType if family == GrammarFamily::Css => "css.context_header",
         _ if family == GrammarFamily::Swift && capture.node.kind() == "class_declaration" => {
             match capture
                 .node
@@ -727,6 +729,17 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Css && role == StructuralRole::ScopeType {
+        // Keep raw header bytes: whitespace may terminate a CSS escape, and
+        // braces inside strings must not be mistaken for the parser's body.
+        let mut cursor = capture.node.walk();
+        end = capture
+            .node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "block")
+            .ok_or_else(|| query_failure("query-css-context-body"))?
+            .start_byte();
+    }
     if family == GrammarFamily::Swift
         && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
     {
@@ -894,6 +907,11 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Css, "keyframes_name" | "property_name") => Some("css.identifier"),
         (GrammarFamily::Css, "declaration") => Some("css.property"),
         (GrammarFamily::Css, "import_statement") => Some("css.import"),
+        (GrammarFamily::Css, "media_statement") => Some("css.media"),
+        (GrammarFamily::Css, "supports_statement") => Some("css.supports"),
+        (GrammarFamily::Css, "scope_statement") => Some("css.scope"),
+        (GrammarFamily::Css, "at_rule") => Some("css.at_rule"),
+        (GrammarFamily::Css, "keyframe_block") => Some("css.keyframe_step"),
         (GrammarFamily::Css, "block" | "keyframe_block_list") => Some("css.block"),
         (GrammarFamily::Css, "comment" | "js_comment") => Some("css.comment"),
         (GrammarFamily::Css, "string_value") => Some("css.string"),
@@ -1289,6 +1307,7 @@ mod tests {
             }
             if family == GrammarFamily::Css {
                 expected.retain(|name| !matches!(*name, "call" | "reference" | "signature"));
+                expected.push("scope_type");
             }
             if family == GrammarFamily::Rust {
                 expected.extend(RUST_SPECIAL_CAPTURES);
