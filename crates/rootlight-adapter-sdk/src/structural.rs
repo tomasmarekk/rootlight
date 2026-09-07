@@ -16,6 +16,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "html.element.declaration" => {
+            Some(EntityKind::MarkupElement)
+        }
+        SyntaxFactKind::Declaration if label == "html.attribute.declaration" => {
+            Some(EntityKind::MarkupAttribute)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -164,6 +170,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// and decode their own escapes; numeric identities do not round through floats.
 /// This scalar boundary does not resolve document directives, tags, anchors,
 /// aliases, block scalars or collection keys; those require document context.
+/// HTML preserves grammar-reviewed source names verbatim, including foreign
+/// markup spelling; it does not perform browser case or namespace adjustments.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -179,7 +187,7 @@ pub fn structural_captured_name_for_language<'a>(
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
     } else if language == "yaml" {
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
-    } else if language == "css" {
+    } else if matches!(language, "css" | "html") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {

@@ -301,6 +301,9 @@ impl QueryPack {
         if family == GrammarFamily::Yaml {
             expected.retain(|name| !matches!(*name, "call" | "import"));
         }
+        if family == GrammarFamily::Html {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
+        }
         if matches!(
             family,
             GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
@@ -775,6 +778,7 @@ fn candidate_for_capture(
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
+            GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -954,6 +958,17 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Html, "document") => Some("html.file"),
+        (GrammarFamily::Html, "element" | "script_element" | "style_element") => {
+            Some("html.element")
+        }
+        (GrammarFamily::Html, "tag_name") => Some("html.tag_name"),
+        (GrammarFamily::Html, "attribute") => Some("html.attribute"),
+        (GrammarFamily::Html, "attribute_name") => Some("html.attribute_name"),
+        (GrammarFamily::Html, "raw_text") => Some("html.embedded_text"),
+        (GrammarFamily::Html, "erroneous_end_tag") => Some("html.unmatched_end_tag"),
+        (GrammarFamily::Html, "attribute_value" | "text" | "entity") => Some("html.text"),
+        (GrammarFamily::Html, "comment") => Some("html.comment"),
         (GrammarFamily::Toml, "document") => Some("toml.file"),
         (GrammarFamily::Toml, "table") => Some("toml.table"),
         (GrammarFamily::Toml, "table_array_element") => Some("toml.table_array_element"),
@@ -1284,7 +1299,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(19);
+        let mut packs = Vec::with_capacity(20);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1311,6 +1326,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Json, include_str!("../queries/json.scm")),
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
+            (GrammarFamily::Html, include_str!("../queries/html.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1383,6 +1399,7 @@ mod tests {
             GrammarFamily::Json,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
+            GrammarFamily::Html,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1390,6 +1407,9 @@ mod tests {
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if family == GrammarFamily::Yaml {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
+            if family == GrammarFamily::Html {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
             }
             if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
                 expected

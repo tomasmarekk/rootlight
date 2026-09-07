@@ -858,6 +858,10 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
+        if let Some((_, detail)) = html_coverage_gap(fact) {
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(&mut string_bytes, detail.len(), limits)?;
+        }
         if request.language().as_str() == "yaml"
             && fact.syntax_kind().as_str() == "yaml.tag.signature"
         {
@@ -1275,6 +1279,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
+            if let Some((domain, detail)) = html_coverage_gap(fact) {
+                let region = skipped_region(
+                    self.full_source,
+                    fact.span(),
+                    domain,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    detail,
+                    provenance_id,
+                )?;
+                skipped.insert(region.id, region);
+            }
             if entity_plan.duplicate_data_keys.contains(&fact.local_id()) {
                 // Both written occurrences remain searchable, but their data
                 // meaning is not a valid unique YAML mapping entry.
@@ -1704,6 +1719,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut unsupported_scope_entities = BTreeSet::new();
         let mut json_positions = HashMap::<Option<u64>, u64>::new();
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
+        let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1935,6 +1951,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .and_then(|scope| scope.stable_identity),
                         "json.property",
                         position,
+                    ))
+                } else if matches!(
+                    kind,
+                    EntityKind::MarkupElement | EntityKind::MarkupAttribute
+                ) {
+                    // Repeated source tags and even duplicate attributes are distinct
+                    // occurrences. Only same-name sibling order affects identity;
+                    // text bodies, attribute values and byte offsets do not.
+                    let next = markup_members
+                        .entry((parent_entity, kind, name.to_string()))
+                        .or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(blake3::derive_key(
+                        "rootlight.html-source-occurrence/1",
+                        &position.to_be_bytes(),
                     ))
                 } else {
                     parent_scope
@@ -2534,6 +2566,19 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.visibility == right.visibility
         && left.flags == right.flags
         && left.provenance == right.provenance
+}
+
+fn html_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    match fact.syntax_kind().as_str() {
+        "html.file.module" => Some((FactDomain::Relations, "html-dom-semantics-unavailable")),
+        "html.embedded_text.signature" => {
+            Some((FactDomain::Entities, "html-embedded-analysis-unavailable"))
+        }
+        "html.unmatched_end_tag.signature" => {
+            Some((FactDomain::Relations, "html-unmatched-end-tag"))
+        }
+        _ => None,
+    }
 }
 
 fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
@@ -3224,6 +3269,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "json.file.module"
                 | "toml.file.module"
                 | "yaml.file.module"
+                | "html.file.module"
         )
         && matches!(
             language,
@@ -3238,6 +3284,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "json"
                 | "toml"
                 | "yaml"
+                | "html"
         )
 }
 
