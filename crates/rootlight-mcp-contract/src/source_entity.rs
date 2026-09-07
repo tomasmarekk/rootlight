@@ -1,0 +1,107 @@
+//! Versioned envelopes for source markup and stylesheet entities.
+//! Retained tools keep their exact historical schemas; new revisions preserve
+//! source kinds instead of coercing markup into programming-language symbols.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::vertical::{
+    AnalysisSchemaVersion, CodeLocateData, ContinuationCursor, CoverageSummary, GenerationSummary,
+    RequiredNullable, ResolvedRepository, ResponseWarning, SymbolExplainData, UsageSummary,
+};
+
+/// Contract revision for source-kind locate and expert queries.
+pub const QUERY_VERSION: &str = "1.1";
+/// Contract revision for source-kind explanations.
+pub const EXPLAIN_VERSION: &str = "1.2";
+/// Contract revision for change results containing markup entities.
+pub const CHANGE_VERSION: &str = "1.3";
+
+/// Exact version of source-kind explanation responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ExplainVersion {
+    /// Explanation contract 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Exact version of markup-aware change responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ChangeVersion {
+    /// Change contract 1.3.
+    #[serde(rename = "1.3")]
+    V1_3,
+}
+
+/// Checked domain error under one exact source-entity contract revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntityErrorResponse<V> {
+    /// Exact error contract version.
+    pub schema_version: V,
+    /// Source-free error and remediation.
+    pub error: crate::PublicError,
+}
+
+/// Success or checked domain error sharing one exact contract revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EntityToolResponse<T, V> {
+    /// Tool-specific successful result.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(EntityErrorResponse<V>),
+}
+
+/// Generation-bound read result carrying an exact source-entity version marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntityReadEnvelope<T, V> {
+    /// Exact response contract version.
+    pub schema_version: V,
+    /// Resolved repository.
+    pub repository: ResolvedRepository,
+    /// Pinned generation and freshness.
+    pub generation: GenerationSummary,
+    /// Relevant coverage.
+    pub coverage: CoverageSummary,
+    /// Tool-specific result.
+    pub data: T,
+    /// Whether a hard or requested limit stopped completion.
+    pub truncated: bool,
+    /// Authoritative completeness and safe continuation semantics.
+    pub completeness: crate::completeness::ResultCompleteness,
+    /// Safe continuation cursor for pageable results.
+    pub next_cursor: RequiredNullable<ContinuationCursor>,
+    /// Runtime resource accounting.
+    pub usage: UsageSummary,
+    /// Source-free warnings.
+    #[schemars(length(max = 100))]
+    pub warnings: Vec<ResponseWarning>,
+    /// Classification for all repository-derived content.
+    pub trust: crate::TrustClassification,
+}
+
+/// Source-kind `code.locate` success or domain error.
+pub type CodeLocateOutputV1_1 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, AnalysisSchemaVersion>,
+    AnalysisSchemaVersion,
+>;
+/// Source-kind `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_2 =
+    EntityToolResponse<EntityReadEnvelope<SymbolExplainData, ExplainVersion>, ExplainVersion>;
+/// Source-kind `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_1 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, AnalysisSchemaVersion>,
+    AnalysisSchemaVersion,
+>;
+/// Markup-aware `change.impact` success or domain error.
+pub type ChangeImpactOutputV1_3 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::ChangeImpactData, ChangeVersion>,
+    ChangeVersion,
+>;
+/// Markup-aware `history.compare` success or domain error.
+pub type HistoryCompareOutputV1_3 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::HistoryCompareData, ChangeVersion>,
+    ChangeVersion,
+>;

@@ -8788,6 +8788,10 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "configuration_key" => EntityKind::Configuration,
         "route" => EntityKind::Route,
         "external_symbol" => EntityKind::ExternalSymbol,
+        "style_rule" => EntityKind::StyleRule,
+        "keyframes" => EntityKind::Keyframes,
+        "markup_element" => EntityKind::MarkupElement,
+        "markup_attribute" => EntityKind::MarkupAttribute,
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)

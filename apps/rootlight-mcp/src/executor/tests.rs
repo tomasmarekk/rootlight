@@ -4030,6 +4030,29 @@ async fn maps_external_symbols_returned_by_semantic_locate() {
 }
 
 #[tokio::test]
+async fn maps_source_structure_kinds_without_relabeling() {
+    for kind in [
+        "style_rule",
+        "keyframes",
+        "markup_element",
+        "markup_attribute",
+    ] {
+        let mut response = locate_response();
+        response.result.hits[0].kind = kind.to_owned();
+        let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+        let output = execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({"repository": {"repository_id": repository()}, "query": "source"}),
+        )
+        .await
+        .expect("source structure maps without losing its kind");
+        assert_eq!(output["data"]["matches"][0]["kind"], kind);
+        assert!(output["data"]["matches"][0]["source_ref"].is_object());
+    }
+}
+
+#[tokio::test]
 async fn maps_routes_returned_by_structural_locate() {
     let mut response = locate_response();
     response.result.hits[0].kind = "route".to_owned();
@@ -4051,6 +4074,85 @@ async fn maps_routes_returned_by_structural_locate() {
     };
 
     assert_eq!(output.data.matches[0].kind, EntityKind::Route);
+}
+
+#[tokio::test]
+async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades() {
+    for kind in [
+        "style_rule",
+        "keyframes",
+        "markup_element",
+        "markup_attribute",
+    ] {
+        for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
+            let mut locate = locate_response();
+            locate.result.hits[0].kind = kind.to_owned();
+            locate.result.hits[0].source = Some(source_reference_without_lines(4, 12));
+            let mut explain = explain_response(source_reference_without_lines(4, 12));
+            explain.result.symbols[0].kind = kind.to_owned();
+            explain.result.unresolved_symbols.clear();
+            let outcome = if tool == VerticalTool::CodeLocate {
+                FakeOutcome::CodeLocate(Ok(locate))
+            } else {
+                FakeOutcome::SymbolExplain(Ok(explain))
+            };
+            let harness = Harness::new(outcome);
+            let router = ToolRouter::new(harness.executor, ExposureProfile::Developer)
+                .expect("router compiles");
+            let arguments = if tool == VerticalTool::CodeLocate {
+                json!({"repository": {"repository_id": repository()}, "query": "source"})
+            } else {
+                json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()]})
+            };
+            for version in [
+                Some(tool.contract_version()),
+                tool.previous_contract_version(),
+                tool.legacy_contract_version(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let response = router
+                    .handle(
+                        operating_request(json!({
+                            "name": tool.name(), "arguments": arguments,
+                            "_meta": {"rootlight/toolContractVersion": version}
+                        })),
+                        cancellation(),
+                    )
+                    .await;
+                let HandlerResponse::Success(result) = response else {
+                    panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
+                };
+                let current = version == tool.contract_version();
+                assert_eq!(result["isError"], !current);
+                let content = &result["structuredContent"];
+                assert_eq!(content["schema_version"], version);
+                let mirror: Value = serde_json::from_str(
+                    result["content"][0]["text"].as_str().expect("JSON mirror"),
+                )
+                .expect("valid JSON");
+                assert_eq!(&mirror, content);
+                if current {
+                    let (field, evidence) = if tool == VerticalTool::CodeLocate {
+                        ("matches", "source_ref")
+                    } else {
+                        ("symbols", "definition")
+                    };
+                    assert_eq!(content["data"][field][0]["kind"], kind);
+                    assert_eq!(content["data"][field][0]["symbol_id"], json!(symbol()));
+                    assert_source_reference_composes_with_read(
+                        content["data"][field][0][evidence].clone(),
+                        source_reference_without_lines(4, 12),
+                    )
+                    .await;
+                } else {
+                    assert_eq!(content["error"]["code"], "PROTOCOL_MISMATCH");
+                    assert!(content.get("data").is_none());
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -4175,6 +4277,45 @@ async fn query_batch_public_profiles_preserve_child_semantics() {
         semantics.windows(2).all(|pair| pair[0] == pair[1]),
         "representation profiles must not change child identity or status"
     );
+}
+
+#[tokio::test]
+async fn batch_preserves_source_entity_kinds() {
+    for kind in [
+        "style_rule",
+        "keyframes",
+        "markup_element",
+        "markup_attribute",
+    ] {
+        let mut locate = locate_response();
+        locate.result.hits[0].kind = kind.to_owned();
+        locate.result.hits[0].source = Some(source_reference_without_lines(4, 12));
+        let harness = Harness::new(FakeOutcome::Batch {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Ok(locate),
+        });
+        let router =
+            ToolRouter::new(harness.executor, ExposureProfile::Developer).expect("router compiles");
+        let response = router.handle(operating_request(json!({
+            "name": "query.batch", "arguments": {
+                "repository": {"repository_id": repository()},
+                "operations": [{"id": "find", "tool": "code.locate", "arguments": {"query": "source"}}]
+            }
+        })), cancellation()).await;
+        let HandlerResponse::Success(result) = response else {
+            panic!("checked batch result");
+        };
+        assert_eq!(result["isError"], false);
+        let child = &result["structuredContent"]["data"]["operation_results"][0];
+        assert_eq!(child["status"], "ok");
+        assert_eq!(child["data"]["matches"][0]["kind"], kind);
+        assert_eq!(child["data"]["matches"][0]["symbol_id"], json!(symbol()));
+        assert_source_reference_composes_with_read(
+            child["data"]["matches"][0]["source_ref"].clone(),
+            source_reference_without_lines(4, 12),
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

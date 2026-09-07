@@ -117,13 +117,14 @@ impl VerticalTool {
     #[must_use]
     pub const fn contract_version(self) -> &'static str {
         match self {
-            Self::ChangeImpact | Self::HistoryCompare => crate::change::CHANGE_SCHEMA_VERSION,
+            Self::CodeLocate | Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
+            Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
+            Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
             Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
             Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
             Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
-            Self::SymbolExplain
-            | Self::SymbolRelationships
+            Self::SymbolRelationships
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
@@ -151,10 +152,10 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-input-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.1.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.2.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-input-1.1.schema.json"
@@ -163,7 +164,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json")
             }
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.3.schema.json"
             ),
             Self::TestsSelect => include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-input-1.1.schema.json"
@@ -178,7 +179,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-code-dead-input-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.3.schema.json"
             ),
             Self::PlanChange => include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-input-1.1.schema.json"
@@ -190,7 +191,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-source-read-input-1.0.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
-                "../../../schemas/generated/json/mcp-query-advanced-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-query-advanced-input-1.1.schema.json"
             ),
             Self::QueryBatch => include_str!(
                 "../../../schemas/generated/json/mcp-query-batch-input-1.0.schema.json"
@@ -215,10 +216,10 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-output-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.1.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.2.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-output-1.1.schema.json"
@@ -227,7 +228,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-flow-trace-output-1.0.schema.json"
             ),
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.3.schema.json"
             ),
             Self::TestsSelect => include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-output-1.1.schema.json"
@@ -242,7 +243,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-code-dead-output-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.3.schema.json"
             ),
             Self::PlanChange => include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-output-1.1.schema.json"
@@ -254,7 +255,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-source-read-output-1.0.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
-                "../../../schemas/generated/json/mcp-query-advanced-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-query-advanced-output-1.1.schema.json"
             ),
             Self::QueryBatch => include_str!(
                 "../../../schemas/generated/json/mcp-query-batch-output-1.0.schema.json"
@@ -266,12 +267,13 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::ChangeImpact | Self::HistoryCompare => Some("1.1"),
+            Self::CodeLocate | Self::QueryAdvanced => Some("1.0"),
+            Self::SymbolExplain => Some("1.1"),
+            Self::ChangeImpact | Self::HistoryCompare => Some("1.2"),
             Self::OperationStatus => Some("1.5"),
             Self::RepoIndex => Some("1.2"),
             Self::RepoStatus => Some("1.1"),
-            Self::SymbolExplain
-            | Self::SymbolRelationships
+            Self::SymbolRelationships
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
@@ -286,7 +288,8 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::ChangeImpact | Self::HistoryCompare => Some(crate::MCP_SCHEMA_VERSION),
+            Self::SymbolExplain => Some("1.0"),
+            Self::ChangeImpact | Self::HistoryCompare => Some("1.1"),
             Self::OperationStatus => Some("1.4"),
             Self::RepoIndex => Some("1.1"),
             Self::RepoStatus => Some(crate::MCP_SCHEMA_VERSION),
@@ -298,6 +301,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn second_legacy_contract_version(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact | Self::HistoryCompare => Some("1.0"),
             Self::OperationStatus => Some("1.3"),
             _ => None,
         }
@@ -334,6 +338,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
+            )),
+            Self::QueryAdvanced => Some(include_str!(
+                "../../../schemas/generated/json/mcp-query-advanced-input-1.0.schema.json"
+            )),
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-input-1.2.schema.json"
             )),
@@ -344,13 +354,13 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-input-1.5.schema.json"
             )),
             Self::SymbolExplain => Some(include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.1.schema.json"
             )),
             Self::SymbolRelationships => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
             )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.2.schema.json"
             )),
             Self::TestsSelect => Some(include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-input-1.0.schema.json"
@@ -365,7 +375,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.2.schema.json"
             )),
             Self::PlanChange => Some(include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-input-1.0.schema.json"
@@ -381,6 +391,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
+            )),
+            Self::QueryAdvanced => Some(include_str!(
+                "../../../schemas/generated/json/mcp-query-advanced-output-1.0.schema.json"
+            )),
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-output-1.2.schema.json"
             )),
@@ -391,13 +407,13 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-output-1.5.schema.json"
             )),
             Self::SymbolExplain => Some(include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.1.schema.json"
             )),
             Self::SymbolRelationships => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-output-1.0.schema.json"
             )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.2.schema.json"
             )),
             Self::TestsSelect => Some(include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-output-1.0.schema.json"
@@ -412,7 +428,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.2.schema.json"
             )),
             Self::PlanChange => Some(include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-output-1.0.schema.json"
@@ -428,11 +444,14 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
+            )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.1.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.4.schema.json"
@@ -451,11 +470,14 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
+            )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.1.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.1.schema.json"
             )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.4.schema.json"
@@ -474,6 +496,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn second_legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+            )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.3.schema.json"
             )),
@@ -485,6 +513,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn second_legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+            )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.3.schema.json"
             )),
@@ -2395,6 +2429,14 @@ pub enum EntityKind {
     Route,
     /// A symbol whose definition is outside the indexed repository.
     ExternalSymbol,
+    /// Authored stylesheet rule.
+    StyleRule,
+    /// Authored stylesheet animation declaration.
+    Keyframes,
+    /// Written markup element, not a constructed DOM node.
+    MarkupElement,
+    /// Written markup attribute, not a runtime object property.
+    MarkupAttribute,
 }
 
 /// Locate retrieval mode.
@@ -3860,21 +3902,27 @@ mod tests {
                 }
                 "code.locate" => {
                     assert_round_trip::<CodeLocateInput>(VerticalTool::CodeLocate, &input, true);
-                    assert_round_trip::<CodeLocateOutput>(VerticalTool::CodeLocate, &output, false);
+                    assert_round_trip_with_schema::<CodeLocateOutput>(
+                        VerticalTool::CodeLocate,
+                        &output,
+                        VerticalTool::CodeLocate
+                            .previous_output_schema_json()
+                            .expect("retained 1.0 output"),
+                    );
                 }
                 "symbol.explain" => {
                     assert_round_trip_with_schema::<SymbolExplainInput>(
                         VerticalTool::SymbolExplain,
                         &input,
                         VerticalTool::SymbolExplain
-                            .previous_input_schema_json()
+                            .legacy_input_schema_json()
                             .expect("symbol.explain retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<SymbolExplainOutputV1_0>(
                         VerticalTool::SymbolExplain,
                         &output,
                         VerticalTool::SymbolExplain
-                            .previous_output_schema_json()
+                            .legacy_output_schema_json()
                             .expect("symbol.explain retains its 1.0 output schema"),
                     );
                 }
@@ -3955,14 +4003,14 @@ mod tests {
                         VerticalTool::ChangeImpact,
                         &input,
                         VerticalTool::ChangeImpact
-                            .legacy_input_schema_json()
+                            .second_legacy_input_schema_json()
                             .expect("change.impact retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<ChangeImpactOutputV1_0>(
                         VerticalTool::ChangeImpact,
                         &output,
                         VerticalTool::ChangeImpact
-                            .legacy_output_schema_json()
+                            .second_legacy_output_schema_json()
                             .expect("change.impact retains its 1.0 output schema"),
                     );
                 }
@@ -3987,14 +4035,14 @@ mod tests {
                         VerticalTool::HistoryCompare,
                         &input,
                         VerticalTool::HistoryCompare
-                            .legacy_input_schema_json()
+                            .second_legacy_input_schema_json()
                             .expect("history.compare retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<HistoryCompareOutputV1_0>(
                         VerticalTool::HistoryCompare,
                         &output,
                         VerticalTool::HistoryCompare
-                            .legacy_output_schema_json()
+                            .second_legacy_output_schema_json()
                             .expect("history.compare retains its 1.0 output schema"),
                     );
                 }
@@ -4036,10 +4084,12 @@ mod tests {
                         &input,
                         true,
                     );
-                    assert_round_trip::<QueryAdvancedOutput>(
+                    assert_round_trip_with_schema::<QueryAdvancedOutput>(
                         VerticalTool::QueryAdvanced,
                         &output,
-                        false,
+                        VerticalTool::QueryAdvanced
+                            .previous_output_schema_json()
+                            .expect("retained 1.0 output"),
                     );
                 }
                 "query.batch" => {
@@ -4141,7 +4191,6 @@ mod tests {
             crate::MCP_OPERATION_STATUS_SCHEMA_VERSION
         );
         for tool in [
-            VerticalTool::SymbolExplain,
             VerticalTool::SymbolRelationships,
             VerticalTool::TestsSelect,
             VerticalTool::ArchitectureOverview,
@@ -4153,9 +4202,10 @@ mod tests {
             assert_eq!(tool.contract_version(), crate::MCP_ANALYSIS_SCHEMA_VERSION);
         }
         for tool in [VerticalTool::ChangeImpact, VerticalTool::HistoryCompare] {
-            assert_eq!(tool.contract_version(), "1.2");
-            assert_eq!(tool.previous_contract_version(), Some("1.1"));
-            assert_eq!(tool.legacy_contract_version(), Some("1.0"));
+            assert_eq!(tool.contract_version(), "1.3");
+            assert_eq!(tool.previous_contract_version(), Some("1.2"));
+            assert_eq!(tool.legacy_contract_version(), Some("1.1"));
+            assert_eq!(tool.second_legacy_contract_version(), Some("1.0"));
         }
         for tool in VerticalTool::ALL {
             if !matches!(
@@ -4174,6 +4224,8 @@ mod tests {
                     | VerticalTool::HistoryCompare
                     | VerticalTool::PlanChange
                     | VerticalTool::ContextPack
+                    | VerticalTool::CodeLocate
+                    | VerticalTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
@@ -4244,7 +4296,8 @@ mod tests {
 
     #[test]
     fn continuation_cursor_is_required_nullable_and_bounded() {
-        let fixture = retained_tool_output("code.locate");
+        let mut fixture = retained_tool_output("code.locate");
+        fixture["schema_version"] = json!(VerticalTool::CodeLocate.contract_version());
         let schema: Value = serde_json::from_str(VerticalTool::CodeLocate.output_schema_json())
             .expect("valid JSON");
         let validator = jsonschema::draft202012::new(&schema).expect("schema compiles");
@@ -4260,12 +4313,16 @@ mod tests {
         let mut maximum = fixture.clone();
         maximum["next_cursor"] = json!("c".repeat(4_096));
         assert!(validator.is_valid(&maximum));
-        serde_json::from_value::<CodeLocateOutput>(maximum).expect("maximum-sized cursor decodes");
+        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_1>(maximum)
+            .expect("maximum-sized cursor decodes");
 
         let mut oversized = fixture;
         oversized["next_cursor"] = json!("c".repeat(4_097));
         assert!(!validator.is_valid(&oversized));
-        assert!(serde_json::from_value::<CodeLocateOutput>(oversized).is_err());
+        assert!(
+            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_1>(oversized)
+                .is_err()
+        );
     }
 
     #[test]

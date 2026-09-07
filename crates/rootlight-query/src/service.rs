@@ -14866,6 +14866,41 @@ mod tests {
     }
 
     #[test]
+    fn advanced_scan_preserves_source_entity_kinds_and_identity() {
+        let mut document = advanced_document();
+        let kinds = [
+            EntityKind::StyleRule,
+            EntityKind::Keyframes,
+            EntityKind::MarkupElement,
+            EntityKind::MarkupAttribute,
+        ];
+        for (index, kind) in kinds.into_iter().enumerate() {
+            add_entity(
+                &mut document,
+                20 + u8::try_from(index).expect("four kinds"),
+                1,
+                kind,
+            );
+        }
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let label = serde_json::to_value(kind).expect("entity kind serializes");
+            let ast: AdvancedAstNode = serde_json::from_value(serde_json::json!({
+                "op": "scan", "entity": label
+            }))
+            .expect("public source kind decodes");
+            let built = run_advanced(&document, &advanced_plan(ast, false, 100));
+            assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+            assert_eq!(built.rows.len(), 1);
+            assert_eq!(built.rows[0]["kind"], label);
+            assert_eq!(built.rows[0]["path"], "src/a.rs");
+            assert_eq!(
+                built.rows[0]["id"],
+                symbol(20 + u8::try_from(index).expect("four kinds")).to_string()
+            );
+        }
+    }
+
+    #[test]
     fn advanced_aggregate_groups_and_counts_rows_deterministically() {
         let document = advanced_document();
         let ast = AdvancedAstNode::Aggregate {

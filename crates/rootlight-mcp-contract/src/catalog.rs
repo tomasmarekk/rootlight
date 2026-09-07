@@ -101,13 +101,14 @@ impl McpTool {
     #[must_use]
     pub const fn contract_version(self) -> &'static str {
         match self {
-            Self::ChangeImpact | Self::HistoryCompare => crate::change::CHANGE_SCHEMA_VERSION,
+            Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
+            Self::CodeLocate | Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
+            Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
             Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
             Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
             Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
-            Self::SymbolExplain
-            | Self::SymbolRelationships
+            Self::SymbolRelationships
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
@@ -411,7 +412,6 @@ mod tests {
             crate::MCP_OPERATION_STATUS_SCHEMA_VERSION
         );
         for tool in [
-            McpTool::SymbolExplain,
             McpTool::SymbolRelationships,
             McpTool::TestsSelect,
             McpTool::ArchitectureOverview,
@@ -425,7 +425,7 @@ mod tests {
         for tool in [McpTool::ChangeImpact, McpTool::HistoryCompare] {
             assert_eq!(
                 tool.contract_version(),
-                crate::change::CHANGE_SCHEMA_VERSION
+                crate::source_entity::CHANGE_VERSION
             );
         }
         for tool in McpTool::ALL {
@@ -445,9 +445,18 @@ mod tests {
                     | McpTool::HistoryCompare
                     | McpTool::PlanChange
                     | McpTool::ContextPack
+                    | McpTool::CodeLocate
+                    | McpTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
+        }
+        assert_eq!(
+            McpTool::SymbolExplain.contract_version(),
+            crate::source_entity::EXPLAIN_VERSION
+        );
+        for tool in [McpTool::CodeLocate, McpTool::QueryAdvanced] {
+            assert_eq!(tool.contract_version(), crate::source_entity::QUERY_VERSION);
         }
     }
 

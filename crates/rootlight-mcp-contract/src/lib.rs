@@ -14,6 +14,7 @@ pub mod intent;
 pub mod json;
 pub mod pagination;
 pub mod repository;
+pub mod source_entity;
 pub mod vertical;
 
 use std::collections::BTreeMap;

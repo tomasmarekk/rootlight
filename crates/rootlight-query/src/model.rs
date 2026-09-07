@@ -2524,6 +2524,14 @@ pub enum AdvancedEntityKind {
     Configuration,
     /// Symbol whose definition is outside the indexed repository.
     ExternalSymbol,
+    /// Authored stylesheet rule.
+    StyleRule,
+    /// Authored stylesheet animation declaration.
+    Keyframes,
+    /// Written markup element.
+    MarkupElement,
+    /// Written markup attribute.
+    MarkupAttribute,
 }
 
 impl AdvancedEntityKind {
@@ -2541,6 +2549,10 @@ impl AdvancedEntityKind {
             Self::Variable => "variable",
             Self::Configuration => "configuration",
             Self::ExternalSymbol => "external_symbol",
+            Self::StyleRule => "style_rule",
+            Self::Keyframes => "keyframes",
+            Self::MarkupElement => "markup_element",
+            Self::MarkupAttribute => "markup_attribute",
         }
     }
 
@@ -2558,6 +2570,10 @@ impl AdvancedEntityKind {
             "variable" => Some(Self::Variable),
             "configuration" => Some(Self::Configuration),
             "external_symbol" => Some(Self::ExternalSymbol),
+            "style_rule" => Some(Self::StyleRule),
+            "keyframes" => Some(Self::Keyframes),
+            "markup_element" => Some(Self::MarkupElement),
+            "markup_attribute" => Some(Self::MarkupAttribute),
             _ => None,
         }
     }
@@ -2593,6 +2609,10 @@ impl AdvancedEntityKind {
             Self::Variable => matches!(kind, IrEntityKind::Variable | IrEntityKind::Parameter),
             Self::Configuration => matches!(kind, IrEntityKind::ConfigurationKey),
             Self::ExternalSymbol => matches!(kind, IrEntityKind::ExternalSymbol),
+            Self::StyleRule => matches!(kind, IrEntityKind::StyleRule),
+            Self::Keyframes => matches!(kind, IrEntityKind::Keyframes),
+            Self::MarkupElement => matches!(kind, IrEntityKind::MarkupElement),
+            Self::MarkupAttribute => matches!(kind, IrEntityKind::MarkupAttribute),
         }
     }
 }

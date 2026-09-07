@@ -44,6 +44,10 @@ use rootlight_mcp_contract::{
         RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput, RepoStatusOutputV1_0,
         RepoStatusOutputV1_1,
     },
+    source_entity::{
+        ChangeImpactOutputV1_3, CodeLocateOutputV1_1, HistoryCompareOutputV1_3,
+        QueryAdvancedOutputV1_1, SymbolExplainOutputV1_2,
+    },
     vertical::SymbolExplainOutputV1_1,
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
@@ -114,7 +118,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 14] = [
     ("1.15", "protobuf/1.15/rootlight.desc"),
     ("1.16", "protobuf/1.16/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 23] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -128,6 +132,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
     "crates/rootlight-mcp-contract/src/context.rs",
     "crates/rootlight-mcp-contract/src/intent.rs",
     "crates/rootlight-mcp-contract/src/repository.rs",
+    "crates/rootlight-mcp-contract/src/source_entity.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-input-1.0.schema.json",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-output-1.0.schema.json",
@@ -923,6 +928,61 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     )?;
     write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
     write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.1")?;
+    write_mcp_tool_schema_version::<CodeLocateOutputV1_1>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.2",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainOutputV1_2>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.2",
+    )?;
+    write_mcp_tool_schema_version::<QueryAdvancedInput>(
+        &schema_root,
+        "query.advanced",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<QueryAdvancedOutputV1_1>(
+        &schema_root,
+        "query.advanced",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<ChangeImpactInput>(
+        &schema_root,
+        "change.impact",
+        "input",
+        "1.3",
+    )?;
+    write_mcp_tool_schema_version::<ChangeImpactOutputV1_3>(
+        &schema_root,
+        "change.impact",
+        "output",
+        "1.3",
+    )?;
+    write_mcp_tool_schema_version::<HistoryCompareInput>(
+        &schema_root,
+        "history.compare",
+        "input",
+        "1.3",
+    )?;
+    write_mcp_tool_schema_version::<HistoryCompareOutputV1_3>(
+        &schema_root,
+        "history.compare",
+        "output",
+        "1.3",
+    )?;
     write_mcp_tool_schema_version::<SymbolExplainInput>(
         &schema_root,
         "symbol.explain",
@@ -1188,8 +1248,8 @@ fn write_mcp_tool_schema_version<T: JsonSchema>(
 }
 
 fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), SchemaError> {
-    // Markup requires a separately versioned MCP response contract. Retained
-    // tool schemas must not widen merely because the internal IR enum grows.
+    // An IR vocabulary extension cannot widen a retained MCP contract. These
+    // exact revisions introduce source kinds at the agent-facing boundary.
     if path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
@@ -1200,12 +1260,36 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             .and_then(|definitions| definitions.pointer_mut("/EntityKind/oneOf"))
             .and_then(serde_json::Value::as_array_mut)
     {
-        variants.retain(|variant| {
-            !matches!(
-                variant.get("const").and_then(serde_json::Value::as_str),
-                Some("markup_element" | "markup_attribute")
-            )
-        });
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("");
+        let source_kinds = matches!(
+            name,
+            "mcp-code-locate-input-1.1.schema.json"
+                | "mcp-code-locate-output-1.1.schema.json"
+                | "mcp-symbol-explain-input-1.2.schema.json"
+                | "mcp-symbol-explain-output-1.2.schema.json"
+                | "mcp-query-advanced-input-1.1.schema.json"
+                | "mcp-query-advanced-output-1.1.schema.json"
+                | "mcp-change-impact-input-1.3.schema.json"
+                | "mcp-change-impact-output-1.3.schema.json"
+                | "mcp-history-compare-input-1.3.schema.json"
+                | "mcp-history-compare-output-1.3.schema.json"
+        );
+        let stylesheet_kinds = source_kinds
+            || matches!(
+                name,
+                "mcp-change-impact-output-1.2.schema.json"
+                    | "mcp-history-compare-output-1.2.schema.json"
+            );
+        variants.retain(
+            |variant| match variant.get("const").and_then(serde_json::Value::as_str) {
+                Some("markup_element" | "markup_attribute") => source_kinds,
+                Some("style_rule" | "keyframes") => stylesheet_kinds,
+                _ => true,
+            },
+        );
     }
     if path
         .file_name()
@@ -2425,6 +2509,16 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.1.schema.json"),

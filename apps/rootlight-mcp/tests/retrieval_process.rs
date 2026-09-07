@@ -88,6 +88,88 @@ fn yaml_scalar_alias_keys_cross_real_process_boundaries() {
 }
 
 #[test]
+fn stylesheet_entities_cross_real_process_boundaries() {
+    let source = ".highlight { color: red; }\n@keyframes pulse { from { opacity: 0; } to { opacity: 1; } }\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("style.css", source)), FixtureLayout::Data);
+    for (name, kind) in [(".highlight", "style_rule"), ("pulse", "keyframes")] {
+        let arguments = json!({"query": name, "search_modes": ["exact"],
+            "languages": ["css"], "scope": {"paths": ["style.css"]}, "response_profile": "evidence"});
+        let located = fixture.standalone(
+            &format!("css-locate-{kind}"),
+            "code.locate",
+            arguments.clone(),
+        );
+        let batch = fixture.batch(
+            &format!("css-batch-{kind}"),
+            "code.locate",
+            arguments.clone(),
+            "evidence",
+        );
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert_eq!(output["schema_version"], "1.1");
+        let found = output["data"]["matches"]
+            .as_array()
+            .expect("matches")
+            .iter()
+            .find(|item| item["kind"] == kind)
+            .expect("exact source kind");
+        let symbol = found["symbol_id"].clone();
+        let reference = found["source_ref"].clone();
+        let explained = fixture.standalone(
+            &format!("css-explain-{kind}"),
+            "symbol.explain",
+            json!({"symbol_ids": [symbol.clone()], "response_profile": "evidence"}),
+        );
+        assert_success(&explained, "symbol.explain");
+        let explanation = &explained["result"]["structuredContent"];
+        assert_eq!(explanation["schema_version"], "1.2");
+        assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
+        assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
+        let read = fixture.standalone(&format!("css-read-{kind}"), "source.read",
+            json!({"references": [{"source_ref": reference.clone()}], "response_profile": "evidence"}));
+        assert_success(&read, "source.read");
+        let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+        for field in ["repository", "generation", "content_hash", "span"] {
+            assert_eq!(chunk["source_ref"][field], reference[field]);
+        }
+        let start = usize::try_from(reference["span"]["start_byte"].as_u64().expect("start"))
+            .expect("offset");
+        let end =
+            usize::try_from(reference["span"]["end_byte"].as_u64().expect("end")).expect("offset");
+        assert_eq!(chunk["content"].as_str(), source.get(start..end));
+        let advanced = fixture.standalone(
+            &format!("css-scan-{kind}"),
+            "query.advanced",
+            json!({"query": {"op": "scan", "entity": kind}}),
+        );
+        assert_success(&advanced, "query.advanced");
+        let rows = advanced["result"]["structuredContent"]["data"]["rows"]
+            .as_array()
+            .expect("scan rows");
+        assert!(
+            rows.iter().any(|row| row["id"] == symbol
+                && row["kind"] == kind
+                && row["path"] == "style.css")
+        );
+        let retained = fixture.standalone_version(
+            &format!("css-retained-{kind}"),
+            "code.locate",
+            arguments,
+            "1.0",
+        );
+        assert_eq!(retained["result"]["isError"], true);
+        assert_eq!(
+            retained["result"]["structuredContent"]["error"]["code"],
+            "PROTOCOL_MISMATCH"
+        );
+    }
+    fixture.finish();
+}
+
+#[test]
 fn yaml_tagged_value_gaps_cross_real_process_boundaries_with_exact_sources() {
     let source = "affected: !custom secret_value\nsafe: readable\n";
     let mut fixture =
@@ -676,7 +758,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.1");
+    assert_eq!(output["schema_version"], "1.2");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -1495,7 +1577,10 @@ fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str)
 
 fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
-        matches!(output["schema_version"].as_str(), Some("1.0" | "1.1")),
+        matches!(
+            output["schema_version"].as_str(),
+            Some("1.0" | "1.1" | "1.2")
+        ),
         "read response uses a supported additive schema version"
     );
     assert_eq!(output["repository"]["repository_id"], repository_id);
