@@ -2875,7 +2875,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "_statement"
+          "name": "_heredoc_statement"
         }
       ]
     },
@@ -2904,10 +2904,267 @@
           "name": "right",
           "content": {
             "type": "SYMBOL",
-            "name": "_statement"
+            "name": "_heredoc_statement"
           }
         }
       ]
+    },
+    "_heredoc_statement": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_heredoc_statement_atom"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_heredoc_statement_pipeline"
+          },
+          "named": true,
+          "value": "pipeline"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_heredoc_statement_list"
+          },
+          "named": true,
+          "value": "list"
+        }
+      ]
+    },
+    "_heredoc_statement_atom": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_heredoc_redirected_statement"
+          },
+          "named": true,
+          "value": "redirected_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "variable_assignment"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "variable_assignments"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "command"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "declaration_command"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unset_command"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "test_command"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "negated_command"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "for_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "c_style_for_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "while_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "if_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "case_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "compound_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "function_definition"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "subshell"
+        }
+      ]
+    },
+    "_heredoc_redirected_statement": {
+      "type": "PREC_DYNAMIC",
+      "value": -1,
+      "content": {
+        "type": "PREC_RIGHT",
+        "value": -1,
+        "content": {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "body",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_heredoc_statement"
+              }
+            },
+            {
+              "type": "FIELD",
+              "name": "redirect",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_redirect"
+                  },
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_heredoc_redirect_continue"
+                    },
+                    "named": true,
+                    "value": "heredoc_redirect"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "REPEAT",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "FIELD",
+                    "name": "redirect",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_redirect"
+                    }
+                  },
+                  {
+                    "type": "FIELD",
+                    "name": "redirect",
+                    "content": {
+                      "type": "ALIAS",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "_heredoc_redirect_continue"
+                      },
+                      "named": true,
+                      "value": "heredoc_redirect"
+                    }
+                  },
+                  {
+                    "type": "FIELD",
+                    "name": "argument",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_literal"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "_heredoc_statement_pipeline": {
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "PREC",
+            "value": 1,
+            "content": {
+              "type": "SYMBOL",
+              "name": "_heredoc_statement_atom"
+            }
+          },
+          {
+            "type": "REPEAT1",
+            "content": {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "|"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "|&"
+                    }
+                  ]
+                },
+                {
+                  "type": "PREC",
+                  "value": 1,
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_heredoc_statement_atom"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "_heredoc_statement_list": {
+      "type": "PREC_LEFT",
+      "value": -1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "SYMBOL",
+            "name": "_heredoc_statement"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "&&"
+              },
+              {
+                "type": "STRING",
+                "value": "||"
+              }
+            ]
+          },
+          {
+            "type": "SYMBOL",
+            "name": "_heredoc_statement"
+          }
+        ]
+      }
     },
     "_heredoc_body_content": {
       "type": "CHOICE",
@@ -7186,7 +7443,9 @@
     "_special_variable_name",
     "_c_word",
     "_statement_not_subshell",
-    "_redirect"
+    "_redirect",
+    "_heredoc_statement",
+    "_heredoc_statement_atom"
   ],
   "supertypes": [
     "_statement",

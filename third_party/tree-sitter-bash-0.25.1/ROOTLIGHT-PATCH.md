@@ -27,7 +27,10 @@ The scanner changes are in `src/scanner.c`:
 
 `grammar.js` admits interspersed heredoc headers, arguments and file redirects.
 Distinct external continuation/end tokens separate group boundaries without
-turning pending outer input into an inner command's body. Generated
+turning pending outer input into an inner command's body. Header-only statement
+rules defer bodies across pipes and conditional operators until the entire
+connected command header has been read. Ordinary arguments remain owned by their
+command, while substitutions retain independent nested groups. Generated
 `src/parser.c`, `src/grammar.json` and `src/node-types.json` are regenerated,
 never hand-edited. Reproduce from this directory using the pinned CLI:
 
@@ -36,7 +39,8 @@ tree-sitter generate --abi 15
 ```
 
 The public node vocabulary is unchanged; the heredoc `descriptor` field can now
-occur more than once. Ordered source-range, quoted-expansion, nested-lifetime,
+occur more than once. Connected header contexts expose the existing statement
+alternatives and optional arguments after redirects. Ordered source-range, quoted-expansion, nested-lifetime,
 invalid-input and incremental tests exercise the compiled native parser.
 
 The reset and Unicode contracts follow the upstream
@@ -51,9 +55,9 @@ its source and ABI have been qualified again.
 Only the isolated native test package currently consumes this candidate.
 It is not registered as a Rootlight language adapter. Bounded state, Unicode,
 source-range and incremental tests do not establish complete Bash conformance,
-shell evaluation or semantic resolution. Multiple heredocs on one command are
-covered; separate pending inputs across pipeline or conditional commands remain
-known parse failures. The upstream corpus's adjacent closing-parenthesis delimiter case
+shell evaluation or semantic resolution. Tests cover multiple inputs on one
+command and connected pipeline/conditional commands; they do not exhaust every
+compound-statement or pending-input combination. The upstream corpus's adjacent closing-parenthesis delimiter case
 differs from strict whole-line matching: Bash itself emits an unterminated-heredoc
 warning for that form. Both the previous and grouped candidates disagree with that
 one upstream golden tree; it is not silently counted as a passing case.

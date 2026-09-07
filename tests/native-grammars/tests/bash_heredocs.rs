@@ -6,6 +6,7 @@ use tree_sitter::{InputEdit, Node, Parser, Point};
 const NESTED_BODY: &str =
     "cat <<OUTER <<TAIL\n$(cat <<INNER\ninside\nINNER\n)\nOUTER\nlast\nTAIL\nafter() { :; }\n";
 const NESTED_HEADER: &str = "cat <<OUTER \"$(cat <<INNER\ninside\nINNER\n)\" <<TAIL\nouter\nOUTER\nlast\nTAIL\nafter() { :; }\n";
+const CONNECTED_NESTED: &str = "left <<ONE | right <<TWO\n$(inner <<THREE | last <<FOUR\nthird\nTHREE\nfourth\nFOUR\n)\nONE\nsecond\nTWO\nafter() { :; }\n";
 
 fn parser() -> Parser {
     let mut parser = Parser::new();
@@ -80,6 +81,104 @@ fn assert_group(source: &str, expected_ends: &[&str]) {
 }
 
 #[test]
+fn connected_commands_share_declaration_order() {
+    for operator in ["|", "|&", "&&", "||"] {
+        let source = format!(
+            "left <<ONE {operator} right <<TWO\nfirst\nONE\nsecond\nTWO\nafter() {{ :; }}\n"
+        );
+        assert_group(&source, &["ONE", "TWO"]);
+        let tree = parser().parse(&source, None).expect("parse");
+        let names: Vec<_> = nodes(tree.root_node(), "command_name")
+            .into_iter()
+            .map(|node| node.utf8_text(source.as_bytes()).expect("command source"))
+            .collect();
+        assert_eq!(names, ["left", "right", ":"]);
+    }
+}
+
+#[test]
+fn connected_arguments_remain_owned_by_the_command() {
+    for operator in ["|", "|&", "&&", "||"] {
+        let source = format!("left <<ONE {operator} right argument\nbody\nONE\n");
+        let tree = parser().parse(&source, None).expect("parse");
+        let root = tree.root_node();
+        assert!(!root.has_error(), "{}", root.to_sexp());
+        assert_eq!(nodes(root, "redirected_statement").len(), 1);
+        let commands = nodes(root, "command");
+        let right = commands
+            .iter()
+            .find(|command| {
+                command.child_by_field_name("name").is_some_and(|name| {
+                    name.utf8_text(source.as_bytes()).expect("name source") == "right"
+                })
+            })
+            .expect("right command");
+        let argument = right.child_by_field_name("argument").expect("argument");
+        assert_eq!(
+            argument
+                .utf8_text(source.as_bytes())
+                .expect("argument source"),
+            "argument"
+        );
+    }
+}
+
+#[test]
+fn mixed_connections_preserve_each_body_and_command() {
+    let source = "left <<ONE <<TWO | MODE=value middle 3<<'THREE' tail >output && last <<-FOUR\nfirst\nONE\nsecond\nTWO\nthird $literal\nTHREE\n\tfourth\n\tFOUR\nafter() { :; }\n";
+    assert_group(source, &["ONE", "TWO", "THREE", "FOUR"]);
+    let tree = parser().parse(source, None).expect("parse");
+    let bodies: Vec<_> = nodes(tree.root_node(), "heredoc_body")
+        .into_iter()
+        .map(|node| node.utf8_text(source.as_bytes()).expect("body source"))
+        .collect();
+    // These are physical source spans, not the shell's tab-stripped input values.
+    assert_eq!(
+        bodies,
+        ["first\n", "second\n", "third $literal\n", "fourth\n\t"]
+    );
+    let names: Vec<_> = nodes(tree.root_node(), "command_name")
+        .into_iter()
+        .map(|node| node.utf8_text(source.as_bytes()).expect("command source"))
+        .collect();
+    assert_eq!(names, ["left", "middle", "last", ":"]);
+    assert!(nodes(tree.root_node(), "simple_expansion").is_empty());
+}
+
+#[test]
+fn connected_headers_and_bodies_isolate_nested_substitutions() {
+    assert_group(CONNECTED_NESTED, &["THREE", "FOUR", "ONE", "TWO"]);
+    assert_group(
+        "left <<ONE || right \"$(inner <<THREE\nthird\nTHREE\n)\" <<TWO tail\nfirst\nONE\nsecond\nTWO\nafter() { :; }\n",
+        &["THREE", "ONE", "TWO"],
+    );
+}
+
+#[test]
+fn connected_commands_keep_complete_syntax_without_new_inputs() {
+    for (source, ends) in [
+        (
+            "first | left <<ONE | ! right <<TWO\nfirst\nONE\nsecond\nTWO\nafter() { :; }\n",
+            vec!["ONE", "TWO"],
+        ),
+        (
+            "left <<ONE | middle arg | last >output\nfirst\nONE\nafter() { :; }\n",
+            vec!["ONE"],
+        ),
+        (
+            "left <<ONE || right <<TWO | last <<THREE\nfirst\nONE\nsecond\nTWO\nthird\nTHREE\nafter() { :; }\n",
+            vec!["ONE", "TWO", "THREE"],
+        ),
+        (
+            "left <<ONE && (right) <<TWO\nfirst\nONE\nsecond\nTWO\nafter() { :; }\n",
+            vec!["ONE", "TWO"],
+        ),
+    ] {
+        assert_group(source, &ends);
+    }
+}
+
+#[test]
 fn nested_body_substitution_keeps_its_own_group() {
     assert_group(NESTED_BODY, &["INNER", "OUTER", "TAIL"]);
 }
@@ -129,6 +228,8 @@ fn incomplete_or_wrongly_ordered_groups_report_parse_errors() {
         "cat <<ONE <<TWO\nsecond\nTWO\nfirst\nONE\n",
         "cat <<ONE <<TWO\nfirst\nONE\nsecond\nTWOsuffix\n",
         "cat <<ONE <<TWO\nONE\n",
+        "left <<ONE | right <<TWO\nfirst\nONE\nsecond\n",
+        "left <<ONE && right <<TWO\nsecond\nTWO\nfirst\nONE\n",
     ] {
         let tree = parser().parse(source, None).expect("parse");
         assert!(
@@ -199,7 +300,7 @@ fn spans(root: Node<'_>) -> Vec<Span> {
 #[test]
 fn nested_group_edits_match_fresh_source_spans() {
     let mut incremental_parser = parser();
-    for source in [NESTED_HEADER, NESTED_BODY] {
+    for source in [NESTED_HEADER, NESTED_BODY, CONNECTED_NESTED] {
         let initial = incremental_parser
             .parse(source, None)
             .expect("initial parse");

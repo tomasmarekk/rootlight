@@ -66,6 +66,8 @@ module.exports = grammar({
     $._c_word,
     $._statement_not_subshell,
     $._redirect,
+    $._heredoc_statement,
+    $._heredoc_statement_atom,
   ],
 
   externals: $ => [
@@ -576,13 +578,64 @@ module.exports = grammar({
 
     _heredoc_pipeline: $ => seq(
       choice('|', '|&'),
-      $._statement,
+      $._heredoc_statement,
     ),
 
     _heredoc_expression: $ => seq(
       field('operator', choice('||', '&&')),
-      field('right', $._statement),
+      field('right', $._heredoc_statement),
     ),
+
+    // Connected command headers defer their bodies to the first redirection.
+    // Substitutions and compound statements retain their own nested grammar.
+    _heredoc_statement: $ => choice(
+      $._heredoc_statement_atom,
+      alias($._heredoc_statement_pipeline, $.pipeline),
+      alias($._heredoc_statement_list, $.list),
+    ),
+
+    _heredoc_statement_atom: $ => choice(
+      alias($._heredoc_redirected_statement, $.redirected_statement),
+      $.variable_assignment,
+      $.variable_assignments,
+      $.command,
+      $.declaration_command,
+      $.unset_command,
+      $.test_command,
+      $.negated_command,
+      $.for_statement,
+      $.c_style_for_statement,
+      $.while_statement,
+      $.if_statement,
+      $.case_statement,
+      $.compound_statement,
+      $.function_definition,
+      $.subshell,
+    ),
+
+    _heredoc_redirected_statement: $ => prec.dynamic(-1, prec.right(-1, seq(
+      field('body', $._heredoc_statement),
+      field('redirect', choice(
+        $._redirect,
+        alias($._heredoc_redirect_continue, $.heredoc_redirect),
+      )),
+      repeat(choice(
+        field('redirect', $._redirect),
+        field('redirect', alias($._heredoc_redirect_continue, $.heredoc_redirect)),
+        field('argument', $._literal),
+      )),
+    ))),
+
+    _heredoc_statement_pipeline: $ => prec.right(seq(
+      prec(1, $._heredoc_statement_atom),
+      repeat1(seq(choice('|', '|&'), prec(1, $._heredoc_statement_atom))),
+    )),
+
+    _heredoc_statement_list: $ => prec.left(-1, seq(
+      $._heredoc_statement,
+      choice('&&', '||'),
+      $._heredoc_statement,
+    )),
 
     _heredoc_body_content: $ => choice(
       $.heredoc_body,
