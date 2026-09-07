@@ -1,4 +1,4 @@
-# Isolated FFI regression tests for pinned native scanners.
+# Isolated syntax and FFI regression tests for pinned native grammars.
 # Production workspace crates retain their forbid-unsafe policy.
 [package]
 name = "rootlight-native-grammar-tests"
@@ -14,6 +14,7 @@ resolver = "3"
 [dev-dependencies]
 tree-sitter-bash = { path = "../../third_party/tree-sitter-bash-0.25.1", version = "=0.25.1", default-features = false }
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+tree-sitter-json = { path = "../../third_party/tree-sitter-json-0.24.8", version = "=0.24.8", default-features = false }
 tree-sitter-swift = { path = "../../third_party/tree-sitter-swift-0.7.3", version = "=0.7.3", default-features = false }
 
 [lints.rust]
