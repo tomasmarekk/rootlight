@@ -50,7 +50,7 @@ pub(crate) fn display_json_key(canonical: &str) -> Option<Cow<'_, str>> {
         return None;
     }
     if !body.contains('\\') {
-        return Some(Cow::Borrowed(body));
+        return (!body.contains('"')).then_some(Cow::Borrowed(body));
     }
     // Canonical keys have already decoded scalar escapes. The remaining
     // Unicode escapes represent controls or unpaired UTF-16 units; keep them
@@ -65,6 +65,9 @@ pub(crate) fn display_json_key(canonical: &str) -> Option<Cow<'_, str>> {
                 _ => return None,
             }
         } else {
+            if character == '"' {
+                return None;
+            }
             character
         };
         decoded.try_reserve(character.len_utf8()).ok()?;

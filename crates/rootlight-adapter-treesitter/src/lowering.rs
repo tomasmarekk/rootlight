@@ -3,6 +3,8 @@
 //! The analyzer injects a `ParseProvider` and never observes native Tree-sitter
 //! types, so extraction can evolve independently from stable IR construction.
 
+mod toml;
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -1827,20 +1829,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
-            let qualified_length = match parent_entity.and_then(|parent| drafts.get(&parent)) {
-                Some(parent) => parent
-                    .qualified_length
-                    .checked_add(2)
-                    .and_then(|length| length.checked_add(name.len()))
-                    .ok_or(SinkError::AccountingOverflow)?,
-                None => match qualified_prefix {
-                    Some(prefix) => prefix
-                        .len()
+            let qualified_length = if language == "toml" {
+                // TOML replaces lexical nesting with its bounded data address
+                // below; charging a filename/lexical prefix here can reject an
+                // otherwise representable absolute table path.
+                name.len()
+            } else {
+                match parent_entity.and_then(|parent| drafts.get(&parent)) {
+                    Some(parent) => parent
+                        .qualified_length
                         .checked_add(2)
                         .and_then(|length| length.checked_add(name.len()))
                         .ok_or(SinkError::AccountingOverflow)?,
-                    None => name.len(),
-                },
+                    None => match qualified_prefix {
+                        Some(prefix) => prefix
+                            .len()
+                            .checked_add(2)
+                            .and_then(|length| length.checked_add(name.len()))
+                            .ok_or(SinkError::AccountingOverflow)?,
+                        None => name.len(),
+                    },
+                }
             };
             require_resource_limit(
                 ResourceKind::StringBytes,
@@ -1856,6 +1865,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     local_id: fact.local_id(),
                     parent_entity,
                     scope_identity: member_scope_identity,
+                    data_identity: None,
+                    data_qualified_name: None,
                     scope_collision_guard: parent_scope
                         .as_ref()
                         .and_then(|scope| scope.collision_guard),
@@ -1876,6 +1887,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
             );
             nearest_entity_ancestor.insert(fact.local_id(), Some(fact.local_id()));
             nearest_scope_ancestor.insert(fact.local_id(), None);
+        }
+        if self.request.language().as_str() == "toml" {
+            toml::resolve(
+                self.parse_output.facts(),
+                &mut drafts,
+                &mut unsupported_scope_entities,
+                total_string_bytes,
+                self.request.limits().ir(),
+                cancellation,
+            )?;
         }
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
@@ -2022,6 +2043,8 @@ struct EntityDraft {
     local_id: u64,
     parent_entity: Option<u64>,
     scope_identity: Option<[u8; 32]>,
+    data_identity: Option<[u8; 32]>,
+    data_qualified_name: Option<String>,
     scope_collision_guard: Option<[u8; 32]>,
     qualified_prefix: Option<String>,
     synthetic: bool,
@@ -2097,53 +2120,78 @@ fn materialize_entity(
     maximum_string_bytes: usize,
     materialized: &HashMap<u64, MaterializedEntity>,
 ) -> Result<MaterializedEntity, AdapterError> {
-    let (container, mut container_identity, qualified_name) = match draft
-        .parent_entity
-        .and_then(|parent| materialized.get(&parent))
-    {
-        Some(parent) => {
-            let mut identity = Vec::with_capacity(1 + parent.record.id.as_bytes().len());
-            identity.push(2);
-            identity.extend_from_slice(parent.record.id.as_bytes());
-            let qualified_length = parent
-                .record
-                .qualified_name
-                .len()
-                .checked_add(2)
-                .and_then(|length| length.checked_add(draft.name.len()))
-                .ok_or(SinkError::AccountingOverflow)?;
-            if qualified_length > maximum_string_bytes {
-                return Err(stream_limit(
-                    ResourceKind::StringBytes,
-                    qualified_length,
-                    maximum_string_bytes,
-                ));
-            }
-            debug_assert_eq!(qualified_length, draft.qualified_length);
-            let mut qualified = String::with_capacity(qualified_length);
-            qualified.push_str(&parent.record.qualified_name);
-            qualified.push_str("::");
-            qualified.push_str(&draft.name);
-            (ContainerRef::Entity(parent.record.id), identity, qualified)
-        }
-        None => {
+    let (container, mut container_identity, qualified_name) =
+        if let Some(address) = draft.data_identity {
+            // Data addresses are independent of whether an implicit parent table
+            // has a written header. The Contains edge still uses the explicit owner.
             let file = full_source.span().file();
-            let mut identity = Vec::with_capacity(1 + file.as_bytes().len());
-            identity.push(1);
+            let container = draft
+                .parent_entity
+                .and_then(|parent| materialized.get(&parent))
+                .map_or(ContainerRef::File(file), |parent| {
+                    ContainerRef::Entity(parent.record.id)
+                });
+            let mut identity = Vec::with_capacity(1 + file.as_bytes().len() + address.len());
+            identity.push(4);
             identity.extend_from_slice(file.as_bytes());
-            let qualified_name = match draft.qualified_prefix.as_deref() {
-                Some(prefix) => {
-                    let mut qualified = String::with_capacity(draft.qualified_length);
-                    qualified.push_str(prefix);
+            identity.extend_from_slice(&address);
+            (
+                container,
+                identity,
+                draft
+                    .data_qualified_name
+                    .clone()
+                    .ok_or_else(|| provider_failure("treesitter-data-address-missing"))?,
+            )
+        } else {
+            match draft
+                .parent_entity
+                .and_then(|parent| materialized.get(&parent))
+            {
+                Some(parent) => {
+                    let mut identity = Vec::with_capacity(1 + parent.record.id.as_bytes().len());
+                    identity.push(2);
+                    identity.extend_from_slice(parent.record.id.as_bytes());
+                    let qualified_length = parent
+                        .record
+                        .qualified_name
+                        .len()
+                        .checked_add(2)
+                        .and_then(|length| length.checked_add(draft.name.len()))
+                        .ok_or(SinkError::AccountingOverflow)?;
+                    if qualified_length > maximum_string_bytes {
+                        return Err(stream_limit(
+                            ResourceKind::StringBytes,
+                            qualified_length,
+                            maximum_string_bytes,
+                        ));
+                    }
+                    debug_assert_eq!(qualified_length, draft.qualified_length);
+                    let mut qualified = String::with_capacity(qualified_length);
+                    qualified.push_str(&parent.record.qualified_name);
                     qualified.push_str("::");
                     qualified.push_str(&draft.name);
-                    qualified
+                    (ContainerRef::Entity(parent.record.id), identity, qualified)
                 }
-                None => draft.name.clone(),
-            };
-            (ContainerRef::File(file), identity, qualified_name)
-        }
-    };
+                None => {
+                    let file = full_source.span().file();
+                    let mut identity = Vec::with_capacity(1 + file.as_bytes().len());
+                    identity.push(1);
+                    identity.extend_from_slice(file.as_bytes());
+                    let qualified_name = match draft.qualified_prefix.as_deref() {
+                        Some(prefix) => {
+                            let mut qualified = String::with_capacity(draft.qualified_length);
+                            qualified.push_str(prefix);
+                            qualified.push_str("::");
+                            qualified.push_str(&draft.name);
+                            qualified
+                        }
+                        None => draft.name.clone(),
+                    };
+                    (ContainerRef::File(file), identity, qualified_name)
+                }
+            }
+        };
     if let Some(scope_identity) = draft.scope_identity {
         container_identity.push(3);
         container_identity.extend_from_slice(&scope_identity);
@@ -2186,7 +2234,7 @@ fn materialize_entity(
         language: draft.language.clone(),
         tier,
         canonical_name: draft.name.clone(),
-        display_name: if draft.kind == EntityKind::Property {
+        display_name: if draft.kind == EntityKind::Property || draft.language == "toml" {
             rootlight_adapter_sdk::structural_display_name_for_language(
                 &draft.language,
                 &draft.name,

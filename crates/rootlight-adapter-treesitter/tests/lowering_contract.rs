@@ -185,7 +185,11 @@ fn assert_data_key_captures(language: &str, cases: &[(&str, &str)]) {
             );
             let entity = &document.entities[0];
             assert_eq!(entity.kind, rootlight_ir::EntityKind::Property);
-            assert_eq!(entity.canonical_name, canonical);
+            if language == "toml" {
+                assert_eq!(entity.qualified_name, canonical);
+            } else {
+                assert_eq!(entity.canonical_name, canonical);
+            }
             assert_eq!(entity.language, language);
             assert_eq!(
                 entity.evidence.source,
@@ -232,6 +236,411 @@ struct LocalIds {
     function: u64,
     call: u64,
     import: u64,
+}
+
+#[test]
+fn toml_nested_array_tables_follow_the_latest_parent_occurrence() {
+    let entries = [
+        ("array", "items", ""),
+        ("pair", "name", "'first'"),
+        ("table", "items.detail", ""),
+        ("pair", "id", "1"),
+        ("array", "items.children", ""),
+        ("pair", "name", "'child'"),
+        ("array", "items", ""),
+        ("pair", "name", "'second'"),
+        ("table", "items.detail", ""),
+        ("pair", "id", "2"),
+        ("array", "items.children", ""),
+        ("pair", "name", "'other'"),
+    ];
+    let document = toml_table_fixture(&entries);
+    assert!(
+        document.skipped_regions.is_empty(),
+        "{:?}",
+        document.skipped_regions
+    );
+    assert_eq!(document.entities.len(), 12);
+    for index in [0, 1] {
+        let prefix = format!("\"items\"[{index}]");
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == prefix)
+            .unwrap();
+        for suffix in ["\"name\"", "\"detail\"", "\"children\"[0]"] {
+            let child = document
+                .entities
+                .iter()
+                .find(|entity| entity.qualified_name == format!("{prefix}.{suffix}"))
+                .unwrap();
+            assert_eq!(
+                child.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+        }
+        let detail = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == format!("{prefix}.\"detail\""))
+            .unwrap();
+        let id = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == format!("{prefix}.\"detail\".\"id\""))
+            .unwrap();
+        assert_eq!(
+            id.container,
+            Some(rootlight_ir::ContainerRef::Entity(detail.id))
+        );
+    }
+    let mut edited = entries;
+    edited[1].2 = "'body changed'";
+    let after = toml_table_fixture(&edited);
+    let ids = |document: &rootlight_ir::NormalizedIrDocument| {
+        document
+            .entities
+            .iter()
+            .map(|entity| (entity.qualified_name.clone(), entity.id))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(ids(&document), ids(&after));
+}
+
+#[test]
+fn toml_dotted_and_explicit_tables_share_addresses_even_with_late_parent_headers() {
+    let dotted = toml_table_fixture(&[("pair", "a.b.value", "1")]);
+    let headers = toml_table_fixture(&[
+        ("table", "a.b", ""),
+        ("pair", "value", "2"),
+        ("table", "a", ""),
+    ]);
+    assert!(headers.skipped_regions.is_empty());
+    let first = &dotted.entities[0];
+    let value = headers
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "\"value\"")
+        .unwrap();
+    assert_eq!(first.id, value.id);
+    assert_eq!(first.qualified_name, value.qualified_name);
+    let a = headers
+        .entities
+        .iter()
+        .find(|entity| entity.qualified_name == "\"a\"")
+        .unwrap();
+    let b = headers
+        .entities
+        .iter()
+        .find(|entity| entity.qualified_name == "\"a\".\"b\"")
+        .unwrap();
+    assert_eq!(b.container, Some(rootlight_ir::ContainerRef::Entity(a.id)));
+    assert_eq!(
+        value.container,
+        Some(rootlight_ir::ContainerRef::Entity(b.id))
+    );
+}
+
+#[test]
+fn toml_inline_tables_in_nested_arrays_count_scalar_siblings() {
+    let text = "items = [0, { name = 'first' }, [0, { name = 'second' }]]\n";
+    let (_directory, snapshot, source) =
+        source_fixture_for(text, "data.toml", b"toml-inline-ownership");
+    let mut facts = vec![SyntaxFact::new(
+        1,
+        None,
+        SyntaxFactKind::Root,
+        source.span(),
+        0,
+        label("toml.file.root"),
+    )];
+    for (id, parent, kind, syntax, needle, ordinal, depth) in [
+        (
+            2,
+            1,
+            SyntaxFactKind::Declaration,
+            "toml.property.declaration",
+            text,
+            0,
+            1,
+        ),
+        (
+            3,
+            2,
+            SyntaxFactKind::Occurrence,
+            "toml.key.definition",
+            "items",
+            0,
+            2,
+        ),
+        (
+            4,
+            2,
+            SyntaxFactKind::Scope,
+            "toml.array.scope",
+            "[0, { name = 'first' }, [0, { name = 'second' }]]",
+            0,
+            2,
+        ),
+        (
+            5,
+            4,
+            SyntaxFactKind::Scope,
+            "toml.array_element.scope",
+            "0",
+            0,
+            3,
+        ),
+        (
+            6,
+            4,
+            SyntaxFactKind::Scope,
+            "toml.array_element.scope",
+            "{ name = 'first' }",
+            0,
+            3,
+        ),
+        (
+            7,
+            6,
+            SyntaxFactKind::Declaration,
+            "toml.property.declaration",
+            "name = 'first'",
+            0,
+            4,
+        ),
+        (
+            8,
+            7,
+            SyntaxFactKind::Occurrence,
+            "toml.key.definition",
+            "name",
+            0,
+            5,
+        ),
+        (
+            9,
+            4,
+            SyntaxFactKind::Scope,
+            "toml.array_element.scope",
+            "[0, { name = 'second' }]",
+            0,
+            3,
+        ),
+        (
+            10,
+            9,
+            SyntaxFactKind::Scope,
+            "toml.array.scope",
+            "[0, { name = 'second' }]",
+            0,
+            4,
+        ),
+        (
+            11,
+            10,
+            SyntaxFactKind::Scope,
+            "toml.array_element.scope",
+            "0",
+            1,
+            5,
+        ),
+        (
+            12,
+            10,
+            SyntaxFactKind::Scope,
+            "toml.array_element.scope",
+            "{ name = 'second' }",
+            0,
+            5,
+        ),
+        (
+            13,
+            12,
+            SyntaxFactKind::Declaration,
+            "toml.property.declaration",
+            "name = 'second'",
+            0,
+            6,
+        ),
+        (
+            14,
+            13,
+            SyntaxFactKind::Occurrence,
+            "toml.key.definition",
+            "name",
+            1,
+            7,
+        ),
+    ] {
+        facts.push(SyntaxFact::new(
+            id,
+            Some(parent),
+            kind,
+            span_in(text, &source, needle, ordinal),
+            depth,
+            label(syntax),
+        ));
+    }
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        LanguageId::new("toml").unwrap(),
+        &limits(IrLimits::default()),
+        facts,
+    )
+    .unwrap();
+    let document = output.document();
+    assert!(document.skipped_regions.is_empty());
+    assert_eq!(document.entities.len(), 3);
+    for expected in ["\"items\"[1].\"name\"", "\"items\"[2][1].\"name\""] {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == expected)
+            .unwrap();
+        assert_eq!(entity.display_name, "name");
+    }
+}
+
+#[test]
+fn toml_duplicate_table_ambiguity_propagates_to_descendants() {
+    let document = toml_table_fixture(&[
+        ("table", "a", ""),
+        ("pair", "x", "1"),
+        ("table", "a", ""),
+        ("pair", "y", "2"),
+        ("table", "a.b", ""),
+        ("pair", "z", "3"),
+    ]);
+    assert!(document.entities.is_empty(), "{:?}", document.entities);
+    assert_eq!(
+        document
+            .skipped_regions
+            .iter()
+            .filter(|region| region.detail == "stable-scope-identity-unavailable")
+            .count(),
+        6
+    );
+}
+
+fn toml_table_fixture(entries: &[(&str, &str, &str)]) -> rootlight_ir::NormalizedIrDocument {
+    toml_table_fixture_with_limits(entries, &limits(IrLimits::default()))
+}
+
+#[test]
+fn toml_qualified_address_uses_its_actual_separator_at_the_byte_boundary() {
+    let key = "x".repeat(60);
+    let mut ir = IrLimits::default();
+    ir.max_string_bytes = 66;
+    let document =
+        toml_table_fixture_with_limits(&[("table", "a", ""), ("pair", &key, "1")], &limits(ir));
+    assert!(document.skipped_regions.is_empty());
+    assert_eq!(document.entities.len(), 2);
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .map(|entity| entity.qualified_name.len())
+            .max(),
+        Some(66)
+    );
+}
+
+fn toml_table_fixture_with_limits(
+    entries: &[(&str, &str, &str)],
+    analysis_limits: &AnalysisLimits,
+) -> rootlight_ir::NormalizedIrDocument {
+    struct Entry {
+        start: usize,
+        end: usize,
+        key_start: usize,
+        key_end: usize,
+        parent: Option<usize>,
+        label: &'static str,
+    }
+    let mut text = String::new();
+    let mut recorded: Vec<Entry> = Vec::new();
+    let mut current = None;
+    for &(kind, key, value) in entries {
+        let start = text.len();
+        let (prefix, suffix, label) = match kind {
+            "table" => ("[", "]\n", "toml.table.declaration"),
+            "array" => ("[[", "]]\n", "toml.table_array_element.declaration"),
+            "pair" => ("", "", "toml.property.declaration"),
+            _ => panic!("unknown fixture entry"),
+        };
+        text.push_str(prefix);
+        let key_start = text.len();
+        text.push_str(key);
+        let key_end = text.len();
+        text.push_str(suffix);
+        if kind == "pair" {
+            text.push_str(&format!(" = {value}\n"));
+        }
+        let parent = if kind == "pair" { current } else { None };
+        recorded.push(Entry {
+            start,
+            end: text.len(),
+            key_start,
+            key_end,
+            parent,
+            label,
+        });
+        if kind != "pair" {
+            current = Some(recorded.len() - 1);
+        }
+        if let Some(parent) = parent {
+            recorded[parent].end = text.len();
+        }
+    }
+    let (_directory, snapshot, source) =
+        source_fixture_for(&text, "data.toml", b"toml-table-ownership");
+    let mut facts = vec![SyntaxFact::new(
+        1,
+        None,
+        SyntaxFactKind::Root,
+        source.span(),
+        0,
+        label("toml.file.root"),
+    )];
+    for (index, entry) in recorded.iter().enumerate() {
+        let id = u64::try_from(index).unwrap() * 2 + 2;
+        let parent = entry
+            .parent
+            .map_or(1, |parent| u64::try_from(parent).unwrap() * 2 + 2);
+        let depth = if entry.parent.is_some() { 2 } else { 1 };
+        let range = |start, end| {
+            let needle = &text[start..end];
+            let ordinal = text[..start].match_indices(needle).count();
+            span_in(&text, &source, needle, ordinal)
+        };
+        facts.push(SyntaxFact::new(
+            id,
+            Some(parent),
+            SyntaxFactKind::Declaration,
+            range(entry.start, entry.end),
+            depth,
+            label(entry.label),
+        ));
+        facts.push(SyntaxFact::new(
+            id + 1,
+            Some(id),
+            SyntaxFactKind::Occurrence,
+            range(entry.key_start, entry.key_end),
+            depth + 1,
+            label("toml.key.definition"),
+        ));
+    }
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        LanguageId::new("toml").unwrap(),
+        analysis_limits,
+        facts,
+    )
+    .unwrap();
+    output.document().clone()
 }
 
 #[test]

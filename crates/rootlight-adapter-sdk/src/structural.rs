@@ -16,6 +16,14 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "toml.table.declaration" | "toml.table_array_element.declaration"
+            ) =>
+        {
+            Some(EntityKind::Namespace)
+        }
         SyntaxFactKind::Declaration if label == "css.style_rule.declaration" => {
             Some(EntityKind::StyleRule)
         }
@@ -189,7 +197,9 @@ pub fn structural_captured_name_for_language<'a>(
 ///
 /// JSON scalar keys omit their enclosing quotes and decode quote/backslash
 /// escapes. Empty, boundary-whitespace, control-bearing and unpaired-UTF-16 keys
-/// retain the canonical quoted identity. Other languages are unchanged. The input must already be a
+/// retain the canonical quoted identity. TOML uses the same display rule for a
+/// single segment; multi-segment paths stay quoted to preserve boundaries.
+/// Other languages are unchanged. The input must already be a
 /// bounded canonical name from [`structural_captured_name_for_language`]; display
 /// text is no longer than that input and must never replace the durable identity.
 #[must_use]
@@ -197,7 +207,7 @@ pub fn structural_display_name_for_language<'a>(
     language: &str,
     canonical: &'a str,
 ) -> Cow<'a, str> {
-    if language == "json" {
+    if matches!(language, "json" | "toml") {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else {
         Cow::Borrowed(canonical)

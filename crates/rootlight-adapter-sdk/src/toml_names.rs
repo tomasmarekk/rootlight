@@ -101,6 +101,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn display_decodes_one_segment_but_preserves_dotted_path_boundaries() {
+        for (source, expected) in [
+            ("a", "a"),
+            ("'a.b'", "a.b"),
+            ("a.b", "\"a\".\"b\""),
+            ("''", "\"\""),
+            ("' '", "\" \""),
+            (r#""\u0000""#, r#""\u0000""#),
+            (r#"'a"b'"#, "a\"b"),
+            (r#"'a"b'.c"#, r#""a\"b"."c""#),
+        ] {
+            let canonical = canonical_toml_key_path(source, 128).unwrap();
+            assert_eq!(
+                crate::structural_display_name_for_language("toml", &canonical),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn equivalent_segments_share_identity_without_losing_path_boundaries() {
         for (source, expected) in [
             ("a", r#""a""#),
