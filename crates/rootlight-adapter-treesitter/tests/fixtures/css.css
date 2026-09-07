@@ -1,0 +1,14 @@
+/* Source-bound stylesheet declarations and nested selector evidence. */
+@import "./base.css";
+:root { --accent: #1a2b3c; }
+.card > .π, [data-label="A B"] {
+  color: var(--accent);
+  & > .icon { opacity: 0.8; }
+}
+@media (width > 40rem) {
+  .responsive { display: grid; }
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

@@ -40,7 +40,14 @@ fn cli_demo_returns_three_queries_and_retains_the_old_generation() {
     );
     assert_eq!(
         data["locate"]["data"]["hits"].as_array().map(Vec::len),
-        Some(1)
+        Some(2)
+    );
+    assert!(data["locate"]["data"]["hits"][0]["symbol"].is_string());
+    assert!(data["locate"]["data"]["hits"][1]["symbol"].is_null());
+    assert_eq!(data["locate"]["data"]["hits"][1]["kind"], "file");
+    assert_eq!(
+        data["locate"]["data"]["hits"][1]["path"],
+        data["locate"]["data"]["hits"][0]["path"]
     );
     assert_eq!(
         data["locate"]["data"]["hits"][0]["trust"],

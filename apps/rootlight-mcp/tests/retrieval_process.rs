@@ -403,12 +403,10 @@ fn supported_language_filters_apply_across_process_boundaries(fixture: &mut Retr
     assert_standalone_batch_parity(&standalone, &batch, "code.locate");
     let matching = &standalone["result"]["structuredContent"];
     assert_common_read_contract(matching, &fixture.repository_id);
-    assert_eq!(
+    process_support::assert_symbol_and_source_matches(
         matching["data"]["matches"]
             .as_array()
-            .expect("matching language returns a result")
-            .len(),
-        1
+            .expect("matching language returns a result"),
     );
 
     let excluded = fixture.standalone(
@@ -450,12 +448,10 @@ fn supported_path_scope_applies_across_process_boundaries(fixture: &mut Retrieva
     assert_standalone_batch_parity(&matching, &matching_batch, "code.locate");
     let matching = &matching["result"]["structuredContent"];
     assert_common_read_contract(matching, &fixture.repository_id);
-    assert_eq!(
+    process_support::assert_symbol_and_source_matches(
         matching["data"]["matches"]
             .as_array()
-            .expect("matching scope returns an array")
-            .len(),
-        1
+            .expect("matching scope returns an array"),
     );
 
     let excluded = fixture.standalone(
@@ -513,8 +509,29 @@ fn supported_path_scope_applies_across_process_boundaries(fixture: &mut Retrieva
         .expect("the scoped match contains a path");
     assert!(late_path.starts_with(&format!("{late_scope}/")));
     assert_ne!(late_path, first_path);
-    assert_eq!(scoped_late["truncated"], false);
-    assert!(scoped_late["next_cursor"].is_null());
+    assert_eq!(scoped_late["truncated"], true);
+    let file_page = fixture.standalone(
+        "locate-scope-late-source-page",
+        "code.locate",
+        json!({
+            "query": "scope_page_candidate",
+            "search_modes": ["exact"],
+            "scope": {"paths": [late_scope]},
+            "max_results": 1,
+            "cursor": scoped_late["next_cursor"]
+        }),
+    );
+    assert_success(&file_page, "code.locate");
+    let file_page = &file_page["result"]["structuredContent"];
+    let files = file_page["data"]["matches"]
+        .as_array()
+        .expect("source page returns matches");
+    assert_eq!(files.len(), 1);
+    assert!(files[0]["symbol_id"].is_null());
+    assert_eq!(files[0]["kind"], "file");
+    assert_eq!(files[0]["path"], late_path);
+    assert_eq!(file_page["truncated"], false);
+    assert!(file_page["next_cursor"].is_null());
 }
 
 fn supported_profiles_preserve_standalone_and_batch_semantics(fixture: &mut RetrievalFixture) {
@@ -827,7 +844,14 @@ fn retrieval_limits_cursors_and_unresolved_ids_are_truthful(fixture: &mut Retrie
         first_exhaustion, second_exhaustion,
         "multi-page locate ordering must be repeatable"
     );
-    assert_eq!(first_exhaustion.len(), 12);
+    assert_eq!(first_exhaustion.len(), 13);
+    assert_eq!(
+        first_exhaustion
+            .iter()
+            .filter(|identity| identity.starts_with("file:"))
+            .count(),
+        1
+    );
     assert_eq!(
         first_exhaustion
             .iter()
@@ -947,7 +971,7 @@ fn retrieval_limits_cursors_and_unresolved_ids_are_truthful(fixture: &mut Retrie
 fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<String> {
     let mut cursor = None;
     let mut identity = None;
-    let mut symbols = Vec::new();
+    let mut identities = Vec::new();
     for page_index in 0..16 {
         let mut arguments = json!({
             "query": "matrix_target",
@@ -982,18 +1006,23 @@ fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<Str
             !matches.is_empty(),
             "locate emitted an empty intermediate page"
         );
-        symbols.extend(matches.iter().map(|matched| {
-            matched["symbol_id"]
-                .as_str()
-                .expect("locate match has a symbol identity")
-                .to_owned()
+        identities.extend(matches.iter().map(|matched| {
+            if let Some(symbol) = matched["symbol_id"].as_str() {
+                symbol.to_owned()
+            } else {
+                assert_eq!(matched["kind"], "file");
+                let file = matched["file_id"]
+                    .as_str()
+                    .expect("source match has a file identity");
+                format!("file:{file}")
+            }
         }));
 
         let Some(next_cursor) = output["next_cursor"].as_str() else {
             assert_eq!(output["truncated"], false);
             assert_eq!(output["completeness"]["state"], "complete");
             assert_eq!(output["completeness"]["continuation"], "not_applicable");
-            return symbols;
+            return identities;
         };
         assert_eq!(output["truncated"], true);
         assert_eq!(output["completeness"]["state"], "truncated");

@@ -676,6 +676,7 @@ mod tests {
     #[test]
     fn compile_and_parser_metadata_are_exactly_populated() {
         let environment = environment(&"00".repeat(32)).expect("audited registry initializes");
+        let registry = GrammarRegistry::audited().expect("audited descriptors are available");
         assert_eq!(
             environment.operating_system,
             EvidenceValue::observed(env::consts::OS.to_owned())
@@ -709,7 +710,15 @@ mod tests {
             value: grammar_versions,
         } = &environment.grammar_versions
         {
-            assert_eq!(grammar_versions.len(), 11);
+            assert_eq!(grammar_versions.len(), registry.descriptors().len());
+            for descriptor in registry.descriptors() {
+                assert_eq!(
+                    grammar_versions
+                        .get(descriptor.language().as_str())
+                        .map(String::as_str),
+                    Some(descriptor.grammar_version())
+                );
+            }
         }
         assert!(matches!(
             &environment.grammar_source_package_checksums,
@@ -719,7 +728,15 @@ mod tests {
             value: source_package_checksums,
         } = &environment.grammar_source_package_checksums
         {
-            assert_eq!(source_package_checksums.len(), 11);
+            assert_eq!(source_package_checksums.len(), registry.descriptors().len());
+            for descriptor in registry.descriptors() {
+                assert_eq!(
+                    source_package_checksums
+                        .get(descriptor.language().as_str())
+                        .map(String::as_str),
+                    Some(descriptor.grammar_source_sha256())
+                );
+            }
         }
         assert!(matches!(
             &environment.grammar_hashes,
@@ -729,7 +746,27 @@ mod tests {
             value: grammar_hashes,
         } = &environment.grammar_hashes
         {
-            assert_eq!(grammar_hashes.len(), 19);
+            let expected_hashes = registry
+                .descriptors()
+                .iter()
+                .map(|descriptor| 1 + usize::from(descriptor.scanner_sha256().is_some()))
+                .sum::<usize>();
+            assert_eq!(grammar_hashes.len(), expected_hashes);
+            for descriptor in registry.descriptors() {
+                let language = descriptor.language().as_str();
+                assert_eq!(
+                    grammar_hashes
+                        .get(&format!("{language}.parser"))
+                        .map(String::as_str),
+                    Some(descriptor.parser_sha256())
+                );
+                assert_eq!(
+                    grammar_hashes
+                        .get(&format!("{language}.scanner"))
+                        .map(String::as_str),
+                    descriptor.scanner_sha256()
+                );
+            }
             assert!(grammar_hashes.contains_key("c.parser"));
             assert!(!grammar_hashes.contains_key("c.scanner"));
             assert!(grammar_hashes.contains_key("cpp.parser"));

@@ -15946,6 +15946,30 @@ mod tests {
 
     static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
 
+    fn assert_located_symbol_and_file(hits: &[daemon::FirstSliceLocateHit]) {
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].symbol.is_some(), "the exact symbol ranks first");
+        assert!(
+            hits[1].symbol.is_none(),
+            "source evidence is not a second symbol"
+        );
+        assert_eq!(hits[1].kind, "file");
+        assert_eq!(hits[1].file, hits[0].file);
+        assert_eq!(hits[1].path, hits[0].path);
+        assert_eq!(
+            hits[1]
+                .source
+                .as_ref()
+                .expect("file retains evidence")
+                .generation,
+            hits[0]
+                .source
+                .as_ref()
+                .expect("symbol retains evidence")
+                .generation,
+        );
+    }
+
     #[test]
     fn installed_project_adapter_is_the_exact_daemon_sibling() {
         let directory = TempDir::new().expect("fixture directory creates");
@@ -21394,7 +21418,7 @@ mod tests {
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
         };
-        assert_eq!(located.hits.len(), 1);
+        assert_located_symbol_and_file(&located.hits);
         let recovery_deadline = Instant::now() + Duration::from_secs(5);
         let recovery_context = loop {
             let context = journal
@@ -21737,7 +21761,7 @@ mod tests {
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
         };
-        assert_eq!(located.hits.len(), 1);
+        assert_located_symbol_and_file(&located.hits);
 
         let mut request = status_request(receipt.repository, None);
         request.include_operations = true;
@@ -21883,7 +21907,25 @@ mod tests {
             )
             .expect("reduced locate succeeds");
 
-        assert_eq!(unrestricted.data.hits.len(), 2);
+        assert_eq!(unrestricted.data.hits.len(), 3);
+        assert_eq!(
+            unrestricted
+                .data
+                .hits
+                .iter()
+                .filter(|hit| hit.symbol.is_some())
+                .count(),
+            2
+        );
+        assert_eq!(
+            unrestricted
+                .data
+                .hits
+                .iter()
+                .filter(|hit| hit.symbol.is_none() && hit.kind == "file")
+                .count(),
+            1
+        );
         assert_eq!(reduced.plan.estimate.results, 1);
         assert_eq!(reduced.data.hits.len(), 1);
         assert!(reduced.data.truncated);
@@ -26582,7 +26624,7 @@ mod tests {
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
             panic!("locate response expected");
         };
-        assert_eq!(locate.hits.len(), 1);
+        assert_located_symbol_and_file(&locate.hits);
         assert!(!locate.context.expect("context exists").active_generation);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -26716,7 +26758,7 @@ mod tests {
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
             panic!("first publicly successful status must name a queryable generation");
         };
-        assert_eq!(locate.hits.len(), 1);
+        assert_located_symbol_and_file(&locate.hits);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()

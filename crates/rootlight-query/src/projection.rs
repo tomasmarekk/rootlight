@@ -21,7 +21,7 @@ const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
 /// Incremental bounded projection of one immutable generation into lexical documents.
 ///
 /// Entity documents are projected during construction. Callers then supply
-/// unsupported source snapshots in the canonical order exposed by
+/// source snapshots in the canonical order exposed by
 /// [`Self::next_source_file`], allowing each full source body to be released
 /// after its bounded fallback document is built.
 #[derive(Debug)]
@@ -46,6 +46,33 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
     pub fn new(
         generation: &'generation GenerationSnapshot,
         budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, QueryError> {
+        Self::with_source_policy(generation, budget, false, cancellation)
+    }
+
+    /// Starts an entity projection with text documents for every retained file.
+    ///
+    /// Structural support must not remove a file's lexical source evidence.
+    /// The legacy constructor remains available for source-free callers and
+    /// reconstruction of previously published lexical indexes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid budgets, cancellation, generation
+    /// drift, exceeded bounds, or allocation failure.
+    pub fn with_all_sources(
+        generation: &'generation GenerationSnapshot,
+        budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, QueryError> {
+        Self::with_source_policy(generation, budget, true, cancellation)
+    }
+
+    fn with_source_policy(
+        generation: &'generation GenerationSnapshot,
+        budget: BuildBudget,
+        all_sources: bool,
         cancellation: &Cancellation,
     ) -> Result<Self, QueryError> {
         validate_build_admission(budget)?;
@@ -90,6 +117,9 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
                 .iter()
                 .map(|entry| entry.file().id),
         );
+        if all_sources {
+            unsupported_files.extend(document.files.iter().map(|file| file.id));
+        }
         if document
             .entities
             .len()
@@ -134,7 +164,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
         self.required_source_files.get(self.next_source).copied()
     }
 
-    /// Projects the next required unsupported source snapshot.
+    /// Projects the next required source snapshot.
     ///
     /// The snapshot must match the file returned by
     /// [`Self::next_source_file`], including its path, content identity, and
@@ -387,7 +417,40 @@ pub fn project_lexical_documents_with_sources(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
-    let mut projection = LexicalProjectionBuilder::new(generation, budget, cancellation)?;
+    project_with_source_snapshots(
+        LexicalProjectionBuilder::new(generation, budget, cancellation)?,
+        sources,
+        cancellation,
+    )
+}
+
+/// Projects entities and a bounded text prefix for every retained file.
+///
+/// File documents preserve source identity without inventing semantic entities;
+/// structural support does not exclude source text from the global index.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] for invalid budgets, cancellation, missing or drifted
+/// source identities, exceeded bounds, or allocation failure.
+pub fn project_lexical_documents_with_all_sources(
+    generation: &GenerationSnapshot,
+    sources: &[&SourceSnapshot],
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    project_with_source_snapshots(
+        LexicalProjectionBuilder::with_all_sources(generation, budget, cancellation)?,
+        sources,
+        cancellation,
+    )
+}
+
+fn project_with_source_snapshots(
+    mut projection: LexicalProjectionBuilder<'_>,
+    sources: &[&SourceSnapshot],
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
     let mut ordered_sources = Vec::new();
     ordered_sources
         .try_reserve_exact(sources.len())

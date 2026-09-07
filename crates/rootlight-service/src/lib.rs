@@ -116,7 +116,7 @@ pub use rootlight_query::{
 };
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
-    QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_sources,
+    QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_all_sources,
     project_scoped_lexical_documents_for_query, project_scoped_lexical_documents_with_source,
     project_source_fallback_document_with_text_limit,
 };
@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/14";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/15";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -8037,7 +8037,7 @@ impl FirstSliceService {
             .iter()
             .map(|source| &source.snapshot)
             .collect::<Vec<_>>();
-        let documents = project_lexical_documents_with_sources(
+        let documents = project_lexical_documents_with_all_sources(
             verified.snapshot(),
             &source_snapshots,
             BuildBudget::default(),
@@ -12710,15 +12710,7 @@ impl FirstSliceService {
                     {
                         observe(FirstSliceCoverageGapReason::Generated, Some(file.id));
                     }
-                    if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64
-                        && document.diagnostics.iter().any(|diagnostic| {
-                            diagnostic.code == "unsupported-language"
-                                && diagnostic
-                                    .source
-                                    .as_ref()
-                                    .is_some_and(|source| source.span().file() == file.id)
-                        })
-                    {
+                    if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64 {
                         observe(FirstSliceCoverageGapReason::Truncated, Some(file.id));
                     }
                 }
@@ -23622,7 +23614,10 @@ mod tests {
             .expect("structural fallback remains queryable");
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits.len(), 2);
+        assert!(located.data.hits[0].symbol.is_some());
+        assert_eq!(located.data.hits[1].kind, "file");
+        assert!(located.data.hits[1].symbol.is_none());
         assert_eq!(located.data.hits[0].language, "python");
         assert!(receipt.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "project-adapter-capacity-fallback"
@@ -23922,7 +23917,10 @@ mod tests {
             .expect("structural declaration remains queryable");
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits.len(), 2);
+        assert!(located.data.hits[0].symbol.is_some());
+        assert_eq!(located.data.hits[1].kind, "file");
+        assert!(located.data.hits[1].symbol.is_none());
         assert!(receipt.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "project-adapter-declaration-loss-fallback"
                 && diagnostic.message == "project analysis for python used structural fallback"
@@ -25324,6 +25322,7 @@ mod tests {
             "sample.c",
             "sample.cpp",
             "sample.cs",
+            "sample.css",
             "sample.go",
             "sample.java",
             "sample.js",
@@ -25381,7 +25380,7 @@ mod tests {
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
-            ("normalize.css", "css"),
+            ("pipeline.yaml", "yaml"),
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
             ("plot.R", "r"),
@@ -25427,7 +25426,7 @@ mod tests {
     fn unsupported_primary_sources_retain_exact_evidence_and_reason() {
         let fixture = TempDir::new().expect("fixture root exists");
         let sources = [
-            ("normalize.css", "html { line-height: 1.15; }\n", "css"),
+            ("pipeline.yaml", "workflow: sourceEvidence\n", "yaml"),
             (
                 "client.dart",
                 "class Transport { final int retryCount = 1; }\n",
@@ -25525,7 +25524,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["css", "dart", "objective-c", "matlab", "perl"] {
+        for language in ["yaml", "dart", "objective-c", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
@@ -25660,6 +25659,164 @@ mod tests {
         assert_eq!(capability.analyzers, ["treesitter"]);
     }
 
+    #[test]
+    fn css_published_rules_preserve_sources_identity_and_durable_versions() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = include_str!("../../rootlight-adapter-treesitter/tests/fixtures/css.css");
+        let path = fixture.path().join("theme.css");
+        fs::write(&path, source).expect("CSS fixture writes");
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .expect("baseline IR fixture writes");
+        let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("capabilities resolve");
+        let capability = inventory
+            .languages
+            .iter()
+            .find(|entry| entry.language == "css")
+            .expect("CSS capability is explicit");
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("mixed stylesheet and baseline IR publish");
+        let generation = service
+            .loaded_generation_snapshot(initial.generation)
+            .expect("generation retained");
+        assert_eq!(generation.document().version, NormalizedIrVersion::V1_2);
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "theme.css")
+            .expect("stylesheet retained");
+        let reference = file.evidence.source.clone().expect("source exists");
+        let read = service
+            .source_read(initial.generation, vec![reference], &deadline())
+            .expect("full stylesheet reads");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        assert_eq!(read.data.chunks[0].language, "css");
+        let status = service
+            .repository_status(initial.repository, None)
+            .expect("status resolves");
+        for language in ["css", "rust"] {
+            let row = status
+                .coverage
+                .iter()
+                .find(|entry| entry.language == language)
+                .expect("each language is accounted independently");
+            assert_eq!((row.discovered_files, row.indexed_files), (1, 1));
+        }
+        let coverage = service
+            .source_file_coverage_until(initial.generation, file.id, &deadline())
+            .expect("stylesheet coverage resolves");
+        assert_eq!(coverage.language, "css");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(
+            coverage.status,
+            CoverageStatus::Unknown,
+            "import resolution is not complete"
+        );
+        let mut symbols = BTreeMap::new();
+        for name in [
+            ":root",
+            "--accent",
+            ".card > .π, [data-label=\"A B\"]",
+            "& > .icon",
+            ".responsive",
+            "spin",
+        ] {
+            let located = service
+                .code_locate(
+                    initial.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("CSS declaration locates");
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .expect("CSS declaration has a symbol hit");
+            let symbol = hit.symbol.expect("symbol exists");
+            let explained = service
+                .symbol_explain(initial.generation, symbol, &deadline())
+                .expect("CSS declaration explains");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            assert_eq!(explained.data.entity.language, "css");
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("declaration source exists");
+            assert_eq!(reference.generation(), initial.generation);
+            let start = usize::try_from(reference.span().start_byte()).expect("offset fits");
+            let end = usize::try_from(reference.span().end_byte()).expect("offset fits");
+            let read = service
+                .source_read_with_options_and_budget(
+                    initial.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("exact declaration reads");
+            assert_eq!(read.data.chunks[0].bytes, &source.as_bytes()[start..end]);
+            symbols.insert(name, symbol);
+        }
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op indexes");
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = source.replace("opacity: 0.8", "opacity: 0.9");
+        fs::write(&path, &changed).expect("body edit writes");
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("body edit indexes");
+        assert_ne!(updated.generation, initial.generation);
+        drop(generation);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline())
+            .expect("mixed-version durable state restores");
+        for receipt in [&initial, &updated] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("both generations survive restart");
+            assert_eq!(generation.document().version, NormalizedIrVersion::V1_2);
+            for (name, symbol) in &symbols {
+                let explained = restored
+                    .symbol_explain(receipt.generation, *symbol, &deadline())
+                    .expect("symbol identity survives body edit and restart");
+                assert_eq!(explained.data.entity.canonical_name, *name);
+                assert_eq!(
+                    explained
+                        .data
+                        .entity
+                        .evidence
+                        .source
+                        .expect("source exists")
+                        .generation(),
+                    receipt.generation
+                );
+            }
+        }
+    }
     #[test]
     fn swift_published_symbols_retain_exact_sources_and_incremental_identity() {
         let fixture = TempDir::new().expect("fixture root exists");
@@ -26182,7 +26339,10 @@ mod tests {
             )
             .expect("canonical language filter executes");
 
-        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits.len(), 2);
+        assert_eq!(located.data.hits[1].language, "rust");
+        assert_eq!(located.data.hits[1].kind, "file");
+        assert!(located.data.hits[1].symbol.is_none());
         assert_eq!(located.data.hits[0].language, "rust");
         assert!(located.data.hits[0].symbol.is_some());
     }
@@ -26194,7 +26354,8 @@ mod tests {
             "{} searchableNeedle {{ color: green; }}\n",
             "a".repeat(SOURCE_FALLBACK_TEXT_BYTES + 256)
         );
-        fs::write(fixture.path().join("normalize.css"), source).expect("large CSS source writes");
+        fs::write(fixture.path().join("pipeline.yaml"), source)
+            .expect("large fallback source writes");
         let mut service = FirstSliceService::new(2).expect("service initializes");
 
         let receipt = service
@@ -26206,7 +26367,7 @@ mod tests {
 
         assert!(gaps.iter().any(|gap| {
             gap.reason == FirstSliceCoverageGapReason::Truncated
-                && gap.language.as_deref() == Some("css")
+                && gap.language.as_deref() == Some("yaml")
                 && gap.files == 1
         }));
     }
@@ -26299,6 +26460,14 @@ mod tests {
                 service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
                     .expect("durable source restores");
             }
+            let gaps = service
+                .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+                .expect("supported source projection gaps resolve");
+            assert!(gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Truncated
+                    && gap.language.as_deref() == Some("css")
+                    && gap.files == 1
+            }));
             for (query, expected) in [("tailOnlyMarker", true), ("absentMarker", false)] {
                 let located = service
                     .code_locate_with_filters_and_budget(
@@ -34073,7 +34242,10 @@ mod tests {
                 &cancellation,
             )
             .expect("v1 answer locate succeeds");
-        assert_eq!(answer.data.hits.len(), 1);
+        assert_eq!(answer.data.hits.len(), 2);
+        assert!(answer.data.hits[0].symbol.is_some());
+        assert!(answer.data.hits[1].symbol.is_none());
+        assert_eq!(answer.data.hits[1].path, "src/lib.rs");
         assert_eq!(answer.data.hits[0].path, "src/lib.rs");
         let first_symbol = answer.data.hits[0].symbol;
         let first_answer = answer.data.hits[0]
@@ -34100,7 +34272,10 @@ mod tests {
                 &cancellation,
             )
             .expect("negated nested source locate succeeds");
-        assert_eq!(kept.data.hits.len(), 1);
+        assert_eq!(kept.data.hits.len(), 2);
+        assert!(kept.data.hits[0].symbol.is_some());
+        assert!(kept.data.hits[1].symbol.is_none());
+        assert_eq!(kept.data.hits[1].path, "nested/ignored/kept.rs");
         assert_eq!(kept.data.hits[0].path, "nested/ignored/kept.rs");
         let kept_source = service
             .source_read(
@@ -34125,7 +34300,7 @@ mod tests {
         assert_no_exact_hits(
             &service,
             first.generation,
-            &["ignored_by_nested_rule", IGNORED_SENTINEL, "broken"],
+            &["ignored_by_nested_rule", IGNORED_SENTINEL],
             &cancellation,
         );
         let repeated = service
@@ -34156,7 +34331,9 @@ mod tests {
                 &cancellation,
             )
             .expect("v2 answer locate succeeds");
-        assert_eq!(active_answer.data.hits.len(), 1);
+        assert_eq!(active_answer.data.hits.len(), 2);
+        assert!(active_answer.data.hits[1].symbol.is_none());
+        assert_eq!(active_answer.data.hits[1].path, "src/lib.rs");
         assert_eq!(active_answer.data.hits[0].path, "src/lib.rs");
         assert_eq!(active_answer.data.hits[0].symbol, first_symbol);
         let active_source = service
@@ -34187,7 +34364,9 @@ mod tests {
                 &cancellation,
             )
             .expect("prior generation remains queryable");
-        assert_eq!(prior_answer.data.hits.len(), 1);
+        assert_eq!(prior_answer.data.hits.len(), 2);
+        assert!(prior_answer.data.hits[1].symbol.is_none());
+        assert_eq!(prior_answer.data.hits[1].path, "src/lib.rs");
         assert_eq!(prior_answer.data.hits[0].symbol, first_symbol);
         assert_eq!(prior_answer.data.hits[0].path, "src/lib.rs");
         let prior_reference = prior_answer.data.hits[0]
@@ -34213,7 +34392,7 @@ mod tests {
         assert_no_exact_hits(
             &service,
             second.generation,
-            &["ignored_by_nested_rule", IGNORED_SENTINEL, "broken"],
+            &["ignored_by_nested_rule", IGNORED_SENTINEL],
             &cancellation,
         );
     }
@@ -34664,6 +34843,34 @@ mod tests {
                     .as_ref()
                     .is_some_and(|source| source.span().file() == malformed)
         }));
+        let located = service
+            .code_locate(
+                generation,
+                "broken".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &deadline(),
+            )
+            .expect("malformed source remains lexically accessible");
+        assert_eq!(located.data.hits.len(), 1);
+        let hit = &located.data.hits[0];
+        assert!(
+            hit.symbol.is_none(),
+            "recovery does not invent a definition"
+        );
+        assert_eq!(hit.kind, "file");
+        assert_eq!(hit.path, "src/malformed.rs");
+        let source = hit
+            .source
+            .clone()
+            .expect("recovery retains source identity");
+        assert_eq!(source.generation(), generation);
+        assert_eq!(source.span().file(), malformed);
+        let read = service
+            .source_read(generation, vec![source], &deadline())
+            .expect("malformed source reads through its exact generation");
+        assert!(String::from_utf8_lossy(&read.data.chunks[0].bytes).contains("broken"));
     }
 
     fn assert_no_exact_hits(

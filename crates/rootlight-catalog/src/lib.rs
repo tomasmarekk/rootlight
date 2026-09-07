@@ -354,8 +354,9 @@ impl OracleReader {
 
     /// Materializes only generations carrying a validated identity proof.
     ///
-    /// Legacy schema version 2 oracles remain readable through [`Self::read`]
-    /// for compatibility, but cannot enter the backend-neutral query contract.
+    /// Legacy generation contracts in a supported schema remain readable through
+    /// [`Self::read`], but cannot enter the backend-neutral query contract without
+    /// the current identity proof. Sealed schema versions 3 and 4 are readable.
     ///
     /// # Errors
     ///

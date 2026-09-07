@@ -867,7 +867,7 @@ fn locate_symbol(mcp: &mut McpProcess, index: &IndexReceipt, query: &str) -> Str
     let matches = response["result"]["structuredContent"]["data"]["matches"]
         .as_array()
         .expect("code.locate returns matches");
-    assert_eq!(matches.len(), 1, "setup locate returns one exact symbol");
+    process_support::assert_symbol_and_source_matches(matches);
     required_string(&matches[0]["symbol_id"], "symbol identity")
 }
 

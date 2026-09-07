@@ -89,7 +89,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 14] = [
+    let cases: [(&str, &str, &[u8]); 15] = [
         (
             "sample.lua",
             "lua",
@@ -98,6 +98,7 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
         ("sample.rs", "rust", b"fn sample() {}\n"),
         ("sample.rb", "ruby", b"def sample\n nil\nend\n"),
         ("sample.swift", "swift", b"func sample() {}\n"),
+        ("sample.css", "css", b".sample { color: red; }\n"),
         ("sample.py", "python", b"def sample():\n    return None\n"),
         (
             "sample.js",

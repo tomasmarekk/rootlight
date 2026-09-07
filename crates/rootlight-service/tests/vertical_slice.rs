@@ -36,6 +36,30 @@ const KEPT: &str = "pub fn kept_after_negation() -> bool {\n    true\n}\n";
 const MALFORMED: &str = "// malformed_source_sentinel\npub fn broken( {\n";
 const SHARED_SECRET: &str = "CUSTOMER_SECRET_DO_NOT_SHARE";
 
+fn assert_symbol_and_source_hits(hits: &[rootlight_query::LocateHit]) {
+    assert_eq!(hits.len(), 2);
+    assert!(hits[0].symbol.is_some(), "the precise symbol ranks first");
+    assert!(
+        hits[1].symbol.is_none(),
+        "source evidence is not a second symbol"
+    );
+    assert_eq!(hits[1].kind, "file");
+    assert_eq!(hits[1].path, hits[0].path);
+    assert_eq!(hits[1].language, hits[0].language);
+    assert_eq!(
+        hits[1]
+            .source
+            .as_ref()
+            .expect("file retains source identity")
+            .generation(),
+        hits[0]
+            .source
+            .as_ref()
+            .expect("symbol retains source identity")
+            .generation(),
+    );
+}
+
 #[test]
 fn shared_generation_round_trip_is_source_bound_and_does_not_activate() {
     let fixture = fixture(&format!(
@@ -243,7 +267,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
             &cancellation,
         )
         .expect("locate query succeeds");
-    assert_eq!(located.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&located.data.hits);
     assert_eq!(
         located.data.hits[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -685,7 +709,7 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
             &cancellation,
         )
         .expect("answer locate succeeds");
-    assert_eq!(answer.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&answer.data.hits);
     assert_eq!(answer.data.hits[0].path, "src/lib.rs");
     let first_answer = answer.data.hits[0]
         .source
@@ -708,12 +732,13 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
             &cancellation,
         )
         .expect("nested kept source locate succeeds");
-    assert_eq!(kept.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&kept.data.hits);
     assert_eq!(kept.data.hits[0].path, "src/nested/kept.rs");
 
     for (sentinel, path, language) in [
         ("cargo_manifest_sentinel", "Cargo.toml", "toml"),
         ("nested_ignore_sentinel", "src/nested/.gitignore", "unknown"),
+        ("malformed_source_sentinel", "src/malformed.rs", "rust"),
     ] {
         let located = service
             .code_locate(
@@ -743,22 +768,20 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
             fs::read(fixture.path().join(path)).expect("fixture source reads")
         );
     }
-    for sentinel in ["malformed_source_sentinel", "excluded_file_sentinel"] {
-        let located = service
-            .code_locate(
-                first.generation,
-                sentinel.to_owned(),
-                LocateMode::Exact,
-                8,
-                0,
-                &cancellation,
-            )
-            .expect("unindexed sentinel locate succeeds");
-        assert!(
-            located.data.hits.is_empty(),
-            "{sentinel} must not be indexed"
-        );
-    }
+    let excluded = service
+        .code_locate(
+            first.generation,
+            "excluded_file_sentinel".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("excluded source query succeeds");
+    assert!(
+        excluded.data.hits.is_empty(),
+        "excluded sources stay outside the index"
+    );
 
     let repeated = service
         .index_rust_fixture(fixture.path(), &cancellation)
@@ -782,7 +805,7 @@ fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
             &cancellation,
         )
         .expect("active answer locate succeeds");
-    assert_eq!(second_answer.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&second_answer.data.hits);
     assert_eq!(second_answer.data.hits[0].path, "src/lib.rs");
     let second_answer = second_answer.data.hits[0]
         .source
@@ -1445,7 +1468,7 @@ fn tests_select_returns_a_direct_rust_test() {
             &cancellation,
         )
         .expect("locate query succeeds");
-    assert_eq!(located.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&located.data.hits);
     let seed = located.data.hits[0]
         .symbol
         .expect("structural locate hit has a symbol identity");
@@ -1525,7 +1548,7 @@ fn change_impact_returns_a_resolved_rust_caller() {
             &cancellation,
         )
         .expect("locate query succeeds");
-    assert_eq!(located.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&located.data.hits);
     let changed = located.data.hits[0]
         .symbol
         .expect("structural locate hit has a symbol identity");
@@ -1630,7 +1653,7 @@ fn plan_change_includes_a_resolved_rust_caller() {
             &cancellation,
         )
         .expect("locate query succeeds");
-    assert_eq!(located.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&located.data.hits);
     let target = located.data.hits[0]
         .symbol
         .expect("structural locate hit has a symbol identity");
@@ -1744,7 +1767,7 @@ fn history_compare_reports_an_honest_empty_comparison_for_base_equal_to_head() {
             &cancellation,
         )
         .expect("locate query succeeds");
-    assert_eq!(located.data.hits.len(), 1);
+    assert_symbol_and_source_hits(&located.data.hits);
     let target = located.data.hits[0]
         .symbol
         .expect("structural locate hit has a symbol identity");

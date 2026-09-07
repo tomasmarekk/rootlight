@@ -290,6 +290,9 @@ impl QueryPack {
             // A shadowable require call is not a language import statement.
             expected.retain(|name| *name != "import");
         }
+        if family == GrammarFamily::Css {
+            expected.retain(|name| !matches!(*name, "call" | "reference" | "signature"));
+        }
         if family == GrammarFamily::Rust {
             expected.extend(RUST_SPECIAL_CAPTURES);
             expected.sort_unstable();
@@ -717,6 +720,7 @@ fn candidate_for_capture(
             GrammarFamily::Lua => "lua.call",
             GrammarFamily::Ruby => "ruby.call",
             GrammarFamily::Swift => "swift.call",
+            GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -883,6 +887,16 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Css, "stylesheet") => Some("css.file"),
+        (GrammarFamily::Css, "rule_set") => Some("css.style_rule"),
+        (GrammarFamily::Css, "selectors") => Some("css.selectors"),
+        (GrammarFamily::Css, "keyframes_statement") => Some("css.keyframes"),
+        (GrammarFamily::Css, "keyframes_name" | "property_name") => Some("css.identifier"),
+        (GrammarFamily::Css, "declaration") => Some("css.property"),
+        (GrammarFamily::Css, "import_statement") => Some("css.import"),
+        (GrammarFamily::Css, "block" | "keyframe_block_list") => Some("css.block"),
+        (GrammarFamily::Css, "comment" | "js_comment") => Some("css.comment"),
+        (GrammarFamily::Css, "string_value") => Some("css.string"),
         (GrammarFamily::Swift, "source_file") => Some("swift.file"),
         (GrammarFamily::Swift, "class_declaration") => Some("swift.type_scope"),
         (GrammarFamily::Swift, "protocol_declaration") => Some("swift.protocol"),
@@ -1174,7 +1188,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(14);
+        let mut packs = Vec::with_capacity(15);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1196,6 +1210,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Lua, include_str!("../queries/lua.scm")),
             (GrammarFamily::Ruby, include_str!("../queries/ruby.scm")),
             (GrammarFamily::Swift, include_str!("../queries/swift.scm")),
+            (GrammarFamily::Css, include_str!("../queries/css.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1263,6 +1278,7 @@ mod tests {
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
             GrammarFamily::Swift,
+            GrammarFamily::Css,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1270,6 +1286,9 @@ mod tests {
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if matches!(family, GrammarFamily::Lua | GrammarFamily::Ruby) {
                 expected.retain(|name| *name != "import");
+            }
+            if family == GrammarFamily::Css {
+                expected.retain(|name| !matches!(*name, "call" | "reference" | "signature"));
             }
             if family == GrammarFamily::Rust {
                 expected.extend(RUST_SPECIAL_CAPTURES);

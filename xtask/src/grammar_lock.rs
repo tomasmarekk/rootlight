@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "d3fa673f292e3864a8951b07d78603ae6c86ae2d0015fbb5a9f6e67cf7d6cc0a";
+    "e6ba18e560909be0a925b06e7f9cf94c5b6a3fce04d1605a882af536a42ace51";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,7 +37,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 14] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 15] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -108,6 +108,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 14] = [
         "0.7.3",
         "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c",
     ),
+    (
+        "tree-sitter-css",
+        "0.25.0",
+        "a5cbc5e18f29a2c6d6435891f42569525cf95435a3e01c2f1947abcde178686f",
+    ),
 ];
 
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
@@ -138,6 +143,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-css-0.25.0-LICENSE",
+        "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-swift-0.7.3-LICENSE",
         "3533cec129bb4bba015c0d61d86dd7c3b7e82110e4d2ff7837a01eff5bad5ccc",
     )?;
@@ -161,7 +171,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 14 {
+    if manifest.grammars.len() != 15 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -185,6 +195,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "c",
         "cpp",
         "csharp",
+        "css",
         "go",
         "java",
         "javascript",

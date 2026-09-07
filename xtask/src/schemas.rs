@@ -68,10 +68,11 @@ const GENERATED_RUST_FILES: [&str; 4] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
-const STORAGE_COMPATIBILITY_BASELINES: [&str; 3] = [
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 4] = [
     "storage/1.0/schema-fingerprints.json",
     "storage/1.1/schema-fingerprints.json",
     "storage/1.2/schema-fingerprints.json",
+    "storage/1.2/oracle-4-schema-fingerprints.json",
 ];
 const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
     "crates/rootlight-catalog/src/schema.rs",
@@ -84,7 +85,7 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-2.0-rejected.json",
 ];
 const LEXICAL_EXTENSION_BASELINE: &str = "extensions/rootlight.lexical/1/envelope.json";
-const COMPATIBILITY_BASELINES: [&str; 9] = [
+const COMPATIBILITY_BASELINES: [&str; 10] = [
     LEXICAL_EXTENSION_BASELINE,
     "ir/1.0/document.json",
     "ir/1.1/document.json",
@@ -94,6 +95,7 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[0],
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
+    STORAGE_COMPATIBILITY_BASELINES[3],
 ];
 const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 14] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
@@ -325,7 +327,7 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
                 )
             })
             .collect::<Vec<_>>()
-            != [(1, 0), (1, 1), (1, 2)]
+            != [(1, 0), (1, 1), (1, 2), (1, 2)]
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.catalog)
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.oracle)
     {

@@ -10,11 +10,11 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "fdc047b5fdac3927bed88b6e299f70a2c96288617ddbd295b1810d1c7955bd74"
+      "blake3": "4f3475ada47dba7a1964bbd4a00aec16b5f9f7578b3b6e2361c0e8c0d25d0dc2"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "a59281d2bce7d9c956c959a2d0e5d13e95504d00960551e06afa0911b648631a"
+      "blake3": "161235879da35763f00c144fccfb4016b9026cf39c701309d9c6f95989c031a0"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -193,6 +193,10 @@
       "blake3": "4117e9c17ed88c38030e076643e9d4959e32627b664dfeb41d14bf622e3a9d4b"
     },
     {
+      "path": "tests/fixtures/compatibility/storage/1.2/oracle-4-schema-fingerprints.json",
+      "blake3": "21d68bfff69e841831e997dec601f1607380c6a1715a317359470ea6d4344901"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.2/schema-fingerprints.json",
       "blake3": "2d303968654a6dbfc0bf279f8273c4fcecbee7636b17f39bff8f325147b010e9"
     },
@@ -226,7 +230,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "08b610452185ce0968f833b3693cc0cf496412ceb85701fcf06a148aac2dd12a"
+      "blake3": "af381de099b2187bd6ded7624f1d7df5944e719d54b7a10897e56d9114936622"
     }
   ],
   "artifacts": [

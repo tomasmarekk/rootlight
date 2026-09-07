@@ -77,6 +77,16 @@ const SWIFT_CASE: LanguageCase = LanguageCase {
     body_after: "return  self",
 };
 
+const CSS_CASE: LanguageCase = LanguageCase {
+    name: "css",
+    path: "src/theme.css",
+    frontend: "tree-sitter-css-0.25.0",
+    source: include_str!("fixtures/css.css"),
+    generated: false,
+    body_before: "opacity: 0.8",
+    body_after: "opacity: 0.9",
+};
+
 const CASES: [LanguageCase; 14] = [
     LanguageCase {
         name: "rust",
@@ -585,6 +595,185 @@ fn ruby_declarations_and_operator_methods_preserve_exact_identities() {
                 .expect("fixture offset fits")
         );
     }
+}
+
+#[test]
+fn css_declarations_preserve_exact_sources_and_body_stable_identity() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(CSS_CASE, CSS_CASE.source.as_bytes());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let initial_request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    let document = output.document();
+    assert_eq!(document.version, rootlight_ir::NormalizedIrVersion::V1_2);
+    validate_ir_document(document, limits.ir(), &ExtensionSupport::default())
+        .expect("source-bound CSS IR validates");
+    let expected = [
+        ("src/theme.css", EntityKind::Module, CSS_CASE.source),
+        (
+            ":root",
+            EntityKind::StyleRule,
+            ":root { --accent: #1a2b3c; }",
+        ),
+        ("--accent", EntityKind::Property, "--accent: #1a2b3c;"),
+        (
+            ".card > .π, [data-label=\"A B\"]",
+            EntityKind::StyleRule,
+            ".card > .π, [data-label=\"A B\"] {\n  color: var(--accent);\n  & > .icon { opacity: 0.8; }\n}",
+        ),
+        (
+            "& > .icon",
+            EntityKind::StyleRule,
+            "& > .icon { opacity: 0.8; }",
+        ),
+        (
+            ".responsive",
+            EntityKind::StyleRule,
+            ".responsive { display: grid; }",
+        ),
+        (
+            "spin",
+            EntityKind::Keyframes,
+            "@keyframes spin {\n  from { transform: rotate(0deg); }\n  to { transform: rotate(360deg); }\n}",
+        ),
+    ];
+    assert_eq!(
+        document.entities.len(),
+        expected.len(),
+        "{:?}",
+        document.entities
+    );
+    for (name, kind, declaration) in expected {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .expect("each CSS declaration survives lowering");
+        assert_eq!(entity.language, "css");
+        let evidence = entity
+            .evidence
+            .source
+            .as_ref()
+            .expect("exact declaration source");
+        assert_eq!(evidence.generation(), fixture.source.generation());
+        assert_eq!(evidence.content_hash(), fixture.source.content_hash());
+        assert_eq!(evidence.span().file(), fixture.source.span().file());
+        if kind != EntityKind::Module {
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .expect("definition targets its exact entity");
+            let span = definition.source.span();
+            let start = usize::try_from(span.start_byte()).expect("fixture offset fits");
+            let end = usize::try_from(span.end_byte()).expect("fixture offset fits");
+            assert_eq!(CSS_CASE.source.get(start..end), Some(declaration));
+            assert_eq!(&definition.source, evidence);
+        }
+    }
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::Calls)
+    );
+    let changed_source = CSS_CASE
+        .source
+        .replace(CSS_CASE.body_before, CSS_CASE.body_after);
+    let changed = fixture.rewrite(changed_source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, CSS_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert_eq!(symbol_ids(document), symbol_ids(reparsed.document()));
+    assert!(reparsed.document().entities.iter().all(|entity| {
+        entity.evidence.source.as_ref().is_some_and(|source| {
+            source.generation() == changed.source.generation()
+                && source.content_hash() == changed.source.content_hash()
+        })
+    }));
+}
+
+#[test]
+fn css_selector_identity_preserves_escape_terminators_and_non_ascii_whitespace() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    let mut identities = BTreeSet::new();
+    for selector in [
+        r".\31 a",
+        r".\31  a",
+        ".a\u{a0}b",
+        ".a b",
+        ".π > .🚀",
+        "[title=\"a  b\"]",
+        ".card,\r\n.card2",
+    ] {
+        let source = format!("{selector} {{ color: red; }}\n");
+        let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+        let request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+        let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+        let rules = output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::StyleRule)
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 1, "{selector:?}");
+        assert_eq!(rules[0].canonical_name, selector);
+        assert!(
+            identities.insert(rules[0].id),
+            "distinct selectors cannot share identity"
+        );
+    }
+}
+
+#[test]
+fn css_custom_properties_preserve_case_and_unicode_codepoint_identity() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CSS_CASE);
+    let limits = limits();
+    let names = [
+        "--foo",
+        "--FOO",
+        "--foó",
+        "--foo\u{301}",
+        r"--\61 ccent",
+        "--α",
+    ];
+    let declarations = names
+        .iter()
+        .map(|name| format!("{name}: red;"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(":root {{ {declarations} }}\n");
+    let fixture = Fixture::new(CSS_CASE, source.as_bytes());
+    let request = request(&fixture.snapshot, &fixture.source, CSS_CASE, &limits);
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let properties = output
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .collect::<Vec<_>>();
+    assert_eq!(properties.len(), names.len());
+    assert_eq!(
+        properties
+            .iter()
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        names.into_iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        properties
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        names.len()
+    );
 }
 
 #[test]

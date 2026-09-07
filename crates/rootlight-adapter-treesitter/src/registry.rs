@@ -41,6 +41,8 @@ pub enum GrammarFamily {
     Ruby,
     /// Swift grammar with checked scanner state restoration.
     Swift,
+    /// CSS grammar with CSS-defined Unicode and whitespace boundaries.
+    Css,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -120,7 +122,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(14);
+        let mut descriptors = Vec::with_capacity(15);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -136,6 +138,7 @@ impl GrammarRegistry {
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
             GrammarFamily::Swift,
+            GrammarFamily::Css,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -246,6 +249,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Lua => tree_sitter_lua::LANGUAGE.into(),
         GrammarFamily::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         GrammarFamily::Swift => tree_sitter_swift::LANGUAGE.into(),
+        GrammarFamily::Css => tree_sitter_css::LANGUAGE.into(),
     }
 }
 
@@ -260,6 +264,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Css => GrammarIdentity {
+            language_id: "css",
+            grammar_version: "0.25.0",
+            source_package_sha256: "a5cbc5e18f29a2c6d6435891f42569525cf95435a3e01c2f1947abcde178686f",
+            parser_sha256: "3563840da71829c8f883a262ead2cd7127e4a2ac09825b0a67484eebbcd40e58",
+            scanner_sha256: Some(
+                "6be764da4d1deb1d8561e1388cce38f2ca5d9312fc97d371b38afe96655a4ec1",
+            ),
+        },
         GrammarFamily::Swift => GrammarIdentity {
             language_id: "swift",
             grammar_version: "0.7.3",
@@ -428,7 +441,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 14);
+        assert_eq!(registry.descriptors().len(), 15);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -444,6 +457,7 @@ mod tests {
             GrammarFamily::Lua,
             GrammarFamily::Ruby,
             GrammarFamily::Swift,
+            GrammarFamily::Css,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -507,6 +521,7 @@ mod tests {
             (GrammarFamily::Lua, "lua", "tree-sitter-lua"),
             (GrammarFamily::Ruby, "ruby", "tree-sitter-ruby"),
             (GrammarFamily::Swift, "swift", "tree-sitter-swift"),
+            (GrammarFamily::Css, "css", "tree-sitter-css"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

@@ -13,7 +13,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{RngAlgorithm, RngSeed};
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot, LanguageId,
-    MemoryAdmissionPolicy, ParseRequest, StreamLimits, execute_parse,
+    MemoryAdmissionPolicy, ParseRequest, ResourceKind, SinkError, StreamLimits, execute_parse,
 };
 use rootlight_adapter_treesitter::{ParserSettings, RuntimeConfig, TreeSitterProvider};
 use rootlight_cancel::{Cancellation, CancellationReason};
@@ -25,7 +25,7 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
 // CI replays one reviewed corpus; broader random campaigns use a separate runner config.
 const FUZZ_SEED: u64 = 202_607_170_404;
-const FUZZ_ROUTES: [(&str, &str); 15] = [
+const FUZZ_ROUTES: [(&str, &str); 16] = [
     ("fuzz.rs", "rust"),
     ("fuzz.py", "python"),
     ("fuzz.js", "javascript"),
@@ -41,6 +41,7 @@ const FUZZ_ROUTES: [(&str, &str); 15] = [
     ("fuzz.php", "php"),
     ("fuzz.lua", "lua"),
     ("fuzz.swift", "swift"),
+    ("fuzz.css", "css"),
 ];
 
 #[test]
@@ -120,8 +121,23 @@ proptest! {
                 Err(AdapterError::Cancelled {
                     reason: CancellationReason::DeadlineExceeded,
                 }) => {}
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed,
+                    limit,
+                })) => {
+                    // Identity facts are atomic: overflow must fail closed, not
+                    // publish an incomplete declaration under a success status.
+                    prop_assert_eq!(limit, 8);
+                    prop_assert!(observed > limit);
+                    let required = provider.required_syntax_fact_count(
+                        &fuzz_request,
+                        &deadline(),
+                    );
+                    prop_assert_eq!(required, Ok(observed));
+                }
                 Err(error) => {
-                    prop_assert!(false, "unexpected bounded parse error: {error:?}");
+                    prop_assert!(false, "{name}: unexpected bounded parse error: {error:?}");
                 }
             }
 
@@ -266,6 +282,7 @@ fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
         "lua" => b"local function cleanup() return 1 end\n",
         "ruby" => b"def cleanup()\nend\n",
         "swift" => b"func cleanup() {}\n",
+        "css" => b".cleanup { color: red; }\n",
         _ => b"",
     }
 }

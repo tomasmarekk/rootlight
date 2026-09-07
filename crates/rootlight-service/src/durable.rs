@@ -336,6 +336,15 @@ struct DurableGenerationManifest {
     source_file_catalog: Option<DurableSidecarDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_storage: Option<DurableSourceStorage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lexical_source_projection: Option<DurableLexicalSourceProjection>,
+}
+
+/// Missing policy reconstructs the exact legacy entity/unsupported-file index.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+enum DurableLexicalSourceProjection {
+    #[serde(rename = "all-files-v1")]
+    AllFilesV1,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3725,6 +3734,7 @@ impl DurablePreparedGeneration {
                 incremental_state,
                 source_file_catalog,
                 source_storage,
+                lexical_source_projection: Some(DurableLexicalSourceProjection::AllFilesV1),
             };
             let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
             let retained_durable_bytes = retained_before_manifest
@@ -5954,7 +5964,7 @@ fn restore_generation(
             repository_directory,
             &generation_directory,
             repository,
-            generation,
+            manifest.lexical_source_projection,
             source_layout,
             cancellation,
         )?
@@ -6012,15 +6022,23 @@ fn restore_normalized_search(
     repository_directory: &PrivateDirectory<'_>,
     generation_directory: &PrivateDirectory<'_>,
     repository: RepositoryId,
-    generation: GenerationId,
+    source_projection: Option<DurableLexicalSourceProjection>,
     source_layout: DurableSourceLayout,
     cancellation: &Cancellation,
 ) -> Result<(LexicalIndex, u64), FirstSliceError> {
-    let mut projection =
-        LexicalProjectionBuilder::new(verified, BuildBudget::default(), cancellation)
-            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    let mut projection = match source_projection {
+        None => LexicalProjectionBuilder::new(verified, BuildBudget::default(), cancellation),
+        Some(DurableLexicalSourceProjection::AllFilesV1) => {
+            LexicalProjectionBuilder::with_all_sources(
+                verified,
+                BuildBudget::default(),
+                cancellation,
+            )
+        }
+    }
+    .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     // Retaining the validated directory capabilities avoids reopening the same
-    // private parents for every unsupported file in a large generation.
+    // private parents for every retained file in a large generation.
     let source_reader = if projection.next_source_file().is_none() {
         None
     } else {
@@ -6047,9 +6065,13 @@ fn restore_normalized_search(
         .finish(cancellation)
         .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     let lexical_documents = u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
-    let search =
-        LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
-            .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
+    let search = LexicalIndex::build_ephemeral(
+        verified.metadata().generation(),
+        documents,
+        BuildBudget::default(),
+        cancellation,
+    )
+    .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
     Ok((search, lexical_documents))
 }
 
@@ -6899,6 +6921,19 @@ mod tests {
     use rootlight_runtime::RuntimePaths;
     use std::{fs, io, time::Duration};
     use tempfile::TempDir;
+
+    #[test]
+    fn lexical_source_projection_accepts_only_the_reviewed_policy() {
+        let policy = DurableLexicalSourceProjection::AllFilesV1;
+        assert_eq!(
+            serde_json::to_string(&policy).expect("policy serializes"),
+            "\"all-files-v1\""
+        );
+        assert!(serde_json::from_str::<DurableLexicalSourceProjection>("\"all-files-v1\"").is_ok());
+        for unknown in ["\"all-files-v2\"", "\"unsupported-only\"", "0", "null"] {
+            assert!(serde_json::from_str::<DurableLexicalSourceProjection>(unknown).is_err());
+        }
+    }
 
     #[test]
     fn storage_scan_budget_stops_after_inflight_cancellation() {
@@ -8646,7 +8681,9 @@ mod tests {
                 .expect("verified query state remains available")
                 .data
                 .hits
-                .len(),
+                .iter()
+                .filter(|hit| hit.symbol.is_some())
+                .count(),
             1
         );
         assert_ne!(first.generation, second.generation);

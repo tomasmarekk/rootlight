@@ -9,6 +9,25 @@ use std::{
 
 use serde_json::Value;
 
+/// Verifies one exact symbol followed by distinct source-only evidence for its file.
+#[allow(dead_code, reason = "not every process test performs a locate query")]
+pub(crate) fn assert_symbol_and_source_matches(matches: &[Value]) {
+    assert_eq!(matches.len(), 2);
+    assert!(matches[0]["symbol_id"].is_string());
+    assert!(matches[1]["symbol_id"].is_null());
+    assert_eq!(matches[1]["kind"], "file");
+    assert_eq!(matches[1]["file_id"], matches[0]["file_id"]);
+    assert_eq!(matches[1]["path"], matches[0]["path"]);
+    assert!(matches[0]["source_ref"].is_object());
+    assert!(matches[1]["source_ref"].is_object());
+    for field in ["repository", "generation", "content_hash"] {
+        assert_eq!(
+            matches[1]["source_ref"][field],
+            matches[0]["source_ref"][field]
+        );
+    }
+}
+
 #[allow(
     dead_code,
     reason = "each integration test compiles this shared module independently"

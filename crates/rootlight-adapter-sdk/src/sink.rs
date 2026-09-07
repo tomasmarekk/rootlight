@@ -7,10 +7,10 @@ use std::{cmp::Ordering, convert::Infallible, fmt, mem};
 
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
+    AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityKind,
     EntityRecord, ExtensionEnvelope, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
-    NormalizedIrDocument, OccurrenceRecord, ProvenanceRecord, RelationRecord, SkippedRegion,
-    SourceMappingRecord, SourceRef, SourceSpan, canonicalize_ir_document,
+    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, ProvenanceRecord, RelationRecord,
+    SkippedRegion, SourceMappingRecord, SourceRef, SourceSpan, canonicalize_ir_document,
 };
 
 use crate::{
@@ -1779,7 +1779,15 @@ const fn coverage_rank(status: CoverageStatus) -> u8 {
 fn append_ir_record(document: &mut NormalizedIrDocument, record: IrRecord) {
     match record {
         IrRecord::File(record) => document.files.push(record),
-        IrRecord::Entity(record) => document.entities.push(record),
+        IrRecord::Entity(record) => {
+            // Record streams have no document-version header. Select the minimum
+            // wire version that can represent the accepted records, without
+            // changing baseline-only output or relaxing commit-time validation.
+            if matches!(record.kind, EntityKind::StyleRule | EntityKind::Keyframes) {
+                document.version = NormalizedIrVersion::V1_2;
+            }
+            document.entities.push(record);
+        }
         IrRecord::Occurrence(record) => document.occurrences.push(record),
         IrRecord::Relation(record) => document.relations.push(record),
         IrRecord::Provenance(record) => document.provenance.push(record),

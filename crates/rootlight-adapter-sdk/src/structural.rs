@@ -16,6 +16,15 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "css.style_rule.declaration" => {
+            Some(EntityKind::StyleRule)
+        }
+        SyntaxFactKind::Declaration if label == "css.keyframes.declaration" => {
+            Some(EntityKind::Keyframes)
+        }
+        SyntaxFactKind::Declaration if label == "css.property.declaration" => {
+            Some(EntityKind::Property)
+        }
         SyntaxFactKind::Declaration if label == "swift.protocol.declaration" => {
             Some(EntityKind::Protocol)
         }
@@ -119,16 +128,21 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// Lua member captures may contain formatting or comments between qualifiers.
 /// Their canonical identity removes only that trivia; the caller must preserve
 /// the original source span. Ruby additionally admits its bracket and division
-/// method operators, including a static singleton receiver. Other languages
-/// retain the shared borrowed-name contract. Non-static or invalid names return
-/// `None`, never an invented name.
+/// method operators, including a static singleton receiver. CSS preserves raw
+/// grammar-reviewed selectors and identifiers: whitespace, escapes and Unicode
+/// normalization can change their meaning. This boundary bounds those captures;
+/// it does not validate arbitrary CSS text. Other languages retain the shared
+/// borrowed-name contract. Non-static or invalid names return `None`.
 #[must_use]
 pub fn structural_captured_name_for_language<'a>(
     language: &str,
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "lua" {
+    if language == "css" {
+        (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
+            .then_some(Cow::Borrowed(text))
+    } else if language == "lua" {
         crate::lua_names::canonical_lua_name(text, maximum_bytes)
     } else if language == "ruby" {
         let candidate = text.trim();

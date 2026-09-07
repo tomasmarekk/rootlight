@@ -30,7 +30,7 @@ mod macos_acl;
 const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
-const ORACLE_SCHEMA_VERSION: u32 = 3;
+const ORACLE_SCHEMA_VERSION: u32 = 4;
 const ORACLE_SCHEMA_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 const ORACLE_FIXED_BYTES_PER_ROW: u64 = 2 * 1024;
 const ORACLE_TEXT_REPLICATION_FACTOR: u64 = 3;
@@ -153,6 +153,45 @@ const FILES_SQL: &str = "CREATE TABLE files (
 ) STRICT";
 
 const ENTITIES_SQL: &str = "CREATE TABLE entities (
+    entity_id BLOB PRIMARY KEY NOT NULL CHECK(length(entity_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    kind TEXT NOT NULL CHECK(kind IN (
+        'repository', 'worktree', 'package', 'build_target', 'directory', 'file',
+        'module', 'namespace', 'class', 'struct', 'enum', 'union', 'type_alias',
+        'trait', 'interface', 'protocol', 'function', 'method', 'constructor',
+        'closure', 'field', 'property', 'constant', 'variable', 'parameter',
+        'type_parameter', 'import', 'export', 'route', 'service', 'message_topic',
+        'database_object', 'test', 'configuration_key', 'commit', 'change',
+        'community_view', 'external_symbol', 'style_rule', 'keyframes'
+    )),
+    language TEXT NOT NULL CHECK(length(language) BETWEEN 1 AND 32768),
+    tier TEXT NOT NULL CHECK(tier IN ('tier_a', 'tier_b', 'tier_c', 'tier_d')),
+    canonical_name TEXT NOT NULL CHECK(length(canonical_name) <= 32768),
+    display_name TEXT NOT NULL CHECK(length(display_name) <= 32768),
+    qualified_name TEXT NOT NULL CHECK(length(qualified_name) <= 32768),
+    container_kind TEXT CHECK(container_kind IN ('repository', 'file', 'entity')),
+    container_id BLOB,
+    visibility TEXT NOT NULL CHECK(visibility IN ('public', 'restricted', 'private', 'unknown')),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    evidence_source_ordinal INTEGER,
+    CHECK((container_kind IS NULL AND container_id IS NULL)
+       OR (container_kind IS NOT NULL AND container_id IS NOT NULL)),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(container_kind, container_id)
+        REFERENCES identity_registry(kind, identity)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(evidence_source_ordinal) REFERENCES source_refs(ordinal)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
+// Sealed version-3 databases are immutable: validate their exact old DDL rather
+// than migrating source evidence or accepting a relabeled version-4 schema.
+const ENTITIES_V3_SQL: &str = "CREATE TABLE entities (
     entity_id BLOB PRIMARY KEY NOT NULL CHECK(length(entity_id) = 20),
     repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
     generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
@@ -641,7 +680,7 @@ pub(crate) fn open_oracle_reader(
     install_generation_cancellation(&connection, context)?;
     verify_sqlite(&connection)?;
     configure_reader(&connection)?;
-    validate_schema(&connection, &oracle_definition())?;
+    validate_schema(&connection, &oracle_reader_definition(&connection)?)?;
     install_authorizer(&connection)?;
     Ok(connection)
 }
@@ -684,7 +723,7 @@ pub(crate) fn validate_oracle(
     connection: &Connection,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
-    validate_schema(connection, &oracle_definition())?;
+    validate_schema(connection, &oracle_reader_definition(connection)?)?;
     validate_oracle_size(connection, context)?;
     validate_integrity(connection, Some(context))
 }
@@ -726,6 +765,41 @@ fn oracle_definition() -> SchemaDefinition<'static> {
         kind: b"rootlight-oracle",
         allows_document_hash: true,
         objects: &OBJECTS,
+    }
+}
+
+fn oracle_v3_definition() -> SchemaDefinition<'static> {
+    static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
+        oracle_definition()
+            .objects
+            .iter()
+            .copied()
+            .map(|object| {
+                if object.name == "entities" {
+                    NamedSql::table("entities", ENTITIES_V3_SQL)
+                } else {
+                    object
+                }
+            })
+            .collect()
+    });
+    SchemaDefinition {
+        version: 3,
+        objects: &OBJECTS,
+        ..oracle_definition()
+    }
+}
+
+fn oracle_reader_definition(
+    connection: &Connection,
+) -> Result<SchemaDefinition<'static>, CatalogError> {
+    if pragma_u32(connection, "application_id")? != ORACLE_APPLICATION_ID {
+        return Err(CatalogError::new(CatalogErrorKind::ForeignDatabase));
+    }
+    match pragma_u32(connection, "user_version")? {
+        3 => Ok(oracle_v3_definition()),
+        ORACLE_SCHEMA_VERSION => Ok(oracle_definition()),
+        _ => Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema)),
     }
 }
 
@@ -1517,6 +1591,86 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn previous_oracle_schema_is_exact_and_readable_without_mutation() {
+        let definition = oracle_v3_definition();
+        assert_eq!(
+            schema_checksum(&definition).to_string(),
+            "b3_wa4fmp4kocvfes455pgml6t4xhhumsadj6slity5mcfilivei3iinugtqm"
+        );
+        #[cfg(target_os = "macos")]
+        let directory = tempfile::Builder::new()
+            .prefix("rootlight-catalog-")
+            .tempdir_in("/private/tmp")
+            .expect("private fixture directory");
+        #[cfg(not(target_os = "macos"))]
+        let directory = TempDir::new().expect("fixture directory");
+        let path = directory.path().join(crate::ORACLE_FILENAME);
+        create_private_file(&path, true).expect("private legacy file");
+        let connection = Connection::open(&path).expect("legacy file opens");
+        initialize(&connection, &definition).expect("exact version-3 schema initializes");
+        connection
+            .execute_batch(include_str!(
+                "../../../tests/fixtures/compatibility/storage/1.1/sealed-oracle.sql"
+            ))
+            .expect("frozen legacy payload loads");
+        drop(connection);
+        let before = fs::read(&path).expect("legacy bytes read");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let reader = crate::OracleReader::open_in(directory.path(), &context)
+            .expect("exact old oracle opens");
+        let snapshot = reader.read(&context).expect("old payload remains readable");
+        assert!(snapshot.document().files.is_empty());
+        drop(reader);
+        assert_eq!(
+            fs::read(&path).expect("legacy bytes remain readable"),
+            before
+        );
+    }
+
+    #[test]
+    fn oracle_schema_version_relabeling_does_not_bypass_exact_ddl_validation() {
+        for definition in [oracle_v3_definition(), oracle_definition()] {
+            let connection = Connection::open_in_memory().expect("fixture opens");
+            initialize(&connection, &definition).expect("exact schema initializes");
+            validate_schema(
+                &connection,
+                &oracle_reader_definition(&connection).expect("supported version"),
+            )
+            .expect("unaltered schema validates");
+            let wrong = if definition.version == 3 { 4 } else { 3 };
+            connection
+                .pragma_update(None, "user_version", wrong)
+                .expect("version marker tampers");
+            let wrong_definition =
+                oracle_reader_definition(&connection).expect("known but wrong version");
+            connection
+                .execute(
+                    "UPDATE migrations SET migration_id = ?1, checksum = ?2",
+                    params![
+                        wrong,
+                        schema_checksum(&wrong_definition).as_bytes().as_slice()
+                    ],
+                )
+                .expect("ledger is relabeled too");
+            assert!(validate_schema(&connection, &wrong_definition).is_err());
+        }
+    }
+
+    #[test]
+    fn stylesheet_oracle_schema_has_an_explicit_fingerprint() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/storage/1.2/oracle-4-schema-fingerprints.json"
+        ))
+        .expect("schema fingerprint fixture parses");
+        assert_eq!(fixture["oracle"]["schema_version"], ORACLE_SCHEMA_VERSION);
+        assert_eq!(
+            fixture["oracle"]["checksum"],
+            oracle_compatibility().checksum().to_string()
+        );
+    }
 
     #[test]
     fn schema_checksums_are_distinct_and_stable_width() {

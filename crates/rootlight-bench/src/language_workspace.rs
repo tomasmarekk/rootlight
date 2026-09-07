@@ -456,7 +456,7 @@ pub fn verify_language_workspace_evidence(
     Ok(())
 }
 
-fn language_evidence() -> Result<LanguageEvidence, LanguageWorkspaceEvidenceError> {
+fn grammar_evidence() -> Result<Vec<GrammarEvidence>, LanguageWorkspaceEvidenceError> {
     let registry =
         GrammarRegistry::audited().map_err(|_| LanguageWorkspaceEvidenceError::LanguageRegistry)?;
     let mut grammars = registry
@@ -474,7 +474,11 @@ fn language_evidence() -> Result<LanguageEvidence, LanguageWorkspaceEvidenceErro
         })
         .collect::<Vec<_>>();
     grammars.sort_by(|left, right| left.language.cmp(&right.language));
+    Ok(grammars)
+}
 
+fn language_evidence() -> Result<LanguageEvidence, LanguageWorkspaceEvidenceError> {
+    let grammars = grammar_evidence()?;
     let semantic_registry = initial_semantic_registry()
         .map_err(|_| LanguageWorkspaceEvidenceError::LanguageRegistry)?;
     let mut expanded_languages = Vec::with_capacity(EXPANDED_LANGUAGES.len());
@@ -1233,7 +1237,7 @@ fn validate_evidence(
     if evidence.schema != LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA
         || evidence.source_revision != source_revision
         || evidence.environment.toolchain != toolchain
-        || evidence.language.grammars.len() != 12
+        || evidence.language.grammars != grammar_evidence()?
         || evidence.language.expanded_languages.len() != EXPANDED_LANGUAGES.len()
         || evidence.language.scip.export_available
         || !evidence.language.scip.import_available
@@ -1490,7 +1494,10 @@ mod tests {
     fn structural_observations_report_actual_capabilities_and_limitations() {
         let evidence = build_language_workspace_evidence(REVISION, TOOLCHAIN)
             .expect("candidate-bound evidence should build");
-        assert_eq!(evidence.language.grammars.len(), 12);
+        assert_eq!(
+            evidence.language.grammars,
+            grammar_evidence().expect("the audited registry defines exact grammar metadata")
+        );
         assert!(evidence.language.grammars.iter().any(|grammar| {
             grammar.language == "lua"
                 && grammar.grammar_version == "0.5.0"
@@ -1525,6 +1532,17 @@ mod tests {
             .expect("contract evidence should build");
         let encoded =
             encode_language_workspace_evidence(&evidence).expect("contract evidence should encode");
+        let mut missing_grammar = evidence.clone();
+        missing_grammar.language.grammars.pop();
+        assert!(validate_evidence(&missing_grammar, REVISION, TOOLCHAIN).is_err());
+        let mut duplicate_grammar = evidence.clone();
+        duplicate_grammar.language.grammars[1] = duplicate_grammar.language.grammars[0].clone();
+        assert!(validate_evidence(&duplicate_grammar, REVISION, TOOLCHAIN).is_err());
+        let mut wrong_grammar = evidence.clone();
+        wrong_grammar.language.grammars[0]
+            .grammar_version
+            .push_str("-modified");
+        assert!(validate_evidence(&wrong_grammar, REVISION, TOOLCHAIN).is_err());
         let mut value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("contract evidence should decode");
         value["workspace"]["partial_snapshot"]["complete"] = serde_json::Value::Bool(true);

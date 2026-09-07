@@ -17,7 +17,7 @@ use rootlight_query::{
     ExecutionCompletenessState, GenerationSet, LexicalProjectionBuilder, LocateMode, PlanKind,
     QueryBudget, QueryError, QueryResource, QueryResponse, QueryService, RelationDirection,
     RelationFamily, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
-    project_lexical_documents_with_sources,
+    project_lexical_documents_with_all_sources, project_lexical_documents_with_sources,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
@@ -1694,6 +1694,37 @@ fn source_plan_reads_only_verified_generation_bound_bytes() {
         &ExtensionSupport::default(),
     )
     .expect("fixture generation is canonical");
+    let retained_source =
+        SourceSnapshot::from_persisted(repository, path.clone(), file, hash, content.to_vec())
+            .expect("retained source identity is canonical");
+    let cancellation = Cancellation::new();
+    let legacy = project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation)
+        .expect("legacy projection remains source-free without unsupported diagnostics");
+    assert!(legacy.is_empty());
+    let projected = project_lexical_documents_with_all_sources(
+        &snapshot,
+        &[&retained_source],
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .expect("supported source contributes global lexical evidence");
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].symbol_id, None);
+    assert_eq!(projected[0].file_id, file);
+    assert_eq!(projected[0].language, "rust");
+    assert_eq!(
+        projected[0].source_text.as_deref(),
+        Some("alpha beta gamma")
+    );
+    assert!(matches!(
+        project_lexical_documents_with_all_sources(
+            &snapshot,
+            &[],
+            BuildBudget::default(),
+            &cancellation,
+        ),
+        Err(QueryError::IndexDrift)
+    ));
     let search = FakeSearch {
         generation,
         hits: Vec::new(),
