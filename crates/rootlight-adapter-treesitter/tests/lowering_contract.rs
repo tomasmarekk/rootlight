@@ -32,6 +32,9 @@ use tempfile::{TempDir, tempdir_in};
 const SOURCE: &str =
     "mod api {\n    /// docs for alpha\n    pub fn alpha() { beta(); }\n    use crate::dep;\n}\n";
 
+#[path = "lowering_contract/yaml_ownership.rs"]
+mod yaml_ownership;
+
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
     assert_data_key_captures(
@@ -2193,6 +2196,30 @@ fn analyze_custom(
     limits: &AnalysisLimits,
     facts: Vec<SyntaxFact>,
 ) -> Result<rootlight_adapter_sdk::AnalysisOutput, AdapterError> {
+    let analyzer = custom_analyzer(snapshot, language.clone(), facts);
+    let request = AnalysisRequest::new(
+        GenerationBoundSnapshot::new(snapshot, source).expect("custom snapshot binds"),
+        language,
+        AnalysisTier::TierD,
+        BuildContextIdentity::new(content_hash(b"build-context")),
+        limits,
+    )
+    .expect("custom analysis request is valid")
+    .with_generated_status(false);
+    execute_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+}
+
+fn custom_analyzer(
+    snapshot: &SourceSnapshot,
+    language: LanguageId,
+    facts: Vec<SyntaxFact>,
+) -> TreeSitterAnalyzer {
     let capabilities = ParseCapabilities::new(
         vec![language.clone()],
         vec![EncodingId::utf8()],
@@ -2213,7 +2240,7 @@ fn analyze_custom(
         Vec::new(),
         complete_coverage(snapshot.content().len()),
     );
-    let analyzer = TreeSitterAnalyzer::new(
+    TreeSitterAnalyzer::new(
         Arc::new(provider),
         ProducerIdentity::new(
             "rootlight-treesitter-lowering",
@@ -2221,27 +2248,11 @@ fn analyze_custom(
             content_hash(b"lowering-configuration"),
         )
         .expect("producer identity is valid"),
-        language.clone(),
+        language,
         "tree-sitter-fixture-1.0",
         content_hash(b"fixture-binary"),
     )
-    .expect("custom analyzer is valid");
-    let request = AnalysisRequest::new(
-        GenerationBoundSnapshot::new(snapshot, source).expect("custom snapshot binds"),
-        language,
-        AnalysisTier::TierD,
-        BuildContextIdentity::new(content_hash(b"build-context")),
-        limits,
-    )
-    .expect("custom analysis request is valid")
-    .with_generated_status(false);
-    execute_analysis(
-        &analyzer,
-        &request,
-        ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-        &deadline(),
-    )
+    .expect("custom analyzer is valid")
 }
 
 fn source_ref_for_snapshot(

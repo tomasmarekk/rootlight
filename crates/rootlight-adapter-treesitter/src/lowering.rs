@@ -4,6 +4,7 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 mod toml;
+mod yaml;
 
 use std::{
     cmp::Reverse,
@@ -524,7 +525,8 @@ fn required_syntax_fact_count_from_output(
         ) || (fact.kind() == SyntaxFactKind::Scope
             && (contains_declaration[index]
                 || fact.syntax_kind().as_str().starts_with("json.")
-                || fact.syntax_kind().as_str().starts_with("toml.")))
+                || fact.syntax_kind().as_str().starts_with("toml.")
+                || fact.syntax_kind().as_str().starts_with("yaml.")))
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && fact.syntax_kind().as_str().ends_with(".definition"));
         if identity_fact {
@@ -862,7 +864,8 @@ fn preflight_lowering_limits(
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
             // Capture association happens after graph validation. Reserve one
             // maximum-sized entity gap per candidate so missing definitions or
-            // unsupported stable scopes cannot bypass string quotas.
+            // unsupported stable scopes or duplicate data keys cannot bypass
+            // string quotas.
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
@@ -1224,6 +1227,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
+            if entity_plan.duplicate_data_keys.contains(&fact.local_id()) {
+                // Both written occurrences remain searchable, but their data
+                // meaning is not a valid unique YAML mapping entry.
+                let region = skipped_region(
+                    self.full_source,
+                    fact.span(),
+                    FactDomain::Entities,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    "yaml-duplicate-mapping-key",
+                    provenance_id,
+                )?;
+                skipped.insert(region.id, region);
+            }
             if let Some(entity) = materialized.get(&fact.local_id()) {
                 let entity_source = source_for_span(
                     self.full_source,
@@ -1831,10 +1847,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
-            let qualified_length = if language == "toml" {
-                // TOML replaces lexical nesting with its bounded data address
+            let qualified_length = if matches!(language.as_str(), "toml" | "yaml") {
+                // Data lowering replaces lexical nesting with its bounded address
                 // below; charging a filename/lexical prefix here can reject an
-                // otherwise representable absolute table path.
+                // otherwise representable data path.
                 name.len()
             } else {
                 match parent_entity.and_then(|parent| drafts.get(&parent)) {
@@ -1900,6 +1916,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation,
             )?;
         }
+        let duplicate_data_keys = if self.request.language().as_str() == "yaml" {
+            yaml::resolve(
+                self.parse_output.facts(),
+                &mut drafts,
+                &mut unsupported_scope_entities,
+                total_string_bytes,
+                self.request.limits().ir(),
+                cancellation,
+            )?
+        } else {
+            BTreeSet::new()
+        };
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -1923,6 +1951,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             drafts,
             nearest_entity_ancestor,
             unsupported_scope_entities,
+            duplicate_data_keys,
         })
     }
 
@@ -2038,6 +2067,7 @@ struct EntityPlan {
     drafts: Vec<EntityDraft>,
     nearest_entity_ancestor: HashMap<u64, Option<u64>>,
     unsupported_scope_entities: BTreeSet<u64>,
+    duplicate_data_keys: BTreeSet<u64>,
 }
 
 #[derive(Clone)]
@@ -3071,6 +3101,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "bash.file.module"
                 | "json.file.module"
                 | "toml.file.module"
+                | "yaml.file.module"
         )
         && matches!(
             language,
@@ -3084,6 +3115,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "bash"
                 | "json"
                 | "toml"
+                | "yaml"
         )
 }
 
