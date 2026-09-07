@@ -2941,10 +2941,11 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "ruby.file.module"
                 | "swift.file.module"
                 | "css.file.module"
+                | "bash.file.module"
         )
         && matches!(
             language,
-            "python" | "javascript" | "typescript" | "lua" | "ruby" | "swift" | "css"
+            "python" | "javascript" | "typescript" | "lua" | "ruby" | "swift" | "css" | "bash"
         )
 }
 

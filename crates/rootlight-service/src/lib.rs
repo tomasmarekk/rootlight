@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/17";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/18";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25390,6 +25390,7 @@ mod tests {
             "sample.py",
             "sample.rb",
             "sample.rs",
+            "sample.sh",
             "sample.swift",
             "sample.ts",
         ]
@@ -25443,7 +25444,6 @@ mod tests {
             ("script.pl", "perl"),
             ("plot.R", "r"),
             ("schema.sql", "sql"),
-            ("script.sh", "bash"),
             ("page.html", "html"),
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
@@ -25827,6 +25827,166 @@ mod tests {
                 .map(|value| format!("--accent: {value};"))
                 .collect::<BTreeSet<_>>();
             assert_eq!(declarations, expected);
+        }
+    }
+
+    #[test]
+    fn bash_published_symbols_and_sources_survive_edits_and_restore() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths");
+        paths.prepare_owner().expect("private runtime");
+        let fixture = durable_test_tempdir();
+        let source =
+            include_str!("../../rootlight-adapter-treesitter/tests/fixtures/structural/bash.sh");
+        let path = fixture.path().join("commands.sh");
+        fs::write(&path, source).expect("Bash fixture");
+        fs::write(
+            fixture.path().join("helper"),
+            "#!/usr/bin/env bash\nhelper() { :; }\n",
+        )
+        .expect("shebang fixture");
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("service");
+        let support = service.support_inventory_snapshot().expect("support");
+        let bash = support
+            .languages
+            .iter()
+            .find(|entry| entry.language == "bash")
+            .expect("Bash capability");
+        assert_eq!(bash.maximum_tier, "tier_d");
+        assert_eq!(bash.analyzers, ["treesitter"]);
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("index");
+        let status = service
+            .repository_status(initial.repository, None)
+            .expect("status");
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|entry| entry.language == "bash")
+            .expect("Bash coverage");
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (2, 2));
+        let generation = service
+            .loaded_generation_snapshot(initial.generation)
+            .expect("generation");
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "commands.sh")
+            .expect("file");
+        let full_ref = file.evidence.source.clone().expect("file source");
+        let read = service
+            .source_read(initial.generation, vec![full_ref.clone()], &deadline())
+            .expect("full source");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let mut symbols = BTreeMap::new();
+        for name in [
+            "emit", "process", "render", "ROOT", "ITEMS", "message", "pending", "item", "helper",
+        ] {
+            let located = service
+                .code_locate(
+                    initial.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .expect("locate");
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .expect("symbol hit");
+            let symbol = hit.symbol.expect("symbol");
+            let explained = service
+                .symbol_explain(initial.generation, symbol, &deadline())
+                .expect("explain");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            assert_eq!(explained.data.entity.language, "bash");
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("declaration source");
+            assert_eq!(reference.generation(), initial.generation);
+            if name != "helper" {
+                let start = usize::try_from(reference.span().start_byte()).expect("start");
+                let end = usize::try_from(reference.span().end_byte()).expect("end");
+                let read = service
+                    .source_read_with_options_and_budget(
+                        initial.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .expect("exact source");
+                assert_eq!(read.data.chunks[0].bytes, &source.as_bytes()[start..end]);
+            }
+            symbols.insert(name, symbol);
+        }
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op");
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = source.replace("first $ROOT", "changed $ROOT");
+        fs::write(&path, &changed).expect("body edit");
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("incremental index");
+        assert_ne!(updated.generation, initial.generation);
+        drop(generation);
+        drop(service);
+        let restored =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("restore");
+        let old_read = restored
+            .source_read(initial.generation, vec![full_ref], &deadline())
+            .expect("historical source");
+        assert_eq!(old_read.data.chunks[0].bytes, source.as_bytes());
+        for receipt in [&initial, &updated] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("retained generation");
+            let file = generation
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == "commands.sh")
+                .expect("retained file");
+            let reference = file.evidence.source.clone().expect("retained full source");
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .expect("retained source read");
+            let expected = if receipt.generation == initial.generation {
+                source
+            } else {
+                &changed
+            };
+            assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
+            for (name, symbol) in &symbols {
+                let explained = restored
+                    .symbol_explain(receipt.generation, *symbol, &deadline())
+                    .expect("restored identity");
+                assert_eq!(explained.data.entity.canonical_name, *name);
+                assert_eq!(
+                    explained
+                        .data
+                        .entity
+                        .evidence
+                        .source
+                        .expect("source")
+                        .generation(),
+                    receipt.generation
+                );
+            }
         }
     }
 

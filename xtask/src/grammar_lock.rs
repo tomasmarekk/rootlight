@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "e6ba18e560909be0a925b06e7f9cf94c5b6a3fce04d1605a882af536a42ace51";
+    "0cb55a02a85c81be06f54b85d2da7a807fc790d553549abb6a8353cce726ae7b";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,11 +37,16 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 15] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 16] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "tree-sitter-bash",
+        "0.25.1",
+        "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062",
     ),
     (
         "tree-sitter-c",
@@ -143,6 +148,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-bash-0.25.1-LICENSE",
+        "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-css-0.25.0-LICENSE",
         "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
     )?;
@@ -171,7 +181,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 15 {
+    if manifest.grammars.len() != 16 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -192,6 +202,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         );
     }
     let expected_languages = BTreeSet::from([
+        "bash",
         "c",
         "cpp",
         "csharp",
@@ -775,6 +786,13 @@ pub(crate) enum GrammarLockError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn checked_in_manifest_matches_the_reviewed_runtime_and_grammar_set() {
+        let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
+            .expect("grammar lock parses");
+        validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
 
     #[test]
     fn vendored_tree_rejects_modified_missing_and_extra_inputs() {

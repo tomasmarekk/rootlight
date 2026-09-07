@@ -87,7 +87,17 @@ const CSS_CASE: LanguageCase = LanguageCase {
     body_after: "opacity: 0.9",
 };
 
-const CASES: [LanguageCase; 14] = [
+const BASH_CASE: LanguageCase = LanguageCase {
+    name: "bash",
+    path: "src/commands.sh",
+    frontend: "tree-sitter-bash-0.25.1",
+    source: include_str!("fixtures/structural/bash.sh"),
+    generated: false,
+    body_before: "first $ROOT",
+    body_after: "changed $ROOT",
+};
+
+const CASES: [LanguageCase; 15] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -190,6 +200,7 @@ const CASES: [LanguageCase; 14] = [
     LUA_CASE,
     RUBY_CASE,
     SWIFT_CASE,
+    BASH_CASE,
 ];
 
 #[derive(Clone, Copy)]
@@ -201,6 +212,95 @@ struct LanguageCase {
     generated: bool,
     body_before: &'static str,
     body_after: &'static str,
+}
+
+#[test]
+fn bash_native_declarations_keep_exact_sources_and_body_stable_ids() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(BASH_CASE, BASH_CASE.source.as_bytes());
+    let analyzer = analyzer(&provider, BASH_CASE);
+    let initial_request = request(&fixture.snapshot, &fixture.source, BASH_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    let document = output.document();
+    validate_ir_document(document, limits.ir(), &ExtensionSupport::default())
+        .expect("valid Bash IR");
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    assert!(
+        document.skipped_regions.is_empty(),
+        "{:?}",
+        document.skipped_regions
+    );
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    for (name, kind, marker) in [
+        ("emit", EntityKind::Function, "function emit()"),
+        ("process", EntityKind::Function, "process()"),
+        ("render", EntityKind::Function, "render()"),
+        ("ROOT", EntityKind::Variable, "ROOT="),
+        ("ITEMS", EntityKind::Variable, "ITEMS="),
+        ("message", EntityKind::Variable, "message="),
+        ("pending", EntityKind::Variable, "pending"),
+        ("item", EntityKind::Variable, "item in"),
+    ] {
+        let found: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+            .collect();
+        assert_eq!(found.len(), 1, "{name}: {:?}", document.entities);
+        let source = found[0]
+            .evidence
+            .source
+            .as_ref()
+            .expect("declaration source");
+        assert_eq!(source.generation(), fixture.source.generation());
+        let start = usize::try_from(source.span().start_byte()).expect("offset fits");
+        assert_eq!(start, BASH_CASE.source.find(marker).expect("marker"));
+        assert_eq!(found[0].language, "bash");
+    }
+    for (name, header) in [
+        ("emit", "function emit()"),
+        ("process", "process()"),
+        ("render", "render()"),
+    ] {
+        let symbol = symbol_id_named(document, name);
+        let signatures: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let value = rootlight_ir::decode_lexical_evidence_envelope(extension)
+                    .expect("lexical data");
+                (value.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && value.subject() == rootlight_ir::FactRef::Entity(symbol))
+                .then_some(value)
+            })
+            .collect();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].text(), header);
+    }
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|relation| relation.predicate != RelationPredicate::Calls)
+    );
+    let source = BASH_CASE
+        .source
+        .replace(BASH_CASE.body_before, BASH_CASE.body_after);
+    let changed = fixture.rewrite(source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, BASH_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert!(reparsed.document().diagnostics.is_empty());
+    assert_eq!(symbol_ids(document), symbol_ids(reparsed.document()));
+    assert_ne!(fixture.source.generation(), changed.source.generation());
 }
 
 #[test]
@@ -2236,7 +2336,7 @@ fn assert_contract(
 
     let coverage = output.report().coverage();
     assert_eq!(coverage.tier(), AnalysisTier::TierD);
-    let expected_status = if case.name == "ruby" {
+    let expected_status = if matches!(case.name, "ruby" | "bash") {
         CoverageStatus::Complete
     } else {
         CoverageStatus::Bounded
@@ -2316,8 +2416,11 @@ fn assert_contract(
     let unresolved_import = document.skipped_regions.iter().any(|region| {
         region.domain == FactDomain::Relations && region.detail == "unresolved-import-target"
     });
-    // Lua and Ruby module loading use ordinary calls, not grammar import statements.
-    assert_eq!(unresolved_import, !matches!(case.name, "lua" | "ruby"));
+    // These languages load modules through calls rather than grammar imports.
+    assert_eq!(
+        unresolved_import,
+        !matches!(case.name, "lua" | "ruby" | "bash")
+    );
     assert!(document.entities.iter().all(|entity| {
         entity.tier == AnalysisTier::TierD
             && entity.provenance == provenance.id

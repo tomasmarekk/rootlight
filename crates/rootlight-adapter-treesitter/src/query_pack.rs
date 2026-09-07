@@ -286,8 +286,11 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
-        if matches!(family, GrammarFamily::Lua | GrammarFamily::Ruby) {
-            // A shadowable require call is not a language import statement.
+        if matches!(
+            family,
+            GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
+        ) {
+            // Runtime module-loading calls are not grammar import statements.
             expected.retain(|name| *name != "import");
         }
         if family == GrammarFamily::Css {
@@ -705,6 +708,7 @@ fn candidate_for_capture(
             GrammarFamily::Php => "php.call_name",
             GrammarFamily::Lua => "lua.call_name",
             GrammarFamily::Ruby => "ruby.call_name",
+            GrammarFamily::Bash => "bash.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -722,6 +726,7 @@ fn candidate_for_capture(
             GrammarFamily::Lua => "lua.call",
             GrammarFamily::Ruby => "ruby.call",
             GrammarFamily::Swift => "swift.call",
+            GrammarFamily::Bash => "bash.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
@@ -740,7 +745,7 @@ fn candidate_for_capture(
             .ok_or_else(|| query_failure("query-css-context-body"))?
             .start_byte();
     }
-    if family == GrammarFamily::Swift
+    if matches!(family, GrammarFamily::Swift | GrammarFamily::Bash)
         && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
     {
         if let Some(body) = capture.node.child_by_field_name("body") {
@@ -891,6 +896,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Php
             | GrammarFamily::Lua
             | GrammarFamily::Ruby
+            | GrammarFamily::Bash
     )
 }
 
@@ -900,6 +906,15 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Bash, "program") => Some("bash.file"),
+        (GrammarFamily::Bash, "function_definition") => Some("bash.function"),
+        (GrammarFamily::Bash, "variable_assignment") => Some("bash.variable"),
+        (GrammarFamily::Bash, "variable_name") => Some("bash.variable"),
+        (GrammarFamily::Bash, "special_variable_name" | "word") => Some("bash.identifier"),
+        (GrammarFamily::Bash, "compound_statement" | "do_group") => Some("bash.block"),
+        (GrammarFamily::Bash, "subshell") => Some("bash.subshell"),
+        (GrammarFamily::Bash, "comment") => Some("bash.comment"),
+        (GrammarFamily::Bash, "string" | "raw_string" | "heredoc_body") => Some("bash.string"),
         (GrammarFamily::Css, "stylesheet") => Some("css.file"),
         (GrammarFamily::Css, "rule_set") => Some("css.style_rule"),
         (GrammarFamily::Css, "selectors") => Some("css.selectors"),
@@ -1206,7 +1221,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(15);
+        let mut packs = Vec::with_capacity(16);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1229,6 +1244,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Ruby, include_str!("../queries/ruby.scm")),
             (GrammarFamily::Swift, include_str!("../queries/swift.scm")),
             (GrammarFamily::Css, include_str!("../queries/css.scm")),
+            (GrammarFamily::Bash, include_str!("../queries/bash.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1297,12 +1313,16 @@ mod tests {
             GrammarFamily::Ruby,
             GrammarFamily::Swift,
             GrammarFamily::Css,
+            GrammarFamily::Bash,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
-            if matches!(family, GrammarFamily::Lua | GrammarFamily::Ruby) {
+            if matches!(
+                family,
+                GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
+            ) {
                 expected.retain(|name| *name != "import");
             }
             if family == GrammarFamily::Css {

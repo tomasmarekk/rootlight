@@ -52,8 +52,8 @@ rejection remain unchanged. This is not an on-disk Rootlight state migration.
 Remove the override when a released grammar passes the native regressions and
 its source and ABI have been qualified again.
 
-Only the isolated native test package currently consumes this candidate.
-It is not registered as a Rootlight language adapter. Bounded state, Unicode,
+The Rootlight syntax adapter and isolated native tests consume this grammar.
+Registration provides structural evidence, not shell evaluation. Bounded state, Unicode,
 source-range and incremental tests do not establish complete Bash conformance,
 shell evaluation or semantic resolution. Tests cover multiple inputs on one
 command and connected pipeline/conditional commands; they do not exhaust every
