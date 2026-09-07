@@ -106,6 +106,7 @@ const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
 const SOURCE_PACK_TARGET_BYTES: u64 = DEFAULT_MAX_SOURCE_FILE_BYTES;
 const PACKED_SOURCE_MIN_FILES: usize = 256;
+const SINGLE_PACK_MIN_FILES: usize = 16;
 const STREAMED_SOURCE_PARTITION_FILES: usize = 4_096;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const RECOVERY_SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
@@ -3294,7 +3295,16 @@ impl DurablePreparedGeneration {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
         }
-        if sources.len() >= PACKED_SOURCE_MIN_FILES {
+        // Below the large-generation threshold, amortize per-source durability
+        // barriers only when a complete rewrite fits one bounded pack.
+        let single_pack = (SINGLE_PACK_MIN_FILES..PACKED_SOURCE_MIN_FILES).contains(&sources.len())
+            && sources
+                .iter()
+                .try_fold(SOURCE_PACK_TARGET_BYTES, |remaining, source| {
+                    remaining.checked_sub(u64::try_from(source.snapshot.content().len()).ok()?)
+                })
+                .is_some();
+        if sources.len() >= PACKED_SOURCE_MIN_FILES || single_pack {
             let mut ordered = Vec::new();
             ordered
                 .try_reserve_exact(sources.len())
@@ -3957,7 +3967,8 @@ impl DurablePackedSourceWriter<'_> {
         if self.entries.is_empty() {
             return Err(FirstSliceError::CatalogCorrupt);
         }
-        if !self.pack.is_empty() {
+        // Empty sources still need the physical pack named by their index entries.
+        if !self.pack.is_empty() || self.pack_sizes.is_empty() {
             write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
         }
         let index = DurablePackedSourceIndex {
@@ -9462,12 +9473,195 @@ mod tests {
 
     #[test]
     fn large_generation_uses_bounded_source_packs_and_restores_exact_content() {
+        assert_packed_generation_restores_exact_content(PACKED_SOURCE_MIN_FILES);
+    }
+
+    #[test]
+    fn small_generation_uses_one_source_pack_and_restores_exact_content() {
+        assert_packed_generation_restores_exact_content(16);
+    }
+
+    #[test]
+    fn source_layout_transitions_preserve_history_and_compaction() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths");
+        paths.prepare_owner().expect("private paths");
+        let fixture = durable_test_tempdir();
+        let deadline = || {
+            Cancellation::with_deadline(
+                std::time::Instant::now()
+                    .checked_add(Duration::from_secs(60))
+                    .expect("test deadline"),
+            )
+        };
+        let mut history = Vec::new();
+        for (revision, files) in [15, 16, 15].into_iter().enumerate() {
+            if revision == 2 {
+                fs::remove_file(fixture.path().join("source-0015.txt")).expect("remove source");
+            }
+            let expected = (0..files)
+                .map(|ordinal| {
+                    let path = format!("source-{ordinal:04}.txt");
+                    let body = if ordinal == 0 { revision } else { 0 };
+                    let content = format!("source {ordinal} value {body}\n").into_bytes();
+                    fs::write(fixture.path().join(&path), &content).expect("source writes");
+                    (path, content)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline())
+                .expect("service restores before transition");
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .expect("transition publishes");
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .expect("no-op completes");
+            assert_eq!(receipt, noop);
+            history.push((receipt, expected));
+        }
+        let catalog = open_test_catalog(paths.state_dir(), 4).expect("catalog reopens");
+        for (ordinal, (receipt, expected)) in history.iter().enumerate() {
+            let restored = catalog
+                .restore_exact_generation(receipt.repository, receipt.generation, &deadline())
+                .expect("mixed-format history restores");
+            assert_eq!(restored.verified.document().files.len(), expected.len());
+            let directory = paths
+                .state_dir()
+                .join(DURABLE_DIRECTORY)
+                .join(REPOSITORIES_DIRECTORY)
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            let manifest: DurableGenerationManifest = serde_json::from_slice(
+                &fs::read(directory.join(MANIFEST_FILENAME)).expect("manifest reads"),
+            )
+            .expect("manifest decodes");
+            assert_eq!(
+                matches!(
+                    source_storage_layout(manifest.version, manifest.source_storage),
+                    Ok(DurableSourceLayout::Packed(_))
+                ),
+                ordinal == 1
+            );
+            for file in &restored.verified.document().files {
+                let snapshot = catalog
+                    .read_source(receipt.repository, receipt.generation, file, &deadline())
+                    .expect("historical source reads");
+                assert_eq!(
+                    snapshot.content(),
+                    expected.get(&file.path).expect("expected source")
+                );
+                assert_eq!(snapshot.content_hash(), file.content_hash);
+            }
+        }
+        let (latest, expected) = history.last().expect("latest generation");
+        catalog
+            .compact_repository(latest.repository, &BTreeSet::from([latest.generation]))
+            .expect("mixed layouts compact");
+        catalog
+            .storage_inventory()
+            .expect("compacted accounting verifies");
+        let restored = catalog
+            .restore_active(&deadline())
+            .expect("compacted state restores");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].receipt.generation, latest.generation);
+        for file in &restored[0].verified.document().files {
+            let snapshot = catalog
+                .read_source(latest.repository, latest.generation, file, &deadline())
+                .expect("retained source survives compaction");
+            assert_eq!(
+                snapshot.content(),
+                expected.get(&file.path).expect("expected source")
+            );
+        }
+    }
+
+    #[test]
+    fn small_generation_packing_respects_file_and_byte_bounds() {
+        for (files, bytes_per_file, packed) in [
+            (16, 0, true),
+            (256, 0, true),
+            (15, 32, false),
+            (16, 524_288, true),
+            (16, 524_289, false),
+        ] {
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .expect("runtime paths");
+            paths.prepare_owner().expect("private paths");
+            let fixture = durable_test_tempdir();
+            let content = b"x\n"
+                .iter()
+                .copied()
+                .cycle()
+                .take(bytes_per_file)
+                .collect::<Vec<_>>();
+            for ordinal in 0..files {
+                fs::write(
+                    fixture.path().join(format!("source-{ordinal:04}.txt")),
+                    &content,
+                )
+                .expect("source fixture writes");
+            }
+            let cancellation = Cancellation::with_deadline(
+                std::time::Instant::now()
+                    .checked_add(Duration::from_secs(60))
+                    .expect("test deadline is representable"),
+            );
+            let receipt = {
+                let mut service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                        .expect("durable service initializes");
+                service
+                    .index_repository(fixture.path(), &cancellation)
+                    .expect("index publishes")
+            };
+            let directory = paths
+                .state_dir()
+                .join(DURABLE_DIRECTORY)
+                .join(REPOSITORIES_DIRECTORY)
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            let manifest: DurableGenerationManifest = serde_json::from_slice(
+                &fs::read(directory.join(MANIFEST_FILENAME)).expect("manifest reads"),
+            )
+            .expect("manifest decodes");
+            assert_eq!(
+                matches!(
+                    source_storage_layout(manifest.version, manifest.source_storage),
+                    Ok(DurableSourceLayout::Packed(_))
+                ),
+                packed
+            );
+            let catalog = open_test_catalog(paths.state_dir(), 2).expect("catalog reopens");
+            let restored = catalog
+                .restore_active(&cancellation)
+                .expect("generation restores");
+            let generation = restored.first().expect("restored generation");
+            assert_eq!(generation.verified.snapshot().file_count(), files);
+            for file in &generation.verified.document().files {
+                let snapshot = catalog
+                    .read_source(receipt.repository, receipt.generation, file, &cancellation)
+                    .expect("restored source reads");
+                assert_eq!(snapshot.content(), content);
+                assert_eq!(snapshot.file(), file.id);
+                assert_eq!(snapshot.content_hash(), file.content_hash);
+            }
+            catalog
+                .storage_inventory()
+                .expect("layout accounting remains valid");
+        }
+    }
+
+    fn assert_packed_generation_restores_exact_content(file_count: usize) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
         let fixture = durable_test_tempdir();
-        for ordinal in 0..PACKED_SOURCE_MIN_FILES {
+        for ordinal in 0..file_count {
             fs::write(
                 fixture.path().join(format!("source-{ordinal:04}.txt")),
                 format!("packed source {ordinal}\n"),
@@ -9505,8 +9699,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("packed source entries read");
         assert!(
-            source_entries.len() < PACKED_SOURCE_MIN_FILES,
-            "large generations must not materialize one durable file per source"
+            source_entries.len() < file_count,
+            "packed generations must not materialize one durable file per source"
         );
 
         let catalog = open_test_catalog(paths.state_dir(), 2).expect("durable catalog reopens");
@@ -9514,10 +9708,16 @@ mod tests {
             .restore_active(&cancellation)
             .expect("packed generation restores");
         let generation = restored.first().expect("one generation restores");
-        assert_eq!(
-            generation.verified.document().files.len(),
-            PACKED_SOURCE_MIN_FILES
-        );
+        assert_eq!(generation.verified.document().files.len(), file_count);
+        for file in &generation.verified.document().files {
+            let source = catalog
+                .read_source(receipt.repository, receipt.generation, file, &cancellation)
+                .expect("every packed source reads");
+            assert_eq!(
+                source.content(),
+                fs::read(fixture.path().join(&file.path)).expect("fixture reads")
+            );
+        }
         let file = generation
             .verified
             .document()
