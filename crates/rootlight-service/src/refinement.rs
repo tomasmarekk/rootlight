@@ -4,7 +4,7 @@
 
 use super::{
     Cancellation, FirstSliceError, FirstSliceResource, check_cancellation, checked_resource_length,
-    extension_payload_bytes, normalized_record_count,
+    extension_payload_bytes, merged_document_version, normalized_record_count,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -245,12 +245,7 @@ pub(super) fn retain_structural_occurrences(
             limits.max_total_records,
             FirstSliceResource::Records,
         )?;
-        if document.version != project.version
-            || document.repository != project.repository
-            || document.generation != project.generation
-        {
-            return Err(FirstSliceError::Identity);
-        }
+        project.version = merged_document_version(&project, document)?;
         for occurrence in &document.occurrences {
             check_cancellation(cancellation)?;
             if !sites.contains(&occurrence_site(occurrence)) {

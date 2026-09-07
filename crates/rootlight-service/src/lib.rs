@@ -9,6 +9,8 @@
 pub mod catalog;
 mod durable;
 mod refinement;
+#[cfg(test)]
+mod version_merge_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -87,12 +89,13 @@ use rootlight_ir::{
     DiagnosticSeverity, EntityKind, EntityRecord, ExtensionEnvelope, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain, FactEvidence, FactRef,
     FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
-    LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason,
-    SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_provenance_record_id, derive_relation_record_id,
-    derive_skipped_region_id, generation_neutral_workspace_bytes, new_file_identity_claim_envelope,
+    LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord,
+    OccurrenceRole, ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint,
+    RelationPredicate, RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion,
+    SkippedRegionReason, SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan,
+    derive_coverage_record_id, derive_diagnostic_record_id, derive_provenance_record_id,
+    derive_relation_record_id, derive_skipped_region_id, generation_neutral_workspace_bytes,
+    new_file_identity_claim_envelope,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -16896,12 +16899,7 @@ fn supplemental_project_relations(
     cancellation: &Cancellation,
 ) -> Result<Vec<RelationRecord>, FirstSliceError> {
     check_cancellation(cancellation)?;
-    if document.version != merged.version
-        || document.repository != merged.repository
-        || document.generation != merged.generation
-    {
-        return Err(FirstSliceError::Identity);
-    }
+    merged_document_version(merged, &document)?;
     remap_supplemental_prefix_relations(merged, &mut document, prefixes, cancellation)?;
     remap_supplemental_occurrence_endpoints(merged, &mut document, cancellation)?;
 
@@ -17084,12 +17082,7 @@ fn merge_project_document(
     diagnostic_capacity: usize,
     limits: &IrLimits,
 ) -> Result<ProjectMergeTruncation, FirstSliceError> {
-    if document.version != merged.version
-        || document.repository != merged.repository
-        || document.generation != merged.generation
-    {
-        return Err(FirstSliceError::Identity);
-    }
+    let version = merged_document_version(merged, &document)?;
     let mut duplicate_external_symbols = BTreeSet::new();
     let mut new_external_symbols = BTreeSet::new();
     document.entities.retain(|entity| {
@@ -17145,6 +17138,7 @@ fn merge_project_document(
             .iter()
             .filter_map(|entity| (entity.kind == EntityKind::ExternalSymbol).then_some(entity.id)),
     );
+    merged.version = version;
     merged.files.append(&mut document.files);
     merged.entities.append(&mut document.entities);
     merged.occurrences.append(&mut document.occurrences);
@@ -17653,18 +17647,45 @@ impl DocumentAppendState {
     }
 }
 
+fn merged_document_version(
+    target: &NormalizedIrDocument,
+    source: &NormalizedIrDocument,
+) -> Result<NormalizedIrVersion, FirstSliceError> {
+    if source.repository != target.repository || source.generation != target.generation {
+        return Err(FirstSliceError::Identity);
+    }
+    match (target.version, source.version) {
+        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_1) => Ok(NormalizedIrVersion::V1_1),
+        (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_2) => Ok(NormalizedIrVersion::V1_2),
+        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2)
+        | (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_1) => {
+            // Promotion must not legalize a kind that was invalid in its input
+            // contract. Only the baseline partition needs this transition check;
+            // repeatedly rescanning the growing 1.2 aggregate would be quadratic.
+            let baseline = if target.version == NormalizedIrVersion::V1_1 {
+                target
+            } else {
+                source
+            };
+            if baseline
+                .entities
+                .iter()
+                .any(|entity| matches!(entity.kind, EntityKind::StyleRule | EntityKind::Keyframes))
+            {
+                return Err(FirstSliceError::Identity);
+            }
+            Ok(NormalizedIrVersion::V1_2)
+        }
+    }
+}
+
 fn append_normalized_document(
     target: &mut NormalizedIrDocument,
     mut source: NormalizedIrDocument,
     limits: &IrLimits,
     append_state: &mut DocumentAppendState,
 ) -> Result<(), FirstSliceError> {
-    if source.version != target.version
-        || source.repository != target.repository
-        || source.generation != target.generation
-    {
-        return Err(FirstSliceError::Identity);
-    }
+    let version = merged_document_version(target, &source)?;
     reserve_resource_records(
         &mut target.files,
         source.files.len(),
@@ -17777,6 +17798,7 @@ fn append_normalized_document(
         mut extensions,
         ..
     } = source;
+    target.version = version;
     target.files.append(&mut files);
     target.entities.append(&mut entities);
     target.occurrences.append(&mut occurrences);
@@ -17809,12 +17831,7 @@ fn preflight_normalized_document_append(
     source: &NormalizedIrDocument,
     limits: &IrLimits,
 ) -> Result<(), FirstSliceError> {
-    if source.version != target.version
-        || source.repository != target.repository
-        || source.generation != target.generation
-    {
-        return Err(FirstSliceError::Identity);
-    }
+    merged_document_version(target, source)?;
     for (current, additional, maximum, resource) in [
         (
             target.files.len(),
