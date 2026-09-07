@@ -125,7 +125,8 @@ impl Units<'_> {
     }
 }
 
-fn append(output: &mut String, text: &str, maximum_bytes: usize) -> Option<()> {
+/// Appends canonical data-key text without exceeding the caller's byte budget.
+pub(crate) fn append(output: &mut String, text: &str, maximum_bytes: usize) -> Option<()> {
     if output.len().checked_add(text.len())? > maximum_bytes {
         return None;
     }
@@ -134,7 +135,12 @@ fn append(output: &mut String, text: &str, maximum_bytes: usize) -> Option<()> {
     Some(())
 }
 
-fn append_character(output: &mut String, character: char, maximum_bytes: usize) -> Option<()> {
+/// Uses the same injective quoted scalar spelling for JSON and TOML data keys.
+pub(crate) fn append_character(
+    output: &mut String,
+    character: char,
+    maximum_bytes: usize,
+) -> Option<()> {
     match character {
         '"' => append(output, "\\\"", maximum_bytes),
         '\\' => append(output, "\\\\", maximum_bytes),

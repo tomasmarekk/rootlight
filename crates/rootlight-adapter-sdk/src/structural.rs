@@ -25,7 +25,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "css.property.declaration" => {
             Some(EntityKind::Property)
         }
-        SyntaxFactKind::Declaration if label == "json.property.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "json.property.declaration" | "toml.property.declaration"
+            ) =>
+        {
             Some(EntityKind::Property)
         }
         SyntaxFactKind::Declaration if label == "swift.protocol.declaration" => {
@@ -137,7 +142,11 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// it does not validate arbitrary CSS text. JSON keys retain a canonical quoted
 /// JSON string, so empty keys and controls cannot collide with ordinary names.
 /// Equivalent escapes have the same identity; unpaired UTF-16 units remain
-/// escaped rather than becoming replacement characters. Other languages retain
+/// escaped rather than becoming replacement characters. TOML key paths quote
+/// each decoded segment independently: `a.b` differs from `"a.b"`, while bare,
+/// basic and literal spellings of the same segment agree. TOML rejects non-scalar
+/// escapes; this validates key syntax, not table ownership or document semantics.
+/// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
 #[must_use]
@@ -148,6 +157,8 @@ pub fn structural_captured_name_for_language<'a>(
 ) -> Option<Cow<'a, str>> {
     if language == "json" {
         crate::json_names::canonical_json_key(text, maximum_bytes)
+    } else if language == "toml" {
+        crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
     } else if language == "css" {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))

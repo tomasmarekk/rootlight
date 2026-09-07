@@ -34,39 +34,70 @@ const SOURCE: &str =
 
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
-    let mut identities = Vec::new();
-    for (key, canonical) in [
-        (r#""a""#, r#""a""#),
-        (r#""\u0061""#, r#""a""#),
-        (r#""""#, r#""""#),
-        (r#"" a/b~c ""#, r#"" a/b~c ""#),
-        (r#""\u0000""#, r#""\u0000""#),
-        (r#""\\u0000""#, r#""\\u0000""#),
-        (r#""\uD800""#, r#""\ud800""#),
-        (r#""\uD83C\uDF0D""#, r#""🌍""#),
-        (r#""🌍""#, r#""🌍""#),
-    ] {
-        for value in ["1", "[true, null]"] {
-            let member = format!("{key}:{value}");
-            let text = format!("{{{member}}}");
-            let (_directory, snapshot, source) =
-                source_fixture_for(&text, "data.json", b"json-key-lowering");
-            let captured = vec![
+    assert_data_key_captures(
+        "json",
+        &[
+            (r#""a""#, r#""a""#),
+            (r#""\u0061""#, r#""a""#),
+            (r#""""#, r#""""#),
+            (r#"" a/b~c ""#, r#"" a/b~c ""#),
+            (r#""\u0000""#, r#""\u0000""#),
+            (r#""\\u0000""#, r#""\\u0000""#),
+            (r#""\uD800""#, r#""\ud800""#),
+            (r#""\uD83C\uDF0D""#, r#""🌍""#),
+            (r#""🌍""#, r#""🌍""#),
+        ],
+    );
+}
+
+#[test]
+fn toml_key_paths_lower_without_merging_quoted_dots_or_losing_source() {
+    assert_data_key_captures(
+        "toml",
+        &[
+            ("a", r#""a""#),
+            ("'a'", r#""a""#),
+            (r#""\x61""#, r#""a""#),
+            ("a.b", r#""a"."b""#),
+            (" 'a' . \"b\" ", r#""a"."b""#),
+            ("'a.b'", r#""a.b""#),
+            ("''", r#""""#),
+            ("' '", r#"" ""#),
+            (r#""\u0000""#, r#""\u0000""#),
+            (r#"'\u0000'"#, r#""\\u0000""#),
+            (r#""\U0001F30D""#, r#""🌍""#),
+            ("'🌍'", r#""🌍""#),
+        ],
+    );
+}
+
+#[test]
+fn invalid_toml_scalar_names_remain_explicit_source_bound_gaps() {
+    for key in [r#""\uD800""#, r#""\U00110000""#, "a..b"] {
+        let text = format!("{key} = 1\n");
+        let (_directory, snapshot, source) =
+            source_fixture_for(&text, "data.toml", b"invalid-data-key");
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("toml").unwrap(),
+            &limits(IrLimits::default()),
+            vec![
                 SyntaxFact::new(
                     1,
                     None,
                     SyntaxFactKind::Root,
                     source.span(),
                     0,
-                    label("json.file.root"),
+                    label("toml.file.root"),
                 ),
                 SyntaxFact::new(
                     2,
                     Some(1),
                     SyntaxFactKind::Declaration,
-                    span_in(&text, &source, &member, 0),
+                    source.span(),
                     1,
-                    label("json.property.declaration"),
+                    label("toml.property.declaration"),
                 ),
                 SyntaxFact::new(
                     3,
@@ -74,13 +105,73 @@ fn json_key_captures_lower_to_exact_source_bound_properties() {
                     SyntaxFactKind::Occurrence,
                     span_in(&text, &source, key, 0),
                     2,
-                    label("json.property.definition"),
+                    label("toml.property.definition"),
+                ),
+            ],
+        )
+        .expect("invalid key is accounted, not fatal");
+        let document = output.document();
+        assert!(document.entities.is_empty());
+        assert!(
+            document.skipped_regions.iter().any(|region| {
+                region.detail == "declaration-name-unavailable" && region.source == source
+            }),
+            "{:?}",
+            document.skipped_regions
+        );
+    }
+}
+
+fn assert_data_key_captures(language: &str, cases: &[(&str, &str)]) {
+    let mut identities = Vec::new();
+    let values = if language == "json" {
+        ["1", "[true, null]"]
+    } else {
+        ["1", "[true, false]"]
+    };
+    for &(key, canonical) in cases {
+        for value in values {
+            let (member, text) = if language == "json" {
+                let member = format!("{key}:{value}");
+                let text = format!("{{{member}}}");
+                (member, text)
+            } else {
+                let member = format!("{key} = {value}");
+                let text = format!("{member}\n");
+                (member, text)
+            };
+            let (_directory, snapshot, source) =
+                source_fixture_for(&text, &format!("data.{language}"), b"data-key-lowering");
+            let captured = vec![
+                SyntaxFact::new(
+                    1,
+                    None,
+                    SyntaxFactKind::Root,
+                    source.span(),
+                    0,
+                    label(&format!("{language}.file.root")),
+                ),
+                SyntaxFact::new(
+                    2,
+                    Some(1),
+                    SyntaxFactKind::Declaration,
+                    span_in(&text, &source, &member, 0),
+                    1,
+                    label(&format!("{language}.property.declaration")),
+                ),
+                SyntaxFact::new(
+                    3,
+                    Some(2),
+                    SyntaxFactKind::Occurrence,
+                    span_in(&text, &source, key, 0),
+                    2,
+                    label(&format!("{language}.property.definition")),
                 ),
             ];
             let output = analyze_custom(
                 &snapshot,
                 &source,
-                LanguageId::new("json").expect("language"),
+                LanguageId::new(language).expect("language"),
                 &limits(IrLimits::default()),
                 captured,
             )
@@ -95,7 +186,7 @@ fn json_key_captures_lower_to_exact_source_bound_properties() {
             let entity = &document.entities[0];
             assert_eq!(entity.kind, rootlight_ir::EntityKind::Property);
             assert_eq!(entity.canonical_name, canonical);
-            assert_eq!(entity.language, "json");
+            assert_eq!(entity.language, language);
             assert_eq!(
                 entity.evidence.source,
                 Some(source_for_span(
