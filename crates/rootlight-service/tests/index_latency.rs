@@ -4,6 +4,7 @@
 //! not flushed, so an empty Rootlight state is not an OS-cold measurement.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     time::{Duration, Instant},
@@ -11,10 +12,12 @@ use std::{
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{GenerationId, SymbolId, content_hash};
+use rootlight_ir::{SourceRef, SourceSpan};
 use rootlight_query::LocateMode;
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
-    FirstSliceIndexCommit, FirstSliceIndexOperationStrategy, FirstSliceService,
+    FirstSliceBudget, FirstSliceIndexCommit, FirstSliceIndexOperationStrategy, FirstSliceService,
+    SourceReadOptions,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -131,6 +134,294 @@ fn durable_index_latency_observations() -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn full_source_latency_shapes_preserve_one_byte_body_edits() {
+    for workload in [Workload::Rust, Workload::Json] {
+        for words in [512, 8_192] {
+            let before = full_source(workload, 0, 1, words);
+            let after = full_source(workload, 0, 2, words);
+            assert_eq!(before.len(), after.len());
+            assert_eq!(
+                before
+                    .bytes()
+                    .zip(after.bytes())
+                    .filter(|(a, b)| a != b)
+                    .count(),
+                1
+            );
+            assert_eq!(before.len() > 32 * 1024, words == 8_192);
+            assert_eq!(
+                before
+                    .split_whitespace()
+                    .filter(|word| word.starts_with("word"))
+                    .count(),
+                words
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "runs release-only full-source size and vocabulary observations"]
+fn durable_full_source_latency_observations() -> Result<(), &'static str> {
+    if cfg!(debug_assertions) {
+        return Err("latency observations require --release");
+    }
+    for sample in 0..=SAMPLES {
+        for files in FILE_COUNTS {
+            for workload in [Workload::Rust, Workload::Json] {
+                // Alternate size order across samples to expose order-sensitive cache effects.
+                let sizes = if sample % 2 == 0 {
+                    [512, 8_192]
+                } else {
+                    [8_192, 512]
+                };
+                for words in sizes {
+                    let observation = observe_full_source(workload, files, words, sample);
+                    println!(
+                        "FULL_SOURCE_LATENCY {}",
+                        serde_json::to_string(&observation).expect("observation serializes")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn full_source(workload: Workload, ordinal: usize, body: u32, words: usize) -> String {
+    let vocabulary = (0..words)
+        .map(|word| format!("word{word:05}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match workload {
+        Workload::Rust => format!(
+            "{}// headmarker {vocabulary} tailmarker\n",
+            workload.source(ordinal, body)
+        ),
+        Workload::Json => format!(
+            "{{\"marker\":\"value_{ordinal}\",\"value\":{body},\"vocabulary\":\"headmarker {vocabulary} tailmarker\"}}\n"
+        ),
+        _ => panic!("full-source observations only declare Rust and JSON shapes"),
+    }
+}
+
+fn observe_full_source(workload: Workload, files: usize, words: usize, sample: usize) -> Value {
+    let fixture = TempDir::new().expect("private fixture root");
+    let root = fixture.path().join("repository");
+    fs::create_dir(&root).expect("repository directory");
+    let mut hasher = blake3::Hasher::new();
+    let mut source_bytes = 0usize;
+    for file in 0..files {
+        let path = workload.path(file);
+        let source = full_source(workload, file, 1, words);
+        hasher.update(path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(source.as_bytes());
+        hasher.update(&[0]);
+        source_bytes += source.len();
+        fs::write(root.join(path), source).expect("full-source fixture writes");
+    }
+    let paths = RuntimePaths::new(fixture.path().join("state"), fixture.path().join("runtime"))
+        .expect("runtime paths");
+    paths.prepare_owner().expect("private runtime");
+    let opened = Instant::now();
+    let mut service =
+        FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).expect("durable service");
+    let open_micros = micros(opened);
+    let (initial, initial_timing) = index(&mut service, &root);
+    let (noop, noop_timing) = index(&mut service, &root);
+    assert_eq!(noop.receipt(), initial.receipt());
+    assert_eq!(
+        noop.evidence().strategy,
+        FirstSliceIndexOperationStrategy::RetainedGeneration
+    );
+    assert_eq!(noop.evidence().changed_files, 0);
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+    fs::write(
+        root.join(workload.path(0)),
+        full_source(workload, 0, 2, words),
+    )
+    .expect("one-byte edit");
+    let (changed, changed_timing) = index(&mut service, &root);
+    assert_eq!(changed.receipt().parent, Some(initial.receipt().generation));
+    assert_ne!(changed.receipt().generation, initial.receipt().generation);
+    assert_eq!(changed.evidence().changed_files, 1);
+    if matches!(workload, Workload::Rust) {
+        assert_eq!(changed.evidence().rebuilt_files, 1);
+        assert_eq!(
+            changed.evidence().reused_files,
+            u64::try_from(files - 1).expect("file count")
+        );
+    }
+    assert_eq!(
+        changed.evidence().rebuilt_facts + changed.evidence().reused_facts,
+        initial.evidence().rebuilt_facts
+    );
+    let verification_started = Instant::now();
+    for (commit, changed_body) in [(&initial, false), (&changed, true)] {
+        assert!(commit.receipt().discovery_complete);
+        assert_eq!(commit.receipt().excluded_inputs, 0);
+        assert_eq!(
+            commit.receipt().discovered_inputs,
+            u64::try_from(files).expect("file count")
+        );
+        assert_eq!(
+            commit.receipt().indexed_files,
+            u64::try_from(files).expect("file count")
+        );
+        verify_full_sources(
+            &service,
+            commit.receipt().generation,
+            workload,
+            files,
+            words,
+            changed_body,
+        );
+    }
+    let verification_micros = micros(verification_started);
+    let status = service
+        .repository_status(changed.receipt().repository, None)
+        .expect("language status");
+    assert_eq!(status.coverage.len(), 1);
+    assert_eq!(status.coverage[0].language, workload.language());
+    assert_eq!(
+        status.coverage[0].indexed_files,
+        if matches!(workload, Workload::Json) {
+            0
+        } else {
+            u64::try_from(files).expect("file count")
+        }
+    );
+    json!({
+        "schema":"rootlight.full-source-latency/1", "workload":workload.label(),
+        "files":files,"vocabulary_words_per_file":words,"source_bytes":source_bytes,
+        "fixture_blake3":hasher.finalize().to_hex().to_string(),
+        "sample":sample,"phase":if sample == 0 {"warmup"} else {"measured"},
+        "profile":"release","storage":"durable","initial_state":"empty","os_cache":"not_flushed",
+        "service_open_micros":open_micros,"verification_micros":verification_micros,
+        "operation_watchdog_seconds":OPERATION_WATCHDOG_SECONDS,
+        "initial":stage(&initial,initial_timing),"noop":stage(&noop,noop_timing),"body_edit":stage(&changed,changed_timing),
+        "coverage":{"language":status.coverage[0].language,"tier":status.coverage[0].tier,"status":status.coverage[0].status,
+            "discovered_files":status.coverage[0].discovered_files,"indexed_files":status.coverage[0].indexed_files},
+        "all_files_global_head_and_tail_located":true,"all_files_lexical_omissions_zero":true,
+        "all_files_exact_tail_reads":true,"complete_file_reads_per_generation":2,"verified_generations":2,
+        "installed_mcp_measurement":false,"full_language_support_claimed":false,"before_after_binary_comparison":false
+    })
+}
+
+fn verify_full_sources(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    workload: Workload,
+    files: usize,
+    words: usize,
+    changed: bool,
+) {
+    let mut hits = BTreeMap::new();
+    for offset in (0..files).step_by(32) {
+        let located = service
+            .code_locate(
+                generation,
+                "headmarker tailmarker".to_owned(),
+                LocateMode::Text,
+                32,
+                offset,
+                &deadline(),
+            )
+            .expect("cross-source vocabulary query");
+        assert_eq!(located.data.hits.len(), (files - offset).min(32));
+        for hit in located.data.hits {
+            assert!(hit.symbol.is_none());
+            assert!(
+                hits.insert(hit.path, hit.source.expect("file reference"))
+                    .is_none()
+            );
+        }
+    }
+    assert_eq!(hits.len(), files);
+    for file in 0..files {
+        let reference = hits
+            .remove(&workload.path(file))
+            .expect("every expected source located");
+        let source = full_source(
+            workload,
+            file,
+            if changed && file == 0 { 2 } else { 1 },
+            words,
+        );
+        assert_eq!(reference.generation(), generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        let coverage = service
+            .source_file_lexical_coverage_until(generation, reference.span().file(), &deadline())
+            .expect("lexical accounting")
+            .expect("whole-input accounting");
+        assert_eq!(
+            coverage.source_bytes,
+            u64::try_from(source.len()).expect("source length")
+        );
+        assert!(coverage.is_complete());
+        assert_eq!(coverage.omitted_word_bytes, 0);
+        let start = source.find("tailmarker").expect("tail marker");
+        assert_eq!(
+            read_range(service, &reference, start, start + "tailmarker".len()),
+            b"tailmarker"
+        );
+        if file == 0 || file == files - 1 {
+            let mut exact = Vec::new();
+            for start in (0..source.len()).step_by(16 * 1024) {
+                exact.extend(read_range(
+                    service,
+                    &reference,
+                    start,
+                    (start + 16 * 1024).min(source.len()),
+                ));
+            }
+            assert_eq!(exact, source.as_bytes());
+        }
+    }
+}
+
+fn read_range(
+    service: &FirstSliceService,
+    reference: &SourceRef,
+    start: usize,
+    end: usize,
+) -> Vec<u8> {
+    let span = SourceSpan::new(
+        reference.span().file(),
+        u64::try_from(start).expect("start offset"),
+        u64::try_from(end).expect("end offset"),
+    )
+    .expect("source span");
+    let part = SourceRef::new(
+        reference.repository(),
+        reference.generation(),
+        span,
+        reference.content_hash(),
+        None,
+    );
+    let read = service
+        .source_read_with_options_and_budget(
+            reference.generation(),
+            vec![part],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .expect("bounded exact source read");
+    assert_eq!(read.data.chunks.len(), 1);
+    read.data
+        .chunks
+        .into_iter()
+        .next()
+        .expect("one source chunk")
+        .bytes
 }
 
 fn observe(workload: Workload, file_count: usize, ordinal: usize) -> Value {
