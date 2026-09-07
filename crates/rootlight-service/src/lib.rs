@@ -116,9 +116,9 @@ pub use rootlight_query::{
 };
 use rootlight_query::{
     GenerationLease, GenerationSet, LexicalProjectionBuilder, QueryBudget, QueryError,
-    QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_all_sources,
+    QueryService, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents_with_full_source_terms,
     project_scoped_lexical_documents_for_query, project_scoped_lexical_documents_with_source,
-    project_source_fallback_document_with_text_limit,
+    project_source_document_with_full_terms,
 };
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/16";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/17";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -8037,7 +8037,7 @@ impl FirstSliceService {
             .iter()
             .map(|source| &source.snapshot)
             .collect::<Vec<_>>();
-        let documents = project_lexical_documents_with_all_sources(
+        let documents = project_lexical_documents_with_full_source_terms(
             verified.snapshot(),
             &source_snapshots,
             BuildBudget::default(),
@@ -8340,7 +8340,6 @@ impl FirstSliceService {
         let catalog_written_bytes =
             prepared.write_source_file_catalog(verified.snapshot().source_files(), cancellation)?;
         let budget = BuildBudget::default();
-        let text_limit = source_fallback_text_limit(verified.snapshot())?;
         let partition_files = SOURCE_FILE_FALLBACK_PARTITION_FILES.min(budget.max_documents);
         let mut partition = Vec::new();
         partition
@@ -8443,10 +8442,9 @@ impl FirstSliceService {
                     return Err(FirstSliceError::DiscoveryDrift.into());
                 }
                 source_writer.push(&snapshot)?;
-                let lexical = project_source_fallback_document_with_text_limit(
+                let lexical = project_source_document_with_full_terms(
                     verified.snapshot(),
                     &snapshot,
-                    text_limit,
                     budget,
                     cancellation,
                 )
@@ -18451,6 +18449,8 @@ struct LogicalLexicalDocument<'document> {
     documentation: &'document Option<String>,
     source_identifiers: &'document [String],
     source_text: &'document Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    source_term_chunks: &'document Vec<Vec<String>>,
     generated: bool,
     test: bool,
     declaration_only: bool,
@@ -18474,6 +18474,7 @@ impl<'document> From<&'document LexicalDocument> for LogicalLexicalDocument<'doc
             documentation: &document.documentation,
             source_identifiers: &document.source_identifiers,
             source_text: &document.source_text,
+            source_term_chunks: &document.source_term_chunks,
             generated: document.generated,
             test: document.test,
             declaration_only: document.declaration_only,
@@ -26543,6 +26544,122 @@ mod tests {
                         .source_read(receipt.generation, vec![reference], &deadline())
                         .expect("generation-bound source read executes");
                     assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_text_finds_tail_terms_across_source_chunks_after_restart() {
+        assert_global_source_terms(false);
+    }
+
+    #[test]
+    fn file_only_global_text_finds_tail_terms_after_restart() {
+        assert_global_source_terms(true);
+    }
+
+    fn assert_global_source_terms(file_only: bool) {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths");
+        paths.prepare_owner().expect("private paths");
+        let fixture = durable_test_tempdir();
+        let source = format!(
+            "// headmarker\n// {}\n// tailmarker\n",
+            "padding ".repeat(12_000)
+        );
+        fs::write(fixture.path().join("source.rs"), &source).expect("Rust source writes");
+        fs::write(
+            fixture.path().join("config.yaml"),
+            source.replace("//", "#"),
+        )
+        .expect("unparsed source writes");
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+            .expect("service initializes");
+        if file_only {
+            let mut ir = service.analysis_limits.ir().clone();
+            ir.max_files = 1;
+            replace_service_ir_limits(&mut service, ir);
+        }
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("sources publish");
+        if file_only {
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("snapshot retained");
+            assert!(!generation.source_files().is_empty());
+        }
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
+                    .expect("durable source index restores");
+            }
+            for query in ["tailmarker", "headmarker tailmarker"] {
+                let located = service
+                    .code_locate(
+                        receipt.generation,
+                        query.to_owned(),
+                        LocateMode::Text,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .expect("global text query executes");
+                let files = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.symbol.is_none())
+                    .map(|hit| hit.path.as_str())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    files,
+                    BTreeSet::from(["source.rs", "config.yaml"]),
+                    "restored={restored}, query={query}"
+                );
+                assert!(!located.data.truncated);
+                for hit in located.data.hits.iter().filter(|hit| hit.symbol.is_none()) {
+                    let reference = hit.source.clone().expect("file source identity");
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let expected = if hit.path == "source.rs" {
+                        source.clone()
+                    } else {
+                        source.replace("//", "#")
+                    };
+                    assert_eq!(reference.content_hash(), content_hash(expected.as_bytes()));
+                    let mut bytes = Vec::new();
+                    for start in (0..expected.len()).step_by(16 * 1024) {
+                        let end = (start + 16 * 1024).min(expected.len());
+                        let span = SourceSpan::new(
+                            reference.span().file(),
+                            u64::try_from(start).expect("fixture offset"),
+                            u64::try_from(end).expect("fixture offset"),
+                        )
+                        .expect("bounded source span");
+                        let part = SourceRef::new(
+                            reference.repository(),
+                            reference.generation(),
+                            span,
+                            reference.content_hash(),
+                            None,
+                        );
+                        let read = service
+                            .source_read_with_options_and_budget(
+                                receipt.generation,
+                                vec![part],
+                                SourceReadOptions::new()
+                                    .with_context_lines_before(0)
+                                    .with_context_lines_after(0),
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .expect("source reads in bounded requests");
+                        bytes.extend_from_slice(&read.data.chunks[0].bytes);
+                    }
+                    assert_eq!(bytes, expected.as_bytes());
                 }
             }
         }

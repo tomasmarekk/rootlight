@@ -340,11 +340,13 @@ struct DurableGenerationManifest {
     lexical_source_projection: Option<DurableLexicalSourceProjection>,
 }
 
-/// Missing policy reconstructs the exact legacy entity/unsupported-file index.
+/// Each policy reconstructs its original vocabulary without rewriting old generations.
 #[derive(Clone, Copy, Deserialize, Serialize)]
 enum DurableLexicalSourceProjection {
     #[serde(rename = "all-files-v1")]
     AllFilesV1,
+    #[serde(rename = "full-source-terms-v1")]
+    FullSourceTermsV1,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3734,7 +3736,7 @@ impl DurablePreparedGeneration {
                 incremental_state,
                 source_file_catalog,
                 source_storage,
-                lexical_source_projection: Some(DurableLexicalSourceProjection::AllFilesV1),
+                lexical_source_projection: Some(DurableLexicalSourceProjection::FullSourceTermsV1),
             };
             let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
             let retained_durable_bytes = retained_before_manifest
@@ -5974,6 +5976,7 @@ fn restore_generation(
             repository_directory,
             &generation_directory,
             repository,
+            manifest.lexical_source_projection,
             source_layout,
             cancellation,
         )?
@@ -6035,6 +6038,13 @@ fn restore_normalized_search(
                 cancellation,
             )
         }
+        Some(DurableLexicalSourceProjection::FullSourceTermsV1) => {
+            LexicalProjectionBuilder::with_full_source_terms(
+                verified,
+                BuildBudget::default(),
+                cancellation,
+            )
+        }
     }
     .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     // Retaining the validated directory capabilities avoids reopening the same
@@ -6080,6 +6090,7 @@ fn restore_file_only_search(
     repository_directory: &PrivateDirectory<'_>,
     generation_directory: &PrivateDirectory<'_>,
     repository: RepositoryId,
+    source_projection: Option<DurableLexicalSourceProjection>,
     source_layout: DurableSourceLayout,
     cancellation: &Cancellation,
 ) -> Result<(LexicalIndex, u64), FirstSliceError> {
@@ -6130,13 +6141,25 @@ fn restore_file_only_search(
             .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         let snapshot = source_reader.read(file, cancellation)?;
-        let document = project_source_fallback_document_with_text_limit(
-            verified,
-            &snapshot,
-            text_limit,
-            budget,
-            cancellation,
-        )
+        let document = if matches!(
+            source_projection,
+            Some(DurableLexicalSourceProjection::FullSourceTermsV1)
+        ) {
+            rootlight_query::project_source_document_with_full_terms(
+                verified,
+                &snapshot,
+                budget,
+                cancellation,
+            )
+        } else {
+            project_source_fallback_document_with_text_limit(
+                verified,
+                &snapshot,
+                text_limit,
+                budget,
+                cancellation,
+            )
+        }
         .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
         partition.push(document);
         lexical_documents = lexical_documents
@@ -6930,6 +6953,15 @@ mod tests {
             "\"all-files-v1\""
         );
         assert!(serde_json::from_str::<DurableLexicalSourceProjection>("\"all-files-v1\"").is_ok());
+        assert_eq!(
+            serde_json::to_string(&DurableLexicalSourceProjection::FullSourceTermsV1)
+                .expect("full-source policy serializes"),
+            "\"full-source-terms-v1\""
+        );
+        assert!(
+            serde_json::from_str::<DurableLexicalSourceProjection>("\"full-source-terms-v1\"")
+                .is_ok()
+        );
         for unknown in ["\"all-files-v2\"", "\"unsupported-only\"", "0", "null"] {
             assert!(serde_json::from_str::<DurableLexicalSourceProjection>(unknown).is_err());
         }

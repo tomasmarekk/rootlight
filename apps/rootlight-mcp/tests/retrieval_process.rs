@@ -88,7 +88,69 @@ fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     source_symbol_selector_resolves_the_complete_definition(&mut fixture);
     unsupported_retrieval_options_fail_with_stable_preflight_errors(&mut fixture);
     retrieval_limits_cursors_and_unresolved_ids_are_truthful(&mut fixture);
+    global_source_chunks_preserve_pagination_and_exact_tail_reads(&mut fixture);
     fixture.finish();
+}
+
+fn global_source_chunks_preserve_pagination_and_exact_tail_reads(fixture: &mut RetrievalFixture) {
+    let mut cursor = Value::Null;
+    let mut paths = std::collections::BTreeSet::new();
+    for page in 0..2 {
+        let mut arguments = json!({"query": "globalheadmarker globaltailmarker",
+            "search_modes": ["lexical"], "languages": ["yaml"], "max_results": 1,
+            "response_profile": "evidence"});
+        if page != 0 {
+            arguments["cursor"] = cursor.clone();
+        }
+        let response = fixture.standalone(
+            &format!("full-source-page-{page}"),
+            "code.locate",
+            arguments,
+        );
+        assert_success(&response, "code.locate");
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        let matches = output["data"]["matches"].as_array().expect("source hits");
+        assert_eq!(matches.len(), 1, "full-source response: {output:#}");
+        let matched = &matches[0];
+        assert!(matched.get("symbol_id").is_none_or(Value::is_null));
+        paths.insert(matched["path"].as_str().expect("source path").to_owned());
+        let mut reference = matched["source_ref"].clone();
+        let end = reference["span"]["end_byte"]
+            .as_u64()
+            .expect("full file extent");
+        assert!(end > 32 * 1024);
+        reference["span"]["start_byte"] = json!(end - 17);
+        reference["span"]["end_byte"] = json!(end - 1);
+        reference
+            .as_object_mut()
+            .expect("source reference is an object")
+            .remove("line_hint");
+        let read = fixture.standalone(
+            &format!("full-source-read-{page}"),
+            "source.read",
+            json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                "context_lines_after": 0, "response_profile": "evidence"}),
+        );
+        assert_success(&read, "source.read");
+        let read = &read["result"]["structuredContent"];
+        assert_common_read_contract(read, &fixture.repository_id);
+        assert_eq!(read["generation"], output["generation"]);
+        assert_eq!(read["data"]["chunks"][0]["content"], "globaltailmarker");
+        assert_eq!(
+            read["data"]["chunks"][0]["source_ref"]["content_hash"],
+            reference["content_hash"]
+        );
+        cursor = output["next_cursor"].clone();
+        assert_eq!(cursor.is_string(), page == 0);
+    }
+    assert_eq!(
+        paths,
+        std::collections::BTreeSet::from([
+            "source-tail-a.yaml".to_owned(),
+            "source-tail-b.yaml".to_owned()
+        ])
+    );
 }
 
 fn supported_architecture_workflows_cross_process_boundaries(fixture: &mut RetrievalFixture) {
@@ -1213,6 +1275,16 @@ impl RetrievalFixture {
             SCOPED_PAGE_SOURCE,
         )
         .expect("scoped test fixture is written");
+
+        let terms = (0..5_000)
+            .map(|index| format!("item{index:05}value{index:05}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let full_source = format!("# globalheadmarker\n# {terms}\n# globaltailmarker\n");
+        for path in ["source-tail-a.yaml", "source-tail-b.yaml"] {
+            fs::write(repository_root.join(path), &full_source)
+                .expect("tail source fixture writes");
+        }
 
         let state_dir = root.path().join("state");
         let runtime_dir = root.path().join("runtime");

@@ -860,14 +860,35 @@ fn locate_symbol(mcp: &mut McpProcess, index: &IndexReceipt, query: &str) -> Str
             "generation": index.generation_id,
             "query": query,
             "search_modes": ["exact"],
-            "max_results": 2
+            "max_results": 3
         }),
     );
     assert_success(&response, "code.locate");
     let matches = response["result"]["structuredContent"]["data"]["matches"]
         .as_array()
         .expect("code.locate returns matches");
-    process_support::assert_symbol_and_source_matches(matches);
+    assert_eq!(
+        matches.len(),
+        3,
+        "definition and both source files: {matches:#?}"
+    );
+    assert_eq!(matches[0]["path"], "src/lib.rs");
+    let mut source_paths = Vec::new();
+    for source in &matches[1..] {
+        assert!(source["symbol_id"].is_null());
+        assert_eq!(source["kind"], "file");
+        source_paths.push(required_string(&source["path"], "source path"));
+    }
+    source_paths.sort();
+    assert_eq!(source_paths, ["src/lib.rs", "tests/regression.rs"]);
+    let definition_source = matches[1..]
+        .iter()
+        .find(|source| source["file_id"] == matches[0]["file_id"])
+        .expect("definition file remains separately retrievable");
+    process_support::assert_symbol_and_source_matches(&[
+        matches[0].clone(),
+        definition_source.clone(),
+    ]);
     required_string(&matches[0]["symbol_id"], "symbol identity")
 }
 

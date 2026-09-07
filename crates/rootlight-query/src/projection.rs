@@ -4,8 +4,8 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
-    BuildBudget, LexicalDocument, SearchBudget, SearchError, select_query_source_text,
-    validate_build_admission,
+    BuildBudget, LexicalDocument, SearchBudget, SearchError, project_source_term_chunks,
+    select_query_source_text, validate_build_admission,
 };
 use rootlight_storage::GenerationSnapshot;
 use rootlight_vfs::SourceSnapshot;
@@ -23,7 +23,7 @@ const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
 /// Entity documents are projected during construction. Callers then supply
 /// source snapshots in the canonical order exposed by
 /// [`Self::next_source_file`], allowing each full source body to be released
-/// after its bounded fallback document is built.
+/// after its policy-specific bounded lexical document is built.
 #[derive(Debug)]
 #[must_use = "finish the projection after supplying every required source"]
 pub struct LexicalProjectionBuilder<'generation> {
@@ -33,6 +33,7 @@ pub struct LexicalProjectionBuilder<'generation> {
     text_bytes: usize,
     required_source_files: Vec<FileId>,
     next_source: usize,
+    full_source_terms: bool,
 }
 
 impl<'generation> LexicalProjectionBuilder<'generation> {
@@ -67,6 +68,24 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
         cancellation: &Cancellation,
     ) -> Result<Self, QueryError> {
         Self::with_source_policy(generation, budget, true, cancellation)
+    }
+
+    /// Starts an all-file projection whose bounded term batches scan full sources.
+    ///
+    /// Legacy constructors retain their exact prefix projection for restoration
+    /// of older generations. Whole-file and symbol identities are unchanged.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for invalid budgets, cancellation, source identity
+    /// drift, allocation failure, or exceeded construction bounds.
+    pub fn with_full_source_terms(
+        generation: &'generation GenerationSnapshot,
+        budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, QueryError> {
+        let mut projection = Self::with_source_policy(generation, budget, true, cancellation)?;
+        projection.full_source_terms = true;
+        Ok(projection)
     }
 
     fn with_source_policy(
@@ -155,6 +174,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             text_bytes,
             required_source_files,
             next_source: 0,
+            full_source_terms: false,
         })
     }
 
@@ -186,15 +206,40 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
         if source.file() != expected {
             return Err(QueryError::IndexDrift);
         }
-        let (projected, next_text_bytes) = project_source_document(
+        let (mut projected, mut next_text_bytes) = project_source_document(
             self.generation,
             source,
             self.text_bytes,
-            SOURCE_FALLBACK_TEXT_BYTES,
+            if self.full_source_terms {
+                0
+            } else {
+                SOURCE_FALLBACK_TEXT_BYTES
+            },
             None,
             self.budget,
             cancellation,
         )?;
+        if self.full_source_terms
+            && let Ok(text) = std::str::from_utf8(source.content())
+        {
+            projected.source_term_chunks = project_source_term_chunks(
+                text,
+                self.budget.max_text_bytes.saturating_sub(next_text_bytes),
+                cancellation,
+            )?;
+            for chunk in &projected.source_term_chunks {
+                next_text_bytes = chunk
+                    .iter()
+                    .try_fold(next_text_bytes, |bytes, word| {
+                        bytes
+                            .checked_add(word.len())
+                            .and_then(|bytes| bytes.checked_add(word.len()))
+                            .ok_or(QueryError::IndexDrift)
+                    })?
+                    .checked_add(chunk.len().saturating_sub(1))
+                    .ok_or(QueryError::IndexDrift)?;
+            }
+        }
         let next_source = self
             .next_source
             .checked_add(1)
@@ -245,6 +290,33 @@ pub fn project_source_fallback_document(
         budget,
         cancellation,
     )
+}
+
+/// Projects one verified file's entire bounded vocabulary into one lexical document.
+///
+/// This is the streaming counterpart of the full-source generation builder.
+/// All batches remain subject to the existing aggregate construction budget.
+///
+/// # Errors
+/// Returns [`QueryError`] for source identity drift, invalid budgets,
+/// cancellation, allocation failure, or exceeded projection limits.
+pub fn project_source_document_with_full_terms(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<LexicalDocument, QueryError> {
+    validate_build_admission(budget)?;
+    let (mut document, bytes) =
+        project_source_document(generation, source, 0, 0, None, budget, cancellation)?;
+    if let Ok(text) = std::str::from_utf8(source.content()) {
+        document.source_term_chunks = project_source_term_chunks(
+            text,
+            budget.max_text_bytes.saturating_sub(bytes),
+            cancellation,
+        )?;
+    }
+    Ok(document)
 }
 
 /// Projects one exact source with an optionally tighter text-prefix ceiling.
@@ -375,6 +447,7 @@ fn project_source_document(
             documentation: None,
             source_identifiers,
             source_text,
+            source_term_chunks: Vec::new(),
             generated: file.generated,
             test: false,
             declaration_only: false,
@@ -441,6 +514,27 @@ pub fn project_lexical_documents_with_all_sources(
 ) -> Result<Vec<LexicalDocument>, QueryError> {
     project_with_source_snapshots(
         LexicalProjectionBuilder::with_all_sources(generation, budget, cancellation)?,
+        sources,
+        cancellation,
+    )
+}
+
+/// Projects every retained file's full bounded vocabulary alongside its symbols.
+///
+/// Batches share their file document, so cross-batch query terms do not create
+/// duplicate hits or require an expensive query-time repository scan.
+///
+/// # Errors
+/// Returns [`QueryError`] for invalid budgets, cancellation, source identity
+/// drift, missing sources, allocation failure, or exceeded construction bounds.
+pub fn project_lexical_documents_with_full_source_terms(
+    generation: &GenerationSnapshot,
+    sources: &[&SourceSnapshot],
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    project_with_source_snapshots(
+        LexicalProjectionBuilder::with_full_source_terms(generation, budget, cancellation)?,
         sources,
         cancellation,
     )
@@ -660,6 +754,7 @@ fn project_entity_document(
             documentation: None,
             source_identifiers: Vec::new(),
             source_text: None,
+            source_term_chunks: Vec::new(),
             generated: file.generated,
             test: matches!(entity.kind, EntityKind::Test)
                 || entity.flags.contains(&EntityFlag::Test),

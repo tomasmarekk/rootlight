@@ -47,6 +47,8 @@ const MAX_DOCUMENTATION_BYTES: usize = 32 * 1024;
 const MAX_SOURCE_IDENTIFIERS: usize = 4_096;
 const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
 const MAX_SOURCE_TEXT_BYTES: usize = 64 * 1024;
+const SOURCE_TERM_CHUNK_BYTES: usize = 32 * 1024;
+const MAX_SOURCE_TERM_CHUNKS: usize = 1_024;
 const MAX_PATTERN_WILDCARDS: usize = 4;
 const MIN_PATTERN_LITERALS: usize = 2;
 const HARD_MAX_DOCUMENTS: usize = 1_000_000;
@@ -780,11 +782,11 @@ fn prepare_documents(
             return Err(SearchError::DuplicateSymbol);
         }
         prior = Some(target);
-        text_bytes = text_bytes.checked_add(validate_document(document)?).ok_or(
-            SearchError::BuildBudgetExceeded {
+        text_bytes = text_bytes
+            .checked_add(validate_document(document, cancellation)?)
+            .ok_or(SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
-            },
-        )?;
+            })?;
         if text_bytes > budget.max_text_bytes {
             return Err(SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
@@ -1073,6 +1075,12 @@ impl Fields {
         }
         if let Some(source_text) = &source.source_text {
             document.add_text(self.source_text, source_text);
+        }
+        for chunk in &source.source_term_chunks {
+            for word in chunk {
+                document.add_text(self.source_identifier_normalized, normalize_exact(word));
+            }
+            document.add_text(self.source_text, chunk.join(" "));
         }
         document.add_bool(self.generated, source.generated);
         Ok(document)
@@ -1791,6 +1799,101 @@ fn compile_literal_prefix(input: &str) -> Result<BoundedPattern, SearchError> {
     )
 }
 
+/// Projects source words from the entire input into bounded lexical batches.
+///
+/// Word identity and tokenization use the same Unicode rules as query-time
+/// source selection. Oversized words remain outside the bounded vocabulary;
+/// callers must not describe this lexical projection as semantic coverage.
+/// Duplicate words within a batch need no additional posting evidence.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for cancellation, allocation failure, or exceeding
+/// the supplied aggregate text budget or the bounded batch count.
+pub fn project_source_term_chunks(
+    source: &str,
+    maximum_text_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<Vec<Vec<String>>, SearchError> {
+    cancellation.check()?;
+    let maximum_text_bytes = maximum_text_bytes.min(HARD_MAX_TEXT_BYTES);
+    let mut chunks = Vec::new();
+    let mut words = BTreeSet::new();
+    let mut chunk_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    for word in source.split(|character: char| {
+        !(character == '_' || character.is_alphanumeric() || is_mark(character))
+    }) {
+        cancellation.check()?;
+        if word.is_empty()
+            || word.len() > MAX_SOURCE_IDENTIFIER_BYTES
+            || normalize_text(word).len() > MAX_SOURCE_IDENTIFIER_BYTES
+            || words.contains(word)
+        {
+            continue;
+        }
+        let additional = word
+            .len()
+            .checked_add(usize::from(!words.is_empty()))
+            .ok_or(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        if words.len() == MAX_SOURCE_IDENTIFIERS
+            || chunk_bytes.saturating_add(additional) > SOURCE_TERM_CHUNK_BYTES
+        {
+            if chunks.len() >= MAX_SOURCE_TERM_CHUNKS {
+                return Err(SearchError::BuildBudgetExceeded {
+                    resource: "source_chunks",
+                });
+            }
+            chunks
+                .try_reserve(1)
+                .map_err(|_| SearchError::BuildBudgetExceeded {
+                    resource: "source_chunks",
+                })?;
+            chunks.push(std::mem::take(&mut words).into_iter().collect());
+            chunk_bytes = 0;
+        }
+        let text_addition = word
+            .len()
+            .checked_add(usize::from(!words.is_empty()))
+            .ok_or(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        total_bytes = total_bytes
+            .checked_add(word.len())
+            .and_then(|bytes| bytes.checked_add(text_addition))
+            .filter(|bytes| *bytes <= maximum_text_bytes)
+            .ok_or(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(word.len())
+            .map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        owned.push_str(word);
+        words.insert(owned);
+        chunk_bytes += text_addition;
+    }
+    if !words.is_empty() {
+        if chunks.len() >= MAX_SOURCE_TERM_CHUNKS {
+            return Err(SearchError::BuildBudgetExceeded {
+                resource: "source_chunks",
+            });
+        }
+        chunks
+            .try_reserve(1)
+            .map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "source_chunks",
+            })?;
+        chunks.push(words.into_iter().collect());
+    }
+    cancellation.check()?;
+    Ok(chunks)
+}
+
 /// Selects bounded, genuinely occurring source words relevant to one text query.
 ///
 /// The scan uses the index's tokenizer and Unicode normalization, retaining at
@@ -2013,7 +2116,10 @@ fn ensure_empty_directory(directory: &Path) -> Result<(), SearchError> {
     Ok(())
 }
 
-fn validate_document(document: &LexicalDocument) -> Result<usize, SearchError> {
+fn validate_document(
+    document: &LexicalDocument,
+    cancellation: &Cancellation,
+) -> Result<usize, SearchError> {
     let mut bytes = 0usize;
     bytes = add_required(
         bytes,
@@ -2090,13 +2196,46 @@ fn validate_document(document: &LexicalDocument) -> Result<usize, SearchError> {
             true,
         )?;
     }
-    add_optional(
+    bytes = add_optional(
         bytes,
         document.source_text.as_deref(),
         MAX_SOURCE_TEXT_BYTES,
         DocumentField::SourceText,
         true,
-    )
+    )?;
+    if document.source_term_chunks.len() > MAX_SOURCE_TERM_CHUNKS
+        || (document.symbol_id.is_some() && !document.source_term_chunks.is_empty())
+    {
+        return Err(SearchError::InvalidDocument {
+            field: DocumentField::SourceText,
+        });
+    }
+    for chunk in &document.source_term_chunks {
+        cancellation.check()?;
+        if chunk.is_empty() || chunk.len() > MAX_SOURCE_IDENTIFIERS {
+            return Err(SearchError::InvalidDocument {
+                field: DocumentField::SourceIdentifier,
+            });
+        }
+        let mut text_bytes = chunk.len().saturating_sub(1);
+        for word in chunk {
+            bytes = add_required(
+                bytes,
+                word,
+                MAX_SOURCE_IDENTIFIER_BYTES,
+                DocumentField::SourceIdentifier,
+                true,
+            )?;
+            text_bytes = checked_text_bytes(text_bytes, word.len())?;
+        }
+        if text_bytes > SOURCE_TERM_CHUNK_BYTES {
+            return Err(SearchError::InvalidDocument {
+                field: DocumentField::SourceText,
+            });
+        }
+        bytes = checked_text_bytes(bytes, text_bytes)?;
+    }
+    Ok(bytes)
 }
 
 fn add_label(bytes: usize, value: &str, field: DocumentField) -> Result<usize, SearchError> {
@@ -2580,6 +2719,117 @@ mod tests {
     }
 
     #[test]
+    fn full_source_chunks_preserve_terms_and_single_file_hits() {
+        let mut terms = (0..8_000)
+            .map(|index| format!("record{index:05}value{index:05}"))
+            .collect::<Vec<_>>();
+        terms.extend(["headmarker", "tailmarker", "Cafe\u{301}", "Straße"].map(str::to_owned));
+        let source = terms.join(" ");
+        let chunks = project_source_term_chunks(
+            &source,
+            BuildBudget::default().max_text_bytes,
+            &Cancellation::new(),
+        )
+        .expect("full source projects");
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| !chunk.is_empty()
+            && chunk.len() <= MAX_SOURCE_IDENTIFIERS
+            && chunk.join(" ").len() <= SOURCE_TERM_CHUNK_BYTES));
+        assert_eq!(
+            chunks.iter().flatten().collect::<BTreeSet<_>>(),
+            terms.iter().collect::<BTreeSet<_>>()
+        );
+        let mut first = document(1, "first", "first.rs");
+        first.symbol_id = None;
+        first.source_term_chunks = chunks;
+        let mut second = document(2, "second", "second.yaml");
+        second.symbol_id = None;
+        second.source_term_chunks = vec![vec!["tailmarker".to_owned(), "separateword".to_owned()]];
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![first, second],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("chunked documents build");
+        for (query, mode, expected) in [
+            ("headmarker tailmarker", SearchMode::Text, 1),
+            (
+                "record00000value00000 record07999value07999",
+                SearchMode::Text,
+                1,
+            ),
+            ("tailmarker", SearchMode::Text, 2),
+            ("tailmarker", SearchMode::Exact, 2),
+            ("tailmar", SearchMode::Prefix, 2),
+            ("CAFÉ", SearchMode::Text, 1),
+            ("STRASSE", SearchMode::Text, 1),
+            ("headmarker separateword", SearchMode::Text, 0),
+            ("missingword", SearchMode::Text, 0),
+        ] {
+            let hits = index
+                .search(
+                    &SearchRequest {
+                        query: query.to_owned(),
+                        mode,
+                        max_results: 10,
+                        page_offset: 0,
+                    },
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .expect("full source query executes");
+            assert_eq!(hits.len(), expected, "{query}");
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| hit.file_id)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn source_chunks_enforce_text_batch_and_cancellation_bounds() {
+        let cancellation = Cancellation::new();
+        assert!(matches!(
+            project_source_term_chunks("marker", 11, &cancellation),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes"
+            })
+        ));
+        let chunks = project_source_term_chunks("marker marker", 12, &cancellation)
+            .expect("deduplicated words fit");
+        assert_eq!(chunks, vec![vec!["marker".to_owned()]]);
+        for invalid in [
+            vec![Vec::new()],
+            vec![vec!["x".repeat(MAX_SOURCE_IDENTIFIER_BYTES + 1)]],
+            vec![vec!["word".to_owned(); MAX_SOURCE_IDENTIFIERS + 1]],
+            vec![vec!["x".repeat(240); 140]],
+            vec![vec!["word".to_owned()]; MAX_SOURCE_TERM_CHUNKS + 1],
+        ] {
+            let mut file = document(1, "file", "file.rs");
+            file.symbol_id = None;
+            file.source_term_chunks = invalid;
+            assert!(matches!(
+                LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![file],
+                    BuildBudget::default(),
+                    &cancellation
+                ),
+                Err(SearchError::InvalidDocument { .. })
+            ));
+        }
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            project_source_term_chunks("marker", 12, &cancellation),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        ));
+    }
+
+    #[test]
     fn source_selection_enforces_admission_output_and_cancellation() {
         let cancellation = Cancellation::new();
         assert_eq!(
@@ -2675,6 +2925,7 @@ mod tests {
             documentation: Some("Runs bounded deterministic lexical search.".to_owned()),
             source_identifiers: Vec::new(),
             source_text: None,
+            source_term_chunks: Vec::new(),
             generated: false,
             test: false,
             declaration_only: false,

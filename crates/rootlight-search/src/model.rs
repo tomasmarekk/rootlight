@@ -41,6 +41,11 @@ pub struct LexicalDocument {
     pub source_identifiers: Vec<String>,
     /// Optional bounded retained source text.
     pub source_text: Option<String>,
+    /// Bounded source-word batches indexed under the same file identity.
+    ///
+    /// These extend the legacy prefix fields without creating extra search
+    /// hits. Each batch retains whole words so token boundaries are not cut.
+    pub source_term_chunks: Vec<Vec<String>>,
     /// Whether the declaring file is generated.
     pub generated: bool,
     /// Whether the entity is test-only or test-related.
