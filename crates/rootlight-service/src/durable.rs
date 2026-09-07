@@ -4913,16 +4913,17 @@ fn scan_source_blob_storage(
         let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
         let blob = PrivateDirectory::open(blobs.capability(), &name)
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let bytes = directory_tree_bytes(&blob, budget)?;
+        let (bytes, payload_metadata) = directory_tree_bytes_and_metadata(
+            &blob,
+            budget,
+            Some(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME)),
+        )?;
         if text.starts_with(STAGING_PREFIX) {
             checked_add_assign(&mut scanned.temporary_bytes, bytes)?;
             continue;
         }
         let digest = ContentHash::from_str(text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let payload_metadata = blob
-            .capability()
-            .symlink_metadata(Path::new(SOURCE_BLOB_PAYLOAD_FILENAME))
-            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let payload_metadata = payload_metadata.ok_or(FirstSliceError::CatalogCorrupt)?;
         if !payload_metadata.is_file() || payload_metadata.file_type().is_symlink() {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -5212,7 +5213,16 @@ fn directory_tree_bytes(
     directory: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
 ) -> Result<u64, FirstSliceError> {
+    directory_tree_bytes_and_metadata(directory, budget, None).map(|(bytes, _)| bytes)
+}
+
+fn directory_tree_bytes_and_metadata(
+    directory: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+    capture: Option<&OsStr>,
+) -> Result<(u64, Option<cap_std::fs::Metadata>), FirstSliceError> {
     let mut total = 0_u64;
+    let mut captured = None;
     for name in budget.entry_names(directory)? {
         budget.visit()?;
         let metadata = directory
@@ -5231,8 +5241,13 @@ fn directory_tree_bytes(
         } else {
             return Err(FirstSliceError::CatalogCorrupt);
         }
+        // Blob accounting already stats the payload; reuse that same observation
+        // instead of reopening each payload for identical metadata a second time.
+        if capture == Some(name.as_os_str()) {
+            captured = Some(metadata);
+        }
     }
-    Ok(total)
+    Ok((total, captured))
 }
 
 fn checked_add_assign(total: &mut u64, bytes: u64) -> Result<(), FirstSliceError> {
@@ -6900,6 +6915,143 @@ mod tests {
     }
 
     #[test]
+    fn storage_tree_metadata_capture_preserves_complete_accounting() {
+        let root = durable_test_tempdir();
+        let paths = RuntimePaths::new(root.path().join("state"), root.path().join("runtime"))
+            .expect("fixture paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let parent = Dir::open_ambient_dir(paths.state_dir(), ambient_authority())
+            .expect("fixture parent opens");
+        let directory = PrivateDirectory::create(&parent, OsStr::new("scan"))
+            .expect("fixture directory creates");
+        fs::write(paths.state_dir().join("scan/content"), b"primary").expect("payload writes");
+        fs::write(paths.state_dir().join("scan/extra"), b"aux").expect("extra file writes");
+        let nested = PrivateDirectory::create(directory.capability(), OsStr::new("nested"))
+            .expect("nested directory creates");
+        fs::write(
+            paths.state_dir().join("scan/nested/content"),
+            b"nested payload",
+        )
+        .expect("nested payload writes");
+        let mut budget = StorageScanBudget::new();
+        let (bytes, metadata) =
+            directory_tree_bytes_and_metadata(&directory, &mut budget, Some(OsStr::new("content")))
+                .expect("complete tree accounts");
+        assert_eq!(bytes, 24);
+        assert_eq!(budget.visited_entries, 4);
+        let metadata = metadata.expect("root payload metadata is retained");
+        assert!(metadata.is_file());
+        assert_eq!(
+            metadata.len(),
+            7,
+            "nested names do not replace the root capture"
+        );
+        let (bytes, missing) = directory_tree_bytes_and_metadata(
+            &directory,
+            &mut StorageScanBudget::new(),
+            Some(OsStr::new("missing")),
+        )
+        .expect("missing optional capture does not hide other entries");
+        assert_eq!(bytes, 24);
+        assert!(missing.is_none());
+        let (bytes, directory_metadata) = directory_tree_bytes_and_metadata(
+            &directory,
+            &mut StorageScanBudget::new(),
+            Some(OsStr::new("nested")),
+        )
+        .expect("non-file metadata retains its actual kind");
+        assert_eq!(bytes, 24);
+        assert!(directory_metadata.expect("nested metadata exists").is_dir());
+        drop(nested);
+    }
+
+    #[test]
+    fn source_blob_scan_counts_extra_bytes_and_requires_regular_payload() {
+        let root = durable_test_tempdir();
+        let paths = RuntimePaths::new(root.path().join("state"), root.path().join("runtime"))
+            .expect("fixture paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let parent = Dir::open_ambient_dir(paths.state_dir(), ambient_authority())
+            .expect("fixture parent opens");
+        let repository = PrivateDirectory::create(&parent, OsStr::new("repository"))
+            .expect("repository creates");
+        let blobs =
+            PrivateDirectory::create(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
+                .expect("source pool creates");
+        let digest = content_hash(b"payload");
+        let blob = PrivateDirectory::create(blobs.capability(), OsStr::new(&digest.to_string()))
+            .expect("blob creates");
+        let blob_path = paths
+            .state_dir()
+            .join("repository")
+            .join(SOURCE_BLOBS_DIRECTORY)
+            .join(digest.to_string());
+        let payload_path = blob_path.join(SOURCE_BLOB_PAYLOAD_FILENAME);
+        {
+            let mut payload = blob
+                .create_file(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME))
+                .expect("private payload creates");
+            payload.write_all(b"payload").expect("payload writes");
+            payload.sync_all().expect("payload synchronizes");
+        }
+        fs::write(blob_path.join("extra"), b"aux").expect("extra bytes write");
+        let scan = |mode| {
+            let mut scanned = ScannedRepositoryStorage::default();
+            scan_source_blob_storage(
+                derive_repository(b"source-blob-accounting").id(),
+                &repository,
+                &mut StorageScanBudget::new(),
+                &mut scanned,
+                &mut BTreeMap::new(),
+                mode,
+            )?;
+            Ok::<_, FirstSliceError>(scanned)
+        };
+        for mode in [
+            SourceBlobScan::AccountPhysicalBytes,
+            SourceBlobScan::VerifyContent,
+        ] {
+            let scanned = scan(mode).unwrap_or_else(|error| {
+                panic!(
+                    "complete blob scan (verify={}): {error:?}",
+                    matches!(mode, SourceBlobScan::VerifyContent)
+                )
+            });
+            assert_eq!(scanned.source_blobs[&digest].bytes, 10);
+            assert_eq!(scanned.source_blobs[&digest].payload_bytes, 7);
+        }
+        fs::write(&payload_path, b"mutated").expect("same-length corruption writes");
+        assert_eq!(
+            scan(SourceBlobScan::AccountPhysicalBytes)
+                .expect("physical accounting is independent of content integrity")
+                .source_blobs[&digest]
+                .bytes,
+            10
+        );
+        assert!(matches!(
+            scan(SourceBlobScan::VerifyContent),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        fs::remove_file(&payload_path).expect("payload removes");
+        for mode in [
+            SourceBlobScan::AccountPhysicalBytes,
+            SourceBlobScan::VerifyContent,
+        ] {
+            assert!(matches!(scan(mode), Err(FirstSliceError::CatalogCorrupt)));
+        }
+        let non_file =
+            PrivateDirectory::create(blob.capability(), OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME))
+                .expect("non-file payload creates");
+        for mode in [
+            SourceBlobScan::AccountPhysicalBytes,
+            SourceBlobScan::VerifyContent,
+        ] {
+            assert!(matches!(scan(mode), Err(FirstSliceError::CatalogCorrupt)));
+        }
+        drop(non_file);
+    }
+
+    #[test]
     fn storage_scan_tree_rejects_cancelled_traversal() {
         let root = durable_test_tempdir();
         let paths = RuntimePaths::new(root.path().join("state"), root.path().join("runtime"))
@@ -7075,6 +7227,122 @@ mod tests {
         {
             TempDir::new().expect("durable test directory is available")
         }
+    }
+
+    #[test]
+    #[ignore = "runs release-only durable activation and compaction observations"]
+    fn durable_noop_publication_phase_observations() -> Result<(), &'static str> {
+        if cfg!(debug_assertions) {
+            return Err("publication observations require --release");
+        }
+        for file_count in [16, 128] {
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .expect("runtime paths are valid");
+            paths.prepare_owner().expect("private paths prepare");
+            let fixture = durable_test_tempdir();
+            for ordinal in 0..file_count {
+                fs::write(
+                    fixture.path().join(format!("item_{ordinal:03}.rs")),
+                    format!("pub fn value_{ordinal}() -> u32 {{ 1 }}\n"),
+                )
+                .expect("fixture source writes");
+            }
+            let cancellation = Cancellation::with_deadline(
+                std::time::Instant::now()
+                    .checked_add(Duration::from_secs(300))
+                    .expect("watchdog fits"),
+            );
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("service opens");
+            let receipt = service
+                .index_repository(fixture.path(), &cancellation)
+                .expect("initial generation publishes");
+            let durable = service.durable.as_ref().expect("durable catalog exists");
+            let repository = PrivateDirectory::open(
+                durable.repositories.capability(),
+                OsStr::new(&receipt.repository.to_string()),
+            )
+            .expect("repository opens");
+            let retained = BTreeSet::from([receipt.generation]);
+            for sample in 0..4_u64 {
+                let started = std::time::Instant::now();
+                let written = durable
+                    .activate_existing(
+                        receipt.repository,
+                        receipt.generation,
+                        sample + 2,
+                        sample + 2,
+                        1,
+                        None,
+                    )
+                    .expect("existing generation activates");
+                let activation_micros = started.elapsed().as_micros();
+                let started = std::time::Instant::now();
+                durable
+                    .compact_repository(receipt.repository, &retained)
+                    .expect("repository compacts");
+                let compaction_micros = started.elapsed().as_micros();
+
+                // These warm diagnostic subprobes run after compaction, not inside its timer.
+                let started = std::time::Instant::now();
+                let referenced = retained_source_blobs(&repository, &retained)
+                    .expect("retained references read");
+                let references_micros = started.elapsed().as_micros();
+                assert_eq!(referenced.len(), file_count);
+                let started = std::time::Instant::now();
+                compact_source_blobs(&repository, &referenced).expect("source pool compacts");
+                let source_pool_micros = started.elapsed().as_micros();
+                let started = std::time::Instant::now();
+                {
+                    let mut accounting =
+                        durable.storage_accounting.lock().expect("accounting locks");
+                    durable
+                        .reconcile_repository_accounting(
+                            &mut accounting,
+                            receipt.repository,
+                            &repository,
+                        )
+                        .expect("repository accounting reconciles");
+                }
+                let accounting_micros = started.elapsed().as_micros();
+                let cached = durable
+                    .storage_inventory_cached()
+                    .expect("cached inventory reads")
+                    .expect("accounting is populated");
+                let verified = durable
+                    .storage_inventory()
+                    .expect("independent physical inventory verifies");
+                assert_eq!(cached.total_physical_bytes, verified.total_physical_bytes);
+                assert_eq!(cached.repositories, verified.repositories);
+                println!(
+                    "PUBLICATION_LATENCY {}",
+                    serde_json::json!({
+                        "schema": "rootlight.publication-latency-observation/1",
+                        "files": file_count, "sample": sample,
+                        "phase": if sample == 0 { "warmup" } else { "measured" },
+                        "profile": "release", "os_cache": "not_flushed",
+                        "activation_micros": activation_micros, "compaction_micros": compaction_micros,
+                        "separate_warm_subprobes": {"references_micros": references_micros,
+                            "source_pool_micros": source_pool_micros, "accounting_micros": accounting_micros},
+                        "activation_written_bytes": written, "physical_accounting_verified": true,
+                        "repeated_activation_same_generation": true, "watchdog_seconds": 300,
+                    })
+                );
+            }
+            drop(repository);
+            drop(service);
+            // Direct phase calls intentionally bypass service activation counters; reopen them.
+            let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("latest durable activation restores");
+            assert_eq!(
+                restored.active_generation_for(receipt.repository),
+                Some(receipt.generation)
+            );
+            assert_eq!(restored.activation_sequences[&receipt.repository], 5);
+        }
+        Ok(())
     }
 
     fn compact_incremental_fixture(file_count: usize) -> PreparedIncrementalState {
