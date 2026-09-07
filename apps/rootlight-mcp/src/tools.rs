@@ -17,9 +17,9 @@ use rootlight_mcp_contract::{
         discovery_metadata,
     },
     change::{
-        ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareOutputV1_0,
-        HistoryCompareOutputV1_1, PlanChangeOutputV1_0, PlanChangeOutputV1_1,
-        TestsSelectOutputV1_0, TestsSelectOutputV1_1,
+        ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, ChangeImpactOutputV1_2,
+        HistoryCompareOutputV1_0, HistoryCompareOutputV1_1, HistoryCompareOutputV1_2,
+        PlanChangeOutputV1_0, PlanChangeOutputV1_1, TestsSelectOutputV1_0, TestsSelectOutputV1_1,
     },
     context::{
         BatchOperation, ContextPackInput, ContextPackOutputV1_0, ContextPackOutputV1_1,
@@ -397,16 +397,51 @@ where
                 return cancel_or(&cancellation, internal_tool_error(failure.message()));
             }
         };
-        let output_value =
-            match select_output_version(contract.tool, selected_version, Value::Object(output)) {
-                Ok(output) => output,
-                Err(()) => {
-                    return cancel_or(
-                        &cancellation,
-                        internal_tool_error("tool output version conversion failed"),
-                    );
-                }
+        let output = Value::Object(output);
+        if selected_version != ContractSelection::Current
+            && requires_change_entity_contract(contract.tool, &output)
+        {
+            if !serialized_json_fits(&output, MAX_TOOL_STRUCTURED_BYTES) {
+                return cancel_or(
+                    &cancellation,
+                    tool_error(contract, selected_version, resource_exhausted)
+                        .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
+                );
+            }
+            let Ok(current) =
+                select_output_version(contract.tool, ContractSelection::Current, output)
+            else {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output version conversion failed"),
+                );
             };
+            // Validate the new result before attributing rejection to an old
+            // client. Malformed server output is still an internal failure.
+            if !contract
+                .output_validator(ContractSelection::Current)
+                .is_valid(&current)
+                || !typed_output_is_valid(contract.tool, &typed_input, &current)
+            {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output failed validation"),
+                );
+            }
+            let response = retained_entity_contract_error(contract)
+                .and_then(|error| tool_error(contract, selected_version, error))
+                .unwrap_or_else(|_| internal_tool_error("tool error validation failed"));
+            return cancel_or(&cancellation, response);
+        }
+        let output_value = match select_output_version(contract.tool, selected_version, output) {
+            Ok(output) => output,
+            Err(()) => {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output version conversion failed"),
+                );
+            }
+        };
         if !serialized_json_fits(&output_value, MAX_TOOL_STRUCTURED_BYTES) {
             return cancel_or(
                 &cancellation,
@@ -1945,7 +1980,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
         }
-        VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
         VerticalTool::TestsSelect => TestsSelectOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ArchitectureOverview => {
             ArchitectureOverviewOutputV1_1::deserialize(output).is_ok()
@@ -1954,7 +1989,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
             ArchitectureCyclesOutputV1_1::deserialize(output).is_ok()
         }
         VerticalTool::CodeDead => CodeDeadOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::HistoryCompare => HistoryCompareOutputV1_2::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => {
@@ -1985,7 +2020,7 @@ fn typed_selected_output_is_valid(
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
             }
-            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::TestsSelect => TestsSelectOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::ArchitectureOverview => {
                 ArchitectureOverviewOutputV1_0::deserialize(output).is_ok()
@@ -1994,12 +2029,14 @@ fn typed_selected_output_is_valid(
                 ArchitectureCyclesOutputV1_0::deserialize(output).is_ok()
             }
             VerticalTool::CodeDead => CodeDeadOutputV1_0::deserialize(output).is_ok(),
-            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::PlanChange => PlanChangeOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::ContextPack => ContextPackOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Legacy => match tool {
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_4::deserialize(output).is_ok(),
@@ -2197,6 +2234,55 @@ fn unsupported_contract_version_error(
     .map_err(|_| ToolResultError::Serialize)
 }
 
+fn retained_entity_contract_error(contract: &ToolContract) -> Result<PublicError, ToolResultError> {
+    let version = SafeLabel::parse(contract.tool.contract_version())
+        .map_err(|_| ToolResultError::Serialize)?;
+    PublicError::builder(
+        ErrorCode::ProtocolMismatch,
+        "tool result requires the current entity contract",
+    )
+    .detail(
+        DetailKey::parse("supported_version").map_err(|_| ToolResultError::Serialize)?,
+        PublicValue::Label(version),
+    )
+    .next_action(NextAction::SelectSupportedVersion)
+    .build()
+    .map_err(|_| ToolResultError::Serialize)
+}
+
+fn requires_change_entity_contract(tool: VerticalTool, output: &Value) -> bool {
+    let is_new_kind = |value: Option<&Value>| {
+        matches!(
+            value.and_then(Value::as_str),
+            Some("style_rule" | "keyframes")
+        )
+    };
+    let items = |pointer| {
+        output
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+    };
+    match tool {
+        VerticalTool::ChangeImpact => {
+            items("/data/resolved_changes").any(|item| is_new_kind(item.get("kind")))
+                || items("/data/impacted").any(|group| {
+                    group
+                        .get("dependents")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .any(|item| is_new_kind(item.get("kind")))
+                })
+        }
+        VerticalTool::HistoryCompare => {
+            items("/data/changes").any(|item| is_new_kind(item.get("entity_kind")))
+        }
+        _ => false,
+    }
+}
+
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
@@ -2211,7 +2297,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
         }
-        VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
         VerticalTool::TestsSelect => TestsSelectOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ArchitectureOverview => {
             ArchitectureOverviewOutputV1_1::deserialize(output).is_ok()
@@ -2220,7 +2306,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
             ArchitectureCyclesOutputV1_1::deserialize(output).is_ok()
         }
         VerticalTool::CodeDead => CodeDeadOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::HistoryCompare => HistoryCompareOutputV1_2::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => SourceReadOutput::deserialize(output).is_ok(),
@@ -2242,7 +2328,7 @@ fn typed_selected_error_output_is_valid(
             VerticalTool::SymbolRelationships => {
                 SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
             }
-            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::TestsSelect => TestsSelectOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::ArchitectureOverview => {
                 ArchitectureOverviewOutputV1_0::deserialize(output).is_ok()
@@ -2251,12 +2337,14 @@ fn typed_selected_error_output_is_valid(
                 ArchitectureCyclesOutputV1_0::deserialize(output).is_ok()
             }
             VerticalTool::CodeDead => CodeDeadOutputV1_0::deserialize(output).is_ok(),
-            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::PlanChange => PlanChangeOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::ContextPack => ContextPackOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Legacy => match tool {
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_4::deserialize(output).is_ok(),
@@ -4035,12 +4123,12 @@ mod tests {
                     "bfabf1f9daa0e2d128cce0af355ccf9f370e341471270e66214a8df1f9033803".to_owned(),
                 ),
                 (
-                    495_782,
-                    "f4d6e14a3c5800cce90cf46b133d20fdff5ea8a4c1157a90a409b51030c8c4dc".to_owned(),
+                    496_073,
+                    "cc7f8d16cd02852b070a33774f69aff6a34aeb15e3c4559d7db3d82dccdd535c".to_owned(),
                 ),
                 (
-                    696_753,
-                    "489a229ef6eff9bd9da342cb117aeeb5fc244df901842b69de6f25f166ea301e".to_owned(),
+                    697_335,
+                    "95e4495c61be38061a2c61c1cbc34a610da73f3f3580f0d831f44344b83ec2a8".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -4814,6 +4902,176 @@ mod tests {
         }
 
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn change_entity_contract_preserves_data_or_returns_checked_version_error() {
+        for (tool, field) in [
+            (VerticalTool::ChangeImpact, "/data/resolved_changes/0/kind"),
+            (
+                VerticalTool::ChangeImpact,
+                "/data/impacted/0/dependents/0/kind",
+            ),
+            (VerticalTool::HistoryCompare, "/data/changes/0/entity_kind"),
+        ] {
+            for kind in ["function", "style_rule", "keyframes"] {
+                let output = change_entity_output(tool, field, kind);
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(output.as_object().expect("fixture is an object").clone()),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .expect("registry compiles");
+                for (version, schema) in [
+                    ("1.2", tool.output_schema_json()),
+                    (
+                        "1.1",
+                        tool.previous_output_schema_json().expect("retained 1.1"),
+                    ),
+                    (
+                        "1.0",
+                        tool.legacy_output_schema_json().expect("retained 1.0"),
+                    ),
+                ] {
+                    let mut expected = output.clone();
+                    expected["schema_version"] = json!(version);
+                    let supported = version == "1.2" || kind == "function";
+                    let schema: Value = serde_json::from_str(schema).expect("valid schema");
+                    let validator = jsonschema::draft202012::new(&schema).expect("schema compiles");
+                    assert_eq!(
+                        validator.is_valid(&expected),
+                        supported,
+                        "{tool:?} {field} {kind} {version}"
+                    );
+                    let result = success(
+                        router
+                            .handle(
+                                request(
+                                    "tools/call",
+                                    json!({
+                                        "name": tool.name(),
+                                        "arguments": retained_input(tool.name()),
+                                        "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                                    }),
+                                ),
+                                cancellation(),
+                            )
+                            .await,
+                    );
+                    assert_eq!(
+                        result["isError"], !supported,
+                        "{tool:?} {field} {kind} {version}"
+                    );
+                    let structured = &result["structuredContent"];
+                    assert!(validator.is_valid(structured));
+                    let mirrored: Value = serde_json::from_str(
+                        result["content"][0]["text"].as_str().expect("text mirror"),
+                    )
+                    .expect("mirror is JSON");
+                    assert_eq!(&mirrored, structured);
+                    if supported {
+                        assert_eq!(
+                            structured, &expected,
+                            "no fields or entities may be dropped"
+                        );
+                    } else {
+                        let error: AnyErrorResponse = serde_json::from_value(structured.clone())
+                            .expect("checked retained error");
+                        assert_eq!(error.schema_version, version);
+                        assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
+                        assert_eq!(
+                            error.error.next_actions(),
+                            &[NextAction::SelectSupportedVersion]
+                        );
+                        assert_eq!(
+                            error
+                                .error
+                                .details()
+                                .get(&DetailKey::parse("supported_version").expect("static key")),
+                            Some(&PublicValue::Label(
+                                SafeLabel::parse("1.2").expect("static version")
+                            ))
+                        );
+                        assert!(structured.get("data").is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    fn change_entity_output(tool: VerticalTool, field: &str, kind: &str) -> Value {
+        let mut output = Value::Object(retained_output(tool.name()));
+        output["schema_version"] = json!("1.2");
+        let symbol = retained_input("change.impact")["change"]["symbol_ids"][0].clone();
+        if tool == VerticalTool::ChangeImpact {
+            output["data"]["resolved_changes"][0]["kind"] = json!("function");
+            output["data"]["impacted"] = json!([{
+                "source_index": 0,
+                "dependents": [{
+                    "symbol_id": symbol, "kind": "function", "distance": 1,
+                    "confidence": 1000, "via": ["references"], "is_public": false
+                }]
+            }]);
+        } else {
+            output["data"]["changes"] = json!([{
+                "kind": "modified", "symbol_id": symbol, "entity_kind": "function",
+                "breaking_candidate": false, "significance": 100
+            }]);
+        }
+        *output
+            .pointer_mut(field)
+            .expect("fixture entity field exists") = json!(kind);
+        output
+    }
+
+    #[tokio::test]
+    async fn malformed_change_entities_remain_internal_errors_for_retained_clients() {
+        for (tool, field) in [
+            (VerticalTool::ChangeImpact, "/data/resolved_changes/0/kind"),
+            (VerticalTool::HistoryCompare, "/data/changes/0/entity_kind"),
+        ] {
+            for version in ["1.0", "1.1", "1.2"] {
+                let mut output = change_entity_output(tool, field, "style_rule");
+                output.as_object_mut().expect("object").remove("generation");
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(output.as_object().expect("object").clone()),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .expect("registry compiles");
+                let response = router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": tool.name(), "arguments": retained_input(tool.name()),
+                                "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await;
+                assert!(matches!(
+                    response,
+                    HandlerResponse::Error {
+                        code: INTERNAL_ERROR,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn change_entity_version_detection_ignores_non_entity_text() {
+        for tool in [VerticalTool::ChangeImpact, VerticalTool::HistoryCompare] {
+            let mut output = Value::Object(retained_output(tool.name()));
+            output["repository"]["display_name"] = json!("style_rule");
+            output["usage"]["trace_id"] = json!("keyframes");
+            assert!(!requires_change_entity_contract(tool, &output));
+        }
     }
 
     #[tokio::test]

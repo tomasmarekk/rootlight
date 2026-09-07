@@ -18,6 +18,66 @@ use crate::vertical::{
     ToolResponse,
 };
 
+/// Exact contract version for change tools that expose stylesheet entities.
+pub const CHANGE_SCHEMA_VERSION: &str = "1.2";
+
+/// Version marker for the expanded change-intelligence entity vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ChangeSchemaVersion {
+    /// Change-tool contract version 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Source-redacted domain error under the change-tool 1.2 contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeErrorResponse {
+    /// Exact error contract version.
+    pub schema_version: ChangeSchemaVersion,
+    /// Checked public error with an actionable next step.
+    pub error: rootlight_error::PublicError,
+}
+
+/// Success or domain error for change-tool contract 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChangeToolResponse<T> {
+    /// Tool-specific successful response.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(ChangeErrorResponse),
+}
+
+/// Generation-bound change result supporting the expanded entity vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeReadEnvelope<T> {
+    /// Exact response contract version.
+    pub schema_version: ChangeSchemaVersion,
+    /// Resolved repository.
+    pub repository: crate::vertical::ResolvedRepository,
+    /// Pinned generation and freshness.
+    pub generation: crate::vertical::GenerationSummary,
+    /// Relevant coverage.
+    pub coverage: crate::vertical::CoverageSummary,
+    /// Tool-specific result.
+    pub data: T,
+    /// Whether any hard or requested limit stopped completion.
+    pub truncated: bool,
+    /// Authoritative execution completeness and safe continuation semantics.
+    pub completeness: ResultCompleteness,
+    /// Safe continuation cursor, when the result is pageable.
+    pub next_cursor: RequiredNullable<ContinuationCursor>,
+    /// Runtime resource accounting.
+    pub usage: crate::vertical::UsageSummary,
+    /// Source-free warnings.
+    #[schemars(length(max = 100))]
+    pub warnings: Vec<crate::vertical::ResponseWarning>,
+    /// Response-level classification for all repository-derived content.
+    pub trust: crate::TrustClassification,
+}
+
 // ---------------------------------------------------------------------------
 // Shared change-intelligence enums
 // ---------------------------------------------------------------------------
@@ -370,8 +430,11 @@ pub type ChangeImpactOutput = ToolResponse<ReadEnvelope<ChangeImpactData>>;
 /// Checked `change.impact` output retained for explicit 1.0 callers.
 pub type ChangeImpactOutputV1_0 = ChangeImpactOutput;
 
-/// Current checked `change.impact` output.
+/// Checked `change.impact` output retained for explicit 1.1 callers.
 pub type ChangeImpactOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<ChangeImpactData>>;
+
+/// Current checked `change.impact` output including stylesheet entity kinds.
+pub type ChangeImpactOutputV1_2 = ChangeToolResponse<ChangeReadEnvelope<ChangeImpactData>>;
 
 // ---------------------------------------------------------------------------
 // tests.select
@@ -861,8 +924,11 @@ pub struct CompareScopeV1_0 {
 /// Checked `history.compare` output retained for explicit 1.0 callers.
 pub type HistoryCompareOutputV1_0 = HistoryCompareOutput;
 
-/// Current checked `history.compare` output.
+/// Checked `history.compare` output retained for explicit 1.1 callers.
 pub type HistoryCompareOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<HistoryCompareData>>;
+
+/// Current checked `history.compare` output including stylesheet entity kinds.
+pub type HistoryCompareOutputV1_2 = ChangeToolResponse<ChangeReadEnvelope<HistoryCompareData>>;
 
 // ---------------------------------------------------------------------------
 // plan.change

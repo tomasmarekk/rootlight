@@ -117,18 +117,17 @@ impl VerticalTool {
     #[must_use]
     pub const fn contract_version(self) -> &'static str {
         match self {
+            Self::ChangeImpact | Self::HistoryCompare => crate::change::CHANGE_SCHEMA_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
             Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
             Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
             Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
             Self::SymbolExplain
             | Self::SymbolRelationships
-            | Self::ChangeImpact
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
             | Self::CodeDead
-            | Self::HistoryCompare
             | Self::PlanChange
             | Self::ContextPack => crate::MCP_ANALYSIS_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
@@ -164,7 +163,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json")
             }
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.2.schema.json"
             ),
             Self::TestsSelect => include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-input-1.1.schema.json"
@@ -179,7 +178,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-code-dead-input-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.2.schema.json"
             ),
             Self::PlanChange => include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-input-1.1.schema.json"
@@ -228,7 +227,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-flow-trace-output-1.0.schema.json"
             ),
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.2.schema.json"
             ),
             Self::TestsSelect => include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-output-1.1.schema.json"
@@ -243,7 +242,7 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-code-dead-output-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.2.schema.json"
             ),
             Self::PlanChange => include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-output-1.1.schema.json"
@@ -267,17 +266,16 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_contract_version(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact | Self::HistoryCompare => Some("1.1"),
             Self::OperationStatus => Some("1.5"),
             Self::RepoIndex => Some("1.2"),
             Self::RepoStatus => Some("1.1"),
             Self::SymbolExplain
             | Self::SymbolRelationships
-            | Self::ChangeImpact
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
             | Self::CodeDead
-            | Self::HistoryCompare
             | Self::PlanChange
             | Self::ContextPack => Some(crate::MCP_SCHEMA_VERSION),
             _ => None,
@@ -288,6 +286,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_contract_version(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact | Self::HistoryCompare => Some(crate::MCP_SCHEMA_VERSION),
             Self::OperationStatus => Some("1.4"),
             Self::RepoIndex => Some("1.1"),
             Self::RepoStatus => Some(crate::MCP_SCHEMA_VERSION),
@@ -351,7 +350,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
             )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.1.schema.json"
             )),
             Self::TestsSelect => Some(include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-input-1.0.schema.json"
@@ -366,7 +365,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.1.schema.json"
             )),
             Self::PlanChange => Some(include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-input-1.0.schema.json"
@@ -398,7 +397,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-symbol-relationships-output-1.0.schema.json"
             )),
             Self::ChangeImpact => Some(include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.1.schema.json"
             )),
             Self::TestsSelect => Some(include_str!(
                 "../../../schemas/generated/json/mcp-tests-select-output-1.0.schema.json"
@@ -413,7 +412,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json"
             )),
             Self::HistoryCompare => Some(include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.1.schema.json"
             )),
             Self::PlanChange => Some(include_str!(
                 "../../../schemas/generated/json/mcp-plan-change-output-1.0.schema.json"
@@ -429,6 +428,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+            )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.4.schema.json"
             )),
@@ -446,6 +451,12 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+            )),
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.4.schema.json"
             )),
@@ -3944,14 +3955,14 @@ mod tests {
                         VerticalTool::ChangeImpact,
                         &input,
                         VerticalTool::ChangeImpact
-                            .previous_input_schema_json()
+                            .legacy_input_schema_json()
                             .expect("change.impact retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<ChangeImpactOutputV1_0>(
                         VerticalTool::ChangeImpact,
                         &output,
                         VerticalTool::ChangeImpact
-                            .previous_output_schema_json()
+                            .legacy_output_schema_json()
                             .expect("change.impact retains its 1.0 output schema"),
                     );
                 }
@@ -3976,14 +3987,14 @@ mod tests {
                         VerticalTool::HistoryCompare,
                         &input,
                         VerticalTool::HistoryCompare
-                            .previous_input_schema_json()
+                            .legacy_input_schema_json()
                             .expect("history.compare retains its 1.0 input schema"),
                     );
                     assert_round_trip_with_schema::<HistoryCompareOutputV1_0>(
                         VerticalTool::HistoryCompare,
                         &output,
                         VerticalTool::HistoryCompare
-                            .previous_output_schema_json()
+                            .legacy_output_schema_json()
                             .expect("history.compare retains its 1.0 output schema"),
                     );
                 }
@@ -4132,16 +4143,19 @@ mod tests {
         for tool in [
             VerticalTool::SymbolExplain,
             VerticalTool::SymbolRelationships,
-            VerticalTool::ChangeImpact,
             VerticalTool::TestsSelect,
             VerticalTool::ArchitectureOverview,
             VerticalTool::ArchitectureCycles,
             VerticalTool::CodeDead,
-            VerticalTool::HistoryCompare,
             VerticalTool::PlanChange,
             VerticalTool::ContextPack,
         ] {
             assert_eq!(tool.contract_version(), crate::MCP_ANALYSIS_SCHEMA_VERSION);
+        }
+        for tool in [VerticalTool::ChangeImpact, VerticalTool::HistoryCompare] {
+            assert_eq!(tool.contract_version(), "1.2");
+            assert_eq!(tool.previous_contract_version(), Some("1.1"));
+            assert_eq!(tool.legacy_contract_version(), Some("1.0"));
         }
         for tool in VerticalTool::ALL {
             if !matches!(
@@ -4366,7 +4380,21 @@ mod tests {
         serde_json::from_value::<SymbolExplainOutputV1_1>(current_error.clone())
             .expect("current explain error decodes");
         serde_json::from_value::<ChangeImpactOutputV1_1>(current_error.clone())
+            .expect("retained impact error decodes");
+        serde_json::from_value::<crate::change::ChangeImpactOutputV1_2>(error("1.2"))
             .expect("current impact error decodes");
+        serde_json::from_value::<crate::change::HistoryCompareOutputV1_2>(error("1.2"))
+            .expect("current history error decodes");
+        for version in ["1.0", "1.1", "1.3"] {
+            assert!(
+                serde_json::from_value::<crate::change::ChangeImpactOutputV1_2>(error(version))
+                    .is_err()
+            );
+            assert!(
+                serde_json::from_value::<crate::change::HistoryCompareOutputV1_2>(error(version))
+                    .is_err()
+            );
+        }
         serde_json::from_value::<TestsSelectOutputV1_1>(current_error.clone())
             .expect("current tests error decodes");
         let legacy_error = error("1.0");

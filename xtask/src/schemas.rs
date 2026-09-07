@@ -26,10 +26,10 @@ use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, RepoIndexInput,
     RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput, SymbolExplainInput,
     change::{
-        ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareInput,
-        HistoryCompareInputV1_0, HistoryCompareOutputV1_0, HistoryCompareOutputV1_1,
-        PlanChangeInput, PlanChangeInputV1_0, PlanChangeOutputV1_0, PlanChangeOutputV1_1,
-        TestsSelectInput, TestsSelectOutputV1_1,
+        ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, ChangeImpactOutputV1_2,
+        HistoryCompareInput, HistoryCompareInputV1_0, HistoryCompareOutputV1_0,
+        HistoryCompareOutputV1_1, HistoryCompareOutputV1_2, PlanChangeInput, PlanChangeInputV1_0,
+        PlanChangeOutputV1_0, PlanChangeOutputV1_1, TestsSelectInput, TestsSelectOutputV1_1,
     },
     context::{
         ContextPackInput, ContextPackOutputV1_0, ContextPackOutputV1_1, QueryAdvancedInput,
@@ -863,6 +863,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "mcp-architecture-cycles-output-1.0.schema.json",
         "mcp-code-dead-input-1.0.schema.json",
         "mcp-code-dead-output-1.0.schema.json",
+        "ir-1.1.schema.json",
         "mcp-symbol-explain-input-1.0.schema.json",
         "mcp-symbol-explain-output-1.0.schema.json",
         "mcp-symbol-relationships-input-1.0.schema.json",
@@ -896,7 +897,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<ConfigDocumentSchemaV1_2>(&schema_root.join("config-1.2.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_3>(&schema_root.join("config-1.3.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
-    write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
+    write_normalized_ir_schema(&schema_root.join("ir-1.2.schema.json"))?;
     write_schema::<LexicalEvidenceV1>(
         &schema_root.join("ir-extension-rootlight-lexical-1.schema.json"),
     )?;
@@ -978,6 +979,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "output",
         "1.1",
     )?;
+    write_mcp_tool_schema_version::<ChangeImpactInput>(
+        &schema_root,
+        "change.impact",
+        "input",
+        "1.2",
+    )?;
+    write_mcp_tool_schema_version::<ChangeImpactOutputV1_2>(
+        &schema_root,
+        "change.impact",
+        "output",
+        "1.2",
+    )?;
     write_mcp_tool_schema_version::<TestsSelectInput>(
         &schema_root,
         "tests.select",
@@ -1035,6 +1048,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "output",
         "1.1",
     )?;
+    write_mcp_tool_schema_version::<HistoryCompareInput>(
+        &schema_root,
+        "history.compare",
+        "input",
+        "1.2",
+    )?;
+    write_mcp_tool_schema_version::<HistoryCompareOutputV1_2>(
+        &schema_root,
+        "history.compare",
+        "output",
+        "1.2",
+    )?;
     write_mcp_tool_schema::<PlanChangeInputV1_0>(&schema_root, "plan.change", "input")?;
     write_mcp_tool_schema::<PlanChangeOutputV1_0>(&schema_root, "plan.change", "output")?;
     write_mcp_tool_schema_version::<PlanChangeInput>(&schema_root, "plan.change", "input", "1.1")?;
@@ -1073,6 +1098,26 @@ fn write_schema<T: JsonSchema>(path: &Path) -> Result<(), SchemaError> {
     write_schema_value(path, schema)
 }
 
+fn write_normalized_ir_schema(path: &Path) -> Result<(), SchemaError> {
+    let mut schema = SchemaSettings::draft2020_12()
+        .for_deserialize()
+        .into_generator()
+        .into_root_schema_for::<NormalizedIrDocument>();
+    // Runtime readers accept both normalized versions, but each published
+    // schema names exactly one contract. The 1.1 artifact remains frozen.
+    let minor = schema
+        .as_object_mut()
+        .and_then(|object| object.get_mut("$defs"))
+        .and_then(|definitions| definitions.pointer_mut("/NormalizedIrVersion/properties/minor"))
+        .ok_or_else(|| {
+            SchemaError::GeneratedSchemaSemantics(
+                "normalized IR schema is missing its exact version marker".to_owned(),
+            )
+        })?;
+    *minor = serde_json::json!({"type": "integer", "const": 2});
+    write_schema_value(path, schema)
+}
+
 fn write_mcp_tool_schema<T: JsonSchema>(
     schema_root: &Path,
     tool: &str,
@@ -1105,6 +1150,26 @@ fn write_mcp_tool_schema_version<T: JsonSchema>(
             "type".to_owned(),
             serde_json::Value::String("object".to_owned()),
         );
+        if matches!(tool, "change.impact" | "history.compare") && matches!(version, "1.0" | "1.1") {
+            // These response contracts predate the IR stylesheet vocabulary.
+            // Their schemas must not widen when the shared domain enum grows.
+            let variants = schema
+                .as_object_mut()
+                .and_then(|object| object.get_mut("$defs"))
+                .and_then(|definitions| definitions.pointer_mut("/EntityKind/oneOf"))
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| {
+                    SchemaError::GeneratedSchemaSemantics(
+                        "retained change schema is missing its entity vocabulary".to_owned(),
+                    )
+                })?;
+            variants.retain(|variant| {
+                !matches!(
+                    variant.get("const").and_then(serde_json::Value::as_str),
+                    Some("style_rule" | "keyframes")
+                )
+            });
+        }
     }
     close_mcp_object_schemas(&mut schema);
     schema.insert(
@@ -1386,6 +1451,12 @@ fn validate_generated_json_schemas(
     )?;
     let mut wrong_normalized_minor = normalized_ir.clone();
     wrong_normalized_minor["version"]["minor"] = serde_json::json!(2);
+    let mut stylesheet_ir = wrong_normalized_minor.clone();
+    stylesheet_ir["entities"][0]["kind"] = serde_json::json!("style_rule");
+    let mut keyframes_ir = stylesheet_ir.clone();
+    keyframes_ir["entities"][0]["kind"] = serde_json::json!("keyframes");
+    let mut downgraded_stylesheet_ir = stylesheet_ir.clone();
+    downgraded_stylesheet_ir["version"]["minor"] = serde_json::json!(1);
     let lexical_envelope = read_json_value(
         &workspace_root
             .join(COMPATIBILITY_ROOT)
@@ -1582,6 +1653,26 @@ fn validate_generated_json_schemas(
             "ir-1.1.schema.json",
             "normalized fact document",
             normalized_ir,
+        ),
+        SchemaSemanticCase::valid(
+            "ir-1.2.schema.json",
+            "stylesheet entity document",
+            stylesheet_ir,
+        ),
+        SchemaSemanticCase::valid(
+            "ir-1.2.schema.json",
+            "keyframes entity document",
+            keyframes_ir,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.1.schema.json",
+            "stylesheet kind in baseline contract",
+            downgraded_stylesheet_ir.clone(),
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.2.schema.json",
+            "stylesheet contract version downgrade",
+            downgraded_stylesheet_ir,
         ),
         SchemaSemanticCase::invalid(
             "ir-1.1.schema.json",
@@ -1827,6 +1918,18 @@ fn validate_generated_json_schemas(
                             &ExtensionSupport::default()
                         ),
                         Ok(IrDocument::NormalizedV1_1(_))
+                    )
+                }
+                "ir-1.2.schema.json" => {
+                    let encoded =
+                        serde_json::to_vec(&case.instance).map_err(SchemaError::SerializeJson)?;
+                    matches!(
+                        decode_ir_document(
+                            &encoded,
+                            &IrLimits::default(),
+                            &ExtensionSupport::default()
+                        ),
+                        Ok(IrDocument::NormalizedV1_2(_))
                     )
                 }
                 _ => case.expected_valid,
@@ -2235,6 +2338,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/config-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
@@ -2288,6 +2392,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-tests-select-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-tests-select-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-tests-select-input-1.1.schema.json"),
@@ -2308,6 +2414,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-plan-change-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-plan-change-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-plan-change-input-1.1.schema.json"),

@@ -3,6 +3,8 @@
 //! The frozen version 1.0 envelope remains available for compatibility. Version
 //! 1.1 adds language-neutral files, entities, occurrences, relations, provenance,
 //! source mappings, coverage, diagnostics, and extension envelopes.
+//! Version 1.2 admits stylesheet rule and keyframes entities; producers retain
+//! version 1.1 when those kinds are not needed. Both versions decode explicitly.
 //! Untrusted documents and standalone extension envelopes must enter through
 //! the explicit byte-bounded decoders. Public dynamic IR values intentionally
 //! do not implement `Deserialize`.
@@ -45,11 +47,11 @@ pub use normalized::{
     ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FilePathLocator,
     FilePathLocatorEncoding, FilePathLocatorError, FileRecord, IrDocument, IrDocumentDecodeError,
     LegacyIrDocumentDecodeError, MAX_FILE_PATH_LOCATOR_COMPONENTS,
-    MAX_FILE_PATH_LOCATOR_ENCODED_BYTES, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    NormalizedIrVersion, NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole,
-    OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
-    decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
+    MAX_FILE_PATH_LOCATOR_ENCODED_BYTES, NORMALIZED_IR_VERSION, NORMALIZED_IR_VERSION_V1_2,
+    NormalizedIrDocument, NormalizedIrVersion, NormalizedRecordDecodeError, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint,
+    RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind,
+    SourceMappingRecord, decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
     decode_extension_envelope_with_checkpoint, decode_ir_document,
     decode_ir_document_with_checkpoint, decode_legacy_ir_document,
     decode_normalized_ir_document_messagepack_reader_with_checkpoint,

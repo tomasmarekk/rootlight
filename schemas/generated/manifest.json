@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "e98197665cfaa25843e7af08b9e575e9befce3892b1ee49db711bb180b4344c6"
+      "blake3": "fdc047b5fdac3927bed88b6e299f70a2c96288617ddbd295b1810d1c7955bd74"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -26,7 +26,7 @@
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
-      "blake3": "ef966247fd79b92052c0d8d9b6935017e979420ebb83fa671a3dba27cf4322a2"
+      "blake3": "a5e498b1c39480962e529a4151a245b3d44e59a80ed39b10db0b8642ac85e701"
     },
     {
       "path": "crates/rootlight-ir/src/lexical.rs",
@@ -34,19 +34,19 @@
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "2dbc77dd43fbb9117d7f2cad9474900c8001ee15728cd2435a7948f8079f0a3e"
+      "blake3": "0c7a21701ea7fe28c0553852d65f83e31c44ca05e6340c6c9756cf6097d6ee91"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
-      "blake3": "3e1308ef85d6dfb6b325c086cd3947e2c39e0efa9114e9ff32a7da346a59b289"
+      "blake3": "8a547576fd9f0458eb75225c5fc06557ea657ff8c5af3d0f58c754722cce49e0"
     },
     {
       "path": "crates/rootlight-ir/src/validation.rs",
-      "blake3": "4161000b80aa16e9597d309d37327e534ac98bf0a433cc9ee131dd443f133e37"
+      "blake3": "dbe78307110e4915d650dc9bcb51e3437825c9d9666197d8a585fe2932f3034c"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/change.rs",
-      "blake3": "5903b129be590ff0c3d8b13bbd728851849e5f4685d672e6682b354c29e2e537"
+      "blake3": "44e981009edaa15d6af784cfb08b802bdfb2a4152de2e3d2f7cb1964a390e176"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
@@ -66,11 +66,11 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "61ccdb3940031c4caaa0459365c600de7179bec7676cd744c7b85a32bd9e2ec1"
+      "blake3": "729eb2b51b0d91d9603309ce400c68575cf234a4fce77f27e1d421120d577c4e"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "f6bbdf1ad58db5db51e1b16962a8491d2161eea656b19a225fad0d0aad29e2d7"
+      "blake3": "ed2e5f0deb7ff71897c6624542a36e7c42b9df36b3a0a655d119ac0598e4fa81"
     },
     {
       "path": "proto/adapter_v1.proto",
@@ -226,7 +226,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "0a7e565d068718bf440b043b9f938abb2e44afacb18e9bfeabf4716d6beb96dc"
+      "blake3": "08b610452185ce0968f833b3693cc0cf496412ceb85701fcf06a148aac2dd12a"
     }
   ],
   "artifacts": [
@@ -275,6 +275,10 @@
       "blake3": "de4a8fcf88a78b8cb5ea41e2bb8eda6e31b74e91f55581c42d173fdc1910315c"
     },
     {
+      "path": "schemas/generated/json/ir-1.2.schema.json",
+      "blake3": "28a3bc2db5cb5522cf5e2ecbc8e2ccca957f31815001ad8205c928d7db66a82e"
+    },
+    {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",
       "blake3": "b513422d0bb11c80fda6eaac11f20c6af74b41a4b0c1dc637b5636852f2706ff"
     },
@@ -319,12 +323,20 @@
       "blake3": "adec3ac36ff856179315d5a444240ff2bb46ce4beef8e2135230e1feaac51442"
     },
     {
+      "path": "schemas/generated/json/mcp-change-impact-input-1.2.schema.json",
+      "blake3": "de0321079c0a303526f92f1d59cff25d646642b3c03de540301128785680ae58"
+    },
+    {
       "path": "schemas/generated/json/mcp-change-impact-output-1.0.schema.json",
       "blake3": "1e82f8f5845bbcc4cec246438f4f3bd5e00c69a722885258cb1f91e2e9a2d848"
     },
     {
       "path": "schemas/generated/json/mcp-change-impact-output-1.1.schema.json",
       "blake3": "aecf2cb38024391beb55cef357c4da288328db372fcaa0543af99bfc201f7148"
+    },
+    {
+      "path": "schemas/generated/json/mcp-change-impact-output-1.2.schema.json",
+      "blake3": "f29f67b173cf0e9a4bf2c1e60e75acfb60a83338a756a70e1dcd367c56ab0711"
     },
     {
       "path": "schemas/generated/json/mcp-code-dead-input-1.0.schema.json",
@@ -387,12 +399,20 @@
       "blake3": "81f944c02b80d5d9aeb4db8061278fb65d71412e15c8941549f970d5ac2011b9"
     },
     {
+      "path": "schemas/generated/json/mcp-history-compare-input-1.2.schema.json",
+      "blake3": "48efecc1585414a56c438906becb97965f99249e70248b11e564b1cd7ad95857"
+    },
+    {
       "path": "schemas/generated/json/mcp-history-compare-output-1.0.schema.json",
       "blake3": "4490c27ec66f435c93ee247a9c19ed9aa2aaedd8427b05ece48d7e5d8c2a03e7"
     },
     {
       "path": "schemas/generated/json/mcp-history-compare-output-1.1.schema.json",
       "blake3": "437b128b1a1f3f26a57031d38df4f630b751c722f5fa06878b5391f1780283f2"
+    },
+    {
+      "path": "schemas/generated/json/mcp-history-compare-output-1.2.schema.json",
+      "blake3": "a10abc4ba3638a19b6b097bcdae8873f9d6f3295d12cbdb7fa85cf135e15fd8d"
     },
     {
       "path": "schemas/generated/json/mcp-operation-status-input-1.0.schema.json",

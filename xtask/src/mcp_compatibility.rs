@@ -333,7 +333,7 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
     })?;
     upgrade_additive_success_example(&mut tools, "symbol.explain", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "change.impact", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "change.impact", "1.2", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
         data.get_mut("coverage_strategy")
             .and_then(Value::as_object_mut)
@@ -371,7 +371,7 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             .insert("entry_symbols".to_owned(), json!([]));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "history.compare", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "history.compare", "1.2", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "plan.change", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "context.pack", "1.1", |_| Ok(()))?;
     validate_examples(&tools)?;
@@ -621,6 +621,15 @@ fn policy_snapshot() -> Value {
         "output_projection": {
             "implemented": true,
             "older_closed_output_claimed": true,
+            "unrepresentable_entities": {
+                "tools": ["change.impact", "history.compare"],
+                "retained_versions": ["1.0", "1.1"],
+                "kinds": ["style_rule", "keyframes"],
+                "required_version": "1.2",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            },
             "evidence": [
                 "retained_fixture_output_schema",
                 "explicit_version_stdio_process",
@@ -1384,7 +1393,7 @@ mod tests {
                 },
                 {
                     "tool": "change.impact",
-                    "current_version": "1.1",
+                    "current_version": "1.2",
                     "projected_version": "1.0",
                 },
                 {
@@ -1409,7 +1418,7 @@ mod tests {
                 },
                 {
                     "tool": "history.compare",
-                    "current_version": "1.1",
+                    "current_version": "1.2",
                     "projected_version": "1.0",
                 },
                 {

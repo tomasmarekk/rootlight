@@ -320,7 +320,7 @@ pub fn import_shared_generation(
     let document = match decode_ir_document(document_bytes, ir_limits, extensions)
         .map_err(|_| SharedGenerationError::Document)?
     {
-        IrDocument::NormalizedV1_1(document) => document,
+        IrDocument::NormalizedV1_1(document) | IrDocument::NormalizedV1_2(document) => document,
         IrDocument::LegacyV1_0(_) => return Err(SharedGenerationError::Document),
     };
     if document.repository != manifest.repository || document.generation != manifest.generation {
@@ -455,6 +455,12 @@ mod tests {
     use crate::{GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationManifestRecipe};
 
     fn fixture() -> (GenerationSnapshot, Cancellation, IrLimits, ExtensionSupport) {
+        fixture_for_version(rootlight_ir::NormalizedIrVersion::V1_1)
+    }
+
+    fn fixture_for_version(
+        version: rootlight_ir::NormalizedIrVersion,
+    ) -> (GenerationSnapshot, Cancellation, IrLimits, ExtensionSupport) {
         let repository = RepositoryId::from_bytes([7; 16]);
         let configuration_hash = content_hash(b"shared-configuration");
         let manifest_hash =
@@ -483,7 +489,8 @@ mod tests {
             provider_set_hash,
         )
         .expect("fixture metadata is valid");
-        let document = NormalizedIrDocument::empty(repository, generation);
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.version = version;
         let cancellation = Cancellation::with_deadline(
             Instant::now()
                 .checked_add(Duration::from_secs(5))
@@ -540,6 +547,35 @@ mod tests {
         assert_eq!(imported.source_set_hash(), source_set_hash);
         assert_eq!(imported.generation().metadata(), generation.metadata());
         assert_eq!(imported.generation().document(), generation.document());
+    }
+
+    #[test]
+    fn shared_generation_preserves_explicit_normalized_version() {
+        let (generation, cancellation, limits, extensions) =
+            fixture_for_version(rootlight_ir::NormalizedIrVersion::V1_2);
+        let source_set_hash = shared_generation_source_set_hash(generation.document())
+            .expect("versioned source set hashes");
+        let encoded = export_shared_generation(
+            &generation,
+            SharedGenerationLimits::default(),
+            &cancellation,
+        )
+        .expect("versioned generation exports");
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let imported = import_shared_generation(
+            &encoded,
+            SharedGenerationExpectation::new(generation.metadata().repository(), source_set_hash),
+            SharedGenerationLimits::default(),
+            &limits,
+            &extensions,
+            &context,
+        )
+        .expect("versioned generation imports");
+        assert_eq!(imported.generation().document(), generation.document());
+        assert_eq!(
+            imported.generation().document().version,
+            rootlight_ir::NormalizedIrVersion::V1_2
+        );
     }
 
     #[test]

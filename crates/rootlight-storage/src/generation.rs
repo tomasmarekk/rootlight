@@ -179,7 +179,10 @@ impl GenerationMetadata {
         self.contract_version
     }
 
-    /// Returns the normalized IR version stored by this contract.
+    /// Returns the baseline normalized IR version supported by this contract.
+    ///
+    /// Individual documents carry their own exact supported version; storage
+    /// writers must persist that marker rather than this compatibility baseline.
     #[must_use]
     pub const fn ir_version(&self) -> IrVersion {
         NORMALIZED_IR_VERSION

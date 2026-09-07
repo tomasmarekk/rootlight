@@ -529,6 +529,43 @@ fn segment_reader_matches_sqlite_for_every_indexed_operation() {
 }
 
 #[test]
+fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
+    let cancellation = Cancellation::new();
+    let context = context(&cancellation);
+    let (metadata, mut document) = fixture();
+    document.version = rootlight_ir::NormalizedIrVersion::V1_2;
+    let oracle = EphemeralOracleWriter::create()
+        .expect("oracle initializes")
+        .seal(verify(metadata, document.clone(), &context), &context)
+        .expect("versioned fixture seals");
+    let segment = Segment::encode(
+        verify(metadata, document, &context),
+        oracle.stats(),
+        &context,
+    )
+    .expect("versioned fixture encodes");
+    let reader = SegmentReader::open(
+        segment.into_bytes(),
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+        &context,
+    )
+    .expect("versioned segment opens");
+    let actual = reader
+        .read_generation(&context)
+        .expect("segment generation reads")
+        .into_snapshot()
+        .into_document();
+    let expected = oracle
+        .read_generation(&context)
+        .expect("oracle generation reads")
+        .into_snapshot()
+        .into_document();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.version, rootlight_ir::NormalizedIrVersion::V1_2);
+}
+
+#[test]
 fn provenance_source_links_match_sqlite_row_accounting() {
     let cancellation = Cancellation::new();
     let setup_context = context(&cancellation);

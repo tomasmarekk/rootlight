@@ -868,6 +868,7 @@ fn derive_fact_id_map(
             .map(|(_, location)| *location)
             .ok_or(NormalizedRebindError::IdentityRecipe)?;
         let mut scratch = NormalizedIrDocument::empty(document.repository, generation);
+        scratch.version = document.version;
         let new_id = rebind_node(
             location.node(document),
             document.repository,
@@ -918,6 +919,7 @@ fn rebind_document_with_map(
 ) -> Result<(NormalizedIrDocument, FactIdMap), NormalizedRebindError> {
     require_supported_extensions(&document)?;
     let mut rebound = NormalizedIrDocument::empty(document.repository, generation);
+    rebound.version = document.version;
     let mut checkpoint = || true;
     let ids = derive_fact_id_map(&document, generation, &mut checkpoint)?;
     for (_, location) in fact_locations(&document, &mut checkpoint)? {
@@ -1076,6 +1078,7 @@ fn hash_rebound_fact(
 ) -> Result<(), NormalizedRebindError> {
     ensure_projection_continues(checkpoint)?;
     let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
+    scratch.version = document.version;
     let id = rebind_node(
         location.node(document),
         document.repository,
@@ -1757,6 +1760,34 @@ mod tests {
             proof.generation_neutral_digests(|| false),
             Err(NormalizedRebindError::Interrupted)
         ));
+    }
+
+    #[test]
+    fn rebind_preserves_explicit_normalized_version_and_logical_digest() {
+        let (mut original, _, _) = fixture_with_identity_extensions();
+        original.version = crate::NormalizedIrVersion::V1_2;
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let rebound = rebind_document(
+            original.clone(),
+            GenerationId::from_bytes([91; 20]),
+            &limits,
+            &extensions,
+        )
+        .expect("versioned document rebinds");
+        assert_eq!(rebound.version, original.version);
+        let digest = |document: &NormalizedIrDocument| {
+            canonical_generation_neutral_digests(document, &limits, &extensions, || true)
+                .expect("versioned logical projection succeeds")
+        };
+        assert_eq!(digest(&original), digest(&rebound));
+        let neutral = CanonicalGenerationNeutralDocument::new(&original, &limits, &extensions)
+            .expect("materialized neutral projection succeeds");
+        assert_eq!(neutral.document.version, original.version);
+        assert_eq!(digest(&original), digest(&neutral.document));
+        let versioned_digest = digest(&original);
+        original.version = crate::NormalizedIrVersion::V1_1;
+        assert_ne!(versioned_digest, digest(&original));
     }
 
     #[test]

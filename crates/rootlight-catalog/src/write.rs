@@ -455,7 +455,7 @@ fn insert_header(
     context.check().map_err(CatalogError::control)?;
     let metadata = generation.metadata();
     let contract = metadata.contract_version();
-    let ir = metadata.ir_version();
+    let ir = generation.document().version.value();
     transaction
         .execute(
             "INSERT INTO generation_meta (

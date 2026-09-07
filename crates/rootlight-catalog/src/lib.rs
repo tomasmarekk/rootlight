@@ -326,7 +326,7 @@ impl OracleReader {
     fn open_path(path: PathBuf, context: &GenerationContext<'_>) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
         let connection = schema::open_oracle_reader(&path, context)?;
-        let (metadata, stats) = read::read_header(&connection, context)?;
+        let (metadata, stats, _) = read::read_header(&connection, context)?;
         schema::validate_oracle(&connection, context)?;
         drop(connection);
         Ok(Self {
@@ -583,7 +583,7 @@ impl EphemeralOracleWriter {
         schema::install_generation_cancellation(&connection, context)?;
         let expected_stats = write::write_generation(&mut connection, snapshot, context)?;
         schema::configure_ephemeral_oracle_reader(&connection, context)?;
-        let (metadata, stats) = read::read_header(&connection, context)?;
+        let (metadata, stats, _) = read::read_header(&connection, context)?;
         let reader = EphemeralOracleReader {
             connection: Mutex::new(connection),
             metadata,

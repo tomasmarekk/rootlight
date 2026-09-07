@@ -10,7 +10,7 @@ use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
     EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, ExtensionEnvelopeDecodeError,
     ExtensionSupport, FactDomain, FactEvidence, FactRef, FilePathLocator, FilePathLocatorEncoding,
-    FileRecord, IrLimits, NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedRecordDecodeError,
+    FileRecord, IrLimits, NormalizedIrDocument, NormalizedIrVersion, NormalizedRecordDecodeError,
     OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
     ProvenanceRecord, RelationPredicate, RelationRecord, SkippedRegion, SourceMappingRecord,
     SourceRef, decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
@@ -56,7 +56,7 @@ struct HeaderRow {
 pub(crate) fn read_header(
     connection: &Connection,
     context: &GenerationContext<'_>,
-) -> Result<(GenerationMetadata, GenerationStats), CatalogError> {
+) -> Result<(GenerationMetadata, GenerationStats, NormalizedIrVersion), CatalogError> {
     context.check().map_err(CatalogError::control)?;
     let raw = connection
         .query_row(
@@ -111,11 +111,14 @@ pub(crate) fn read_header(
     if raw.sealed != 1
         || (contract_version != GENERATION_CONTRACT_VERSION
             && contract_version != GenerationContractVersion::new(1, 1))
-        || raw.ir_major != i64::from(NORMALIZED_IR_VERSION.major())
-        || raw.ir_minor != i64::from(NORMALIZED_IR_VERSION.minor())
     {
         return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema));
     }
+    let ir_version = match (raw.ir_major, raw.ir_minor) {
+        (1, 1) => NormalizedIrVersion::V1_1,
+        (1, 2) => NormalizedIrVersion::V1_2,
+        _ => return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema)),
+    };
     let metadata = GenerationMetadata::new_for_contract(
         contract_version,
         codec::repository_id(raw.repository)?,
@@ -152,7 +155,7 @@ pub(crate) fn read_header(
         .require(GenerationResource::EncodedTextBytes, stats.text_bytes())
         .map_err(CatalogError::control)?;
     validate_text_bytes(connection, stats, context)?;
-    Ok((metadata, stats))
+    Ok((metadata, stats, ir_version))
 }
 
 fn validate_text_bytes(
@@ -296,7 +299,7 @@ pub(crate) fn read_generation(
     let transaction = connection
         .unchecked_transaction()
         .map_err(CatalogError::sqlite)?;
-    let (metadata, stats) = read_header(&transaction, context)?;
+    let (metadata, stats, ir_version) = read_header(&transaction, context)?;
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
@@ -328,6 +331,7 @@ pub(crate) fn read_generation(
     let document = read_complete_document(
         &transaction,
         metadata,
+        ir_version,
         files,
         entities,
         occurrences,
@@ -1183,6 +1187,7 @@ fn read_coverage(
 fn read_complete_document(
     connection: &Connection,
     metadata: GenerationMetadata,
+    ir_version: NormalizedIrVersion,
     files: Vec<FileRecord>,
     entities: Vec<EntityRecord>,
     occurrences: Vec<OccurrenceRecord>,
@@ -1249,6 +1254,7 @@ fn read_complete_document(
     )?;
     context.check().map_err(CatalogError::control)?;
     let mut document = NormalizedIrDocument::empty(metadata.repository(), metadata.generation());
+    document.version = ir_version;
     document.files = files;
     document.entities = entities;
     document.occurrences = occurrences;

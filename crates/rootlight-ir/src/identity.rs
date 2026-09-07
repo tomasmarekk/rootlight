@@ -902,6 +902,8 @@ pub const fn entity_kind_identity_label(kind: EntityKind) -> &'static str {
         EntityKind::DatabaseObject => "database-object",
         EntityKind::Test => "test",
         EntityKind::ConfigurationKey => "configuration-key",
+        EntityKind::StyleRule => "style-rule",
+        EntityKind::Keyframes => "keyframes",
         EntityKind::Commit => "commit",
         EntityKind::Change => "change",
         EntityKind::CommunityView => "community-view",

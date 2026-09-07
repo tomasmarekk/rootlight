@@ -1,4 +1,4 @@
-//! Validation and deterministic canonicalization for normalized IR 1.1.
+//! Validation and deterministic canonicalization for supported normalized IR versions.
 //!
 //! Limits are checked before deduplication. Canonicalization then normalizes all
 //! collection order before referential and source-integrity checks run.
@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 
 use crate::{
-    ContainerRef, CoverageScope, ExtensionCriticality, ExtensionEnvelope, FactEvidence, FactRef,
-    NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, SourceRef,
+    ContainerRef, CoverageScope, EntityKind, ExtensionCriticality, ExtensionEnvelope, FactEvidence,
+    FactRef, NormalizedIrDocument, NormalizedIrVersion, OccurrenceTarget, RelationEndpoint,
+    SourceRef,
 };
 
 const DEFAULT_MAX_NESTED_ITEMS_PER_RECORD: usize = 4_096;
@@ -228,7 +229,6 @@ pub fn validate_ir_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<(), IrDocumentValidationError> {
-    validate_version(document)?;
     validate_limits(document, limits)?;
     prepare_bounded_document(document.clone(), extensions).map(|_| ())
 }
@@ -238,7 +238,6 @@ pub(crate) fn validate_canonical_ir_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<(), IrDocumentValidationError> {
-    validate_version(document)?;
     validate_limits(document, limits)?;
     validate_canonical_collections(document, extensions)?;
     validate_extension_envelopes(document, extensions)?;
@@ -259,7 +258,6 @@ pub fn canonicalize_ir_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<NormalizedIrDocument, IrDocumentValidationError> {
-    validate_version(&document)?;
     validate_limits(&document, limits)?;
     prepare_bounded_document(document, extensions)
 }
@@ -278,18 +276,6 @@ fn prepare_bounded_document(
         validate_invariants(&document, extensions)?;
     }
     Ok(document)
-}
-
-fn validate_version(document: &NormalizedIrDocument) -> Result<(), IrDocumentValidationError> {
-    let version = document.version.value();
-    if version == NORMALIZED_IR_VERSION {
-        Ok(())
-    } else {
-        Err(IrDocumentValidationError::UnsupportedVersion {
-            major: version.major(),
-            minor: version.minor(),
-        })
-    }
 }
 
 fn validate_limits(
@@ -366,6 +352,11 @@ fn validate_limits(
         budget.string("file.encoding", &file.encoding, limits)?;
     }
     for entity in &document.entities {
+        if document.version == NormalizedIrVersion::V1_1
+            && matches!(entity.kind, EntityKind::StyleRule | EntityKind::Keyframes)
+        {
+            return Err(IrDocumentValidationError::EntityKindVersion { kind: entity.kind });
+        }
         budget.nested("entity.flags", entity.flags.len(), limits)?;
         budget.evidence("entity.evidence.derivation", &entity.evidence, limits)?;
         budget.string("entity.language", &entity.language, limits)?;
@@ -1400,16 +1391,22 @@ fn valid_extension_version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
 }
 
-/// Validation failures for normalized IR 1.1 documents.
+/// Validation failures for supported normalized IR documents.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IrDocumentValidationError {
-    /// The document uses a version other than exactly 1.1.
+    /// The document uses an unsupported normalized version.
     #[error("unsupported normalized IR version {major}.{minor}")]
     UnsupportedVersion {
         /// Unsupported major component.
         major: u16,
         /// Unsupported minor component.
         minor: u16,
+    },
+    /// A stylesheet kind was supplied under the baseline 1.1 contract.
+    #[error("entity kind {kind:?} requires normalized IR version 1.2")]
+    EntityKindVersion {
+        /// Kind requiring the newer document version.
+        kind: EntityKind,
     },
     /// A caller requiring canonical input observed unsorted or duplicate records.
     #[error("normalized IR document is not canonical")]

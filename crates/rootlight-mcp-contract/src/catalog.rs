@@ -101,18 +101,17 @@ impl McpTool {
     #[must_use]
     pub const fn contract_version(self) -> &'static str {
         match self {
+            Self::ChangeImpact | Self::HistoryCompare => crate::change::CHANGE_SCHEMA_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
             Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
             Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
             Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
             Self::SymbolExplain
             | Self::SymbolRelationships
-            | Self::ChangeImpact
             | Self::TestsSelect
             | Self::ArchitectureOverview
             | Self::ArchitectureCycles
             | Self::CodeDead
-            | Self::HistoryCompare
             | Self::PlanChange
             | Self::ContextPack => crate::MCP_ANALYSIS_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
@@ -414,16 +413,20 @@ mod tests {
         for tool in [
             McpTool::SymbolExplain,
             McpTool::SymbolRelationships,
-            McpTool::ChangeImpact,
             McpTool::TestsSelect,
             McpTool::ArchitectureOverview,
             McpTool::ArchitectureCycles,
             McpTool::CodeDead,
-            McpTool::HistoryCompare,
             McpTool::PlanChange,
             McpTool::ContextPack,
         ] {
             assert_eq!(tool.contract_version(), crate::MCP_ANALYSIS_SCHEMA_VERSION);
+        }
+        for tool in [McpTool::ChangeImpact, McpTool::HistoryCompare] {
+            assert_eq!(
+                tool.contract_version(),
+                crate::change::CHANGE_SCHEMA_VERSION
+            );
         }
         for tool in McpTool::ALL {
             if !matches!(

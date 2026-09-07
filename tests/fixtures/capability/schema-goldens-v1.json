@@ -10,8 +10,8 @@
       "outputSha256": "5824487b8fb32b53cd17b328eb6ab70ebcf53fd29d2cd433c61f9d9bb6cfc511"
     },
     "change.impact": {
-      "inputSha256": "6a17f8e03a5da78386fef6f9434d7f57d08dc3363492abf7b467c75fde03d8a0",
-      "outputSha256": "737ad0b849c98df5bd50edebc1b643504ec44868ed3b223ef398d7a39c02a2ae"
+      "inputSha256": "d6f3b4cf315f83c2bbc00e65b7ce2c336f0aff12e46563b493262d198741f3d4",
+      "outputSha256": "43faa604baef911f95e6807cfbf3219e87b8aea5ecb0c90e1e8f7fa72c9652a0"
     },
     "code.dead": {
       "inputSha256": "be2ed9e22093dfd4464df2c20364779b72b04f883ae63a2c5fdf778c3217a7bc",
@@ -30,8 +30,8 @@
       "outputSha256": "c9c54b272a1c5d35ea60e87e422f2b21c979b799fddabc62c5a9a90e9e82216b"
     },
     "history.compare": {
-      "inputSha256": "81e2eaf5f27f84c3275b299ccdbcef417be7095925ff35ccbb79ef5abb96dd54",
-      "outputSha256": "72667c12a4e656129a89fe18b0868e4c9092412b772d5784dcdf2625fc03bd0b"
+      "inputSha256": "653d70f1974998e41be6abecb4a2f10bb9c7e2a212e7a41d700eb9b57c2f4572",
+      "outputSha256": "d84395bbd556c4102d3eb024245b01922117c60ff64cff64633711e66f54e7c2"
     },
     "operation.status": {
       "inputSha256": "72b951a3550133d63e805abbac4bb802d6b45a8d529827aa20820dd0a2ad8607",

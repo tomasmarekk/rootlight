@@ -1300,6 +1300,8 @@ fn project_entity_kind(kind: EntityKind) -> Option<Kind> {
         | EntityKind::DatabaseObject
         | EntityKind::Test
         | EntityKind::ConfigurationKey
+        | EntityKind::StyleRule
+        | EntityKind::Keyframes
         | EntityKind::Commit
         | EntityKind::Change
         | EntityKind::CommunityView
