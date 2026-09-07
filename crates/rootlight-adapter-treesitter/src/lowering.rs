@@ -2577,6 +2577,12 @@ fn html_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
         "html.unmatched_end_tag.signature" => {
             Some((FactDomain::Relations, "html-unmatched-end-tag"))
         }
+        "html.foreign_context.signature" => {
+            Some((FactDomain::Entities, "html-foreign-context-unavailable"))
+        }
+        "html.scripting_context.signature" => {
+            Some((FactDomain::Entities, "html-scripting-mode-unavailable"))
+        }
         _ => None,
     }
 }

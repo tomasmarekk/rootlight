@@ -288,9 +288,9 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "html",
             grammar_version: "0.23.2",
             source_package_sha256: "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee",
-            parser_sha256: "65768172733b3bbe461cbdc14ea928f00fbfcc51d8ac68f0a5c72071c6a0bbf1",
+            parser_sha256: "888cdb697b113cb17295dbf66e05e6b5b81abc8863227a6be1869bd496259490",
             scanner_sha256: Some(
-                "2194a20a98f9dd9ccb45bbb21081f0ac64bd62ff29c82c7e7c7ba1d7e2197a1b",
+                "1d669342598367dc389adebfb7d07c82b7c46f9b3641d9611586978e217e7fc3",
             ),
         },
         GrammarFamily::Yaml => GrammarIdentity {

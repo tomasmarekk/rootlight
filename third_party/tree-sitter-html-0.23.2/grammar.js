@@ -26,6 +26,8 @@ module.exports = grammar({
     $._implicit_end_tag,
     $.raw_text,
     $.comment,
+    $._text_start_tag_name,
+    $._plaintext_start_tag_name,
   ],
 
   rules: {
@@ -47,6 +49,8 @@ module.exports = grammar({
       $.element,
       $.script_element,
       $.style_element,
+      alias($.text_element, $.element),
+      alias($.plaintext_element, $.element),
       $.erroneous_end_tag,
     ),
 
@@ -69,6 +73,34 @@ module.exports = grammar({
       alias($.style_start_tag, $.start_tag),
       optional($.raw_text),
       $.end_tag,
+    ),
+
+    // Text-only contexts retain authored bytes, not decoded DOM text values.
+    text_element: $ => seq(
+      alias($.text_start_tag, $.start_tag),
+      optional(alias($.raw_text, $.text)),
+      $.end_tag,
+    ),
+
+    plaintext_element: $ => seq(
+      alias($.plaintext_start_tag, $.start_tag),
+      optional(alias($.raw_text, $.text)),
+    ),
+
+    text_start_tag: $ => seq(
+      '<',
+      alias($._text_start_tag_name, $.tag_name),
+      repeat($.attribute),
+      optional('/'),
+      '>',
+    ),
+
+    plaintext_start_tag: $ => seq(
+      '<',
+      alias($._plaintext_start_tag_name, $.tag_name),
+      repeat($.attribute),
+      optional('/'),
+      '>',
     ),
 
     start_tag: $ => seq(

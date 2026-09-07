@@ -644,6 +644,36 @@ fn candidate_for_capture(
     if family == GrammarFamily::Yaml {
         return yaml::candidate(capture.node, role);
     }
+    if family == GrammarFamily::Html
+        && role == StructuralRole::Signature
+        && capture.node.kind() == "tag_name"
+    {
+        let owner = capture
+            .node
+            .parent()
+            .and_then(|tag| tag.parent())
+            .filter(|node| node.kind() == "element")
+            .ok_or_else(|| query_failure("query-html-context-owner"))?;
+        let name = capture
+            .node
+            .utf8_text(source)
+            .map_err(|_| query_failure("query-html-context-name"))?;
+        let syntax = if name.eq_ignore_ascii_case("noscript") {
+            "html.scripting_context"
+        } else if name.eq_ignore_ascii_case("svg") || name.eq_ignore_ascii_case("math") {
+            "html.foreign_context"
+        } else {
+            return Err(query_failure("query-html-context-kind"));
+        };
+        return Ok(QueryCandidate {
+            start: owner.start_byte(),
+            end: owner.end_byte(),
+            role,
+            syntax,
+            required: false,
+            native_depth: 0,
+        });
+    }
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {

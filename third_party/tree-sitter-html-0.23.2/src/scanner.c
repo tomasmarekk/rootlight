@@ -11,6 +11,8 @@ enum TokenType {
     IMPLICIT_END_TAG,
     RAW_TEXT,
     COMMENT,
+    TEXT_START_TAG_NAME,
+    PLAINTEXT_START_TAG_NAME,
 };
 
 #include "state.h"
@@ -51,6 +53,37 @@ static bool scan_comment(TSLexer *lexer) {
     return false;
 }
 
+static bool custom_tag_equals(const Tag *tag, const char *name) {
+    size_t length = strlen(name);
+    return tag->type == CUSTOM && tag->custom_tag_name.size == length &&
+           memcmp(tag->custom_tag_name.contents, name, length) == 0;
+}
+
+static const char *text_end_delimiter(const Tag *tag) {
+    switch (tag->type) {
+        case SCRIPT: return "</SCRIPT";
+        case STYLE: return "</STYLE";
+        case TITLE: return "</TITLE";
+        case TEXTAREA: return "</TEXTAREA";
+        case IFRAME: return "</IFRAME";
+        default:
+            if (custom_tag_equals(tag, "XMP")) return "</XMP";
+            if (custom_tag_equals(tag, "NOEMBED")) return "</NOEMBED";
+            if (custom_tag_equals(tag, "NOFRAMES")) return "</NOFRAMES";
+            return NULL;
+    }
+}
+
+static bool in_foreign_scope(const Scanner *scanner) {
+    // This source grammar does not infer namespace integration from attributes.
+    // In particular, an SVG title must not select HTML RCDATA tokenization.
+    for (unsigned i = 0; i < scanner->tags.size; i++) {
+        TagType type = scanner->tags.contents[i].type;
+        if (type == SVG || type == MATH) return true;
+    }
+    return false;
+}
+
 static bool scan_raw_text(Scanner *scanner, TSLexer *lexer) {
     if (scanner->tags.size == 0) {
         return false;
@@ -58,15 +91,24 @@ static bool scan_raw_text(Scanner *scanner, TSLexer *lexer) {
 
     lexer->mark_end(lexer);
 
-    const char *end_delimiter = array_back(&scanner->tags)->type == SCRIPT ? "</SCRIPT" : "</STYLE";
+    const Tag *tag = array_back(&scanner->tags);
+    if (custom_tag_equals(tag, "PLAINTEXT")) {
+        while (!lexer->eof(lexer)) advance(lexer);
+        lexer->mark_end(lexer);
+        lexer->result_symbol = RAW_TEXT;
+        return true;
+    }
+    const char *end_delimiter = text_end_delimiter(tag);
+    if (!end_delimiter) return false;
+    size_t delimiter_length = strlen(end_delimiter);
 
     unsigned delimiter_index = 0;
-    while (lexer->lookahead) {
+    while (!lexer->eof(lexer)) {
         if (ascii_upper(lexer->lookahead) == end_delimiter[delimiter_index]) {
             if (delimiter_index == 0) lexer->mark_end(lexer);
             delimiter_index++;
             advance(lexer);
-            if (delimiter_index == strlen(end_delimiter)) {
+            if (delimiter_index == delimiter_length) {
                 if (html_space(lexer->lookahead) || lexer->lookahead == '/' || lexer->lookahead == '>') {
                     lexer->result_symbol = RAW_TEXT;
                     return true;
@@ -166,8 +208,20 @@ static bool scan_start_tag_name(Scanner *scanner, TSLexer *lexer) {
         tag_free(&tag);
         return false;
     }
+    bool plaintext = custom_tag_equals(&tag, "PLAINTEXT");
+    bool text_mode = tag.type != SCRIPT && tag.type != STYLE &&
+                     (plaintext || text_end_delimiter(&tag) != NULL);
+    bool html_context = text_mode && !in_foreign_scope(scanner);
     array_push(&scanner->tags, tag);
     scanner->serialized_bytes += bytes;
+    if (html_context && plaintext) {
+        lexer->result_symbol = PLAINTEXT_START_TAG_NAME;
+        return true;
+    }
+    if (html_context) {
+        lexer->result_symbol = TEXT_START_TAG_NAME;
+        return true;
+    }
     switch (tag.type) {
         case SCRIPT:
             lexer->result_symbol = SCRIPT_START_TAG_NAME;

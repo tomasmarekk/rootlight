@@ -1,4 +1,4 @@
-//! Qualifies HTML syntax before structural adapter registration.
+//! Qualifies pinned HTML syntax used by the source structural adapter.
 //! Source extents and fresh/incremental parity must survive scanner persistence.
 
 use tree_sitter::{InputEdit, Node, Parser, Point};
@@ -78,6 +78,105 @@ fn html_raw_text_requires_a_complete_end_tag_name() {
         let raw = nodes(tree.root_node(), "raw_text");
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
+fn html_text_elements_preserve_literal_markup_until_their_own_end_tag() {
+    for tag in ["title", "textarea", "xmp", "iframe", "noembed", "noframes"] {
+        let body = format!("\n<b id='literal'>text</b><!--literal-->&amp;</{tag}X><</{tag}X>");
+        let source = format!("<{tag}>{body}</{}><p>outside</p>", tag.to_ascii_uppercase());
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        let names = nodes(tree.root_node(), "tag_name");
+        assert_eq!(names.len(), 4, "{tag}: {}", tree.root_node().to_sexp());
+        assert!(nodes(tree.root_node(), "attribute").is_empty());
+        assert!(nodes(tree.root_node(), "comment").is_empty());
+        let raw = nodes(tree.root_node(), "text");
+        assert_eq!(raw.len(), 2, "{tag}");
+        assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
+fn html_text_plaintext_has_no_closing_tag_transition() {
+    let body = "<b id='literal'>text</b></plaintext><p>still literal</p>";
+    let source = format!("<plaintext>{body}");
+    let tree = parser().parse(&source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    assert_eq!(nodes(tree.root_node(), "tag_name").len(), 1);
+    let raw = nodes(tree.root_node(), "text");
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+}
+
+#[test]
+fn html_text_null_bytes_are_not_end_of_input() {
+    for tag in ["script", "style", "textarea"] {
+        let body = "one\0<b>still text</b>two";
+        let source = format!("<{tag}>{body}</{tag}>");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{tag}: {}",
+            tree.root_node().to_sexp()
+        );
+        let raw = nodes(
+            tree.root_node(),
+            if tag == "textarea" {
+                "text"
+            } else {
+                "raw_text"
+            },
+        );
+        assert_eq!(raw.len(), 1, "{tag}");
+        assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
+fn html_text_modes_do_not_replace_foreign_element_syntax() {
+    let source = "<svg><title><b>markup</b></title></svg>";
+    let tree = parser().parse(source, None).unwrap();
+    assert!(!tree.root_node().has_error());
+    assert_eq!(nodes(tree.root_node(), "tag_name").len(), 6);
+    assert!(nodes(tree.root_node(), "raw_text").is_empty());
+}
+
+#[test]
+fn html_text_empty_bodies_and_start_tag_slashes_preserve_text_mode() {
+    for tag in ["title", "textarea", "xmp", "iframe", "noembed", "noframes"] {
+        for body in ["", "\n  ", "<b>literal</b>", "one\u{00a0}two"] {
+            let source = format!("<{tag} />{body}</{tag} >");
+            let tree = parser().parse(&source, None).unwrap();
+            assert!(
+                !tree.root_node().has_error(),
+                "{source:?}: {}",
+                tree.root_node().to_sexp()
+            );
+            assert_eq!(nodes(tree.root_node(), "tag_name").len(), 2);
+            if !body.is_empty() {
+                let text = nodes(tree.root_node(), "text");
+                assert_eq!(text.len(), 1);
+                assert_eq!(text[0].utf8_text(source.as_bytes()).unwrap(), body);
+            }
+        }
+    }
+    for source in ["<plaintext>", "<plaintext />", "<plaintext />\n  "] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source:?}: {}",
+            tree.root_node().to_sexp()
+        );
     }
 }
 
@@ -167,6 +266,9 @@ fn html_incremental_edits_match_fresh_trees_and_source_extents() {
         "<x-ž><span>one</span></x-ž>".to_owned(),
         "<script>let x = '</scripture>';</script><style>a{}</style>".to_owned(),
         "<ul>\r\n<li id='first'>one<li>two</ul>".to_owned(),
+        "<textarea>one<b>&amp;</b></textarea><p>two</p>".to_owned(),
+        "<iframe>one<b>two</b></iframe><xmp>three</xmp>".to_owned(),
+        "<plaintext>one</plaintext><b>two</b>".to_owned(),
         format!("<x-{}><b>one</b></x-{}>", "a".repeat(300), "a".repeat(300)),
     ] {
         let mut source = initial;

@@ -280,6 +280,156 @@ fn markup_ids(document: &rootlight_ir::NormalizedIrDocument) -> BTreeSet<SymbolI
 }
 
 #[test]
+fn html_native_text_modes_do_not_define_literal_markup() {
+    for tag in ["title", "textarea", "xmp", "iframe", "noembed", "noframes"] {
+        let body =
+            format!("\n<fake id='not-an-attribute'>literal</fake><!-- text -->&amp;</{tag}X>");
+        let source = format!("<{tag} id='owner'>{body}</{tag}><p>outside</p>");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{tag}: {:?}",
+            document.diagnostics
+        );
+        assert_eq!(document.entities.len(), 4, "{tag}: {:?}", document.entities);
+        for name in [tag, "id", "p"] {
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.canonical_name == name)
+                    .count(),
+                1,
+                "{tag}: {name}"
+            );
+        }
+        assert!(
+            document.occurrences.iter().any(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.role == OccurrenceRole::StringEvidence
+                    && occurrence.syntactic_text_hash == content_hash(body.as_bytes())
+                    && source[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()]
+                        == body
+            }),
+            "{tag}: literal source must remain retrievable"
+        );
+        assert_eq!(
+            document.skipped_regions.len(),
+            1,
+            "{tag}: {:?}",
+            document.skipped_regions
+        );
+        assert_eq!(
+            document.skipped_regions[0].detail,
+            "html-dom-semantics-unavailable"
+        );
+    }
+}
+
+#[test]
+fn html_native_plaintext_keeps_the_complete_remainder_as_source_text() {
+    let body = "one\0<fake key='text'>two</fake></plaintext><p>still text</p>";
+    let source = format!("<plaintext>{body}");
+    let result = output(&source);
+    let document = result.document();
+    assert!(document.diagnostics.is_empty());
+    assert_eq!(document.entities.len(), 2);
+    let element = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::MarkupElement)
+        .unwrap();
+    assert_eq!(element.canonical_name, "plaintext");
+    assert_eq!(
+        element.evidence.source.as_ref().unwrap().span().end_byte(),
+        u64::try_from(source.len()).unwrap()
+    );
+    assert!(document.occurrences.iter().any(|occurrence| occurrence.role
+        == OccurrenceRole::StringEvidence
+        && occurrence.syntactic_text_hash == content_hash(body.as_bytes())));
+}
+
+#[test]
+fn html_native_context_uncertainty_survives_required_capture_replay() {
+    let source = "<main><svg><title><b>markup</b></title></svg><math><mi>x</mi></math><noscript><b>conditional</b></noscript><p>safe</p></main>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, HTML);
+    let fixture = Fixture::new(HTML, source.as_bytes());
+    let budget = limits();
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, HTML, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let expected = [
+        (
+            "html-foreign-context-unavailable",
+            "<svg><title><b>markup</b></title></svg>",
+        ),
+        (
+            "html-foreign-context-unavailable",
+            "<math><mi>x</mi></math>",
+        ),
+        (
+            "html-scripting-mode-unavailable",
+            "<noscript><b>conditional</b></noscript>",
+        ),
+    ];
+    for (detail, text) in expected {
+        assert!(
+            first.document().skipped_regions.iter().any(|gap| {
+                let span = gap.source.span();
+                gap.domain == FactDomain::Entities
+                    && gap.detail == detail
+                    && &source[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()]
+                        == text
+            }),
+            "{detail}: {:?}",
+            first.document().skipped_regions
+        );
+    }
+    let changed = fixture.next_generation();
+    let bounded =
+        limits_with_syntax_records(artifact.required_syntax_fact_count(&deadline()).unwrap());
+    let (fresh, retained) = analyzer
+        .analyze_and_capture(
+            &request(&changed.snapshot, &changed.source, HTML, &bounded),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let replay = analyzer
+        .analyze_from_artifact(
+            &request(&changed.snapshot, &changed.source, HTML, &bounded),
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(markup_ids(first.document()), markup_ids(replay.document()));
+    for gap in &first.document().skipped_regions {
+        assert!(
+            replay
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|next| next.detail == gap.detail
+                    && next.source.span() == gap.source.span()
+                    && next.source.generation() == changed.source.generation())
+        );
+    }
+}
+
+#[test]
 fn html_native_unrelated_siblings_do_not_renumber_same_name_occurrences() {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, HTML);
