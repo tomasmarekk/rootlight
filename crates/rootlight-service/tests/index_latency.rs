@@ -16,8 +16,8 @@ use rootlight_ir::{SourceRef, SourceSpan};
 use rootlight_query::LocateMode;
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
-    FirstSliceBudget, FirstSliceIndexCommit, FirstSliceIndexOperationStrategy, FirstSliceService,
-    SourceReadOptions,
+    FirstSliceBudget, FirstSliceIndexCommit, FirstSliceIndexMode, FirstSliceIndexOperationStrategy,
+    FirstSliceIndexProgress, FirstSliceService, SourceReadOptions,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -231,8 +231,8 @@ fn observe_full_source(workload: Workload, files: usize, words: usize, sample: u
     let mut service =
         FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).expect("durable service");
     let open_micros = micros(opened);
-    let (initial, initial_timing) = index(&mut service, &root);
-    let (noop, noop_timing) = index(&mut service, &root);
+    let (initial, initial_timing, initial_checkpoints) = profiled_index(&mut service, &root);
+    let (noop, noop_timing, noop_checkpoints) = profiled_index(&mut service, &root);
     assert_eq!(noop.receipt(), initial.receipt());
     assert_eq!(
         noop.evidence().strategy,
@@ -246,7 +246,7 @@ fn observe_full_source(workload: Workload, files: usize, words: usize, sample: u
         full_source(workload, 0, 2, words),
     )
     .expect("one-byte edit");
-    let (changed, changed_timing) = index(&mut service, &root);
+    let (changed, changed_timing, changed_checkpoints) = profiled_index(&mut service, &root);
     assert_eq!(changed.receipt().parent, Some(initial.receipt().generation));
     assert_ne!(changed.receipt().generation, initial.receipt().generation);
     assert_eq!(changed.evidence().changed_files, 1);
@@ -305,6 +305,7 @@ fn observe_full_source(workload: Workload, files: usize, words: usize, sample: u
         "service_open_micros":open_micros,"verification_micros":verification_micros,
         "operation_watchdog_seconds":OPERATION_WATCHDOG_SECONDS,
         "initial":stage(&initial,initial_timing),"noop":stage(&noop,noop_timing),"body_edit":stage(&changed,changed_timing),
+        "preparation_checkpoints":{"initial":initial_checkpoints,"noop":noop_checkpoints,"body_edit":changed_checkpoints},
         "coverage":{"language":status.coverage[0].language,"tier":status.coverage[0].tier,"status":status.coverage[0].status,
             "discovered_files":status.coverage[0].discovered_files,"indexed_files":status.coverage[0].indexed_files},
         "all_files_global_head_and_tail_located":true,"all_files_lexical_omissions_zero":true,
@@ -562,6 +563,86 @@ struct StageTiming {
     wall_micros: u64,
     preparation_micros: u64,
     publication_micros: u64,
+}
+
+fn profiled_index(
+    service: &mut FirstSliceService,
+    root: &Path,
+) -> (FirstSliceIndexCommit, StageTiming, Value) {
+    let cancellation = deadline();
+    let mut checkpoints = Vec::with_capacity(16);
+    let started = Instant::now();
+    let prepared = service
+        .prepare_repository_with_mode_and_progress(
+            root,
+            FirstSliceIndexMode::Structural,
+            &cancellation,
+            |progress| checkpoints.push((progress, micros(started))),
+        )
+        .expect("repository prepares");
+    let preparation_micros = micros(started);
+    let commit = service
+        .publish_prepared_with_metrics(prepared, &cancellation)
+        .expect("generation publishes");
+    let wall_micros = micros(started);
+    // Serialize after timing; callback boundaries can repeat or mix work on fallback paths.
+    let profile = checkpoint_profile(checkpoints, preparation_micros);
+    (
+        commit,
+        StageTiming {
+            wall_micros,
+            preparation_micros,
+            publication_micros: wall_micros - preparation_micros,
+        },
+        profile,
+    )
+}
+
+fn checkpoint_profile(checkpoints: Vec<(FirstSliceIndexProgress, u64)>, total: u64) -> Value {
+    let mut previous = 0;
+    let checkpoints = checkpoints
+        .into_iter()
+        .map(|(progress, elapsed)| {
+            assert!(elapsed >= previous && elapsed <= total);
+            let interval = elapsed - previous;
+            previous = elapsed;
+            json!({
+                "stage":format!("{:?}", progress.stage),
+                "completed":progress.completed,"total":progress.total,
+                "files_examined":progress.files_examined,"bytes_examined":progress.bytes_examined,
+                "written_bytes":progress.written_bytes,
+                "elapsed_micros":elapsed,"since_previous_micros":interval,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "schema":"rootlight.preparation-checkpoints/1", "checkpoints":checkpoints,
+        "after_last_checkpoint_micros":total - previous,
+        "intervals_are_exclusive_work_categories":false,
+    })
+}
+
+#[test]
+fn checkpoint_intervals_conserve_time_without_collapsing_repeated_stages() {
+    let progress = FirstSliceIndexProgress {
+        stage: rootlight_service::FirstSliceIndexStage::Persistence,
+        completed: 4,
+        total: 6,
+        files_examined: 1,
+        bytes_examined: 32,
+        written_bytes: 8,
+    };
+    let profile = checkpoint_profile(vec![(progress, 10), (progress, 25)], 30);
+    let points = profile["checkpoints"].as_array().expect("checkpoint array");
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["since_previous_micros"], 10);
+    assert_eq!(points[1]["since_previous_micros"], 15);
+    assert_eq!(points[1]["elapsed_micros"], 25);
+    assert_eq!(profile["after_last_checkpoint_micros"], 5);
+    assert_eq!(
+        checkpoint_profile(Vec::new(), 30)["after_last_checkpoint_micros"],
+        30
+    );
 }
 
 fn index(service: &mut FirstSliceService, root: &Path) -> (FirstSliceIndexCommit, StageTiming) {
