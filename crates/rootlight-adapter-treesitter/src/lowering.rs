@@ -858,6 +858,19 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
+        if request.language().as_str() == "yaml"
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "yaml.document.scope" | "yaml.node_key.definition"
+            )
+        {
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "yaml-document-schema-uncertain".len(),
+                limits,
+            )?;
+        }
         if let Some(kind) = structural_entity_kind(fact) {
             entity_candidates = checked_add(entity_candidates, 1)?;
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
@@ -1157,6 +1170,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut extension_bytes = 0_usize;
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
+        for &(span, detail) in &entity_plan.yaml_warnings {
+            cancellation.check()?;
+            let region = skipped_region(
+                self.full_source,
+                span,
+                FactDomain::Entities,
+                SkippedRegionReason::UnsupportedConstruct,
+                detail,
+                provenance_id,
+            )?;
+            skipped.insert(region.id, region);
+        }
         let facts_by_id: HashMap<_, _> = self
             .parse_output
             .facts()
@@ -1268,13 +1293,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?;
                     // The entity retains the full declaration for source.read;
                     // its definition occurrence identifies the original name token.
+                    let definition_span = entity_plan
+                        .yaml_key_sources
+                        .get(&definition_local_id)
+                        .copied()
+                        .unwrap_or(definition_fact.span());
                     let occurrence = declaration_occurrence(
                         definition_fact,
                         entity,
                         provenance_id,
                         syntax_confidence,
-                        &source_for_span(self.full_source, definition_fact.span()),
-                        content_hash(self.text_for_span(definition_fact.span())?.as_bytes()),
+                        &source_for_span(self.full_source, definition_span),
+                        content_hash(self.text_for_span(definition_span)?.as_bytes()),
                     )?;
                     occurrences.insert(occurrence.id, occurrence);
                 }
@@ -1605,6 +1635,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
     ) -> Result<EntityPlan, AdapterError> {
         let mut ordered_facts: Vec<_> = self.parse_output.facts().iter().collect();
         ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
+        let yaml_names = if self.request.language().as_str() == "yaml" {
+            yaml::names::Names::new(
+                self.parse_output.facts(),
+                self.source_text,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?
+        } else {
+            yaml::names::Names::default()
+        };
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
         let file_is_test = test_source_path(self.request.source().path().as_str());
         let mut nearest_declaration = HashMap::new();
@@ -1620,7 +1660,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 captures.entry(fact.local_id()).or_default();
             } else {
                 nearest_declaration.insert(fact.local_id(), parent_declaration);
-                if let Some(owner) = parent_declaration {
+                if let Some(owner) = yaml_names
+                    .owners
+                    .get(&fact.local_id())
+                    .copied()
+                    .or(parent_declaration)
+                {
                     if is_definition_capture(fact) {
                         captures.entry(owner).or_default().definitions.push(*fact);
                     } else if is_signature_capture(fact) {
@@ -1830,12 +1875,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
-                let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
-                    language_for_fact(self.request, definition).as_str(),
-                    definition,
-                    text,
-                    self.request.limits().ir().max_string_bytes,
-                ) else {
+                let name = if matches!(
+                    definition.syntax_kind().as_str(),
+                    "yaml.node_key.definition" | "yaml.empty_key.definition"
+                ) {
+                    yaml_names
+                        .keys
+                        .get(&definition.local_id())
+                        .and_then(Option::as_ref)
+                        .map(|key| std::borrow::Cow::Borrowed(key.name.as_str()))
+                } else {
+                    rootlight_adapter_sdk::structural_captured_name_for_fact(
+                        language_for_fact(self.request, definition).as_str(),
+                        definition,
+                        text,
+                        self.request.limits().ir().max_string_bytes,
+                    )
+                };
+                let Some(name) = name else {
                     nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                     nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                     continue;
@@ -1995,6 +2052,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
             unsupported_scope_entities,
             duplicate_data_keys,
             yaml_aliases,
+            yaml_key_sources: yaml_names
+                .keys
+                .into_iter()
+                .filter_map(|(id, key)| key.map(|key| (id, key.source)))
+                .collect(),
+            yaml_warnings: yaml_names.warnings,
         })
     }
 
@@ -2112,6 +2175,8 @@ struct EntityPlan {
     unsupported_scope_entities: BTreeSet<u64>,
     duplicate_data_keys: BTreeSet<u64>,
     yaml_aliases: HashMap<u64, u64>,
+    yaml_key_sources: HashMap<u64, SourceSpan>,
+    yaml_warnings: Vec<(SourceSpan, &'static str)>,
 }
 
 #[derive(Clone)]

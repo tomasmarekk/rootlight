@@ -425,10 +425,11 @@ module.exports = grammar({
 
     // explicit flow pair
 
-    _r_flw_exp_par: $ => seq($._r_flw_key_bgn, optional(choice($._r_flw_imp_r_par, $._r_flw_imp_br_par, $._br_flw_imp_r_par, $._br_flw_imp_br_par))),
-    _br_flw_exp_par: $ => seq($._br_flw_key_bgn, optional(choice($._r_flw_imp_r_par, $._r_flw_imp_br_par, $._br_flw_imp_r_par, $._br_flw_imp_br_par))),
+    // Explicit pairs may omit the key as well as the value (YAML 1.2.2, 7.4.2).
+    _r_flw_exp_par: $ => seq($._r_flw_key_bgn, optional(choice($._r_flw_imp_r_par, $._r_flw_imp_br_par, $._br_flw_imp_r_par, $._br_flw_imp_br_par, $._r_flw_njl_ann_par, $._br_flw_njl_ann_par))),
+    _br_flw_exp_par: $ => seq($._br_flw_key_bgn, optional(choice($._r_flw_imp_r_par, $._r_flw_imp_br_par, $._br_flw_imp_r_par, $._br_flw_imp_br_par, $._r_flw_njl_ann_par, $._br_flw_njl_ann_par))),
 
-    _r_sgl_flw_exp_par: $ => seq($._r_flw_key_bgn, optional($._r_sgl_flw_imp_par)),
+    _r_sgl_flw_exp_par: $ => seq($._r_flw_key_bgn, optional(choice($._r_sgl_flw_imp_par, $._r_sgl_flw_njl_ann_par))),
 
     // implicit flow pair
 

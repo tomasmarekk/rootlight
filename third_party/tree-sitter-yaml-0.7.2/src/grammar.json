@@ -4188,6 +4188,14 @@
                 {
                   "type": "SYMBOL",
                   "name": "_br_flw_imp_br_par"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_r_flw_njl_ann_par"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_br_flw_njl_ann_par"
                 }
               ]
             },
@@ -4231,6 +4239,14 @@
                 {
                   "type": "SYMBOL",
                   "name": "_br_flw_imp_br_par"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_r_flw_njl_ann_par"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_br_flw_njl_ann_par"
                 }
               ]
             },
@@ -4257,8 +4273,17 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "_r_sgl_flw_imp_par"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "_r_sgl_flw_imp_par"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_r_sgl_flw_njl_ann_par"
+                }
+              ]
             },
             {
               "type": "BLANK"

@@ -18,6 +18,8 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod yaml;
+
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
 const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
 const HARD_MAX_QUERY_CAPTURES: usize = 2_097_152;
@@ -189,21 +191,26 @@ pub(crate) struct QueryCandidate {
     pub(crate) role: StructuralRole,
     pub(crate) syntax: &'static str,
     pub(crate) required: bool,
+    // Native nesting disambiguates YAML nodes with identical byte ranges.
+    pub(crate) native_depth: usize,
 }
 
 impl QueryCandidate {
-    pub(crate) fn retention_rank(self) -> (u8, usize, usize, StructuralRole, &'static str) {
+    pub(crate) fn retention_rank(self) -> (u8, usize, usize, StructuralRole, &'static str, usize) {
         (
             self.role.retention_rank(),
             self.start,
             self.end,
             self.role,
             self.syntax,
+            self.native_depth,
         )
     }
 
-    pub(crate) fn selection_rank(self) -> (u8, u8, usize, usize, StructuralRole, &'static str) {
-        let (role, start, end, structural_role, syntax) = self.retention_rank();
+    pub(crate) fn selection_rank(
+        self,
+    ) -> (u8, u8, usize, usize, StructuralRole, &'static str, usize) {
+        let (role, start, end, structural_role, syntax, native_depth) = self.retention_rank();
         (
             u8::from(!self.required),
             role,
@@ -211,6 +218,7 @@ impl QueryCandidate {
             end,
             structural_role,
             syntax,
+            native_depth,
         )
     }
 
@@ -219,6 +227,7 @@ impl QueryCandidate {
             && self.end == other.end
             && self.role == other.role
             && self.syntax == other.syntax
+            && self.native_depth == other.native_depth
     }
 }
 
@@ -226,7 +235,7 @@ impl QueryCandidate {
 struct RetainedCandidate(QueryCandidate);
 
 impl RetainedCandidate {
-    fn rank(self) -> (u8, usize, usize, StructuralRole, &'static str) {
+    fn rank(self) -> (u8, usize, usize, StructuralRole, &'static str, usize) {
         self.0.retention_rank()
     }
 }
@@ -288,6 +297,9 @@ impl QueryPack {
         let mut expected = EXPECTED_CAPTURES.to_vec();
         if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
+        }
+        if family == GrammarFamily::Yaml {
+            expected.retain(|name| !matches!(*name, "call" | "import"));
         }
         if matches!(
             family,
@@ -468,7 +480,10 @@ impl QueryPack {
                     // Data scalar siblings are needed to count array positions,
                     // even when they contain no named declaration themselves.
                     candidate.required = candidate.role != StructuralRole::Scope
-                        || matches!(family, GrammarFamily::Json | GrammarFamily::Toml);
+                        || matches!(
+                            family,
+                            GrammarFamily::Json | GrammarFamily::Toml | GrammarFamily::Yaml
+                        );
                     push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
                 }
                 Ok(())
@@ -623,6 +638,9 @@ fn candidate_for_capture(
     role: StructuralRole,
     source: &[u8],
 ) -> Result<QueryCandidate, AdapterError> {
+    if family == GrammarFamily::Yaml {
+        return yaml::candidate(capture.node, role);
+    }
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
@@ -756,6 +774,7 @@ fn candidate_for_capture(
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
+            GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -816,6 +835,7 @@ fn candidate_for_capture(
         role,
         syntax,
         required: false,
+        native_depth: 0,
     })
 }
 
@@ -1264,7 +1284,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(18);
+        let mut packs = Vec::with_capacity(19);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1290,6 +1310,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Bash, include_str!("../queries/bash.scm")),
             (GrammarFamily::Json, include_str!("../queries/json.scm")),
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
+            (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1361,11 +1382,15 @@ mod tests {
             GrammarFamily::Bash,
             GrammarFamily::Json,
             GrammarFamily::Toml,
+            GrammarFamily::Yaml,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Yaml {
+                expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
             if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
                 expected
                     .retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));

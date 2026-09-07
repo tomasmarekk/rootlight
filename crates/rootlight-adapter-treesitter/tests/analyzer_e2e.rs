@@ -36,6 +36,9 @@ const MAX_SYNTAX_DEPTH: usize = 128;
 const BINARY_SEED: &[u8] = b"rootlight-treesitter-e2e-binary";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight-treesitter-e2e-build";
 const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
+
+#[path = "analyzer_e2e/yaml_native.rs"]
+mod yaml_native;
 const EXPECTED_DOMAINS: [FactDomain; 8] = [
     FactDomain::Files,
     FactDomain::Entities,

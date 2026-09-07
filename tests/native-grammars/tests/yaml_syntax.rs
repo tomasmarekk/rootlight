@@ -26,6 +26,36 @@ fn nodes<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
 }
 
 #[test]
+fn yaml_explicit_empty_flow_keys_preserve_one_pair_and_optional_value() {
+    for (open, close) in [("{", "}"), ("[", "]")] {
+        for separation in [" ", "\n ", "\r\n "] {
+            for value in ["", " value", " {nested: true}"] {
+                let source = format!("{open}?{separation}:{value}{close}");
+                let tree = parser().parse(&source, None).expect("parse completes");
+                assert!(
+                    !tree.root_node().has_error(),
+                    "{source:?}: {}",
+                    tree.root_node().to_sexp()
+                );
+                let pairs = nodes(tree.root_node(), "flow_pair");
+                let outer = pairs.first().expect("explicit entry retains its pair");
+                assert!(outer.child_by_field_name("key").is_none(), "{source:?}");
+                assert_eq!(
+                    outer.child_by_field_name("value").is_some(),
+                    !value.is_empty(),
+                    "{source:?}"
+                );
+                assert_eq!(
+                    pairs.len(),
+                    if value.contains("nested") { 2 } else { 1 },
+                    "{source:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn yaml_layout_positions_remain_exact_above_signed_sixteen_bits() {
     for width in [32_766, 32_767, 32_768, 40_000, 65_536] {
         for source in [

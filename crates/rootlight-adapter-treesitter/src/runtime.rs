@@ -1372,6 +1372,7 @@ struct FactDraft {
     syntax_kind: SyntaxKindLabel,
     parent: Option<usize>,
     depth: usize,
+    native_depth: usize,
 }
 
 #[derive(Debug)]
@@ -1387,12 +1388,20 @@ fn normalize_query_candidates(
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
-        (left.start, left.end, left.role, left.syntax).cmp(&(
-            right.start,
-            right.end,
-            right.role,
-            right.syntax,
-        ))
+        (
+            left.start,
+            left.end,
+            left.role,
+            left.syntax,
+            left.native_depth,
+        )
+            .cmp(&(
+                right.start,
+                right.end,
+                right.role,
+                right.syntax,
+                right.native_depth,
+            ))
     })?;
     dedup_query_candidates(&mut candidates, cancellation)?;
     mark_required_scope_closure(&mut candidates, cancellation)?;
@@ -1402,12 +1411,20 @@ fn normalize_query_candidates(
     let mut limited =
         prune_optional_candidates_within_limit(&mut candidates, max_facts, cancellation)?.limited;
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
-        (left.start, left.end, left.role, left.syntax).cmp(&(
-            right.start,
-            right.end,
-            right.role,
-            right.syntax,
-        ))
+        (
+            left.start,
+            left.end,
+            left.role,
+            left.syntax,
+            left.native_depth,
+        )
+            .cmp(&(
+                right.start,
+                right.end,
+                right.role,
+                right.syntax,
+                right.native_depth,
+            ))
     })?;
     let mut root_count = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -1464,12 +1481,20 @@ fn normalize_query_candidates(
         }
     }
     sort_cancellable_by(&mut restricted, cancellation, |left, right| {
-        (left.start, left.end, left.role, left.syntax).cmp(&(
-            right.start,
-            right.end,
-            right.role,
-            right.syntax,
-        ))
+        (
+            left.start,
+            left.end,
+            left.role,
+            left.syntax,
+            left.native_depth,
+        )
+            .cmp(&(
+                right.start,
+                right.end,
+                right.role,
+                right.syntax,
+                right.native_depth,
+            ))
     })?;
     dedup_query_candidates(&mut restricted, cancellation)?;
     mark_required_scope_closure(&mut restricted, cancellation)?;
@@ -1477,12 +1502,20 @@ fn normalize_query_candidates(
         retain_required_candidates_within_limit(&mut restricted, max_facts, cancellation)?;
     limited |= retention.limited;
     sort_cancellable_by(&mut restricted, cancellation, |left, right| {
-        (left.start, left.end, left.role, left.syntax).cmp(&(
-            right.start,
-            right.end,
-            right.role,
-            right.syntax,
-        ))
+        (
+            left.start,
+            left.end,
+            left.role,
+            left.syntax,
+            left.native_depth,
+        )
+            .cmp(&(
+                right.start,
+                right.end,
+                right.role,
+                right.syntax,
+                right.native_depth,
+            ))
     })?;
 
     let mut selected = Vec::new();
@@ -1558,6 +1591,7 @@ fn normalize_query_candidates(
                 .map_err(|_| provider_failure("query-syntax-label"))?,
             parent: None,
             depth: 0,
+            native_depth: candidate.native_depth,
         });
     }
     assign_fact_parents(&mut drafts, cancellation)?;
@@ -1952,6 +1986,7 @@ fn assign_fact_parents(
         (
             drafts[left].start,
             std::cmp::Reverse(drafts[left].end),
+            drafts[left].native_depth,
             hierarchy_rank(drafts[left].role),
             drafts[left].role,
             drafts[left].syntax_kind.as_str(),
@@ -1959,6 +1994,7 @@ fn assign_fact_parents(
             .cmp(&(
                 drafts[right].start,
                 std::cmp::Reverse(drafts[right].end),
+                drafts[right].native_depth,
                 hierarchy_rank(drafts[right].role),
                 drafts[right].role,
                 drafts[right].syntax_kind.as_str(),
@@ -2034,7 +2070,9 @@ fn parent_is_valid(parent: &FactDraft, child: &FactDraft) -> bool {
         return false;
     }
     let strict = parent.start < child.start || parent.end > child.end;
-    strict || parent_rank < hierarchy_rank(child.role)
+    strict
+        || parent.native_depth < child.native_depth
+        || (parent.native_depth == child.native_depth && parent_rank < hierarchy_rank(child.role))
 }
 
 const fn span_contains(

@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/21";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/22";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25395,6 +25395,7 @@ mod tests {
             "sample.swift",
             "sample.toml",
             "sample.ts",
+            "sample.yaml",
         ]
         .into_iter()
         .filter_map(source_language_from_path)
@@ -25441,7 +25442,6 @@ mod tests {
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
-            ("pipeline.yaml", "yaml"),
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
             ("plot.R", "r"),
@@ -25486,7 +25486,6 @@ mod tests {
     fn unsupported_primary_sources_retain_exact_evidence_and_reason() {
         let fixture = TempDir::new().expect("fixture root exists");
         let sources = [
-            ("pipeline.yaml", "workflow: sourceEvidence\n", "yaml"),
             (
                 "client.dart",
                 "class Transport { final int retryCount = 1; }\n",
@@ -25584,7 +25583,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["yaml", "dart", "objective-c", "matlab", "perl"] {
+        for language in ["dart", "objective-c", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
@@ -26032,6 +26031,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn yaml_document_keys_and_aliases_survive_durable_restore() {
+        data_properties_survive_durable_restore(
+            "yaml",
+            "data.yaml",
+            "key: 101\nitems: [null, &entry {key: 303}, {\"k\\u0065y\": 202}, {key: 404}, *entry]\n'': 5\n' ': 6\n",
+            ["key: 303", "key: 3030"],
+        );
+    }
+
     fn data_properties_survive_durable_restore(
         language: &str,
         relative: &str,
@@ -26077,6 +26086,29 @@ mod tests {
                 .loaded_generation_snapshot(receipt.generation)
                 .expect("generation");
             let document = generation.document();
+            if language == "yaml" {
+                let anchors: Vec<_> = document
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.kind == EntityKind::Variable && entity.canonical_name == "entry"
+                    })
+                    .collect();
+                assert_eq!(anchors.len(), 1);
+                let aliases: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.syntax_kind == "yaml.alias.reference")
+                    .collect();
+                assert_eq!(aliases.len(), 1);
+                assert_eq!(
+                    aliases[0].target,
+                    OccurrenceTarget::Resolved {
+                        symbol: anchors[0].id
+                    }
+                );
+                assert_eq!(aliases[0].source.generation(), receipt.generation);
+            }
             assert_eq!(
                 document
                     .entities
@@ -26119,7 +26151,14 @@ mod tests {
                 let explained = service
                     .symbol_explain(receipt.generation, *symbol, &deadline())
                     .expect("explain");
-                assert_eq!(explained.data.entity.canonical_name, r#""key""#);
+                assert_eq!(
+                    explained.data.entity.canonical_name,
+                    if language == "yaml" {
+                        r#"str:"key""#
+                    } else {
+                        r#""key""#
+                    }
+                );
                 assert_eq!(explained.data.entity.display_name, "key");
                 let occurrence = document
                     .occurrences
@@ -26729,7 +26768,7 @@ mod tests {
                     .expect("configuration source reads");
                 assert_eq!(read.data.chunks[0].bytes, source.as_bytes(), "{path}");
                 assert_eq!(read.data.chunks[0].language, language, "{path}");
-                if !matches!(language, "rust" | "json" | "toml") {
+                if !matches!(language, "rust" | "json" | "toml" | "yaml") {
                     assert!(
                         !generation.document().entities.iter().any(|entity| {
                             entity
@@ -26763,7 +26802,7 @@ mod tests {
                     coverage.discovered_files,
                     u64::try_from(expected).expect("count fits")
                 );
-                if matches!(language, "json" | "toml") {
+                if matches!(language, "json" | "toml" | "yaml") {
                     assert_eq!(
                         coverage.indexed_files,
                         u64::try_from(expected).expect("count fits")

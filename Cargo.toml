@@ -111,6 +111,7 @@ tree-sitter = { version = "=0.26.11", default-features = false, features = ["std
 tree-sitter-bash = { version = "=0.25.1", default-features = false }
 tree-sitter-json = { version = "=0.24.8", default-features = false }
 tree-sitter-toml-ng = { version = "=0.7.0", default-features = false }
+tree-sitter-yaml = { version = "=0.7.2", default-features = false }
 tree-sitter-c = { version = "=0.24.2", default-features = false }
 tree-sitter-c-sharp = { version = "=0.23.5", default-features = false }
 tree-sitter-cpp = { version = "=0.23.4", default-features = false }
@@ -143,6 +144,7 @@ zip = { version = "=2.4.2", default-features = false }
 tree-sitter-bash = { path = "third_party/tree-sitter-bash-0.25.1" }
 tree-sitter-json = { path = "third_party/tree-sitter-json-0.24.8" }
 tree-sitter-toml-ng = { path = "third_party/tree-sitter-toml-ng-0.7.0" }
+tree-sitter-yaml = { path = "third_party/tree-sitter-yaml-0.7.2" }
 lru = { path = "third_party/lru-0.16.4" }
 tree-sitter-css = { path = "third_party/tree-sitter-css-0.25.0" }
 tree-sitter-swift = { path = "third_party/tree-sitter-swift-0.7.3" }

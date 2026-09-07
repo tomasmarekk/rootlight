@@ -1,7 +1,8 @@
-# YAML native scanner qualification
+# YAML native grammar qualification
 
 This directory retains the MIT-licensed `tree-sitter-yaml` crate `0.7.2`
-for isolated native tests. It is not yet a production structural adapter.
+for source-backed structural analysis and isolated native tests. Native syntax
+qualification alone does not establish complete YAML semantics or MCP coverage.
 
 ## Provenance
 
@@ -9,9 +10,22 @@ for isolated native tests. It is not yet a production structural adapter.
 - Commit: `7708026449bed86239b1cd5bce6e3c34dbca6415` (tag `v0.7.2`).
 - Published crate SHA-256:
   `53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97`.
-- License, grammar, generated parser, node metadata, schemas, query and Rust
-  bindings are retained verbatim. Registry markers, Cargo.lock and README are
-  omitted. Only `src/scanner.c` is patched; no generated file is hand-edited.
+- License, node metadata, schemas, query and Rust bindings are retained verbatim.
+  Registry markers, Cargo.lock and README are omitted. `src/scanner.c` and
+  `grammar.js` are patched; generated files are never hand-edited.
+
+## Grammar changes
+
+Explicit flow pairs accept an omitted key followed by a colon, with or without
+a value, as specified by YAML 1.2.2 section 7.4.2. The same anonymous-pair rule
+applies to mapping entries, sequence entries and single-line contexts. The
+upstream rule accepted implicit empty keys but rejected the explicit form.
+
+Regenerate `src/grammar.json` and `src/parser.c` using Tree-sitter CLI 0.25.10:
+
+```sh
+tree-sitter generate --abi 14
+```
 
 ## Scanner changes
 

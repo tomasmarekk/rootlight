@@ -5,6 +5,7 @@
 use super::*;
 
 mod bindings;
+pub(super) mod names;
 
 pub(super) struct Plan {
     pub(super) duplicates: BTreeSet<u64>,
