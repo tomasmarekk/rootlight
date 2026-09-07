@@ -78,6 +78,132 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
+    let source = include_str!(
+        "../../../crates/rootlight-adapter-treesitter/tests/fixtures/structural/bash.sh"
+    );
+    let mut fixture = RetrievalFixture::spawn_with_bash_source(Some(source));
+    for name in [
+        "emit", "process", "render", "ROOT", "ITEMS", "message", "pending", "item",
+    ] {
+        let arguments = json!({"query": name, "search_modes": ["exact"],
+            "languages": ["bash"], "response_profile": "evidence"});
+        let located = fixture.standalone(
+            &format!("bash-locate-{name}"),
+            "code.locate",
+            arguments.clone(),
+        );
+        let batch = fixture.batch(
+            &format!("bash-batch-{name}"),
+            "code.locate",
+            arguments,
+            "evidence",
+        );
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert!(
+            output["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .all(|warning| warning["code"] != "coverage_unsupported"),
+            "Bash-only query returned unsupported coverage: {output:#}"
+        );
+        let matches = output["data"]["matches"].as_array().expect("Bash matches");
+        let found = matches
+            .iter()
+            .find(|value| value["symbol_id"].is_string())
+            .expect("native symbol");
+        let symbol = found["symbol_id"].clone();
+        let reference = found["source_ref"].clone();
+        assert!(reference.is_object());
+        let explained = fixture.standalone(
+            &format!("bash-explain-{name}"),
+            "symbol.explain",
+            json!({"symbol_ids": [symbol.clone()], "response_profile": "evidence"}),
+        );
+        assert_success(&explained, "symbol.explain");
+        assert_common_read_contract(
+            &explained["result"]["structuredContent"],
+            &fixture.repository_id,
+        );
+        let read = fixture.standalone(
+            &format!("bash-source-{name}"),
+            "source.read",
+            json!({"references": [{"symbol_id": symbol}], "response_profile": "evidence"}),
+        );
+        assert_success(&read, "source.read");
+        let read = &read["result"]["structuredContent"];
+        assert_common_read_contract(read, &fixture.repository_id);
+        let chunks = read["data"]["chunks"].as_array().expect("source chunks");
+        assert_eq!(chunks.len(), 1);
+        let resolved = &chunks[0]["source_ref"];
+        for field in ["content_hash", "generation", "repository", "span"] {
+            assert_eq!(resolved[field], reference[field]);
+        }
+        let start = usize::try_from(resolved["span"]["start_byte"].as_u64().expect("start"))
+            .expect("offset");
+        let end =
+            usize::try_from(resolved["span"]["end_byte"].as_u64().expect("end")).expect("offset");
+        assert_eq!(chunks[0]["content"].as_str(), source.get(start..end));
+    }
+    let lexical = fixture.standalone(
+        "bash-heredoc-lexical",
+        "code.locate",
+        json!({"query": "second", "search_modes": ["lexical"], "languages": ["bash"],
+            "scope": {"paths": ["commands.sh"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&lexical, "code.locate");
+    let output = &lexical["result"]["structuredContent"];
+    assert_common_read_contract(output, &fixture.repository_id);
+    assert!(
+        !output["data"]["matches"]
+            .as_array()
+            .expect("lexical matches")
+            .is_empty()
+    );
+    for (id, languages, expects_toml) in [
+        ("filtered-empty", json!(["yaml"]), false),
+        ("unfiltered-empty", json!([]), true),
+    ] {
+        let absent = fixture.standalone(
+            id,
+            "code.locate",
+            json!({"query": "absent_definition_probe", "search_modes": ["exact"],
+                "languages": languages, "response_profile": "evidence"}),
+        );
+        assert_success(&absent, "code.locate");
+        let output = &absent["result"]["structuredContent"];
+        assert_eq!(output["data"]["matches"], json!([]));
+        let warnings = output["warnings"]
+            .as_array()
+            .expect("empty-result warnings");
+        assert!(warnings.iter().any(|warning| {
+            warning["code"] == "coverage_unsupported"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.ends_with("language yaml"))
+        }));
+        assert_eq!(
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "coverage_unsupported"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.ends_with("language toml"))),
+            expects_toml
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "coverage_stale")
+        );
+    }
+    fixture.finish();
+}
+
+#[test]
 fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     let mut fixture = RetrievalFixture::spawn();
     supported_profiles_preserve_standalone_and_batch_semantics(&mut fixture);
@@ -1269,12 +1395,19 @@ struct RetrievalFixture {
 
 impl RetrievalFixture {
     fn spawn() -> Self {
+        Self::spawn_with_bash_source(None)
+    }
+
+    fn spawn_with_bash_source(bash_source: Option<&str>) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
             .expect("fixture source directory is created");
         fs::create_dir_all(repository_root.join("tests"))
             .expect("fixture test directory is created");
+        if let Some(source) = bash_source {
+            fs::write(repository_root.join("commands.sh"), source).expect("Bash source fixture");
+        }
         fs::write(
             repository_root.join("Cargo.toml"),
             "[package]\nname = \"retrieval_process_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",

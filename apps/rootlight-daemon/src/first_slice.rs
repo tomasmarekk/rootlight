@@ -11065,6 +11065,7 @@ fn code_locate(
     };
     let languages = parse_code_locate_languages(request.languages)?;
     let path_prefixes = parse_code_locate_paths(request.path_prefixes)?;
+    let coverage_languages = languages.clone();
     let response = service
         .code_locate_with_filters_and_budget(
             generation.generation,
@@ -11102,15 +11103,25 @@ fn code_locate(
             source: hit.source.as_ref().map(source_ref_to_wire),
         });
     }
+    let mut metadata = query_context(
+        service,
+        generation,
+        &response.usage,
+        &response.data.coverage,
+        &context.cancellation,
+    )?;
+    if !coverage_languages.is_empty() {
+        // Filter by the requested domain, not returned hits: an empty result
+        // still needs its language's gaps. Unscoped repository gaps remain visible.
+        metadata.coverage_gaps.retain(|gap| {
+            gap.language
+                .as_ref()
+                .is_none_or(|language| coverage_languages.binary_search(language).is_ok())
+        });
+    }
     Ok(daemon::CodeLocateResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(
-            service,
-            generation,
-            &response.usage,
-            &response.data.coverage,
-            &context.cancellation,
-        )?),
+        context: Some(metadata),
         hits,
         matched_candidates: response.data.matched_candidates,
         truncated: response.data.truncated,
