@@ -205,7 +205,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/12";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/13";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/1";
@@ -25520,7 +25520,7 @@ mod tests {
     #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n end\nend\n";
+        let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";
         fs::write(fixture.path().join("store.rb"), source).expect("Ruby source writes");
         let mut service = FirstSliceService::new(2).expect("service initializes");
         let receipt = service
@@ -25566,7 +25566,17 @@ mod tests {
             .find(|entry| entry.language == "ruby")
             .expect("Ruby indexing is accounted");
         assert_eq!((indexed.discovered_files, indexed.indexed_files), (1, 1));
-        for name in ["Garden", "Store", "DEFAULT", "lookup", "self.lookup", "[]"] {
+        for name in [
+            "Garden",
+            "Store",
+            "DEFAULT",
+            "lookup",
+            "self.lookup",
+            "[]",
+            "ready",
+            "self.build",
+            "version",
+        ] {
             let located = service
                 .code_locate(
                     receipt.generation,

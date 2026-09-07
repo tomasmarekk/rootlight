@@ -468,6 +468,73 @@ fn lua_local_references_obey_visibility_shadowing_and_closure_boundaries() {
 }
 
 #[test]
+fn ruby_parameterless_methods_have_source_backed_signatures_and_stable_ids() {
+    let source = "class Store\n def ready\n  true\n end\n def self.build\n  nil\n end\n def version = 1\n def -@\n  self\n end\nend\n";
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let fixture = Fixture::new(RUBY_CASE, source.as_bytes());
+    let analyzer = analyzer(&provider, RUBY_CASE);
+    let initial_request = request(&fixture.snapshot, &fixture.source, RUBY_CASE, &limits);
+    let output = analyze(&analyzer, &initial_request, &ExtensionSupport::default());
+    assert!(output.document().diagnostics.is_empty());
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(output.document().skipped_regions.is_empty());
+    for (name, header) in [
+        ("ready", "def ready"),
+        ("self.build", "def self.build"),
+        ("version", "def version"),
+        ("-@", "def -@"),
+    ] {
+        let symbol = symbol_id_named(output.document(), name);
+        let signatures = output
+            .document()
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension)
+                    .expect("lexical evidence validates");
+                (lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && lexical.subject() == rootlight_ir::FactRef::Entity(symbol))
+                .then_some((extension, lexical))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures.len(), 1, "{name}");
+        let (extension, lexical) = &signatures[0];
+        assert_eq!(lexical.text(), header);
+        assert!(!lexical.is_truncated());
+        let reference = extension
+            .evidence
+            .source
+            .as_ref()
+            .expect("header has source");
+        assert_eq!(reference.generation(), fixture.source.generation());
+        let start = usize::try_from(reference.span().start_byte()).expect("span start fits");
+        let end = usize::try_from(reference.span().end_byte()).expect("span end fits");
+        assert_eq!(source.get(start..end), Some(header));
+    }
+    let changed_source = source
+        .replace("true", "false")
+        .replace("version = 1", "version = 200");
+    let changed = fixture.rewrite(changed_source.as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, RUBY_CASE, &limits);
+    let reparsed = analyze(&analyzer, &changed_request, &ExtensionSupport::default());
+    assert_ne!(fixture.source.content_hash(), changed.source.content_hash());
+    assert_ne!(fixture.source.generation(), changed.source.generation());
+    assert_eq!(
+        reparsed.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert_eq!(
+        symbol_ids(output.document()),
+        symbol_ids(reparsed.document())
+    );
+}
+
+#[test]
 fn ruby_declarations_and_operator_methods_preserve_exact_identities() {
     let source = "module Garden\n class Store\n  DEFAULT = 1\n  def read(key)\n   @value = key\n  end\n  def self.read(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def []=(key, value)\n   value\n  end\n  def /(other)\n   other\n  end\n end\nend\n";
     let provider = Arc::new(provider());

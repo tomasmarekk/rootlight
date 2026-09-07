@@ -164,6 +164,53 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
 }
 
 #[test]
+fn ruby_method_signatures_preserve_headers_without_bodies() {
+    let source = "class Café\r\n def ready\r\n  true\r\n end\r\n def self.build\r\n  new\r\n end\r\n def empty()\r\n  nil\r\n end\r\n def accept value, fallback = 1\r\n  value\r\n end\r\n def version = 1\r\n def self.label = 'ready'\r\n def combine(value) = value\r\n def -@\r\n  self\r\n end\r\nend\r\n";
+    let fixture = Fixture::new("methods.rb", source.as_bytes());
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "ruby",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("Ruby method headers parse");
+    assert!(output.diagnostics().is_empty());
+    let headers = output
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str().ends_with(".signature"))
+        .filter(|fact| fact.syntax_kind().as_str() != "ruby.class.signature")
+        .map(|fact| {
+            let start = usize::try_from(fact.span().start_byte()).expect("span start fits");
+            let end = usize::try_from(fact.span().end_byte()).expect("span end fits");
+            source.get(start..end).expect("header span is in source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        headers,
+        [
+            "def ready",
+            "def self.build",
+            "def empty()",
+            "def accept value, fallback = 1",
+            "def version",
+            "def self.label",
+            "def combine(value)",
+            "def -@",
+        ]
+    );
+}
+
+#[test]
 fn ruby_class_signatures_include_inheritance_without_the_body() {
     const SOURCE: &[u8] =
         b"class Simple\n VALUE = 1\nend\nclass Child < Parent::Base\n VALUE = 2\nend\n";
@@ -1054,7 +1101,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("ruby.constant.declaration", 1),
             ("ruby.variable.declaration", 1),
             ("ruby.parameter.declaration", 3),
-            ("ruby.parameters.signature", 2),
+            ("ruby.method.signature", 2),
             ("ruby.identifier.definition", 9),
             ("ruby.identifier.reference", 8),
             ("ruby.call.call", 3),

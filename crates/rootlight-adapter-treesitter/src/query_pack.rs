@@ -673,17 +673,19 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
-    if family == GrammarFamily::Ruby
-        && role == StructuralRole::Signature
-        && capture.node.kind() == "class"
-    {
-        // The class header includes inheritance, but body edits must not change
-        // its declaration identity or enter the compact signature projection.
+    if family == GrammarFamily::Ruby && role == StructuralRole::Signature {
+        let header_field = match capture.node.kind() {
+            "class" => "superclass",
+            "method" | "singleton_method" => "parameters",
+            _ => return Err(query_failure("query-ruby-signature-kind")),
+        };
+        // Ruby permits parameterless methods without parentheses. Capture their
+        // real headers, excluding bodies from compact signatures and identity.
         end = capture
             .node
-            .child_by_field_name("superclass")
+            .child_by_field_name(header_field)
             .or_else(|| capture.node.child_by_field_name("name"))
-            .ok_or_else(|| query_failure("query-ruby-class-header"))?
+            .ok_or_else(|| query_failure("query-ruby-signature-header"))?
             .end_byte();
     }
     if family == GrammarFamily::Ruby

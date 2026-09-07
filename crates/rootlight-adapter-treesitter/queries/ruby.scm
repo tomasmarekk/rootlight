@@ -8,8 +8,8 @@
 (singleton_class) @scope
 (class name: (_) @definition) @declaration @scope @signature
 (module name: (_) @definition) @declaration @scope
-(method name: (_) @definition parameters: (method_parameters)? @signature) @declaration @scope
-(singleton_method name: (_) @definition parameters: (method_parameters)? @signature) @declaration @scope
+(method name: (_) @definition) @declaration @scope @signature
+(singleton_method name: (_) @definition) @declaration @scope @signature
 (method_parameters (identifier) @declaration @definition)
 (block_parameters (identifier) @declaration @definition)
 [(optional_parameter name: (identifier) @declaration @definition)
