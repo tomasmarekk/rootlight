@@ -3,6 +3,74 @@
 //! from standalone scalar decoding or successful grammar construction.
 
 #[test]
+fn yaml_native_wide_integer_spellings_share_identity_but_keep_exact_sources() {
+    // 2^1024 - 1, independently constructed as a decimal golden.
+    let decimal = concat!(
+        "179769313486231590772930519078902473361797697894230657273430081157732675805500",
+        "963132708477322407536021120113879871393357658789768814416622492847430639474",
+        "124377767893424865485276302219601246094119453082952085005768838150682342462",
+        "881473913110540827237163350510684586298239947245938479716304835356329624224",
+        "137215"
+    );
+    let hex = format!("0x{}", "f".repeat(256));
+    let octal = format!("0o1{}", "7".repeat(341));
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, YAML);
+    let mut fixture = Fixture::new(YAML, b"0: value\n");
+    let mut previous = None;
+    for key in [
+        hex.clone(),
+        octal,
+        decimal.to_owned(),
+        format!("!!int '{hex}'"),
+    ] {
+        fixture = fixture.rewrite(format!("{key}: value\n").as_bytes());
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, YAML, &limits()),
+            &ExtensionSupport::default(),
+        );
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        assert!(
+            document.skipped_regions.is_empty(),
+            "{:?}",
+            document.skipped_regions
+        );
+        let properties: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property)
+            .collect();
+        assert_eq!(properties.len(), 1);
+        let entity = properties[0];
+        assert_eq!(entity.canonical_name, format!("int:{decimal}"));
+        if let Some(previous) = previous {
+            assert_eq!(entity.id, previous);
+        }
+        previous = Some(entity.id);
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .unwrap();
+        assert_eq!(definition.source.generation(), fixture.source.generation());
+        assert_eq!(definition.source.span().start_byte(), 0);
+        assert_eq!(
+            definition.source.span().end_byte(),
+            u64::try_from(key.len()).unwrap()
+        );
+    }
+}
+
+#[test]
 fn yaml_native_addresses_preserve_layout_and_value_edits_but_count_every_slot() {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, YAML);

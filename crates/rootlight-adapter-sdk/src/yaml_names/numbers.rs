@@ -101,36 +101,7 @@ impl Number<'_> {
                     }
                     append(&mut result, digits, maximum)?;
                 } else {
-                    // Grade-school base conversion is bounded by source/name bytes,
-                    // not the numeric value. No arbitrary-precision dependency or
-                    // recursively allocated number representation is needed.
-                    let mut decimal = Vec::<u8>::new();
-                    for character in digits.chars() {
-                        let mut carry = character.to_digit(radix)?;
-                        for digit in &mut decimal {
-                            let value = u32::from(*digit).checked_mul(radix)?.checked_add(carry)?;
-                            *digit = u8::try_from(value % 10).ok()?;
-                            carry = value / 10;
-                        }
-                        while carry > 0 {
-                            if decimal.len() >= maximum.checked_sub(result.len())? {
-                                return None;
-                            }
-                            decimal.try_reserve(1).ok()?;
-                            decimal.push(u8::try_from(carry % 10).ok()?);
-                            carry /= 10;
-                        }
-                    }
-                    if decimal.is_empty() {
-                        append(&mut result, "0", maximum)?;
-                    }
-                    for digit in decimal.into_iter().rev() {
-                        append(
-                            &mut result,
-                            char::from(b'0' + digit).encode_utf8(&mut [0; 4]),
-                            maximum,
-                        )?;
-                    }
+                    append_radix_integer(&mut result, digits, radix, maximum)?;
                 }
                 Some(result)
             }
@@ -173,6 +144,68 @@ impl Number<'_> {
             }
         }
     }
+}
+
+fn append_radix_integer(
+    result: &mut String,
+    digits: &str,
+    radix: u32,
+    maximum: usize,
+) -> Option<()> {
+    let chunk_length = match radix {
+        16 => 8,
+        8 => 10,
+        _ => return None,
+    };
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return append(result, "0", maximum);
+    }
+    let remaining = maximum.checked_sub(result.len())?;
+    let maximum_limbs = remaining.div_ceil(9);
+    // The release benchmark yaml_radix exposes per-digit quadratic work.
+    // Each operation here consumes up to 32 input bits and nine decimal digits;
+    // (10^9 - 1) * 2^32 + (2^32 - 1) fits u64 without rounding.
+    const DECIMAL_BASE: u64 = 1_000_000_000;
+    let mut decimal = Vec::<u32>::new();
+    for chunk in digits.as_bytes().chunks(chunk_length) {
+        let text = std::str::from_utf8(chunk).ok()?;
+        let mut carry = u64::from(u32::from_str_radix(text, radix).ok()?);
+        let multiplier = u64::from(radix).checked_pow(u32::try_from(chunk.len()).ok()?)?;
+        for limb in &mut decimal {
+            let value = u64::from(*limb)
+                .checked_mul(multiplier)?
+                .checked_add(carry)?;
+            *limb = u32::try_from(value % DECIMAL_BASE).ok()?;
+            carry = value / DECIMAL_BASE;
+        }
+        while carry > 0 {
+            if decimal.len() >= maximum_limbs {
+                return None;
+            }
+            decimal.try_reserve(1).ok()?;
+            decimal.push(u32::try_from(carry % DECIMAL_BASE).ok()?);
+            carry /= DECIMAL_BASE;
+        }
+    }
+    let (&first, rest) = decimal.split_last()?;
+    let first = first.to_string();
+    let bytes = rest.len().checked_mul(9)?.checked_add(first.len())?;
+    if bytes > remaining {
+        return None;
+    }
+    result.try_reserve_exact(bytes).ok()?;
+    append(result, &first, maximum)?;
+    for &limb in rest.iter().rev() {
+        let mut value = limb;
+        let mut buffer = [b'0'; 9];
+        for digit in buffer.iter_mut().rev() {
+            *digit = b'0'.checked_add(u8::try_from(value % 10).ok()?)?;
+            value /= 10;
+        }
+        append(result, std::str::from_utf8(&buffer).ok()?, maximum)?;
+    }
+    Some(())
 }
 
 fn magnitude(value: &str) -> &str {
