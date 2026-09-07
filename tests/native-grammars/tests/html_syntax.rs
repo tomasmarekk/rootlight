@@ -82,6 +82,89 @@ fn html_raw_text_requires_a_complete_end_tag_name() {
 }
 
 #[test]
+fn html_script_escape_transitions_preserve_literal_end_tags() {
+    for body in [
+        "<!--<script>inner</script><b>literal</b>-->",
+        "<!--<ScRiPt >inner</sCrIpT ><b>literal</b>",
+        "<!--<script/>inner</script/><b>literal</b>",
+        "<!--<script\n>one\0two</script\t><b>literal</b>",
+        "<!--<script>--x</script><b>literal</b>",
+        "<!--<script></scriptx></script><b>literal</b>",
+        "<!--<script><</script><b>literal</b>",
+        "<!--<script></script!></script><b>literal</b>",
+    ] {
+        let source = format!("<script>{body}</script><p>outside</p>");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{body:?}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(nodes(tree.root_node(), "tag_name").len(), 4, "{body:?}");
+        let raw = nodes(tree.root_node(), "raw_text");
+        assert_eq!(raw.len(), 1, "{body:?}");
+        assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
+fn html_script_escape_lookalikes_do_not_hide_the_real_end_tag() {
+    for body in [
+        "<script>ordinary",
+        "<!-<script>ordinary",
+        "<!x<script>ordinary",
+        "<!--><script>ordinary",
+        "<!--x--><script>ordinary",
+        "<!--<scriptx>ordinary",
+        "<!--<script!>ordinary",
+        "<!--<script\u{a0}>ordinary",
+        "<!--<script>-->ordinary",
+        "<!--<script>--->ordinary",
+        "<!--<script>--\0</script>escaped",
+        "<!--<script>--x</script>escaped",
+        "<!--<script></scriptx>--></scriptx>ordinary",
+        "<!--<script></script>-->",
+        "<!--<<script>inner</script>escaped",
+        "<!--<script></script0></script>escaped",
+    ] {
+        let source = format!("<script>{body}</script><p>outside</p>");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{body:?}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(nodes(tree.root_node(), "tag_name").len(), 4, "{body:?}");
+        let raw = nodes(tree.root_node(), "raw_text");
+        assert_eq!(raw.len(), 1, "{body:?}");
+        assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
+fn html_script_name_boundaries_are_ascii_and_complete() {
+    for value in 0..=255_u8 {
+        let character = char::from(value);
+        let boundary = matches!(character, '\t' | '\n' | '\r' | '\u{c}' | ' ' | '/' | '>');
+        let mut body = format!("<!--<script{character}>inner");
+        if boundary {
+            body.push_str("</script><fake>literal</fake>");
+        }
+        let source = format!("<script>{body}</script><p>outside</p>");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{value}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(nodes(tree.root_node(), "tag_name").len(), 4, "{value}");
+        let raw = nodes(tree.root_node(), "raw_text");
+        assert_eq!(raw.len(), 1, "{value}");
+        assert_eq!(raw[0].utf8_text(source.as_bytes()).unwrap(), body);
+    }
+}
+
+#[test]
 fn html_text_elements_preserve_literal_markup_until_their_own_end_tag() {
     for tag in ["title", "textarea", "xmp", "iframe", "noembed", "noframes"] {
         let body = format!("\n<b id='literal'>text</b><!--literal-->&amp;</{tag}X><</{tag}X>");
@@ -269,6 +352,7 @@ fn html_incremental_edits_match_fresh_trees_and_source_extents() {
         "<textarea>one<b>&amp;</b></textarea><p>two</p>".to_owned(),
         "<iframe>one<b>two</b></iframe><xmp>three</xmp>".to_owned(),
         "<plaintext>one</plaintext><b>two</b>".to_owned(),
+        "<script><!--<script>inner</script><b>literal</b>--></script>".to_owned(),
         format!("<x-{}><b>one</b></x-{}>", "a".repeat(300), "a".repeat(300)),
     ] {
         let mut source = initial;

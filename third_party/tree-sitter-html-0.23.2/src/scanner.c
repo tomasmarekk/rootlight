@@ -84,6 +84,128 @@ static bool in_foreign_scope(const Scanner *scanner) {
     return false;
 }
 
+typedef enum {
+    SCRIPT_DATA, SCRIPT_LESS_THAN, SCRIPT_END_TAG,
+    SCRIPT_ESCAPE_START, SCRIPT_ESCAPE_START_DASH,
+    SCRIPT_ESCAPED, SCRIPT_ESCAPED_DASH, SCRIPT_ESCAPED_DASH_DASH,
+    SCRIPT_ESCAPED_LESS_THAN, SCRIPT_DOUBLE_START,
+    SCRIPT_DOUBLE, SCRIPT_DOUBLE_DASH, SCRIPT_DOUBLE_DASH_DASH,
+    SCRIPT_DOUBLE_LESS_THAN, SCRIPT_DOUBLE_END,
+} ScriptState;
+
+static bool script_alpha(int32_t value) {
+    value = ascii_upper(value);
+    return value >= 'A' && value <= 'Z';
+}
+
+static bool script_delimiter(int32_t value) {
+    return html_space(value) || value == '/' || value == '>';
+}
+
+static unsigned script_name_step(unsigned matched, int32_t value) {
+    // Seven is a sticky mismatch, so arbitrary names never need a buffer.
+    return matched < 6 && ascii_upper(value) == "SCRIPT"[matched] ? matched + 1 : 7;
+}
+
+static bool scan_script_text(TSLexer *lexer) {
+    // HTML script data is not RAWTEXT: a double-escaped </script> is source text.
+    // The complete body is one token, so these states never enter snapshots.
+    // https://html.spec.whatwg.org/multipage/parsing.html#script-data-state
+    ScriptState state = SCRIPT_DATA;
+    ScriptState end_return = SCRIPT_DATA;
+    unsigned matched = 0;
+    while (!lexer->eof(lexer)) {
+        int32_t value = lexer->lookahead;
+        switch (state) {
+            case SCRIPT_DATA:
+                if (value == '<') {
+                    lexer->mark_end(lexer);
+                    state = SCRIPT_LESS_THAN;
+                }
+                break;
+            case SCRIPT_LESS_THAN:
+                if (value == '/') {
+                    state = SCRIPT_END_TAG;
+                    end_return = SCRIPT_DATA;
+                    matched = 0;
+                } else if (value == '!') {
+                    state = SCRIPT_ESCAPE_START;
+                } else { state = SCRIPT_DATA; continue; }
+                break;
+            case SCRIPT_END_TAG:
+                if (script_alpha(value)) { matched = script_name_step(matched, value); }
+                else if (matched == 6 && script_delimiter(value)) {
+                    lexer->result_symbol = RAW_TEXT;
+                    return true;
+                } else { state = end_return; continue; }
+                break;
+            case SCRIPT_ESCAPE_START:
+                if (value == '-') state = SCRIPT_ESCAPE_START_DASH;
+                else { state = SCRIPT_DATA; continue; }
+                break;
+            case SCRIPT_ESCAPE_START_DASH:
+                if (value == '-') state = SCRIPT_ESCAPED_DASH_DASH;
+                else { state = SCRIPT_DATA; continue; }
+                break;
+            case SCRIPT_ESCAPED:
+            case SCRIPT_ESCAPED_DASH:
+            case SCRIPT_ESCAPED_DASH_DASH:
+                if (value == '<') {
+                    lexer->mark_end(lexer);
+                    state = SCRIPT_ESCAPED_LESS_THAN;
+                } else if (value == '-') {
+                    state = state == SCRIPT_ESCAPED ? SCRIPT_ESCAPED_DASH : SCRIPT_ESCAPED_DASH_DASH;
+                } else if (value == '>' && state == SCRIPT_ESCAPED_DASH_DASH) {
+                    state = SCRIPT_DATA;
+                } else { state = SCRIPT_ESCAPED; }
+                break;
+            case SCRIPT_ESCAPED_LESS_THAN:
+                if (value == '/') {
+                    state = SCRIPT_END_TAG;
+                    end_return = SCRIPT_ESCAPED;
+                    matched = 0;
+                } else if (script_alpha(value)) {
+                    state = SCRIPT_DOUBLE_START;
+                    matched = 0;
+                    continue;
+                } else { state = SCRIPT_ESCAPED; continue; }
+                break;
+            case SCRIPT_DOUBLE_START:
+            case SCRIPT_DOUBLE_END:
+                if (script_alpha(value)) { matched = script_name_step(matched, value); }
+                else if (script_delimiter(value)) {
+                    if (state == SCRIPT_DOUBLE_START) {
+                        state = matched == 6 ? SCRIPT_DOUBLE : SCRIPT_ESCAPED;
+                    } else {
+                        state = matched == 6 ? SCRIPT_ESCAPED : SCRIPT_DOUBLE;
+                    }
+                } else {
+                    state = state == SCRIPT_DOUBLE_START ? SCRIPT_ESCAPED : SCRIPT_DOUBLE;
+                    continue;
+                }
+                break;
+            case SCRIPT_DOUBLE:
+            case SCRIPT_DOUBLE_DASH:
+            case SCRIPT_DOUBLE_DASH_DASH:
+                if (value == '<') state = SCRIPT_DOUBLE_LESS_THAN;
+                else if (value == '-') {
+                    state = state == SCRIPT_DOUBLE ? SCRIPT_DOUBLE_DASH : SCRIPT_DOUBLE_DASH_DASH;
+                } else if (value == '>' && state == SCRIPT_DOUBLE_DASH_DASH) {
+                    state = SCRIPT_DATA;
+                } else { state = SCRIPT_DOUBLE; }
+                break;
+            case SCRIPT_DOUBLE_LESS_THAN:
+                if (value == '/') { state = SCRIPT_DOUBLE_END; matched = 0; }
+                else { state = SCRIPT_DOUBLE; continue; }
+                break;
+        }
+        advance(lexer);
+    }
+    lexer->mark_end(lexer);
+    lexer->result_symbol = RAW_TEXT;
+    return true;
+}
+
 static bool scan_raw_text(Scanner *scanner, TSLexer *lexer) {
     if (scanner->tags.size == 0) {
         return false;
@@ -92,6 +214,7 @@ static bool scan_raw_text(Scanner *scanner, TSLexer *lexer) {
     lexer->mark_end(lexer);
 
     const Tag *tag = array_back(&scanner->tags);
+    if (tag->type == SCRIPT && !in_foreign_scope(scanner)) return scan_script_text(lexer);
     if (custom_tag_equals(tag, "PLAINTEXT")) {
         while (!lexer->eof(lexer)) advance(lexer);
         lexer->mark_end(lexer);

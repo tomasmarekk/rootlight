@@ -25,6 +25,13 @@ nodes without DOM character-reference decoding or newline normalization. A start
 tag slash does not disable their text mode. Raw scanning uses the lexer EOF
 callback, so embedded NUL bytes cannot expose subsequent literal markup as tags.
 
+HTML script bodies distinguish data, escaped and double-escaped states, including
+ASCII-only script-name matches and dash/less-than reconsumption. A double-escaped
+end tag remains text; leaving that state does not itself close the element.
+The scanner retains authored NUL and newline bytes instead of constructing DOM
+text. The single body token uses constant local state and no new allocations or
+serialized fields. SVG/MathML script handling remains outside this qualification.
+
 New text modes are selected only outside native SVG/MathML scopes. Namespace
 integration and scripting-dependent noscript behavior are not inferred by this
 scanner; the Rootlight adapter reports those source scopes as coverage gaps.

@@ -290,7 +290,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             source_package_sha256: "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee",
             parser_sha256: "888cdb697b113cb17295dbf66e05e6b5b81abc8863227a6be1869bd496259490",
             scanner_sha256: Some(
-                "1d669342598367dc389adebfb7d07c82b7c46f9b3641d9611586978e217e7fc3",
+                "03d6f8493b475e742fef692a9b58e9206e7d92b2bef2e4da5272a0ee1285e6ac",
             ),
         },
         GrammarFamily::Yaml => GrammarIdentity {

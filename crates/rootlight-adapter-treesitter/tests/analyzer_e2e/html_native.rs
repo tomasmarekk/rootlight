@@ -280,6 +280,47 @@ fn markup_ids(document: &rootlight_ir::NormalizedIrDocument) -> BTreeSet<SymbolI
 }
 
 #[test]
+fn html_native_script_escapes_keep_exact_embedded_coverage() {
+    let body = "<!--<ScRiPt>one\0</script><fake key='literal'>two</fake>-->";
+    let source = format!("<main><script>{body}</script><p>safe</p></main>");
+    let result = output(&source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    assert_eq!(document.entities.len(), 4);
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::MarkupElement)
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["main", "script", "p"])
+    );
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "html-embedded-analysis-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    let span = gaps[0].source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        body
+    );
+    assert_eq!(gaps[0].domain, FactDomain::Entities);
+    let altered = source.replace("one", "changed source body");
+    assert_eq!(
+        markup_ids(document),
+        markup_ids(output(&altered).document())
+    );
+}
+
+#[test]
 fn html_native_text_modes_do_not_define_literal_markup() {
     for tag in ["title", "textarea", "xmp", "iframe", "noembed", "noframes"] {
         let body =
