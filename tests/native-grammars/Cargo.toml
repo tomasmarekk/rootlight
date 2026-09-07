@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 resolver = "3"
 
 [dev-dependencies]
+tree-sitter-sequel = { path = "../../third_party/tree-sitter-sequel-0.3.11", version = "=0.3.11", default-features = false }
 tree-sitter-bash = { path = "../../third_party/tree-sitter-bash-0.25.1", version = "=0.25.1", default-features = false }
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
 tree-sitter-json = { path = "../../third_party/tree-sitter-json-0.24.8", version = "=0.24.8", default-features = false }
