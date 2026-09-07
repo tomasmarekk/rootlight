@@ -11,7 +11,7 @@ mod context;
 mod numbers;
 
 pub use block::YamlBlockScalar;
-pub use context::{YamlDocumentContext, YamlScalarIdentity};
+pub use context::{YamlCollectionKind, YamlCollectionTag, YamlDocumentContext, YamlScalarIdentity};
 
 pub(crate) fn anchor_name(text: &str, maximum: usize) -> Option<&str> {
     (!text.is_empty()

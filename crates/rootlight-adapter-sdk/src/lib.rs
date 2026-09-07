@@ -53,4 +53,6 @@ pub use structural::{
     structural_captured_name_for_language, structural_display_name_for_language,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
-pub use yaml_names::{YamlBlockScalar, YamlDocumentContext, YamlScalarIdentity};
+pub use yaml_names::{
+    YamlBlockScalar, YamlCollectionKind, YamlCollectionTag, YamlDocumentContext, YamlScalarIdentity,
+};

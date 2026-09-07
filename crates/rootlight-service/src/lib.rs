@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/23";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/24";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -26049,6 +26049,102 @@ mod tests {
             "key: 101\nitems: [null, {&entry key: 303}, {\"k\\u0065y\": 202}, {*entry : 404}]\n'': 5\n' ': 6\n",
             ["key: 303", "key: 3030"],
         );
+    }
+
+    #[test]
+    fn yaml_collection_keys_survive_durable_query_and_source_reads() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("paths");
+        paths.prepare_owner().expect("runtime");
+        let fixture = durable_test_tempdir();
+        let source = "base: &key [one, {a: 1}]\n? *key\n: first\n";
+        let edited = source.replace(": first", ": second");
+        let path = fixture.path().join("data.yaml");
+        fs::write(&path, source).expect("fixture");
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("service");
+        let first = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("index");
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op");
+        assert_eq!(first.generation, noop.generation);
+        fs::write(&path, &edited).expect("edit");
+        let second = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("incremental");
+        assert_ne!(first.generation, second.generation);
+        drop(service);
+        let service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).expect("restore");
+        let mut previous = None;
+        for receipt in [&first, &second] {
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("generation");
+            let document = generation.document();
+            assert!(document.diagnostics.is_empty());
+            assert!(
+                document.skipped_regions.is_empty(),
+                "{:?}",
+                document.skipped_regions
+            );
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Property && entity.canonical_name.starts_with("seq:")
+                })
+                .expect("collection key");
+            if let Some(previous) = previous {
+                assert_eq!(entity.id, previous);
+            }
+            previous = Some(entity.id);
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    entity.display_name.clone(),
+                    LocateMode::Exact,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .expect("locate");
+            assert!(
+                located
+                    .data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.symbol == Some(entity.id))
+            );
+            let explained = service
+                .symbol_explain(receipt.generation, entity.id, &deadline())
+                .expect("explain");
+            assert_eq!(explained.data.entity.canonical_name, entity.canonical_name);
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+                })
+                .expect("definition");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![definition.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("source");
+            assert_eq!(read.data.chunks[0].bytes, b"*key");
+            assert_eq!(definition.source.generation(), receipt.generation);
+        }
     }
 
     fn data_properties_survive_durable_restore(

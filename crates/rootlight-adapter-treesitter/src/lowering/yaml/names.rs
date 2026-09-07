@@ -5,6 +5,8 @@
 use super::super::*;
 use rootlight_adapter_sdk::{YamlBlockScalar, YamlDocumentContext};
 
+mod collections;
+
 pub(in super::super) struct Key {
     pub(in super::super) name: String,
     pub(in super::super) source: SourceSpan,
@@ -148,7 +150,7 @@ impl Names {
         // A scalar anchor is decoded at most once, even when many keys use it.
         // Alias and target evidence remain distinct; no alias graph is expanded.
         let mut anchor_values = HashMap::new();
-        for fact in ordered {
+        for fact in &ordered {
             cancellation.check()?;
             if !matches!(
                 fact.syntax_kind().as_str(),
@@ -198,6 +200,23 @@ impl Names {
                     })
                 });
             result.keys.insert(fact.local_id(), key);
+        }
+        if complete_parse && result.keys.values().any(Option::is_none) {
+            collections::complete_keys(
+                collections::Input {
+                    ordered: &ordered,
+                    source,
+                    maximum,
+                    documents: &documents,
+                    contexts: &decoded,
+                    parents: &collections,
+                    owners: &result.owners,
+                    bindings: &result.bindings,
+                },
+                &mut result.keys,
+                &mut result.warnings,
+                cancellation,
+            )?;
         }
         Ok(result)
     }

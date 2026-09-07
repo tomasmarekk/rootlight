@@ -121,6 +121,89 @@ fn properties(document: &NormalizedIrDocument) -> Vec<&rootlight_ir::EntityRecor
 }
 
 #[test]
+fn collection_key_identity_requires_complete_context_and_existing_name_budget() {
+    let text = "? [one]\n: body\nsafe: value\n";
+    let mut fixture = Fixture::new(text);
+    let document = fixture.add(2, "yaml.document.scope", text, 0);
+    let mapping = fixture.add(document, "yaml.mapping.scope", text, 0);
+    let property = fixture.add(mapping, "yaml.property.declaration", "? [one]\n: body", 0);
+    let key = fixture.add(property, "yaml.key.scope", "[one]", 0);
+    let sequence = fixture.add(key, "yaml.sequence.scope", "[one]", 0);
+    fixture.add(sequence, "yaml.sequence_element.scope", "one", 0);
+    fixture.add(key, "yaml.node_key.definition", "[one]", 0);
+    fixture.add(property, "yaml.node.scope", "body", 0);
+    fixture.property(mapping, "safe: value", "safe", 0);
+    let full = fixture.analyze();
+    assert!(full.skipped_regions.is_empty());
+    assert_eq!(properties(&full).len(), 2);
+    let largest_name = full
+        .entities
+        .iter()
+        .map(|entity| entity.qualified_name.len())
+        .max()
+        .unwrap()
+        .max(128);
+    let mut exact = IrLimits::default();
+    exact.max_string_bytes = largest_name;
+    assert_eq!(
+        fixture
+            .analyze_with(fixture.facts.clone(), exact)
+            .unwrap()
+            .document(),
+        &full
+    );
+    let mut insufficient = IrLimits::default();
+    insufficient.max_string_bytes = 67;
+    let bounded = fixture
+        .analyze_with(fixture.facts.clone(), insufficient)
+        .unwrap();
+    assert_eq!(properties(bounded.document()).len(), 1);
+    assert_eq!(
+        properties(bounded.document())[0].canonical_name,
+        "str:\"safe\""
+    );
+    assert!(!bounded.document().skipped_regions.is_empty());
+    let limits = limits(IrLimits::default());
+    let language = LanguageId::new("yaml").unwrap();
+    let request = AnalysisRequest::new(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language.clone(),
+        AnalysisTier::TierD,
+        BuildContextIdentity::new(content_hash(b"build-context")),
+        &limits,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    for status in [CoverageStatus::Bounded, CoverageStatus::Unknown] {
+        let coverage = CoverageReport::new(
+            AnalysisTier::TierD,
+            status,
+            text.len(),
+            text.len() - 1,
+            1,
+            Vec::new(),
+        )
+        .unwrap();
+        let analyzer =
+            custom_analyzer_with_coverage(language.clone(), fixture.facts.clone(), coverage);
+        let partial = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        assert_eq!(properties(partial.document()).len(), 1);
+        assert_eq!(
+            properties(partial.document())[0].canonical_name,
+            "str:\"safe\""
+        );
+        assert!(!partial.document().skipped_regions.is_empty());
+    }
+}
+
+#[test]
 fn documents_and_every_sequence_slot_own_distinct_source_properties() {
     let text = "---\n...\n---\nitems: [null, {name: first}, [false, {name: second}]]\n---\nitems: {name: third}\n";
     let mut fixture = Fixture::new(text);

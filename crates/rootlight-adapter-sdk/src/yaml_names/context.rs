@@ -8,6 +8,36 @@ use super::{YamlBlockScalar, append, append_quoted, canonical_value, decode_flow
 
 const CORE: &str = "tag:yaml.org,2002:";
 
+/// The two collection kinds in the YAML representation graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum YamlCollectionKind {
+    /// An unordered set of unique key/value pairs.
+    Mapping,
+    /// An ordered sequence of nodes.
+    Sequence,
+}
+
+/// A document-resolved collection tag, with explicit application-schema opacity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct YamlCollectionTag {
+    name: String,
+    unrecognized: bool,
+}
+
+impl YamlCollectionTag {
+    /// Returns the exact resolved tag, without URI decoding or normalization.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the tag's application-specific collection semantics are unknown.
+    #[must_use]
+    pub const fn has_unrecognized_tag(&self) -> bool {
+        self.unrecognized
+    }
+}
+
 /// Bounded YAML 1.2 Core interpretation and tag directives for one document.
 ///
 /// Construct a fresh context for every document, including documents without
@@ -117,6 +147,43 @@ impl<'a> YamlDocumentContext<'a> {
     #[must_use]
     pub const fn has_version_warning(&self) -> bool {
         self.version_warning
+    }
+
+    /// Resolves a collection tag without interpreting application-specific types.
+    ///
+    /// Absent and non-specific `!` tags select the matching Core collection tag.
+    /// Known scalar tags and a mismatched collection kind return `None`, as do
+    /// malformed tags, unknown handles, allocation failure or excess tag bytes.
+    /// Unrecognized tags preserve exact identity and require a scoped warning.
+    #[must_use]
+    pub fn collection_tag(
+        &self,
+        kind: YamlCollectionKind,
+        tag: Option<&str>,
+    ) -> Option<YamlCollectionTag> {
+        let default = match kind {
+            YamlCollectionKind::Mapping => "tag:yaml.org,2002:map",
+            YamlCollectionKind::Sequence => "tag:yaml.org,2002:seq",
+        };
+        let name = match tag {
+            None | Some("!") => {
+                let mut name = String::new();
+                append(&mut name, default, self.maximum_bytes)?;
+                name
+            }
+            Some(tag) if tag.len() <= self.maximum_bytes => self.resolve_tag(tag)?,
+            Some(_) => return None,
+        };
+        let unrecognized = name != default;
+        if unrecognized
+            && matches!(
+                name.strip_prefix(CORE),
+                Some("map" | "seq" | "str" | "int" | "float" | "bool" | "null")
+            )
+        {
+            return None;
+        }
+        Some(YamlCollectionTag { name, unrecognized })
     }
 
     /// Interprets one grammar-reviewed flow scalar and its optional raw tag.

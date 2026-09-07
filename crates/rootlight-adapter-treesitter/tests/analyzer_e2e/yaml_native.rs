@@ -2,6 +2,9 @@
 //! Document context and exact source evidence are checked together, not inferred
 //! from standalone scalar decoding or successful grammar construction.
 
+#[path = "yaml_collections.rs"]
+mod collections;
+
 #[test]
 fn yaml_native_wide_integer_spellings_share_identity_but_keep_exact_sources() {
     // 2^1024 - 1, independently constructed as a decimal golden.
@@ -241,6 +244,61 @@ const YAML: LanguageCase = LanguageCase {
     body_after: "changed",
 };
 
+#[test]
+fn yaml_native_collection_keys_keep_all_nested_properties_and_sources() {
+    for key in ["[one, {a: 1, b: [false, null]}]", "{a, b:}"] {
+        let source = format!("? {key}\n: value\n");
+        let result = output(&source);
+        let document = result.document();
+        assert!(document.diagnostics.is_empty());
+        assert!(
+            document.skipped_regions.is_empty(),
+            "{:?}",
+            document.skipped_regions
+        );
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Property)
+                .count(),
+            3
+        );
+        let root = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name.starts_with("seq:")
+                    || entity.canonical_name.starts_with("map:")
+            })
+            .unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: root.id })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            key
+        );
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        let encoded = serde_json::to_vec(document).unwrap();
+        assert_eq!(
+            decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default())
+                .unwrap(),
+            IrDocument::NormalizedV1_1(document.clone())
+        );
+    }
+}
+
 fn output(source: &str) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, YAML);
@@ -466,11 +524,10 @@ fn yaml_native_scalar_alias_key_identity_matches_literal_and_changes_with_target
 }
 
 #[test]
-fn yaml_native_unavailable_or_nonscalar_alias_keys_leave_local_gaps() {
+fn yaml_native_unavailable_or_cyclic_alias_keys_leave_local_gaps() {
     for source in [
         "base: &key name\n---\n*key : value\nsafe: value\n",
         "*key : value\nbase: &key name\nsafe: value\n",
-        "base: &key [name]\n*key : value\nsafe: value\n",
         "base: &key {*key : value}\nsafe: value\n",
     ] {
         let result = output(source);
