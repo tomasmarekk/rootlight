@@ -97,6 +97,9 @@ module.exports = grammar({
     /\n/,
     '(',
     'esac',
+    $._heredoc_arrow_continue,
+    $._heredoc_arrow_dash_continue,
+    $._heredoc_end_continue,
     $.__error_recovery,
   ],
 
@@ -543,17 +546,32 @@ module.exports = grammar({
       field('descriptor', optional($.file_descriptor)),
       choice('<<', '<<-'),
       $.heredoc_start,
+      repeat(choice(
+        $._heredoc_redirect_continue,
+        field('redirect', $._redirect),
+        field('argument', $._literal),
+      )),
       optional(choice(
         alias($._heredoc_pipeline, $.pipeline),
-        seq(
-          field('redirect', repeat1($._redirect)),
-          optional($._heredoc_expression),
-        ),
         $._heredoc_expression,
-        $._heredoc_command,
       )),
       /\n/,
-      choice($._heredoc_body, $._simple_heredoc_body),
+      repeat(seq(
+        $._heredoc_body_content,
+        alias($._heredoc_end_continue, $.heredoc_end),
+        /\n/,
+      )),
+      $._heredoc_body_content,
+      $.heredoc_end,
+    ),
+
+    _heredoc_redirect_continue: $ => seq(
+      field('descriptor', optional($.file_descriptor)),
+      choice(
+        alias($._heredoc_arrow_continue, '<<'),
+        alias($._heredoc_arrow_dash_continue, '<<-'),
+      ),
+      $.heredoc_start,
     ),
 
     _heredoc_pipeline: $ => seq(
@@ -566,11 +584,9 @@ module.exports = grammar({
       field('right', $._statement),
     ),
 
-    _heredoc_command: $ => repeat1(field('argument', $._literal)),
-
-    _heredoc_body: $ => seq(
+    _heredoc_body_content: $ => choice(
       $.heredoc_body,
-      $.heredoc_end,
+      alias($.simple_heredoc_body, $.heredoc_body),
     ),
 
     heredoc_body: $ => seq(
@@ -581,11 +597,6 @@ module.exports = grammar({
         $.command_substitution,
         $.heredoc_content,
       )),
-    ),
-
-    _simple_heredoc_body: $ => seq(
-      alias($.simple_heredoc_body, $.heredoc_body),
-      $.heredoc_end,
     ),
 
     herestring_redirect: $ => prec.left(seq(

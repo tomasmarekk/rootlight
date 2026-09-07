@@ -35,6 +35,9 @@ enum TokenType {
     NEWLINE,
     OPENING_PAREN,
     ESAC,
+    HEREDOC_ARROW_CONTINUE,
+    HEREDOC_ARROW_DASH_CONTINUE,
+    HEREDOC_END_CONTINUE,
     ERROR_RECOVERY,
 };
 
@@ -44,6 +47,7 @@ typedef struct {
     bool is_raw;
     bool started;
     bool allows_indent;
+    bool continues_group;
     String delimiter;
 } Heredoc;
 
@@ -52,6 +56,7 @@ typedef struct {
         .is_raw = false,                                                                                               \
         .started = false,                                                                                              \
         .allows_indent = false,                                                                                        \
+        .continues_group = false,                                                                                      \
         .delimiter = array_new(),                                                                                      \
     };
 
@@ -79,6 +84,7 @@ static inline void reset_heredoc(Heredoc *heredoc) {
     heredoc->is_raw = false;
     heredoc->started = false;
     heredoc->allows_indent = false;
+    heredoc->continues_group = false;
     reset_string(&heredoc->delimiter);
 }
 
@@ -97,6 +103,32 @@ static inline void reset(Scanner *scanner) {
     scanner->ext_saw_outside_quote = false;
 }
 
+// Groups form a stack for nested substitutions; each group's bodies form a FIFO.
+static uint32_t active_heredoc_index(Scanner *scanner) {
+    uint32_t index = scanner->heredocs.size - 1;
+    while (index > 0 && array_get(&scanner->heredocs, index)->continues_group) {
+        index--;
+    }
+    return index;
+}
+
+static Heredoc *active_heredoc(Scanner *scanner) {
+    return array_get(&scanner->heredocs, active_heredoc_index(scanner));
+}
+
+static bool heredoc_group_continues(Scanner *scanner) {
+    return active_heredoc_index(scanner) + 1 < scanner->heredocs.size;
+}
+
+static void finish_heredoc(Scanner *scanner) {
+    uint32_t index = active_heredoc_index(scanner);
+    array_delete(&array_get(&scanner->heredocs, index)->delimiter);
+    array_erase(&scanner->heredocs, index);
+    if (index < scanner->heredocs.size) {
+        array_get(&scanner->heredocs, index)->continues_group = false;
+    }
+}
+
 static unsigned serialize(Scanner *scanner, char *buffer) {
     uint32_t size = 0;
 
@@ -112,7 +144,7 @@ static unsigned serialize(Scanner *scanner, char *buffer) {
         }
 
         buffer[size++] = (char)heredoc->is_raw;
-        buffer[size++] = (char)heredoc->started;
+        buffer[size++] = (char)(heredoc->started | (heredoc->continues_group << 1));
         buffer[size++] = (char)heredoc->allows_indent;
 
         memcpy(&buffer[size], &heredoc->delimiter.size, sizeof(uint32_t));
@@ -171,7 +203,9 @@ static void deserialize(Scanner *scanner, const char *buffer, unsigned length) {
             }
 
             heredoc->is_raw = buffer[size++];
-            heredoc->started = buffer[size++];
+            uint8_t flags = (uint8_t)buffer[size++];
+            heredoc->started = (flags & 1) != 0;
+            heredoc->continues_group = (flags & 2) != 0;
             heredoc->allows_indent = buffer[size++];
 
             memcpy(&heredoc->delimiter.size, &buffer[size], sizeof(uint32_t));
@@ -311,7 +345,7 @@ static bool scan_heredoc_end_identifier(Heredoc *heredoc, TSLexer *lexer) {
 static bool scan_heredoc_content(Scanner *scanner, TSLexer *lexer, enum TokenType middle_type,
                                  enum TokenType end_type) {
     bool did_advance = false;
-    Heredoc *heredoc = array_back(&scanner->heredocs);
+    Heredoc *heredoc = active_heredoc(scanner);
 
     for (;;) {
         switch (lexer->lookahead) {
@@ -371,7 +405,7 @@ static bool scan_heredoc_content(Scanner *scanner, TSLexer *lexer, enum TokenTyp
                 lexer->mark_end(lexer);
                 if (scan_heredoc_end_identifier(heredoc, lexer)) {
                     if (lexer->result_symbol == HEREDOC_END) {
-                        truncate_heredocs(scanner, scanner->heredocs.size - 1);
+                        finish_heredoc(scanner);
                     }
                     return true;
                 }
@@ -501,21 +535,21 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
 
     if ((valid_symbols[HEREDOC_BODY_BEGINNING] || valid_symbols[SIMPLE_HEREDOC_BODY]) && scanner->heredocs.size > 0 &&
-        !array_back(&scanner->heredocs)->started && !in_error_recovery(valid_symbols)) {
+        !active_heredoc(scanner)->started && !in_error_recovery(valid_symbols)) {
         return scan_heredoc_content(scanner, lexer, HEREDOC_BODY_BEGINNING, SIMPLE_HEREDOC_BODY);
     }
 
-    if (valid_symbols[HEREDOC_END] && scanner->heredocs.size > 0) {
-        Heredoc *heredoc = array_back(&scanner->heredocs);
-        if (scan_heredoc_end_identifier(heredoc, lexer)) {
-            array_delete(&heredoc->delimiter);
-            array_pop(&scanner->heredocs);
-            lexer->result_symbol = HEREDOC_END;
+    if ((valid_symbols[HEREDOC_END] || valid_symbols[HEREDOC_END_CONTINUE]) && scanner->heredocs.size > 0) {
+        Heredoc *heredoc = active_heredoc(scanner);
+        enum TokenType end = heredoc_group_continues(scanner) ? HEREDOC_END_CONTINUE : HEREDOC_END;
+        if (valid_symbols[end] && scan_heredoc_end_identifier(heredoc, lexer)) {
+            finish_heredoc(scanner);
+            lexer->result_symbol = end;
             return true;
         }
     }
 
-    if (valid_symbols[HEREDOC_CONTENT] && scanner->heredocs.size > 0 && array_back(&scanner->heredocs)->started &&
+    if (valid_symbols[HEREDOC_CONTENT] && scanner->heredocs.size > 0 && active_heredoc(scanner)->started &&
         !in_error_recovery(valid_symbols)) {
         return scan_heredoc_content(scanner, lexer, HEREDOC_CONTENT, HEREDOC_END);
     }
@@ -600,7 +634,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         }
     }
 
-    if ((valid_symbols[VARIABLE_NAME] || valid_symbols[FILE_DESCRIPTOR] || valid_symbols[HEREDOC_ARROW]) &&
+    if ((valid_symbols[VARIABLE_NAME] || valid_symbols[FILE_DESCRIPTOR] || valid_symbols[HEREDOC_ARROW] ||
+         valid_symbols[HEREDOC_ARROW_CONTINUE] || valid_symbols[HEREDOC_ARROW_DASH_CONTINUE]) &&
         !valid_symbols[REGEX_NO_SLASH] && !in_error_recovery(valid_symbols)) {
         for (;;) {
             if ((lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r' ||
@@ -650,7 +685,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
             }
         }
 
-        if (valid_symbols[HEREDOC_ARROW] && lexer->lookahead == '<') {
+        if ((valid_symbols[HEREDOC_ARROW] || valid_symbols[HEREDOC_ARROW_CONTINUE] ||
+             valid_symbols[HEREDOC_ARROW_DASH_CONTINUE]) && lexer->lookahead == '<') {
             advance(lexer);
             if (lexer->lookahead == '<') {
                 advance(lexer);
@@ -658,14 +694,16 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
                     advance(lexer);
                     Heredoc heredoc = heredoc_new();
                     heredoc.allows_indent = true;
+                    heredoc.continues_group = valid_symbols[HEREDOC_ARROW_DASH_CONTINUE];
                     array_push(&scanner->heredocs, heredoc);
-                    lexer->result_symbol = HEREDOC_ARROW_DASH;
+                    lexer->result_symbol = heredoc.continues_group ? HEREDOC_ARROW_DASH_CONTINUE : HEREDOC_ARROW_DASH;
                 } else if (lexer->lookahead == '<' || lexer->lookahead == '=') {
                     return false;
                 } else {
                     Heredoc heredoc = heredoc_new();
+                    heredoc.continues_group = valid_symbols[HEREDOC_ARROW_CONTINUE];
                     array_push(&scanner->heredocs, heredoc);
-                    lexer->result_symbol = HEREDOC_ARROW;
+                    lexer->result_symbol = heredoc.continues_group ? HEREDOC_ARROW_CONTINUE : HEREDOC_ARROW;
                 }
                 return true;
             }

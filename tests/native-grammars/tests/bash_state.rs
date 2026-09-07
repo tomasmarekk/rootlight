@@ -104,6 +104,24 @@ fn reset_and_shorter_restores_erase_prior_context() {
 }
 
 #[test]
+fn group_markers_survive_restore_and_reuse() {
+    let mut scanner = Scanner::new();
+    for flags in [[0, 2, 0, 2], [1, 2, 1, 3], [0, 3, 0, 3]] {
+        let mut bytes = state(128, &[b"A\0", b"B\0", b"C\0", b"D\0"]);
+        for (index, flag) in flags.into_iter().enumerate() {
+            bytes[4 + index * 9 + 1] = flag;
+        }
+        scanner.restore(&bytes);
+        assert_eq!(scanner.serialized(), bytes);
+        scanner.restore(&state(0, &[b"OTHER\0"]));
+        scanner.restore(&bytes);
+        assert_eq!(scanner.serialized(), bytes);
+        scanner.restore(&[]);
+        assert_eq!(scanner.serialized(), [0; 4]);
+    }
+}
+
+#[test]
 fn malformed_states_reset_without_retaining_partial_entries() {
     let valid = state(128, &[b"ONE\0", b"TWO\0"]);
     let mut scanner = Scanner::new();
