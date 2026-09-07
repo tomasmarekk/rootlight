@@ -116,6 +116,7 @@ dependencies = [
  "tree-sitter-bash",
  "tree-sitter-json",
  "tree-sitter-swift",
+ "tree-sitter-toml-ng",
 ]
 
 [[package]]
@@ -223,6 +224,14 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-swift"
 version = "0.7.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-toml-ng"
+version = "0.7.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

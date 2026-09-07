@@ -16,6 +16,7 @@ tree-sitter-bash = { path = "../../third_party/tree-sitter-bash-0.25.1", version
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
 tree-sitter-json = { path = "../../third_party/tree-sitter-json-0.24.8", version = "=0.24.8", default-features = false }
 tree-sitter-swift = { path = "../../third_party/tree-sitter-swift-0.7.3", version = "=0.7.3", default-features = false }
+tree-sitter-toml-ng = { path = "../../third_party/tree-sitter-toml-ng-0.7.0", version = "=0.7.0", default-features = false }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
