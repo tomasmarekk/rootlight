@@ -55,6 +55,8 @@ pub enum GrammarFamily {
     Html,
     /// SQL source declarations; does not execute migrations or infer a live catalog.
     Sql,
+    /// R source assignments and closures; runtime environments are not evaluated.
+    R,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -134,7 +136,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(21);
+        let mut descriptors = Vec::with_capacity(22);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -157,6 +159,7 @@ impl GrammarRegistry {
             GrammarFamily::Yaml,
             GrammarFamily::Html,
             GrammarFamily::Sql,
+            GrammarFamily::R,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -274,6 +277,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         GrammarFamily::Html => tree_sitter_html::LANGUAGE.into(),
         GrammarFamily::Sql => tree_sitter_sequel::LANGUAGE.into(),
+        GrammarFamily::R => tree_sitter_r::LANGUAGE.into(),
     }
 }
 
@@ -288,6 +292,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::R => GrammarIdentity {
+            language_id: "r",
+            grammar_version: "1.3.0",
+            source_package_sha256: "ffc9954ec870dcad6cffdd302b405306c68cf031ed79a78cd9746f6740d9fe20",
+            parser_sha256: "43ec2413de8aec823c76e6994991fe07d9877e019ab2e1892534a76ce81a0771",
+            scanner_sha256: Some(
+                "812287794c71796698c55dc305b4a115149d2d2883ad9490dd4120193887a70c",
+            ),
+        },
         GrammarFamily::Sql => GrammarIdentity {
             language_id: "sql",
             grammar_version: "0.3.11",
@@ -517,7 +530,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 21);
+        assert_eq!(registry.descriptors().len(), 22);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -540,6 +553,7 @@ mod tests {
             GrammarFamily::Yaml,
             GrammarFamily::Html,
             GrammarFamily::Sql,
+            GrammarFamily::R,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -610,6 +624,7 @@ mod tests {
             (GrammarFamily::Yaml, "yaml", "tree-sitter-yaml"),
             (GrammarFamily::Html, "html", "tree-sitter-html"),
             (GrammarFamily::Sql, "sql", "tree-sitter-sequel"),
+            (GrammarFamily::R, "r", "tree-sitter-r"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

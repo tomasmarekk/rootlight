@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod r;
 mod sql;
 mod yaml;
 
@@ -310,7 +311,7 @@ impl QueryPack {
         }
         if matches!(
             family,
-            GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
+            GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash | GrammarFamily::R
         ) {
             // Runtime module-loading calls are not grammar import statements.
             expected.retain(|name| *name != "import");
@@ -555,6 +556,28 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::R {
+                    if matches!(
+                        role,
+                        StructuralRole::Declaration
+                            | StructuralRole::Definition
+                            | StructuralRole::Signature
+                    ) {
+                        let Some(binding) = r::declaration(capture.node, input.source) else {
+                            continue;
+                        };
+                        if role == StructuralRole::Signature && binding.function.is_none() {
+                            continue;
+                        }
+                        if role == StructuralRole::Definition {
+                            capture.node = binding.name;
+                        }
+                    } else if role == StructuralRole::Reference
+                        && r::is_nonlexical_name(capture.node, input.source)
+                    {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Sql
                     && role == StructuralRole::Reference
                     && sql::is_declared_name(capture.node)
@@ -694,6 +717,12 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Declaration if family == GrammarFamily::R => {
+            r::declaration(capture.node, source)
+                .ok_or_else(|| query_failure("query-r-declaration-kind"))?
+                .syntax
+        }
+        StructuralRole::Signature if family == GrammarFamily::R => "r.function_header",
         StructuralRole::Scope if family == GrammarFamily::Toml => {
             if capture
                 .node
@@ -803,6 +832,7 @@ fn candidate_for_capture(
             GrammarFamily::Lua => "lua.call_name",
             GrammarFamily::Ruby => "ruby.call_name",
             GrammarFamily::Bash => "bash.call_name",
+            GrammarFamily::R => "r.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -821,6 +851,7 @@ fn candidate_for_capture(
             GrammarFamily::Ruby => "ruby.call",
             GrammarFamily::Swift => "swift.call",
             GrammarFamily::Bash => "bash.call",
+            GrammarFamily::R => "r.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -833,6 +864,12 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::R && role == StructuralRole::Signature {
+        let range = r::signature_range(capture.node, source)
+            .ok_or_else(|| query_failure("query-r-signature-header"))?;
+        start = range.start;
+        end = range.end;
+    }
     if family == GrammarFamily::Rust
         && role == StructuralRole::Signature
         && let Some(function) = capture.node.parent()
@@ -1022,6 +1059,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Lua
             | GrammarFamily::Ruby
             | GrammarFamily::Bash
+            | GrammarFamily::R
     )
 }
 
@@ -1032,6 +1070,14 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
         (GrammarFamily::Sql, "program") => Some("sql.file"),
+        (GrammarFamily::R, "program") => Some("r.file"),
+        (GrammarFamily::R, "function_definition") => Some("r.function"),
+        (GrammarFamily::R, "parameter") => Some("r.parameter"),
+        (GrammarFamily::R, "identifier" | "dots" | "dot_dot_i") => Some("r.identifier"),
+        (GrammarFamily::R, "namespace_operator") => Some("r.namespace_name"),
+        (GrammarFamily::R, "extract_operator") => Some("r.member_name"),
+        (GrammarFamily::R, "string") => Some("r.string"),
+        (GrammarFamily::R, "comment") => Some("r.comment"),
         (GrammarFamily::Sql, "create_table") => Some("sql.table"),
         (GrammarFamily::Sql, "create_view") => Some("sql.view"),
         (GrammarFamily::Sql, "create_materialized_view") => Some("sql.materialized_view"),
@@ -1392,7 +1438,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(21);
+        let mut packs = Vec::with_capacity(22);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1421,6 +1467,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
             (GrammarFamily::Sql, include_str!("../queries/sql.scm")),
+            (GrammarFamily::R, include_str!("../queries/r.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1495,6 +1542,7 @@ mod tests {
             GrammarFamily::Yaml,
             GrammarFamily::Html,
             GrammarFamily::Sql,
+            GrammarFamily::R,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1515,7 +1563,7 @@ mod tests {
             }
             if matches!(
                 family,
-                GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
+                GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash | GrammarFamily::R
             ) {
                 expected.retain(|name| *name != "import");
             }

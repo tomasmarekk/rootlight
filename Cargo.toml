@@ -115,6 +115,7 @@ tree-sitter-bash = { version = "=0.25.1", default-features = false }
 tree-sitter-json = { version = "=0.24.8", default-features = false }
 tree-sitter-html = { version = "=0.23.2", default-features = false }
 tree-sitter-sequel = { version = "=0.3.11", default-features = false }
+tree-sitter-r = { version = "=1.3.0", default-features = false }
 tree-sitter-toml-ng = { version = "=0.7.0", default-features = false }
 tree-sitter-yaml = { version = "=0.7.2", default-features = false }
 tree-sitter-c = { version = "=0.24.2", default-features = false }
@@ -150,6 +151,7 @@ tree-sitter-bash = { path = "third_party/tree-sitter-bash-0.25.1" }
 tree-sitter-json = { path = "third_party/tree-sitter-json-0.24.8" }
 tree-sitter-html = { path = "third_party/tree-sitter-html-0.23.2" }
 tree-sitter-sequel = { path = "third_party/tree-sitter-sequel-0.3.11" }
+tree-sitter-r = { path = "third_party/tree-sitter-r-1.3.0" }
 tree-sitter-toml-ng = { path = "third_party/tree-sitter-toml-ng-0.7.0" }
 tree-sitter-yaml = { path = "third_party/tree-sitter-yaml-0.7.2" }
 lru = { path = "third_party/lru-0.16.4" }

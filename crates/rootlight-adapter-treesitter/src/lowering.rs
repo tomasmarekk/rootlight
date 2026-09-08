@@ -1721,6 +1721,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
         let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
+        let mut r_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
+        let mut r_scopes = HashMap::<Option<u64>, u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1791,7 +1793,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings must not depend on sibling positions. JSON
                 // data is different: array positions are part of its address,
                 // while whitespace and value-body edits are not.
-                let stable_identity = json_position
+                // R records source occurrences, not an evaluated environment. Anonymous
+                // sibling functions need distinct parameter owners, including when their
+                // headers match. Offsets and function bodies must not affect identity.
+                let r_scope_identity = if self.request.language().as_str() == "r" {
+                    let next = r_scopes.entry(fact.parent()).or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(r_source_identity(
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.stable_identity),
+                        fact.syntax_kind().as_str(),
+                        position,
+                    ))
+                } else {
+                    None
+                };
+                let stable_identity = r_scope_identity.or(json_position
                     .map(|position| {
                         json_data_identity(
                             parent_scope
@@ -1816,7 +1835,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             parent_scope
                                 .as_ref()
                                 .and_then(|scope| scope.stable_identity)
-                        }));
+                        })));
                 // CSS groups repeated declarations by raw name and enclosing
                 // headers; each declaration retains its source-bound occurrence.
                 // JSON data positions already distinguish repeated members.
@@ -1967,6 +1986,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
+            } else if self.request.language().as_str() == "r" && kind != EntityKind::Module {
+                // Reassignment can replace a binding at runtime. Preserve each written
+                // declaration and its children without claiming runtime binding identity.
+                let label = fact.syntax_kind().as_str();
+                let next = r_declarations
+                    .entry((fact.parent(), label.to_owned(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(r_source_identity(
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    label,
+                    position,
+                ))
             } else if matches!(
                 kind,
                 EntityKind::MarkupElement | EntityKind::MarkupAttribute
@@ -2585,6 +2620,18 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "r.file.root" => Some((
+            FactDomain::Entities,
+            "r-runtime-generated-definitions-unavailable",
+        )),
+        "r.file.module" => Some((
+            FactDomain::Relations,
+            "r-environment-dispatch-resolution-unavailable",
+        )),
+        "r.nonlocal_function.declaration" | "r.nonlocal_variable.declaration" => Some((
+            FactDomain::Relations,
+            "r-nonlocal-binding-target-unavailable",
+        )),
         "sql.file.root" => Some((
             FactDomain::Entities,
             "sql-dialect-statement-coverage-incomplete",
@@ -2613,6 +2660,22 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
 
 fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key("rootlight.json-data-position/1");
+    match parent {
+        Some(parent) => {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(&position.to_be_bytes());
+    hasher.update(kind.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn r_source_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("rootlight.r-source-occurrence/1");
     match parent {
         Some(parent) => {
             hasher.update(&[1]);
@@ -3301,6 +3364,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "yaml.file.module"
                 | "html.file.module"
                 | "sql.file.module"
+                | "r.file.module"
         )
         && matches!(
             language,
@@ -3317,6 +3381,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "yaml"
                 | "html"
                 | "sql"
+                | "r"
         )
 }
 

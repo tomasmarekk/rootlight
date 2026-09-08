@@ -200,6 +200,18 @@ fn sql_database_objects_cross_process_boundaries_with_exact_source_entities() {
 }
 
 #[test]
+fn r_source_owners_cross_process_boundaries_without_claiming_runtime_bindings() {
+    source_entities_cross_process_boundaries(
+        "r",
+        "analysis.R",
+        "identity <- function(value) { value }\nidentity <- function(value) { value + 1 }\nlapply(values, function(value) value)\n",
+        // The public retrieval taxonomy groups IR parameters under `variable`.
+        // The durable service test separately asserts their exact Parameter kind.
+        &[("identity", "function", 2), ("value", "variable", 3)],
+    );
+}
+
+#[test]
 fn sql_return_headers_reach_mcp_explanations_without_body_text() {
     let header = "CREATE FUNCTION app.rows(\nvalue INT\n)\nRETURNS TABLE (id INT) LANGUAGE SQL";
     let source = format!("{header} AS $$ SELECT value; $$;\n");
@@ -288,7 +300,7 @@ fn source_entities_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.2");
-        if language == "sql" {
+        if matches!(language, "sql" | "r") {
             assert!(
                 output["warnings"]
                     .as_array()
@@ -296,11 +308,11 @@ fn source_entities_cross_process_boundaries(
                     .iter()
                     .any(|warning| {
                         warning["code"] == "coverage_unsupported"
-                            && warning["message"]
-                                .as_str()
-                                .is_some_and(|message| message.ends_with("language sql"))
+                            && warning["message"].as_str().is_some_and(|message| {
+                                message.ends_with(&format!("language {language}"))
+                            })
                     }),
-                "SQL source retrieval must not imply complete SQL semantics: {output:#}"
+                "Source retrieval must not imply complete language semantics: {output:#}"
             );
         }
         let matches: Vec<_> = output["data"]["matches"]
@@ -328,6 +340,12 @@ fn source_entities_cross_process_boundaries(
             assert_eq!(explanation["schema_version"], "1.3");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
+            if language == "r" && kind == "function" {
+                assert_eq!(
+                    explanation["data"]["symbols"][0]["signature"],
+                    "function(value)"
+                );
+            }
             let read = fixture.standalone(&format!("source-read-{kind}-{ordinal}"), "source.read",
             json!({"references": [{"source_ref": reference.clone()}], "response_profile": "evidence"}));
             assert_success(&read, "source.read");
@@ -349,9 +367,18 @@ fn source_entities_cross_process_boundaries(
             let rows = advanced["result"]["structuredContent"]["data"]["rows"]
                 .as_array()
                 .expect("scan rows");
+            // Advanced rows retain the IR kind even when the public selector
+            // groups it with variables. These R fixtures contain parameters.
+            let row_kind = if language == "r" && kind == "variable" {
+                "parameter"
+            } else {
+                kind
+            };
             assert!(
-                rows.iter()
-                    .any(|row| row["id"] == symbol && row["kind"] == kind && row["path"] == path)
+                rows.iter().any(|row| row["id"] == symbol
+                    && row["kind"] == row_kind
+                    && row["path"] == path),
+                "advanced scan must retain the precise source entity: {rows:#?}"
             );
         }
         let retained = fixture.standalone_version(
@@ -360,6 +387,12 @@ fn source_entities_cross_process_boundaries(
             arguments,
             "1.0",
         );
+        if language == "r" {
+            // R uses existing function/parameter kinds, unlike the newer data
+            // kinds that correctly require the updated retrieval schema.
+            assert_success(&retained, "code.locate");
+            continue;
+        }
         assert_eq!(retained["result"]["isError"], true);
         assert_eq!(
             retained["result"]["structuredContent"]["error"]["code"],

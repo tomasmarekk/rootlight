@@ -19,6 +19,7 @@ tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true
 tree-sitter-html.workspace = true
 tree-sitter-sequel.workspace = true
+tree-sitter-r.workspace = true
 tree-sitter-toml-ng.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-c.workspace = true

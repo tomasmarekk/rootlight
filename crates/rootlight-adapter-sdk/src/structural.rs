@@ -195,6 +195,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// markup spelling; it does not perform browser case or namespace adjustments.
 /// SQL removes only trivia between qualified name components, retaining case,
 /// delimiters and escape spelling until a dialect-aware resolver is available.
+/// R retains grammar-reviewed name spelling, including backticks and quoted
+/// assignment targets; decoding or runtime binding equivalence is not inferred.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -212,7 +214,7 @@ pub fn structural_captured_name_for_language<'a>(
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
     } else if language == "yaml" {
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
-    } else if matches!(language, "css" | "html") {
+    } else if matches!(language, "css" | "html" | "r") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {
