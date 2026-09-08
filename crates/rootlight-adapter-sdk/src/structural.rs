@@ -19,7 +19,8 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
-                "scala.object.declaration"
+                "dart.extension.declaration"
+                    | "scala.object.declaration"
                     | "scala.package.declaration"
                     | "scala.package_object.declaration"
             ) =>
@@ -225,6 +226,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// unavailable; canonical spelling does not infer runtime binding equivalence.
 /// Scala removes enclosing identifier backticks without changing their contents;
 /// grammar-reviewed symbolic names retain their exact spelling, including `/`.
+/// Dart removes trivia between qualified name components and additionally retains
+/// its grammar-reviewed division and bracket operators, without resolving receivers.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -269,6 +272,8 @@ pub fn structural_captured_name_for_language<'a>(
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {
         crate::lua_names::canonical_lua_name(text, maximum_bytes)
+    } else if language == "dart" {
+        crate::dart_names::canonical_dart_name(text, maximum_bytes)
     } else if language == "ruby" {
         let candidate = text.trim();
         let operator = candidate

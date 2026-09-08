@@ -1846,12 +1846,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "scala.lambda.scope"
                         | "scala.extension.scope"
                         | "scala.anonymous_given.scope"
+                        | "dart.block.scope"
+                        | "dart.for.scope"
+                        | "dart.case.scope"
+                        | "dart.catch.scope"
+                        | "dart.lambda.scope"
+                        | "dart.extension.scope"
                 ) {
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        if self.request.language().as_str() == "scala" {
+                        if self.request.language().as_str() == "dart" {
+                            "rootlight.dart-lexical-scope/1"
+                        } else if self.request.language().as_str() == "scala" {
                             "rootlight.scala-lexical-scope/1"
                         } else {
                             "rootlight.solidity-lexical-scope/1"
@@ -2089,8 +2097,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 && let Some(signature) = signature_capture
             {
                 let text = self.text_for_span(signature.span())?;
-                match canonical_symbol_signature(text, self.request.limits().ir().max_string_bytes)
+                let maximum = self.request.limits().ir().max_string_bytes;
+                let canonical = if kind == EntityKind::Constructor
+                    && self.request.language().as_str() == "dart"
+                    && let Some(definition) = definition
                 {
+                    canonical_constructor_signature(
+                        text,
+                        signature.span(),
+                        definition.span(),
+                        &name,
+                        maximum,
+                    )
+                } else {
+                    canonical_symbol_signature(text, maximum)
+                };
+                match canonical {
                     Some(canonical) => (canonical, Some(text.to_owned()), Some(signature.span())),
                     None => (String::new(), None, None),
                 }
@@ -2685,6 +2707,14 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "scala.unbraced_package_unavailable.scope" => Some((
             FactDomain::Relations,
             "scala-nonleading-unbraced-package-scope-unavailable",
+        )),
+        "dart.file.module" => Some((
+            FactDomain::Relations,
+            "dart-import-inheritance-extension-dispatch-resolution-unavailable",
+        )),
+        "dart.lambda.scope" => Some((
+            FactDomain::Entities,
+            "dart-anonymous-runtime-declaration-identity-unavailable",
         )),
         "scala.file.module" => Some((
             FactDomain::Relations,
@@ -3487,6 +3517,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "r.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
+                | "dart.file.module"
         )
         && matches!(
             language,
@@ -3506,6 +3537,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "r"
                 | "solidity"
                 | "scala"
+                | "dart"
         )
 }
 
@@ -3544,6 +3576,43 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
                 && candidate.syntax_kind().as_str() == selected.syntax_kind().as_str()
         })
         .then_some(selected)
+}
+
+fn canonical_constructor_signature(
+    text: &str,
+    signature: SourceSpan,
+    definition: SourceSpan,
+    name: &str,
+    maximum: usize,
+) -> Option<String> {
+    if text.len() > maximum || text.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+        return None;
+    }
+    let start = usize::try_from(
+        definition
+            .start_byte()
+            .checked_sub(signature.start_byte())?,
+    )
+    .ok()?;
+    let end = usize::try_from(definition.end_byte().checked_sub(signature.start_byte())?).ok()?;
+    let prefix = text.get(..start)?;
+    let suffix = text.get(end..)?;
+    let length = prefix
+        .len()
+        .checked_add(name.len())?
+        .checked_add(suffix.len())?;
+    if length > maximum || length > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+        return None;
+    }
+    // Qualified constructor trivia is not part of overload identity. Replace
+    // only the AST-backed name range before shared signature normalization;
+    // retain the original lexical header separately for exact source evidence.
+    let mut normalized = String::new();
+    normalized.try_reserve_exact(length).ok()?;
+    normalized.push_str(prefix);
+    normalized.push_str(name);
+    normalized.push_str(suffix);
+    canonical_symbol_signature(&normalized, maximum)
 }
 
 const fn supports_signature(kind: EntityKind) -> bool {

@@ -18,6 +18,29 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "dart"
+crate_name = "tree-sitter-dart"
+crate_version = "0.2.0"
+crates_io_checksum = "325dd1e24ee9ee21111e9c43680ae7d6010aaa9f282b048a99b9c7163c1cf553"
+repository = "https://github.com/nielsenko/tree-sitter-dart"
+tag = "v0.2.0"
+commit = "b57d734c84f510bbd524097902cab671e4dbfca9"
+parser_sha256 = "1894ef57f8e0ceb483ccf6d548429517dc42b0d983293ebdb5ff9ff9c612c4a9"
+scanner_sha256 = "7d9fc9245dc2532bb666f737d4b8c48dc2c465ace4677a17d11496ca1268cbd5"
+abi = 15
+analysis_tier = "D"
+license = "MIT"
+license_source = "https://github.com/nielsenko/tree-sitter-dart/blob/b57d734c84f510bbd524097902cab671e4dbfca9/LICENSE"
+license_sha256 = "37255daf7e1cfaa7f90f56bcfe02d8dd4452587fabec5fae84790344ae3a3be2"
+modifications = "none"
+test_corpus = "86 upstream syntax cases and six Rootlight native contracts, plus source-backed analyzer contracts"
+msrv = "not declared; native grammar verified with Rootlight MSRV 1.90"
+offline_behavior = "builds bundled C11 parser and scanner from the Cargo cache without network access"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "source declarations only; import/inheritance/extension/dispatch resolution and anonymous runtime identities remain unavailable"
+audit_notes = ["CLI 0.26.8 reproduces parser.c, grammar.json and node-types.json byte-for-byte", "stateless external scanner handles strings, interpolation, nested comments and annotation boundaries"]
+
+[[grammars]]
 language = "scala"
 crate_name = "tree-sitter-scala"
 crate_version = "0.26.2"

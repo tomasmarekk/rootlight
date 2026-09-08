@@ -61,6 +61,8 @@ pub enum GrammarFamily {
     Solidity,
     /// Scala source declarations; implicit search and JVM dispatch are not evaluated.
     Scala,
+    /// Dart written declarations; package and dynamic dispatch resolution remain separate.
+    Dart,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -140,7 +142,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(24);
+        let mut descriptors = Vec::with_capacity(25);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -166,6 +168,7 @@ impl GrammarRegistry {
             GrammarFamily::R,
             GrammarFamily::Solidity,
             GrammarFamily::Scala,
+            GrammarFamily::Dart,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -286,6 +289,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::R => tree_sitter_r::LANGUAGE.into(),
         GrammarFamily::Solidity => tree_sitter_solidity::LANGUAGE.into(),
         GrammarFamily::Scala => tree_sitter_scala::LANGUAGE.into(),
+        GrammarFamily::Dart => tree_sitter_dart::LANGUAGE.into(),
     }
 }
 
@@ -300,6 +304,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Dart => GrammarIdentity {
+            language_id: "dart",
+            grammar_version: "0.2.0",
+            source_package_sha256: "325dd1e24ee9ee21111e9c43680ae7d6010aaa9f282b048a99b9c7163c1cf553",
+            parser_sha256: "1894ef57f8e0ceb483ccf6d548429517dc42b0d983293ebdb5ff9ff9c612c4a9",
+            scanner_sha256: Some(
+                "7d9fc9245dc2532bb666f737d4b8c48dc2c465ace4677a17d11496ca1268cbd5",
+            ),
+        },
         GrammarFamily::Scala => GrammarIdentity {
             language_id: "scala",
             grammar_version: "0.26.2",
@@ -554,7 +567,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 24);
+        assert_eq!(registry.descriptors().len(), 25);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -580,6 +593,7 @@ mod tests {
             GrammarFamily::R,
             GrammarFamily::Solidity,
             GrammarFamily::Scala,
+            GrammarFamily::Dart,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -653,6 +667,7 @@ mod tests {
             (GrammarFamily::R, "r", "tree-sitter-r"),
             (GrammarFamily::Solidity, "solidity", "tree-sitter-solidity"),
             (GrammarFamily::Scala, "scala", "tree-sitter-scala"),
+            (GrammarFamily::Dart, "dart", "tree-sitter-dart"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

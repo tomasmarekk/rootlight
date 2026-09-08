@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod dart;
 mod r;
 mod scala;
 mod sql;
@@ -562,6 +563,10 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Dart && !dart::retain_capture(capture.node, role)
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Scala
                     && !scala::retain_capture(capture.node, role, input.source)
                 {
@@ -744,6 +749,10 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Declaration if family == GrammarFamily::Dart => {
+            dart::declaration_syntax(capture.node)
+                .ok_or_else(|| query_failure("query-dart-declaration-kind"))?
+        }
         StructuralRole::Scope | StructuralRole::Signature
             if family == GrammarFamily::Scala
                 && capture.node.kind() == "given_definition"
@@ -888,6 +897,7 @@ fn candidate_for_capture(
             GrammarFamily::R => "r.call_name",
             GrammarFamily::Solidity => "solidity.call_name",
             GrammarFamily::Scala => "scala.call_name",
+            GrammarFamily::Dart => "dart.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -909,6 +919,7 @@ fn candidate_for_capture(
             GrammarFamily::R => r::call_syntax(capture.node),
             GrammarFamily::Solidity => "solidity.call",
             GrammarFamily::Scala => "scala.call",
+            GrammarFamily::Dart => "dart.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -921,6 +932,17 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Dart && role == StructuralRole::Definition {
+        let range = dart::definition_range(capture.node);
+        start = range.start;
+        end = range.end;
+    }
+    if family == GrammarFamily::Dart && role == StructuralRole::Signature {
+        end = dart::header_end(capture.node);
+        while end > start && source.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
+            end -= 1;
+        }
+    }
     if family == GrammarFamily::R && role == StructuralRole::Signature {
         let range = r::signature_range(capture.node, source)
             .ok_or_else(|| query_failure("query-r-signature-header"))?;
@@ -1121,6 +1143,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::R
             | GrammarFamily::Solidity
             | GrammarFamily::Scala
+            | GrammarFamily::Dart
     )
 }
 
@@ -1130,6 +1153,7 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Dart, native) => dart::canonical_syntax(native),
         (GrammarFamily::Scala, native) => scala::canonical_syntax(native),
         (GrammarFamily::Solidity, "source_file") => Some("solidity.file"),
         (GrammarFamily::Solidity, "contract_declaration" | "library_declaration") => {
@@ -1534,7 +1558,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(24);
+        let mut packs = Vec::with_capacity(25);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1565,6 +1589,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Sql, include_str!("../queries/sql.scm")),
             (GrammarFamily::R, include_str!("../queries/r.scm")),
             (GrammarFamily::Scala, include_str!("../queries/scala.scm")),
+            (GrammarFamily::Dart, include_str!("../queries/dart.scm")),
             (
                 GrammarFamily::Solidity,
                 include_str!("../queries/solidity.scm"),
@@ -1646,6 +1671,7 @@ mod tests {
             GrammarFamily::R,
             GrammarFamily::Solidity,
             GrammarFamily::Scala,
+            GrammarFamily::Dart,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();

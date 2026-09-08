@@ -214,6 +214,24 @@ fn solidity_declaration_kinds_cross_real_process_boundaries() {
 }
 
 #[test]
+fn dart_constructors_and_accessors_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "dart",
+        "store.dart",
+        "class Store { final int value; Store(this.value); Store /* outer /* nested */ owner */ . named(this.value); int read(int input) => input; int get size => value; set size(int next) {} int operator /(int divisor) => value; }\nenum Phase { open, closed }",
+        &[
+            ("Store", "type", 1),
+            ("Store.named", "method", 1),
+            ("read", "method", 1),
+            ("store.dart::Store::read", "method", 1),
+            ("size", "method", 2),
+            ("/", "method", 1),
+            ("open", "constant", 1),
+        ],
+    );
+}
+
+#[test]
 fn scala_companions_overloads_and_written_names_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "scala",
@@ -351,7 +369,7 @@ fn source_entities_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.3");
-        if matches!(language, "sql" | "r" | "solidity" | "scala") {
+        if matches!(language, "sql" | "r" | "solidity" | "scala" | "dart") {
             assert!(
                 output["warnings"]
                     .as_array()
@@ -422,8 +440,9 @@ fn source_entities_cross_process_boundaries(
             // kind independently asserted by these source-backed fixtures.
             let row_kind = match (language, kind) {
                 ("r", "variable") => "parameter",
-                ("scala", "type") => "class",
+                ("scala" | "dart", "type") => "class",
                 ("scala", "module") => "namespace",
+                ("dart", "method") if name == "Store.named" => "constructor",
                 _ => kind,
             };
             assert!(
@@ -439,7 +458,7 @@ fn source_entities_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if matches!(language, "r" | "scala") {
+        if matches!(language, "r" | "scala" | "dart") {
             // These fixtures use existing IR kinds, unlike the newer data
             // kinds that correctly require the updated retrieval schema.
             assert_success(&retained, "code.locate");

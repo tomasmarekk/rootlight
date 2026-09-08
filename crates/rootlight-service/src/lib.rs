@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/35";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/37";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25407,6 +25407,7 @@ mod tests {
             "sample.rb",
             "sample.rs",
             "sample.scala",
+            "sample.dart",
             "sample.sh",
             "sample.sol",
             "sample.sql",
@@ -25462,7 +25463,6 @@ mod tests {
         let languages = [
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
-            ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("pipeline.groovy", "groovy"),
             ("boot.asm", "assembly"),
@@ -25499,11 +25499,6 @@ mod tests {
     fn unsupported_primary_sources_retain_exact_evidence_and_reason() {
         let fixture = TempDir::new().expect("fixture root exists");
         let sources = [
-            (
-                "client.dart",
-                "class Transport { final int retryCount = 1; }\n",
-                "dart",
-            ),
             (
                 "Session.m",
                 "@interface Session : NSObject\n@end\n",
@@ -25596,7 +25591,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["dart", "objective-c", "matlab", "perl"] {
+        for language in ["objective-c", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
@@ -27181,6 +27176,167 @@ mod tests {
                     let signature = explained.data.signature.as_ref().unwrap();
                     assert!(!signature.is_truncated());
                     assert!(!signature.text().contains("require"));
+                    let reference = explained.data.entity.evidence.source.unwrap();
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    let end = usize::try_from(reference.span().end_byte()).unwrap();
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        expected_source.as_bytes()[start..end]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dart_source_declarations_survive_publication_queries_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "class Store { final int value; Store(this.value); Store /* owner */ . named(this.value); int read(int input) => input; int get size => value; set size(int next) {} }";
+        fs::write(fixture.path().join("store.dart"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let status = service.repository_status(initial.repository, None).unwrap();
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|row| row.language == "dart")
+            .unwrap();
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (1, 1));
+        assert_eq!(coverage.tier, "tier_d");
+        assert_ne!(coverage.status, "complete");
+        let original = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let identities = original
+            .document()
+            .entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id,
+                    (entity.kind, entity.canonical_name.clone(), entity.container),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let class = original
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Store" && entity.kind == EntityKind::Class)
+            .unwrap();
+        for name in ["read", "size", "Store.named"] {
+            let members = original
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == name)
+                .collect::<Vec<_>>();
+            assert!(!members.is_empty());
+            for member in members {
+                assert_eq!(
+                    member.container,
+                    Some(rootlight_ir::ContainerRef::Entity(class.id))
+                );
+                assert_eq!(member.qualified_name, format!("store.dart::Store::{name}"));
+            }
+        }
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source
+            .replace("=> input;", "=> input + 1;")
+            .replace("Store /* owner */ . named", "Store // owner\n . named");
+        fs::write(fixture.path().join("store.dart"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(original);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected_source) in [(&initial, source), (&updated, changed.as_str())] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .map(|entity| {
+                        (
+                            entity.id,
+                            (entity.kind, entity.canonical_name.clone(), entity.container),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+                identities
+            );
+            assert!(document.skipped_regions.iter().any(|gap| gap.detail
+                == "dart-import-inheritance-extension-dispatch-resolution-unavailable"));
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "store.dart")
+                .unwrap();
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expected_source.as_bytes());
+            assert_eq!(read.data.chunks[0].language, "dart");
+            for (name, kind, count) in [
+                ("read", EntityKind::Method, 1),
+                ("size", EntityKind::Method, 2),
+                ("Store.named", EntityKind::Constructor, 1),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), count, "{name}");
+                for symbol in symbols {
+                    let explained = restored
+                        .symbol_explain(receipt.generation, symbol, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.kind, kind);
+                    let signature = explained.data.signature.as_ref().unwrap();
+                    assert!(!signature.is_truncated());
+                    assert!(!signature.text().contains("=>"));
                     let reference = explained.data.entity.evidence.source.unwrap();
                     assert_eq!(reference.generation(), receipt.generation);
                     let start = usize::try_from(reference.span().start_byte()).unwrap();

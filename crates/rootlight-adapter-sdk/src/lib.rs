@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod dart_names;
 mod descriptor;
 mod error;
 mod ir_accounting;

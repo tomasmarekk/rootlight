@@ -37,6 +37,8 @@ const BINARY_SEED: &[u8] = b"rootlight-treesitter-e2e-binary";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight-treesitter-e2e-build";
 const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
 
+#[path = "analyzer_e2e/dart_native.rs"]
+mod dart_native;
 #[path = "analyzer_e2e/html_native.rs"]
 mod html_native;
 #[path = "analyzer_e2e/r_native.rs"]
