@@ -609,6 +609,23 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
     wait_for_publication(&mut mcp, &index, &operation_id);
     wait_for_semantic_freshness(&mut mcp, &repository_id);
 
+    // Both fixture files have native structural coverage. Pin that premise so
+    // a missing analyzer cannot silently change the expected batch diagnostics.
+    let complete = mcp.call(
+        "outcome-coverage",
+        "code.locate",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "query": "__batch_absent__",
+            "search_modes": ["exact"]
+        }),
+    );
+    assert_success(&complete, "code.locate");
+    let complete = &complete["result"]["structuredContent"];
+    assert_eq!(complete["coverage"]["status"], "complete");
+    assert_eq!(complete["warnings"], json!([]));
+
     let locate = |id: &str, local_tokens: u16| {
         json!({
             "id": id,
@@ -751,6 +768,97 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
     daemon.finish();
 }
 
+#[test]
+fn batch_preserves_unrecognized_source_warnings_for_empty_queries() {
+    let _guard = process_test_guard();
+    let fixture = process_fixture();
+    let repository_root = fixture.path().join("repository");
+    fs::create_dir_all(repository_root.join("src")).expect("fixture directory is created");
+    fs::write(
+        repository_root.join("Cargo.toml"),
+        "[package]\nname = \"coverage_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest is written");
+    fs::write(repository_root.join("src/lib.rs"), "pub fn covered() {}\n")
+        .expect("supported source is written");
+    fs::write(
+        repository_root.join("unknown.sourceblob"),
+        "unrecognized source content\n",
+    )
+    .expect("unrecognized UTF-8 source is written");
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = ensure_daemon_binary();
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
+    let index = index_repository_retrying_busy_with_mode(
+        &mut mcp,
+        "coverage-index",
+        &repository_root,
+        "deep",
+        true,
+    );
+    assert_success(&index, "repo.index");
+    let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
+        .as_str()
+        .expect("index has repository identity")
+        .to_owned();
+    let operation_id = index["result"]["structuredContent"]["data"]["operation_id"]
+        .as_str()
+        .expect("index has operation identity")
+        .to_owned();
+    wait_for_publication(&mut mcp, &index, &operation_id);
+    wait_for_semantic_freshness(&mut mcp, &repository_id);
+    // Coverage records also consume result budget. Compare the same explicit
+    // ceiling instead of the different standalone and batch defaults.
+    let arguments = json!({
+        "query": "__batch_absent__", "search_modes": ["exact"], "max_results": 200
+    });
+    let mut direct_arguments = arguments.clone();
+    direct_arguments["repository"] = json!({"repository_id": repository_id});
+    direct_arguments["generation"] = json!("active");
+    direct_arguments["budget"] = json!({"max_results": 200});
+    let standalone = mcp.call("coverage-standalone", "code.locate", direct_arguments);
+    assert_success(&standalone, "code.locate");
+    let standalone = &standalone["result"]["structuredContent"];
+    assert_eq!(standalone["data"]["matches"], json!([]));
+    assert_ne!(standalone["coverage"]["status"], "complete");
+    let warning_codes = standalone["warnings"]
+        .as_array()
+        .expect("warnings are present")
+        .iter()
+        .map(|warning| warning["code"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warning_codes,
+        vec![
+            json!("coverage_unrecognized"),
+            json!("negative_claims_inconclusive")
+        ]
+    );
+    let batch = mcp.call(
+        "coverage-batch",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": standalone["generation"]["generation_id"],
+            "operations": [{
+                "id": "find", "tool": "code.locate", "arguments": arguments,
+                "local_budget": {"max_results": 200}
+            }]
+        }),
+    );
+    assert_success(&batch, "query.batch");
+    let batch = &batch["result"]["structuredContent"];
+    let child = &batch["data"]["operation_results"][0];
+    assert_eq!(child["status"], "ok");
+    assert_eq!(child["warnings"], standalone["warnings"], "{batch:#}");
+    assert_eq!(batch["warnings"], standalone["warnings"]);
+    mcp.finish();
+    daemon.finish();
+}
+
 fn process_outcome_snapshot(response: &Value, repository_id: &str) -> Value {
     let content = &response["result"]["structuredContent"];
     let encoded = serde_json::to_vec(content).expect("structured batch response serializes");
@@ -788,9 +896,12 @@ fn process_outcome_snapshot(response: &Value, repository_id: &str) -> Value {
             "state": content["completeness"]["state"],
             "limiting_resources": limiting_resources
         },
-        "warnings": content["warnings"]
+        "warning_codes": content["warnings"]
             .as_array()
-            .map_or(0, Vec::len),
+            .expect("batch warnings are an array")
+            .iter()
+            .map(|warning| warning["code"].clone())
+            .collect::<Vec<_>>(),
         "usage": {
             "json_bytes_exact": content["usage"]["json_bytes"] == json!(encoded.len()),
             "estimated_tokens_exact": content["usage"]["estimated_tokens"]

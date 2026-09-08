@@ -442,7 +442,7 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
 }
 
 #[test]
-fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_results() {
+fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_results() {
     let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("empty-repository");
     fs::create_dir_all(repository_root.join("src"))
@@ -514,9 +514,9 @@ fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_res
     );
 
     fs::remove_file(repository_root.join("src").join("lib.rs"))
-        .expect("indexed source is removed before the unsupported-only update");
-    let unsupported_index = mcp.call(
-        "index-unsupported",
+        .expect("indexed source is removed before the metadata-only update");
+    let metadata_index = mcp.call(
+        "index-metadata",
         "repo.index",
         json!({
             "root": repository_root,
@@ -524,18 +524,18 @@ fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_res
             "detached": false
         }),
     );
-    assert_success(&unsupported_index, "repo.index");
-    let unsupported_content = &unsupported_index["result"]["structuredContent"];
-    assert_eq!(unsupported_content["data"]["state"], "published");
+    assert_success(&metadata_index, "repo.index");
+    let metadata_content = &metadata_index["result"]["structuredContent"];
+    assert_eq!(metadata_content["data"]["state"], "published");
     assert!(
-        unsupported_content["data"]["diagnostics"]
+        !metadata_content["data"]["diagnostics"]
             .as_array()
-            .expect("unsupported-only indexing returns diagnostics")
+            .expect("metadata-only indexing returns diagnostics")
             .iter()
             .any(|diagnostic| diagnostic["code"] == "unsupported-language")
     );
     let successor_generation = required_text(
-        &unsupported_index,
+        &metadata_index,
         &[
             "result",
             "structuredContent",
@@ -544,36 +544,42 @@ fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_res
         ],
     );
 
-    let unsupported = mcp.call(
-        "status-unsupported",
+    let metadata = mcp.call(
+        "status-metadata",
         "repo.status",
         json!({
             "repository": {"repository_id": repository_id},
+            "coverage_detail": "language",
             "include_operations": true
         }),
     );
-    assert_success(&unsupported, "repo.status");
-    let unsupported_status = &unsupported["result"]["structuredContent"];
-    assert_eq!(unsupported_status["data"]["repository_state"], "ready");
+    assert_success(&metadata, "repo.status");
+    let metadata_status = &metadata["result"]["structuredContent"];
+    assert_eq!(metadata_status["data"]["repository_state"], "ready");
+    let toml = metadata_status["data"]["coverage"]["languages"]
+        .as_array()
+        .expect("metadata coverage is reported")
+        .iter()
+        .find(|language| language["language"] == "toml")
+        .expect("the retained manifest has TOML coverage");
+    assert_eq!(toml["files_indexed"], 1);
+    assert_eq!(toml["files_skipped"], 0);
     assert_eq!(
-        unsupported_status["generation"]["generation_id"],
+        metadata_status["generation"]["generation_id"],
         successor_generation
     );
     assert_eq!(
-        unsupported_status["data"]["operations"][0]["state"],
+        metadata_status["data"]["operations"][0]["state"],
         "published"
     );
     assert!(
-        !unsupported_status["data"]["recommended_actions"]
+        !metadata_status["data"]["recommended_actions"]
             .as_array()
             .expect("repository status returns recommended actions")
             .iter()
             .any(|action| action == "inspect operation")
     );
-    assert_eq!(
-        unsupported_status["warnings"][0]["code"],
-        "stale_generation"
-    );
+    assert_eq!(metadata_status["warnings"][0]["code"], "stale_generation");
 
     mcp.finish();
     daemon.finish();

@@ -19,7 +19,7 @@
         "state": "complete",
         "limiting_resources": []
       },
-      "warnings": 0,
+      "warning_codes": [],
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -43,7 +43,7 @@
         "state": "indeterminate",
         "limiting_resources": ["cancellation"]
       },
-      "warnings": 0,
+      "warning_codes": [],
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -81,7 +81,7 @@
         "state": "indeterminate",
         "limiting_resources": []
       },
-      "warnings": 2,
+      "warning_codes": [],
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -112,7 +112,7 @@
         "state": "complete",
         "limiting_resources": []
       },
-      "warnings": 2,
+      "warning_codes": [],
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -143,7 +143,12 @@
         "state": "truncated",
         "limiting_resources": ["results", "estimated_tokens"]
       },
-      "warnings": 5,
+      "warning_codes": [
+        "limit_results",
+        "narrow_scope",
+        "negative_claims_inconclusive",
+        "result_truncated"
+      ],
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
