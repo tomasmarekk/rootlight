@@ -27,6 +27,86 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn r_equivalent_written_function_names_preserve_identity_and_original_source() {
+    let mut identity = None;
+    for name in [
+        "identity",
+        "`identity`",
+        "\"identity\"",
+        "'identity'",
+        r"`\x69dentity`",
+        r#""\u0069dentity""#,
+        r#"r"(identity)""#,
+    ] {
+        let source = format!("{name} <- function(value) {{ value }}\n");
+        let result = output(&source);
+        let function = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function)
+            .unwrap();
+        assert_eq!(function.canonical_name, "identity", "{source}");
+        if let Some(expected) = identity {
+            assert_eq!(function.id, expected, "{source}");
+        }
+        identity = Some(function.id);
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: function.id,
+                        }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+}
+
+#[test]
+fn r_undecodable_names_are_scoped_gaps_and_keep_source_evidence() {
+    for name in [r"`\u0061`", r#""\xff""#, r#""\uD800""#] {
+        let source = format!("{name} <- 1\nsafe <- 2\n");
+        let result = output(&source);
+        assert!(
+            result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "safe")
+        );
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name)
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "declaration-name-unavailable"),
+            "{source}: {:?}",
+            result.document().skipped_regions
+        );
+        assert_eq!(result.document().files.len(), 1);
+    }
+}
+
+#[test]
 fn r_function_and_parameter_definitions_have_exact_source_and_containment() {
     let result = output(R.source);
     let document = result.document();

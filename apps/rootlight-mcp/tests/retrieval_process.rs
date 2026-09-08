@@ -212,6 +212,16 @@ fn r_source_owners_cross_process_boundaries_without_claiming_runtime_bindings() 
 }
 
 #[test]
+fn r_decoded_names_reach_exact_mcp_queries_with_written_source_spelling() {
+    source_entities_cross_process_boundaries(
+        "r",
+        "names.R",
+        "`with spaces` <- function(value) { value }\n\"with\\x20spaces\" <- function(value) { value + 1 }\n\"\\u03bb\" <- function(value) { value }\n",
+        &[("with spaces", "function", 2), ("λ", "function", 1)],
+    );
+}
+
+#[test]
 fn sql_return_headers_reach_mcp_explanations_without_body_text() {
     let header = "CREATE FUNCTION app.rows(\nvalue INT\n)\nRETURNS TABLE (id INT) LANGUAGE SQL";
     let source = format!("{header} AS $$ SELECT value; $$;\n");

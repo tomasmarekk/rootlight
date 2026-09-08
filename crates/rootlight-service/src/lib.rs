@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/28";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/29";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -26629,7 +26629,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "identity <- function(value) { value }\nidentity <- function(value) { value + 1 }\nlapply(values, function(value) { value })\n";
+        let source = "`identity` <- function(value) { value }\n\"\\u0069dentity\" <- function(value) { value + 1 }\nlapply(values, function(value) { value })\n";
         fs::write(fixture.path().join("analysis.R"), source).unwrap();
         let mut service =
             FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();

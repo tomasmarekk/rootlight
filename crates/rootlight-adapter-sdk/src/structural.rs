@@ -195,8 +195,9 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// markup spelling; it does not perform browser case or namespace adjustments.
 /// SQL removes only trivia between qualified name components, retaining case,
 /// delimiters and escape spelling until a dialect-aware resolver is available.
-/// R retains grammar-reviewed name spelling, including backticks and quoted
-/// assignment targets; decoding or runtime binding equivalence is not inferred.
+/// R decodes backticks and quoted assignment targets into UTF-8 names without
+/// case folding or Unicode normalization. Invalid or non-UTF-8 escapes remain
+/// unavailable; canonical spelling does not infer runtime binding equivalence.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -214,7 +215,9 @@ pub fn structural_captured_name_for_language<'a>(
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
     } else if language == "yaml" {
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
-    } else if matches!(language, "css" | "html" | "r") {
+    } else if language == "r" {
+        crate::r_names::canonical_r_name(text, maximum_bytes)
+    } else if matches!(language, "css" | "html") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {
@@ -396,6 +399,54 @@ mod tests {
                 structural_captured_name_for_language("ruby", name, 64),
                 None,
                 "{name:?}"
+            );
+        }
+    }
+    #[test]
+    fn r_name_spellings_decode_without_changing_other_language_names() {
+        for (source, expected) in [
+            ("identity", "identity"),
+            ("`identity`", "identity"),
+            ("\"identity\"", "identity"),
+            ("'identity'", "identity"),
+            (r"`\x69dentity`", "identity"),
+            (r#""\151dentity""#, "identity"),
+            (r#""\u0069dentity""#, "identity"),
+            (r#"r"(identity)""#, "identity"),
+            ("`with spaces`", "with spaces"),
+            (r#""\u03bb""#, "λ"),
+            (r#""\xce\xbb""#, "λ"),
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("r", source, 128).as_deref(),
+                Some(expected),
+                "{source}"
+            );
+            assert!(structural_captured_name_for_language("r", source, source.len() - 1).is_none());
+        }
+        assert_eq!(
+            structural_captured_name_for_language("html", "`identity`", 128).as_deref(),
+            Some("`identity`")
+        );
+    }
+
+    #[test]
+    fn r_invalid_name_escapes_do_not_invent_a_canonical_symbol() {
+        for source in [
+            r"`\u0061`",
+            r#""\x61\u0062""#,
+            r#""\0""#,
+            r#""\400""#,
+            r#""\q""#,
+            r#""\xff""#,
+            r#""\uD800""#,
+            "\"\"",
+            "`unclosed",
+            "`a` trailing",
+        ] {
+            assert!(
+                structural_captured_name_for_language("r", source, 128).is_none(),
+                "{source}"
             );
         }
     }
