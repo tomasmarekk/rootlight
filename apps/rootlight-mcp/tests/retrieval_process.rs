@@ -218,10 +218,12 @@ fn scala_companions_overloads_and_written_names_cross_real_process_boundaries() 
     source_entities_cross_process_boundaries(
         "scala",
         "store.scala",
-        "package outer\npackage inner\nclass Entry(val count: Int)\nobject Entry { def read(value: Int) = value; def read(value: String) = value; def `odd name` = 1; def / = 2 }\nenum Color { case Red, Blue }",
+        "package outer\npackage inner\npackage object utility { def format(value: Int): String = value.toString }\nclass Entry(val count: Int)\nobject Entry { def read(value: Int) = value; def read(value: String) = value; def `odd name` = 1; def / = 2 }\nenum Color { case Red, Blue }",
         &[
             ("Entry", "type", 1),
             ("store.scala::outer::inner::Entry", "type", 1),
+            ("utility", "module", 1),
+            ("store.scala::outer::inner::utility::format", "function", 1),
             ("outer", "module", 1),
             ("inner", "module", 1),
             ("Entry", "module", 1),

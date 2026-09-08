@@ -134,6 +134,7 @@ pub(super) fn canonical_syntax(native: &str) -> Option<&'static str> {
     Some(match native {
         "compilation_unit" => "scala.file",
         "package_clause" => "scala.package",
+        "package_object" => "scala.package_object",
         "class_definition" | "full_enum_case" => "scala.class",
         "object_definition" => "scala.object",
         "trait_definition" => "scala.trait",

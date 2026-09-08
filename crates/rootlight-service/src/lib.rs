@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/34";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/35";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -27212,7 +27212,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "package outer\npackage inner\nobject Store { def read(value: Int): Int = value; def read(value: String): String = value; def `odd name` = 1 }";
+        let source = "package outer\npackage inner\npackage object utility { def format(value: Int): String = value.toString }\nobject Store { def read(value: Int): Int = value; def read(value: String): String = value; def `odd name` = 1 }";
         fs::write(fixture.path().join("store.scala"), source).unwrap();
         let mut service =
             FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
@@ -27243,10 +27243,16 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(identities.len(), 9);
+        assert_eq!(identities.len(), 12);
         for (name, parent, qualified) in [
             ("inner", "outer", "store.scala::outer::inner"),
             ("Store", "inner", "store.scala::outer::inner::Store"),
+            ("utility", "inner", "store.scala::outer::inner::utility"),
+            (
+                "format",
+                "utility",
+                "store.scala::outer::inner::utility::format",
+            ),
         ] {
             let entity = original
                 .document()
@@ -27312,6 +27318,7 @@ mod tests {
             for (name, kind, count) in [
                 ("read", EntityKind::Function, 2),
                 ("odd name", EntityKind::Function, 1),
+                ("format", EntityKind::Function, 1),
             ] {
                 let located = restored
                     .code_locate(

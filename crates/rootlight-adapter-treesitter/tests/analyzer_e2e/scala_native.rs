@@ -98,6 +98,129 @@ object Store {
 }
 
 #[test]
+fn scala_package_object_retains_definition_members_and_outer_siblings() {
+    let source = "package outer\npackage object utility extends Base { type Name = String; val fallback = \"x\"; def read(value: Name): Name = value }\nobject Outside";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let named = |name: &str| {
+        let found: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|e| e.canonical_name == name)
+            .collect();
+        assert_eq!(found.len(), 1, "{name}: {:?}", doc.entities);
+        found[0]
+    };
+    let package = named("utility");
+    assert_eq!(package.kind, EntityKind::Namespace);
+    assert_eq!(
+        package.container,
+        Some(rootlight_ir::ContainerRef::Entity(named("outer").id))
+    );
+    for name in ["Name", "fallback", "read"] {
+        assert_eq!(
+            named(name).container,
+            Some(rootlight_ir::ContainerRef::Entity(package.id))
+        );
+    }
+    assert_eq!(
+        named("Outside").container,
+        Some(rootlight_ir::ContainerRef::Entity(named("outer").id))
+    );
+    let definitions: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|o| {
+            o.role == OccurrenceRole::Definition
+                && o.target == (OccurrenceTarget::Resolved { symbol: package.id })
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    let span = definitions[0].source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "utility"
+    );
+    let identities = |output: &AnalysisOutput| {
+        output
+            .document()
+            .entities
+            .iter()
+            .map(|e| (e.id, (e.kind, e.canonical_name.clone(), e.container)))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        identities(&result),
+        identities(&output(&source.replace("= value }", "= value.toString }")))
+    );
+}
+
+#[test]
+fn scala_package_object_layout_and_quoted_names_keep_exact_source() {
+    let header = "package object `utility-kit` extends Base";
+    let mut expected = None;
+    for source in [
+        format!(
+            "{header} {{ def read = 1 }}\nobject Outside {{ val text = \"package object Ghost\" }}"
+        ),
+        format!(
+            "{header}:\n  def read = 1\nobject Outside {{ val text = \"package object Ghost\" }}"
+        ),
+    ] {
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        let entity = doc
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "utility-kit")
+            .unwrap();
+        assert_eq!(entity.kind, EntityKind::Namespace);
+        assert!(!doc.entities.iter().any(|e| e.canonical_name == "Ghost"));
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|o| {
+                o.role == OccurrenceRole::Definition
+                    && o.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("`utility-kit`")
+        );
+        let span = entity.evidence.source.as_ref().unwrap().span();
+        let declaration = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(span.start_byte(), 0);
+        assert!(declaration.starts_with(header));
+        assert!(declaration.contains("def read = 1"));
+        assert!(!declaration.contains("object Outside"));
+        let identities = doc
+            .entities
+            .iter()
+            .map(|e| (e.id, e.container))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(ref expected) = expected {
+            assert_eq!(&identities, expected);
+        } else {
+            expected = Some(identities);
+        }
+    }
+}
+
+#[test]
 fn scala_package_prefixes_match_explicit_nested_ownership() {
     let declarations = "class Entry\nobject Entry { def read(value: Int) = value }";
     let implicit = output(&format!("package outer\npackage inner\n{declarations}"));
@@ -239,58 +362,60 @@ fn scala_nonleading_unbraced_package_never_claims_following_declarations() {
 
 #[test]
 fn scala_package_ownership_replays_exactly_with_retained_generation_evidence() {
-    let provider = Arc::new(provider());
-    let analyzer = analyzer(&provider, SCALA);
-    let fixture = Fixture::new(
-        SCALA,
-        b"package outer\npackage inner\nobject Store { def read(value: Int) = value }",
-    );
-    let initial_limits = limits();
-    let initial_request = request(&fixture.snapshot, &fixture.source, SCALA, &initial_limits);
-    let (initial, artifact) = analyzer
-        .analyze_and_capture(
-            &initial_request,
-            ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-            &deadline(),
-        )
-        .unwrap();
-    let successor = fixture.next_generation();
-    let reduced_limits =
-        limits_with_syntax_records(artifact.syntax_fact_count().checked_add(1).unwrap());
-    let successor_request = request(
-        &successor.snapshot,
-        &successor.source,
-        SCALA,
-        &reduced_limits,
-    );
-    let reused = analyzer
-        .analyze_from_artifact(
-            &successor_request,
-            &artifact,
-            ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-            &deadline(),
-        )
-        .unwrap();
-    let fresh = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
-    assert_eq!(reused.document(), fresh.document());
-    assert_eq!(reused.report(), fresh.report());
-    let identities = |result: &AnalysisOutput| {
-        result
-            .document()
-            .entities
-            .iter()
-            .map(|e| (e.id, e.container))
-            .collect::<BTreeMap<_, _>>()
-    };
-    assert_eq!(identities(&initial), identities(&reused));
-    assert!(reused.document().entities.iter().all(|e| {
-        e.evidence
-            .source
-            .as_ref()
-            .is_some_and(|r| r.generation() == successor.source.generation())
-    }));
+    for source in [
+        "package outer\npackage inner\nobject Store { def read(value: Int) = value }",
+        "package outer\npackage object utility { def read(value: Int) = value }",
+    ] {
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, SCALA);
+        let fixture = Fixture::new(SCALA, source.as_bytes());
+        let initial_limits = limits();
+        let initial_request = request(&fixture.snapshot, &fixture.source, SCALA, &initial_limits);
+        let (initial, artifact) = analyzer
+            .analyze_and_capture(
+                &initial_request,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let successor = fixture.next_generation();
+        let reduced_limits =
+            limits_with_syntax_records(artifact.syntax_fact_count().checked_add(1).unwrap());
+        let successor_request = request(
+            &successor.snapshot,
+            &successor.source,
+            SCALA,
+            &reduced_limits,
+        );
+        let reused = analyzer
+            .analyze_from_artifact(
+                &successor_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let fresh = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
+        assert_eq!(reused.document(), fresh.document());
+        assert_eq!(reused.report(), fresh.report());
+        let identities = |result: &AnalysisOutput| {
+            result
+                .document()
+                .entities
+                .iter()
+                .map(|e| (e.id, e.container))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(identities(&initial), identities(&reused));
+        assert!(reused.document().entities.iter().all(|e| {
+            e.evidence
+                .source
+                .as_ref()
+                .is_some_and(|r| r.generation() == successor.source.generation())
+        }));
+    }
 }
 
 #[test]

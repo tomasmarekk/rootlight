@@ -2,6 +2,7 @@
 ; Anonymous contexts retain lexical ownership without claiming implicit or JVM resolution.
 (compilation_unit) @root @module
 (package_clause name: (_) @definition) @declaration @scope
+(package_object name: (_) @definition) @declaration @scope @signature
 (class_definition name: (_) @definition) @declaration @scope @signature
 (object_definition name: (_) @definition) @declaration @scope @signature
 (trait_definition name: (_) @definition) @declaration @scope @signature

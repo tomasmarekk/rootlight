@@ -19,7 +19,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
-                "scala.object.declaration" | "scala.package.declaration"
+                "scala.object.declaration"
+                    | "scala.package.declaration"
+                    | "scala.package_object.declaration"
             ) =>
         {
             Some(EntityKind::Namespace)
