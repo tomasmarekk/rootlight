@@ -27,6 +27,169 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn r_anonymous_functions_own_parameters_and_nested_callables_without_invented_definitions() {
+    let source = "outer <- function(root) { lapply(root, function(value) { function(inner) inner + value }) }\n";
+    let result = output(source);
+    let document = result.document();
+    let functions: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(
+        functions.len(),
+        3,
+        "anonymous callables must have source-backed owners"
+    );
+    for (parameter_name, function_source) in [
+        ("root", source.trim()),
+        ("value", "function(value) { function(inner) inner + value }"),
+        ("inner", "function(inner) inner + value"),
+    ] {
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == parameter_name)
+            .unwrap();
+        let owner = functions
+            .iter()
+            .find(|entity| {
+                parameter.container == Some(rootlight_ir::ContainerRef::Entity(entity.id))
+            })
+            .unwrap();
+        let span = owner.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(function_source)
+        );
+        if parameter_name != "root" {
+            assert!(owner.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            assert!(
+                !document
+                    .occurrences
+                    .iter()
+                    .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: owner.id })
+            );
+        }
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(owner.id)
+                    && relation.object == RelationEndpoint::Entity(parameter.id))
+        );
+    }
+}
+
+#[test]
+fn r_anonymous_callable_headers_and_owners_cover_expression_positions() {
+    for (source, header, callable) in [
+        ("function() 1", "function()", "function() 1"),
+        (
+            "(function(value) value)(1)",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "list(function(value) value)",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "object$member <- function(value) value",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "object[[1]] <- function(value) value",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "assign('runtime', function(value) value)",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "outer <- function(callback = function(value) value) callback",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "outer <- function() function(value) value",
+            "function(value)",
+            "function(value) value",
+        ),
+        (
+            "lapply(values, \\(value) value)",
+            "\\(value)",
+            "\\(value) value",
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        let anonymous: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Function
+                    && entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+            })
+            .collect();
+        assert_eq!(anonymous.len(), 1, "{source}: {:?}", document.entities);
+        let entity = anonymous[0];
+        let span = entity.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(callable)
+        );
+        let signatures: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                if lexical.kind() != rootlight_ir::LexicalEvidenceKind::Signature
+                    || lexical.subject() != rootlight_ir::FactRef::Entity(entity.id)
+                {
+                    return None;
+                }
+                let span = extension.evidence.source.as_ref().unwrap().span();
+                assert_eq!(
+                    source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap()
+                    ),
+                    Some(lexical.text())
+                );
+                Some(lexical.text().to_owned())
+            })
+            .collect();
+        assert_eq!(signatures, [header], "{source}");
+        if header.contains("value") {
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "value")
+                .unwrap();
+            assert_eq!(
+                parameter.container,
+                Some(rootlight_ir::ContainerRef::Entity(entity.id)),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
 fn r_equivalent_written_function_names_preserve_identity_and_original_source() {
     let mut identity = None;
     for name in [
@@ -288,7 +451,7 @@ fn r_source_identity_is_stable_across_body_trivia_and_unrelated_name_edits() {
             })
             .collect::<BTreeMap<_, _>>()
     };
-    assert_eq!(identities(&original).len(), 7);
+    assert_eq!(identities(&original).len(), 9);
     for changed in [
         source.to_owned(),
         format!("\n# moved source\n{source}"),

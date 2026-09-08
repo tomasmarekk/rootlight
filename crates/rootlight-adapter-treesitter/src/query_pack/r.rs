@@ -5,15 +5,35 @@ use tree_sitter::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Declaration<'tree> {
-    pub(super) name: Node<'tree>,
+    pub(super) name: Option<Node<'tree>>,
     pub(super) syntax: &'static str,
     pub(super) function: Option<Node<'tree>>,
 }
 
 pub(super) fn declaration<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Declaration<'tree>> {
+    if node.kind() == "function_definition" {
+        let mut parent = node.parent();
+        while parent.is_some_and(|parent| parent.kind() == "parenthesized_expression") {
+            parent = parent.and_then(|parent| parent.parent());
+        }
+        // A direct assignment already owns this callable. Other expressions,
+        // including replacement writes, must retain an unnamed source owner.
+        if parent
+            .filter(|parent| parent.kind() == "binary_operator")
+            .and_then(|parent| declaration(parent, source))
+            .is_some_and(|binding| binding.function == Some(node))
+        {
+            return None;
+        }
+        return Some(Declaration {
+            name: None,
+            syntax: "r.anonymous_function",
+            function: Some(node),
+        });
+    }
     if node.kind() == "parameter" {
         return Some(Declaration {
-            name: node.child_by_field_name("name")?,
+            name: Some(node.child_by_field_name("name")?),
             syntax: "r.parameter",
             function: None,
         });
@@ -22,7 +42,7 @@ pub(super) fn declaration<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Dec
         parent.kind() == "for_statement" && parent.child_by_field_name("variable") == Some(node)
     }) {
         return Some(Declaration {
-            name: node,
+            name: Some(node),
             syntax: "r.variable",
             function: None,
         });
@@ -59,7 +79,7 @@ pub(super) fn declaration<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Dec
         (false, true) => "r.nonlocal_variable",
     };
     Some(Declaration {
-        name,
+        name: Some(name),
         syntax,
         function,
     })
@@ -77,7 +97,7 @@ pub(super) fn is_nonlexical_name(node: Node<'_>, source: &[u8]) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    if declaration(parent, source).is_some_and(|binding| binding.name == node)
+    if declaration(parent, source).is_some_and(|binding| binding.name == Some(node))
         || declaration(node, source).is_some()
     {
         return true;

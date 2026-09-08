@@ -207,7 +207,11 @@ fn r_source_owners_cross_process_boundaries_without_claiming_runtime_bindings() 
         "identity <- function(value) { value }\nidentity <- function(value) { value + 1 }\nlapply(values, function(value) value)\n",
         // The public retrieval taxonomy groups IR parameters under `variable`.
         // The durable service test separately asserts their exact Parameter kind.
-        &[("identity", "function", 2), ("value", "variable", 3)],
+        &[
+            ("identity", "function", 2),
+            ("<anonymous>", "function", 1),
+            ("value", "variable", 3),
+        ],
     );
 }
 

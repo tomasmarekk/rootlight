@@ -1,7 +1,7 @@
 ; R source candidates use AST ownership, not runtime evaluation or package loading.
 ; Native selectors separate simple assignment names from replacement expressions.
 (program) @root @module
-(function_definition) @scope
+(function_definition) @scope @declaration @signature
 (binary_operator operator: ["<-" "=" "->" "<<-" "->>"]) @declaration @definition @signature
 (parameter) @declaration @definition
 (for_statement variable: (_) @declaration @definition)

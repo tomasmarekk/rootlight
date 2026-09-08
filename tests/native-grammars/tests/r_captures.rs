@@ -46,7 +46,10 @@ fn captures(source: &str, role: &str) -> Vec<Capture> {
                     };
                     syntax = binding.syntax;
                     if role == "definition" {
-                        binding.name.byte_range()
+                        let Some(name) = binding.name else {
+                            continue;
+                        };
+                        name.byte_range()
                     } else {
                         node.byte_range()
                     }
@@ -117,8 +120,60 @@ fn r_assignments_capture_both_directions_and_mark_nonlocal_writes() {
                 }]
             );
         } else {
-            assert!(texts(source, "signature").is_empty());
+            assert_eq!(
+                texts(source, "signature"),
+                if source.starts_with("function") {
+                    vec!["function(x)"]
+                } else {
+                    vec![]
+                }
+            );
         }
+    }
+}
+
+#[test]
+fn r_anonymous_callables_are_captured_once_without_a_written_binding() {
+    for source in [
+        "lapply(values, function(value) value)",
+        "object$member <- function(value) value",
+        "object[[1]] <- function(value) value",
+        "assign('runtime', function(value) value)",
+        "outer <- function(callback = function(value) value) callback",
+        "outer <- function() function(value) value",
+    ] {
+        let declarations = captures(source, "declaration");
+        let anonymous: Vec<_> = declarations
+            .iter()
+            .filter(|capture| capture.syntax == "r.anonymous_function")
+            .collect();
+        assert_eq!(anonymous.len(), 1, "{source}");
+        assert_eq!(anonymous[0].text, "function(value) value");
+        assert!(
+            !captures(source, "definition")
+                .iter()
+                .any(|capture| capture.syntax == "r.anonymous_function")
+        );
+        assert_eq!(
+            texts(source, "signature")
+                .iter()
+                .filter(|text| *text == "function(value)")
+                .count(),
+            1
+        );
+    }
+    for source in [
+        "named <- function(value) value",
+        "named <- ((function(value) value))",
+        "((function(value) value)) -> named",
+        "named <<- function(value) value",
+    ] {
+        assert!(
+            !captures(source, "declaration")
+                .iter()
+                .any(|capture| capture.syntax == "r.anonymous_function"),
+            "{source}"
+        );
     }
 }
 

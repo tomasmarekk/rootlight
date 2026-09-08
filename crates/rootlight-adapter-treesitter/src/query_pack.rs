@@ -570,7 +570,10 @@ impl QueryPack {
                             continue;
                         }
                         if role == StructuralRole::Definition {
-                            capture.node = binding.name;
+                            let Some(name) = binding.name else {
+                                continue;
+                            };
+                            capture.node = name;
                         }
                     } else if role == StructuralRole::Reference
                         && r::is_nonlexical_name(capture.node, input.source)

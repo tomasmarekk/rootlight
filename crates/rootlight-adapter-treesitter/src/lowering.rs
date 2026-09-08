@@ -1950,6 +1950,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if is_explicit_file_module(fact, self.request.language().as_str()) {
                 let name = self.request.source().path().as_str();
                 (std::borrow::Cow::Borrowed(name), None)
+            } else if fact.syntax_kind().as_str() == "r.anonymous_function.declaration" {
+                // This label is synthetic, not a written binding. The native
+                // callable span and scope identity retain its source ownership.
+                (std::borrow::Cow::Borrowed("<anonymous>"), None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
