@@ -8,6 +8,8 @@ use std::{
     sync::Arc,
 };
 
+mod dart;
+
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch,
     IrBatchSink, IrRecord, LanguageId, MemoryAdmissionPolicy, MemoryEnforcement, ParseProvider,
@@ -88,6 +90,8 @@ pub enum SemanticProjectLanguage {
     Php,
     /// C translation units, declarations, linkage, and calls.
     C,
+    /// Dart declarations and direct library imports with scoped name filters.
+    Dart,
 }
 
 impl SemanticProjectLanguage {
@@ -115,6 +119,7 @@ impl SemanticProjectLanguage {
             Self::CSharp => "csharp",
             Self::Php => "php",
             Self::C => "c",
+            Self::Dart => "dart",
         }
     }
 
@@ -123,7 +128,7 @@ impl SemanticProjectLanguage {
             Self::Rust | Self::Go | Self::Java | Self::Cpp | Self::CSharp | Self::Php | Self::C => {
                 STATIC_CALL_CONFIDENCE
             }
-            Self::TypeScript => TYPESCRIPT_CALL_CONFIDENCE,
+            Self::TypeScript | Self::Dart => TYPESCRIPT_CALL_CONFIDENCE,
             Self::JavaScript | Self::Python => DYNAMIC_CALL_CONFIDENCE,
         }
     }
@@ -664,9 +669,10 @@ fn preferred_domain_syntax_fact_groups(
         .flat_map(|(_, bindings)| bindings)
         .filter_map(|binding| match binding {
             ImportBinding::Namespace { local } => Some(local),
-            ImportBinding::Named { .. } | ImportBinding::Wildcard | ImportBinding::SideEffect => {
-                None
-            }
+            ImportBinding::Named { .. }
+            | ImportBinding::Wildcard
+            | ImportBinding::SideEffect
+            | ImportBinding::Dart(_) => None,
         })
         .collect::<BTreeSet<_>>();
     if gin_aliases.is_empty() {
@@ -1078,8 +1084,14 @@ fn imported_call_syntax_fact_groups(
         .filter(|fact| !declared_calls.contains(&fact.local_id()))
         .filter_map(|call| {
             let name = retained_call_name(source, call, call_names, facts_by_id)?;
-            let receiver =
-                source_text(source, call.span()).and_then(|text| call_receiver(text, name));
+            let (name, receiver) = if language == SemanticProjectLanguage::Dart {
+                dart::call_name(name)?
+            } else {
+                (
+                    name,
+                    source_text(source, call.span()).and_then(|text| call_receiver(text, name)),
+                )
+            };
             Some((
                 call.local_id(),
                 name.to_owned(),
@@ -1116,10 +1128,16 @@ fn imported_call_syntax_fact_groups(
                         ImportBinding::Wildcard if receiver.is_none() => {
                             ImportedCallBinding::Wildcard(call_name.clone())
                         }
+                        ImportBinding::Dart(namespace)
+                            if namespace.admits(receiver.as_deref(), call_name) =>
+                        {
+                            ImportedCallBinding::Wildcard(call_name.clone())
+                        }
                         ImportBinding::Named { .. }
                         | ImportBinding::Namespace { .. }
                         | ImportBinding::Wildcard
-                        | ImportBinding::SideEffect => continue,
+                        | ImportBinding::SideEffect
+                        | ImportBinding::Dart(_) => continue,
                     };
                     let owner = facts_by_id.get(call_id).and_then(|call| {
                         enclosing_callable_declaration(call, facts_by_id, &declaration_kinds)
@@ -1480,6 +1498,7 @@ enum ImportBinding {
     Namespace { local: String },
     Wildcard,
     SideEffect,
+    Dart(dart::ImportNamespace),
 }
 
 #[derive(Debug, Clone)]
@@ -1712,6 +1731,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     domain_counts,
                 },
             );
+            if self.analyzer.language == SemanticProjectLanguage::Dart {
+                self.push_dart_gap(
+                    input,
+                    source.span(),
+                    "dart-project-inheritance-extension-dispatch-unavailable",
+                )?;
+            }
         }
         Ok(())
     }
@@ -1995,12 +2021,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         signature_captures
                             .get(&declaration.local_id())
                             .and_then(|captures| select_unique_syntax_fact(captures))
-                            .and_then(|signature| source_text(bytes, signature.span()))
                             .and_then(|signature| {
-                                canonical_symbol_signature(
-                                    signature,
-                                    self.request.limits().ir().max_string_bytes,
-                                )
+                                let text = source_text(bytes, signature.span())?;
+                                let maximum = self.request.limits().ir().max_string_bytes;
+                                if kind == EntityKind::Constructor
+                                    && self.analyzer.language == SemanticProjectLanguage::Dart
+                                {
+                                    rootlight_adapter_sdk::canonical_dart_constructor_signature(
+                                        text,
+                                        signature.span(),
+                                        definition.span(),
+                                        name,
+                                        maximum,
+                                    )
+                                } else {
+                                    canonical_symbol_signature(text, maximum)
+                                }
                             })
                             .unwrap_or_default()
                     } else {
@@ -2061,7 +2097,17 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         let Some(text) = source_text(bytes, fact.span()) else {
                             continue;
                         };
-                        for import in parse_import(self.analyzer.language, text) {
+                        let imports = parse_import(self.analyzer.language, text);
+                        if self.analyzer.language == SemanticProjectLanguage::Dart
+                            && imports.is_empty()
+                        {
+                            self.push_dart_gap(
+                                input,
+                                fact.span(),
+                                "dart-library-directive-resolution-unavailable",
+                            )?;
+                        }
+                        for import in imports {
                             self.imports.push(ImportDraft {
                                 file: fact.span().file(),
                                 span: fact.span(),
@@ -2086,9 +2132,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         let parsed_name = if call {
                             terminal_name
                                 .and_then(|name| {
-                                    is_identifier(name).then(|| ParsedOccurrenceName {
-                                        name,
-                                        qualifier: call_receiver(observed_text, name),
+                                    let parsed = if self.analyzer.language
+                                        == SemanticProjectLanguage::Dart
+                                    {
+                                        dart::call_name(name).map(|(name, qualifier)| {
+                                            ParsedOccurrenceName { name, qualifier }
+                                        })
+                                    } else {
+                                        occurrence_name(name, true)
+                                    };
+                                    parsed.map(|parsed| ParsedOccurrenceName {
+                                        name: parsed.name,
+                                        qualifier: parsed
+                                            .qualifier
+                                            .or_else(|| call_receiver(observed_text, parsed.name)),
                                     })
                                 })
                                 .or_else(|| occurrence_name(observed_text, true))
@@ -2446,6 +2503,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .get(&(import.file, import.module.clone()))
                 .cloned()
                 .unwrap_or_default();
+            if targets.is_empty() && self.analyzer.language == SemanticProjectLanguage::Dart {
+                let input = self.input_for_file(import.file)?;
+                self.push_dart_gap(input, import.span, "dart-library-uri-target-unavailable")?;
+            }
             for target_file in targets {
                 let Some(target_module) = self.module_by_file.get(&target_file).copied() else {
                     continue;
@@ -2494,7 +2555,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 ImportBinding::Namespace { local } => Some(local.as_str()),
                 ImportBinding::Named { .. }
                 | ImportBinding::Wildcard
-                | ImportBinding::SideEffect => None,
+                | ImportBinding::SideEffect
+                | ImportBinding::Dart(_) => None,
             })
             .collect::<BTreeSet<_>>();
         if gin_aliases.is_empty() {
@@ -3088,7 +3150,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .ok_or_else(|| provider_failure("project-provenance"))
     }
 
-    fn input_for_file(&self, file: FileId) -> Result<&ProjectSourceInput<'source>, AdapterError> {
+    fn input_for_file(
+        &self,
+        file: FileId,
+    ) -> Result<&'request ProjectSourceInput<'source>, AdapterError> {
         self.request
             .inputs()
             .iter()
@@ -3135,6 +3200,79 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         index
     }
 
+    fn resolve_dart_occurrence(
+        &self,
+        occurrence: &OccurrenceDraft,
+        definitions: &BTreeMap<String, Vec<SemanticEntity>>,
+        import_targets: &BTreeMap<(FileId, String), Vec<FileId>>,
+    ) -> ResolutionCandidates {
+        let mut symbols = BTreeSet::new();
+        let candidates = definitions.get(&occurrence.name).into_iter().flatten();
+        if occurrence.qualifier.is_none() {
+            symbols.extend(
+                candidates
+                    .clone()
+                    .filter(|entity| {
+                        entity.file == occurrence.file && entity.declaring_type.is_none()
+                    })
+                    .map(|entity| entity.symbol),
+            );
+            // A declaration shadows imports. Until lexical receiver inference is
+            // available, nested same-name declarations must not produce a false
+            // high-confidence binding to an imported function.
+            let nested_shadow = candidates
+                .clone()
+                .any(|entity| entity.file == occurrence.file && entity.declaring_type.is_some());
+            if nested_shadow || !symbols.is_empty() {
+                if nested_shadow {
+                    symbols.clear();
+                }
+                return ResolutionCandidates {
+                    symbols: symbols.into_iter().collect(),
+                    kind: ResolutionKind::Binding,
+                };
+            }
+        } else if occurrence.qualifier.as_ref().is_some_and(|qualifier| {
+            definitions
+                .get(qualifier)
+                .into_iter()
+                .flatten()
+                .any(|entity| entity.file == occurrence.file)
+        }) {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        for import in self
+            .imports
+            .iter()
+            .filter(|import| import.file == occurrence.file)
+        {
+            if !import.bindings.iter().any(|binding| matches!(binding,
+                ImportBinding::Dart(namespace) if namespace.admits(occurrence.qualifier.as_deref(), &occurrence.name))) {
+                continue;
+            }
+            let Some(targets) = import_targets.get(&(import.file, import.module.clone())) else {
+                continue;
+            };
+            symbols.extend(
+                candidates
+                    .clone()
+                    .filter(|entity| {
+                        targets.contains(&entity.file)
+                            && entity.declaring_type.is_none()
+                            && entity.visibility == EntityVisibility::Public
+                    })
+                    .map(|entity| entity.symbol),
+            );
+        }
+        ResolutionCandidates {
+            symbols: symbols.into_iter().collect(),
+            kind: ResolutionKind::Binding,
+        }
+    }
+
     fn resolve_occurrence(
         &self,
         occurrence: &OccurrenceDraft,
@@ -3158,6 +3296,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .collect(),
                 kind: ResolutionKind::Binding,
             };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Dart {
+            return self.resolve_dart_occurrence(occurrence, definitions, import_targets);
         }
         if let Some(resolution) = self.resolve_reviewed_static_call(occurrence, definitions) {
             return resolution;
@@ -3306,7 +3447,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     ImportBinding::Wildcard => Some(occurrence.name.as_str()),
                     ImportBinding::Named { .. }
                     | ImportBinding::Namespace { .. }
-                    | ImportBinding::SideEffect => None,
+                    | ImportBinding::SideEffect
+                    | ImportBinding::Dart(_) => None,
                 })
                 .collect::<BTreeSet<_>>();
             let target_files = import_targets
@@ -3432,7 +3574,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 | SemanticProjectLanguage::TypeScript
                 | SemanticProjectLanguage::JavaScript
                 | SemanticProjectLanguage::Python
-                | SemanticProjectLanguage::Go => false,
+                | SemanticProjectLanguage::Go
+                | SemanticProjectLanguage::Dart => false,
             })
             .collect::<Vec<_>>();
         let mut symbols = receiver_candidates
@@ -3648,6 +3791,36 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         Ok(())
     }
 
+    fn push_dart_gap(
+        &mut self,
+        input: &ProjectSourceInput<'_>,
+        span: SourceSpan,
+        detail: &str,
+    ) -> Result<(), AdapterError> {
+        let source = source_for_span(input, span);
+        let mut record = SkippedRegion {
+            id: FactId::from_bytes([0; 20]),
+            repository: source.repository(),
+            generation: source.generation(),
+            source: source.clone(),
+            domain: FactDomain::Relations,
+            reason: SkippedRegionReason::UnsupportedConstruct,
+            detail: detail.to_owned(),
+            provenance: self.provenance_for(input)?,
+            evidence: direct_evidence(source),
+        };
+        record.id = derive_skipped_region_id(&record)
+            .map_err(|_| provider_failure("project-skip-identity"))?;
+        self.records.push(IrRecord::SkippedRegion(record));
+        let state = self.state_mut(input)?;
+        state.status = merge_status(state.status, CoverageStatus::Bounded);
+        state.skipped_regions = state
+            .skipped_regions
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("project-accounting"))?;
+        state.increment(FactDomain::Diagnostics)
+    }
+
     fn push_skipped_region(
         &mut self,
         input: &ProjectSourceInput<'_>,
@@ -3761,6 +3934,13 @@ fn infer_visibility(
                 EntityVisibility::Private
             } else {
                 EntityVisibility::Unknown
+            }
+        }
+        SemanticProjectLanguage::Dart => {
+            if name.starts_with('_') {
+                EntityVisibility::Private
+            } else {
+                EntityVisibility::Public
             }
         }
         SemanticProjectLanguage::Go => {
@@ -3886,7 +4066,8 @@ fn positive_test_declarations(
         | SemanticProjectLanguage::Go
         | SemanticProjectLanguage::CSharp
         | SemanticProjectLanguage::Php
-        | SemanticProjectLanguage::C => BTreeSet::new(),
+        | SemanticProjectLanguage::C
+        | SemanticProjectLanguage::Dart => BTreeSet::new(),
     }
 }
 
@@ -3984,7 +4165,8 @@ fn declaration_is_test(language: SemanticProjectLanguage, path: &str, name: &str
             | SemanticProjectLanguage::Cpp
             | SemanticProjectLanguage::CSharp
             | SemanticProjectLanguage::Php
-            | SemanticProjectLanguage::C => false,
+            | SemanticProjectLanguage::C
+            | SemanticProjectLanguage::Dart => false,
         }
 }
 
@@ -4513,6 +4695,7 @@ const fn uses_explicit_file_module(language: SemanticProjectLanguage) -> bool {
         SemanticProjectLanguage::TypeScript
             | SemanticProjectLanguage::JavaScript
             | SemanticProjectLanguage::Python
+            | SemanticProjectLanguage::Dart
     )
 }
 
@@ -4527,6 +4710,10 @@ fn parse_import(
         }
         SemanticProjectLanguage::Python => parse_python_imports(text),
         SemanticProjectLanguage::Go => parse_go_imports(text),
+        SemanticProjectLanguage::Dart => dart::parse_import(text)
+            .map(|(uri, namespace)| (uri, vec![ImportBinding::Dart(namespace)]))
+            .into_iter()
+            .collect(),
         SemanticProjectLanguage::Java
         | SemanticProjectLanguage::Cpp
         | SemanticProjectLanguage::CSharp
@@ -4851,6 +5038,8 @@ fn module_matches(
 ) -> bool {
     let candidate_no_extension = strip_extension(candidate_path);
     match language {
+        SemanticProjectLanguage::Dart => dart::relative_uri(current_path, module)
+            .is_some_and(|resolved| resolved == candidate_path),
         SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript => {
             let resolved = resolve_relative_module(current_path, module);
             candidate_no_extension == resolved
@@ -4964,7 +5153,9 @@ fn inheritance_names(
                 ))
                 .collect()
         }
-        SemanticProjectLanguage::Rust | SemanticProjectLanguage::C => Vec::new(),
+        SemanticProjectLanguage::Rust
+        | SemanticProjectLanguage::C
+        | SemanticProjectLanguage::Dart => Vec::new(),
     }
 }
 

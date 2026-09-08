@@ -875,6 +875,7 @@ fn semantic_language(value: &str) -> Result<SemanticProjectLanguage, AdapterHost
         "csharp" => Ok(SemanticProjectLanguage::CSharp),
         "php" => Ok(SemanticProjectLanguage::Php),
         "c" => Ok(SemanticProjectLanguage::C),
+        "dart" => Ok(SemanticProjectLanguage::Dart),
         _ => Err(AdapterHostError::ProjectRequest),
     }
 }
@@ -1148,6 +1149,7 @@ mod tests {
             ("csharp", SemanticProjectLanguage::CSharp),
             ("php", SemanticProjectLanguage::Php),
             ("c", SemanticProjectLanguage::C),
+            ("dart", SemanticProjectLanguage::Dart),
         ] {
             assert_eq!(
                 semantic_language(label).expect("reviewed project language is supported"),

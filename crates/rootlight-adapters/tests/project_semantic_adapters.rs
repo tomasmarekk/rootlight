@@ -38,6 +38,9 @@ use rootlight_ir::{
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
 
+#[path = "project_semantic_adapters/dart.rs"]
+mod dart;
+
 #[test]
 fn every_language_emits_complete_tier_b_project_semantics() {
     for case in language_cases() {
@@ -3153,7 +3156,7 @@ impl ProjectFixture {
         tier: AnalysisTier,
     ) -> ProjectAnalysisRequest<'a> {
         let manifest = b"{\"target\":\"fixture\"}";
-        let inputs = self
+        let mut inputs: Vec<_> = self
             .snapshots
             .iter()
             .zip(&self.sources)
@@ -3167,6 +3170,12 @@ impl ProjectFixture {
                 )
             })
             .collect();
+        inputs.sort_by(|left, right| {
+            left.source()
+                .path()
+                .identity_bytes()
+                .cmp(right.source().path().identity_bytes())
+        });
         ProjectAnalysisRequest::new(
             AnalysisUnitId::new("fixture.project").expect("unit is valid"),
             BuildTargetId::new("//fixture:project").expect("target is valid"),

@@ -41,6 +41,90 @@ use rootlight_protocol::{
 use rootlight_vfs::RelativePath;
 
 #[test]
+fn actual_isolated_dart_imports_preserve_library_identity_and_coverage() {
+    let executable = adapter_executable();
+    let session = negotiated_session(&executable, resource_limits(8 * 1024 * 1024));
+    let source = b"import 'library.dart' as api show selected;\nvoid start() { api.selected(); api.hidden(); }\n";
+    let request = project_request(
+        &session,
+        "dart",
+        &[
+            ("entry.dart", source.as_slice(), false, Vec::new()),
+            (
+                "library.dart",
+                b"void selected() {}\nvoid hidden() {}\n",
+                false,
+                Vec::new(),
+            ),
+            ("unrelated.dart", b"void selected() {}\n", false, Vec::new()),
+        ],
+    );
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("isolated Dart project succeeds");
+    assert!(output.isolation().permits_deep_adapter());
+    let document = output.document();
+    assert_eq!(document.files.len(), 3);
+    let library = document
+        .files
+        .iter()
+        .find(|file| file.path == "library.dart")
+        .unwrap();
+    let selected = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "selected"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == library.id)
+        })
+        .unwrap();
+    let calls = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        let span = call.source.span();
+        let written = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        match written {
+            b"api.selected()" => assert_eq!(
+                call.target,
+                OccurrenceTarget::Resolved {
+                    symbol: selected.id
+                }
+            ),
+            b"api.hidden()" => assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. })),
+            _ => panic!("unexpected call evidence"),
+        }
+        assert_eq!(call.source.content_hash(), content_hash(source));
+    }
+    assert!(
+        document
+            .coverage_records
+            .iter()
+            .any(|coverage| coverage.domain == FactDomain::Relations
+                && coverage.status == CoverageStatus::Bounded)
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|region| region.reason == rootlight_ir::SkippedRegionReason::UnsupportedConstruct)
+    );
+}
+
+#[test]
 fn actual_isolated_binary_returns_multifile_tier_b() {
     let executable = adapter_executable();
     let limits = resource_limits(8 * 1024 * 1024);

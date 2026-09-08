@@ -1558,8 +1558,8 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".dart"],
         aliases: &[],
         detectors: &["extension"],
-        maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
         language: "go",

@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/37";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/38";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -228,7 +228,7 @@ const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
 // additional fallback grammars that must not be advertised for the host.
-const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 10] = [
+const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 11] = [
     SemanticProjectLanguage::Rust,
     SemanticProjectLanguage::TypeScript,
     SemanticProjectLanguage::JavaScript,
@@ -239,6 +239,7 @@ const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 10] = [
     SemanticProjectLanguage::CSharp,
     SemanticProjectLanguage::Php,
     SemanticProjectLanguage::C,
+    SemanticProjectLanguage::Dart,
 ];
 
 fn project_adapter_supports_language(language: &str) -> bool {
@@ -13370,6 +13371,8 @@ pub enum FirstSliceProjectCoverageLanguage {
     Php,
     /// C project analysis.
     C,
+    /// Dart project analysis.
+    Dart,
 }
 
 impl FirstSliceProjectCoverageLanguage {
@@ -13385,6 +13388,7 @@ impl FirstSliceProjectCoverageLanguage {
             b"csharp" => Some(Self::CSharp),
             b"php" => Some(Self::Php),
             b"c" => Some(Self::C),
+            b"dart" => Some(Self::Dart),
             _ => None,
         }
     }
@@ -13403,6 +13407,7 @@ impl FirstSliceProjectCoverageLanguage {
             Self::CSharp => "csharp",
             Self::Php => "php",
             Self::C => "c",
+            Self::Dart => "dart",
         }
     }
 }
@@ -34020,6 +34025,7 @@ mod tests {
                 "csharp",
                 "php",
                 "c",
+                "dart",
             ]
         );
         for language in &project.languages {

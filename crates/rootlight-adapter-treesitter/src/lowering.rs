@@ -2102,7 +2102,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && self.request.language().as_str() == "dart"
                     && let Some(definition) = definition
                 {
-                    canonical_constructor_signature(
+                    rootlight_adapter_sdk::canonical_dart_constructor_signature(
                         text,
                         signature.span(),
                         definition.span(),
@@ -3576,43 +3576,6 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
                 && candidate.syntax_kind().as_str() == selected.syntax_kind().as_str()
         })
         .then_some(selected)
-}
-
-fn canonical_constructor_signature(
-    text: &str,
-    signature: SourceSpan,
-    definition: SourceSpan,
-    name: &str,
-    maximum: usize,
-) -> Option<String> {
-    if text.len() > maximum || text.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
-        return None;
-    }
-    let start = usize::try_from(
-        definition
-            .start_byte()
-            .checked_sub(signature.start_byte())?,
-    )
-    .ok()?;
-    let end = usize::try_from(definition.end_byte().checked_sub(signature.start_byte())?).ok()?;
-    let prefix = text.get(..start)?;
-    let suffix = text.get(end..)?;
-    let length = prefix
-        .len()
-        .checked_add(name.len())?
-        .checked_add(suffix.len())?;
-    if length > maximum || length > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
-        return None;
-    }
-    // Qualified constructor trivia is not part of overload identity. Replace
-    // only the AST-backed name range before shared signature normalization;
-    // retain the original lexical header separately for exact source evidence.
-    let mut normalized = String::new();
-    normalized.try_reserve_exact(length).ok()?;
-    normalized.push_str(prefix);
-    normalized.push_str(name);
-    normalized.push_str(suffix);
-    canonical_symbol_signature(&normalized, maximum)
 }
 
 const fn supports_signature(kind: EntityKind) -> bool {

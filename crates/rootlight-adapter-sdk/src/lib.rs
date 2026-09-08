@@ -23,6 +23,7 @@ pub mod testkit;
 mod toml_names;
 mod yaml_names;
 
+pub use dart_names::canonical_dart_constructor_signature;
 pub use descriptor::{
     EncodingId, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
     ParseCapabilities, ProducerDescriptor,

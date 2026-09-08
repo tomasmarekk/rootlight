@@ -6,6 +6,53 @@ use std::borrow::Cow;
 
 use crate::structural_captured_name;
 
+/// Canonicalizes a Dart constructor signature using its reviewed name capture.
+///
+/// `text` is the exact signature source; `definition` selects its constructor
+/// name and `name` is that capture's canonical spelling. Both spans must belong
+/// to the same file. The original source remains unchanged for lexical evidence.
+/// Invalid spans, byte budgets, UTF-8 boundaries or allocation failures return
+/// `None`; name trivia is excluded without erasing parameter distinctions.
+pub fn canonical_dart_constructor_signature(
+    text: &str,
+    signature: rootlight_ir::SourceSpan,
+    definition: rootlight_ir::SourceSpan,
+    name: &str,
+    maximum: usize,
+) -> Option<String> {
+    if signature.file() != definition.file() || definition.end_byte() > signature.end_byte() {
+        return None;
+    }
+    if text.len() > maximum || text.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+        return None;
+    }
+    let start = usize::try_from(
+        definition
+            .start_byte()
+            .checked_sub(signature.start_byte())?,
+    )
+    .ok()?;
+    let end = usize::try_from(definition.end_byte().checked_sub(signature.start_byte())?).ok()?;
+    let prefix = text.get(..start)?;
+    let suffix = text.get(end..)?;
+    let length = prefix
+        .len()
+        .checked_add(name.len())?
+        .checked_add(suffix.len())?;
+    if length > maximum || length > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+        return None;
+    }
+    // Qualified constructor trivia is not part of overload identity. Replace
+    // only the AST-backed name range before shared signature normalization;
+    // retain the original lexical header separately for exact source evidence.
+    let mut normalized = String::new();
+    normalized.try_reserve_exact(length).ok()?;
+    normalized.push_str(prefix);
+    normalized.push_str(name);
+    normalized.push_str(suffix);
+    rootlight_ir::canonical_symbol_signature(&normalized, maximum)
+}
+
 /// Removes qualified-name trivia within the source and output byte budget.
 ///
 /// Compact captures borrow their input. Invalid component boundaries, unfinished
