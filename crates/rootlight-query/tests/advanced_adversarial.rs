@@ -138,6 +138,9 @@ fn entity_kind() -> impl Strategy<Value = AdvancedEntityKind> {
         AdvancedEntityKind::MarkupElement,
         AdvancedEntityKind::MarkupAttribute,
         AdvancedEntityKind::DatabaseObject,
+        AdvancedEntityKind::Event,
+        AdvancedEntityKind::ErrorDeclaration,
+        AdvancedEntityKind::Modifier,
     ])
 }
 

@@ -98,6 +98,14 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, watch};
 
 use super::*;
+
+#[test]
+fn source_declaration_kinds_preserve_their_exact_public_labels() {
+    for label in ["event", "error_declaration", "modifier"] {
+        let kind = entity_kind(label).expect("source declaration maps without coercion");
+        assert_eq!(serde_json::to_value(kind).unwrap(), label);
+    }
+}
 use crate::{
     HandlerResponse, OperatingRequest, RequestHandler, RequestId, ToolExecutor, ToolRouter,
 };
@@ -4084,6 +4092,9 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
         "markup_element",
         "markup_attribute",
         "database_object",
+        "event",
+        "error_declaration",
+        "modifier",
     ] {
         for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
             let mut locate = locate_response();
@@ -4110,6 +4121,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 tool.previous_contract_version(),
                 tool.legacy_contract_version(),
                 tool.second_legacy_contract_version(),
+                tool.third_legacy_contract_version(),
             ]
             .into_iter()
             .flatten()
@@ -4127,13 +4139,22 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                     panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
                 };
                 let supported = version == tool.contract_version()
-                    || (kind != "database_object"
+                    || (!matches!(kind, "event" | "error_declaration" | "modifier")
                         && version
                             == if tool == VerticalTool::CodeLocate {
-                                "1.1"
-                            } else {
                                 "1.2"
-                            });
+                            } else {
+                                "1.3"
+                            })
+                    || (!matches!(
+                        kind,
+                        "database_object" | "event" | "error_declaration" | "modifier"
+                    ) && version
+                        == if tool == VerticalTool::CodeLocate {
+                            "1.1"
+                        } else {
+                            "1.2"
+                        });
                 assert_eq!(result["isError"], !supported, "{tool:?} {kind} {version}");
                 let content = &result["structuredContent"];
                 assert_eq!(content["schema_version"], version);
@@ -4296,6 +4317,9 @@ async fn batch_preserves_source_entity_kinds() {
         "markup_element",
         "markup_attribute",
         "database_object",
+        "event",
+        "error_declaration",
+        "modifier",
     ] {
         let mut locate = locate_response();
         locate.result.hits[0].kind = kind.to_owned();

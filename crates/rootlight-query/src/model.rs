@@ -2540,6 +2540,12 @@ pub enum AdvancedEntityKind {
     MarkupAttribute,
     /// Source-declared database object.
     DatabaseObject,
+    /// Source-declared event.
+    Event,
+    /// Named source error declaration.
+    ErrorDeclaration,
+    /// Declared callable modifier.
+    Modifier,
 }
 
 impl AdvancedEntityKind {
@@ -2562,6 +2568,9 @@ impl AdvancedEntityKind {
             Self::MarkupElement => "markup_element",
             Self::MarkupAttribute => "markup_attribute",
             Self::DatabaseObject => "database_object",
+            Self::Event => "event",
+            Self::ErrorDeclaration => "error_declaration",
+            Self::Modifier => "modifier",
         }
     }
 
@@ -2584,6 +2593,9 @@ impl AdvancedEntityKind {
             "markup_element" => Some(Self::MarkupElement),
             "markup_attribute" => Some(Self::MarkupAttribute),
             "database_object" => Some(Self::DatabaseObject),
+            "event" => Some(Self::Event),
+            "error_declaration" => Some(Self::ErrorDeclaration),
+            "modifier" => Some(Self::Modifier),
             _ => None,
         }
     }
@@ -2624,6 +2636,9 @@ impl AdvancedEntityKind {
             Self::MarkupElement => matches!(kind, IrEntityKind::MarkupElement),
             Self::MarkupAttribute => matches!(kind, IrEntityKind::MarkupAttribute),
             Self::DatabaseObject => matches!(kind, IrEntityKind::DatabaseObject),
+            Self::Event => matches!(kind, IrEntityKind::Event),
+            Self::ErrorDeclaration => matches!(kind, IrEntityKind::ErrorDeclaration),
+            Self::Modifier => matches!(kind, IrEntityKind::Modifier),
         }
     }
 }

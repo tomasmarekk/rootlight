@@ -14951,11 +14951,14 @@ mod tests {
             EntityKind::MarkupElement,
             EntityKind::MarkupAttribute,
             EntityKind::DatabaseObject,
+            EntityKind::Event,
+            EntityKind::ErrorDeclaration,
+            EntityKind::Modifier,
         ];
         for (index, kind) in kinds.into_iter().enumerate() {
             add_entity(
                 &mut document,
-                20 + u8::try_from(index).expect("five kinds"),
+                20 + u8::try_from(index).expect("fixture kinds fit u8"),
                 1,
                 kind,
             );
@@ -14973,7 +14976,7 @@ mod tests {
             assert_eq!(built.rows[0]["path"], "src/a.rs");
             assert_eq!(
                 built.rows[0]["id"],
-                symbol(20 + u8::try_from(index).expect("five kinds")).to_string()
+                symbol(20 + u8::try_from(index).expect("fixture kinds fit u8")).to_string()
             );
         }
     }

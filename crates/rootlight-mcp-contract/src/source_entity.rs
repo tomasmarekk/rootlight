@@ -1,4 +1,4 @@
-//! Versioned envelopes for source markup, stylesheet and database entities.
+//! Versioned envelopes for source markup, stylesheet, database and declaration entities.
 //! Retained tools keep their exact historical schemas; new revisions preserve
 //! source kinds instead of coercing markup into programming-language symbols.
 
@@ -11,11 +11,11 @@ use crate::vertical::{
 };
 
 /// Contract revision for source-kind locate and expert queries.
-pub const QUERY_VERSION: &str = "1.2";
+pub const QUERY_VERSION: &str = "1.3";
 /// Contract revision for source-kind explanations.
-pub const EXPLAIN_VERSION: &str = "1.3";
+pub const EXPLAIN_VERSION: &str = "1.4";
 /// Contract revision for change results containing markup entities.
-pub const CHANGE_VERSION: &str = "1.3";
+pub const CHANGE_VERSION: &str = "1.4";
 
 /// Exact version of source-kind explanation responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -136,4 +136,46 @@ pub type QueryAdvancedOutputV1_2 = EntityToolResponse<
 pub type SymbolExplainOutputV1_3 = EntityToolResponse<
     EntityReadEnvelope<SymbolExplainData, DatabaseExplainVersion>,
     DatabaseExplainVersion,
+>;
+
+/// Exact version of event-, error- and modifier-aware queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DeclarationQueryVersion {
+    /// Query contract 1.3.
+    #[serde(rename = "1.3")]
+    V1_3,
+}
+
+/// Exact version of declaration-aware explanations and change results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DeclarationVersion {
+    /// Explanation and change contract 1.4.
+    #[serde(rename = "1.4")]
+    V1_4,
+}
+
+/// Declaration-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_3 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, DeclarationQueryVersion>,
+    DeclarationQueryVersion,
+>;
+/// Declaration-aware `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_3 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, DeclarationQueryVersion>,
+    DeclarationQueryVersion,
+>;
+/// Declaration-aware `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_4 = EntityToolResponse<
+    EntityReadEnvelope<SymbolExplainData, DeclarationVersion>,
+    DeclarationVersion,
+>;
+/// Declaration-aware `change.impact` success or domain error.
+pub type ChangeImpactOutputV1_4 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::ChangeImpactData, DeclarationVersion>,
+    DeclarationVersion,
+>;
+/// Declaration-aware `history.compare` success or domain error.
+pub type HistoryCompareOutputV1_4 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::HistoryCompareData, DeclarationVersion>,
+    DeclarationVersion,
 >;

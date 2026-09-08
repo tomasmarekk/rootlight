@@ -6634,11 +6634,11 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.2",
+            "contractVersion": "1.3",
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "fb596128e40cad09520705804ccfd1cf7437ad3b0b3e6c372ee5a081cdb1d8f4",
+            "inputShapeHash": "f17e506788160d46938a95956ddeac9213ec3ef316f71469cb6247961815f66b",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -6854,6 +6854,21 @@
                 {
                   "const": "database_object",
                   "description": "Authored database object, not an assertion about a live catalog.",
+                  "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "Declared source event, not a runtime emission.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "Named source error declaration, not an analysis diagnostic.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "Declared callable modifier, not a visibility keyword.",
                   "type": "string"
                 }
               ]
@@ -7131,7 +7146,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.2",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7502,12 +7517,12 @@
               ],
               "type": "object"
             },
-            "DatabaseQueryVersion": {
-              "description": "Exact version of database-aware locate and advanced-query responses.",
+            "DeclarationQueryVersion": {
+              "description": "Exact version of event-, error- and modifier-aware queries.",
               "oneOf": [
                 {
-                  "const": "1.2",
-                  "description": "Query contract 1.2.",
+                  "const": "1.3",
+                  "description": "Query contract 1.3.",
                   "type": "string"
                 }
               ]
@@ -7528,7 +7543,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseQueryVersion",
+                  "$ref": "#/$defs/DeclarationQueryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7620,6 +7635,21 @@
                   "const": "database_object",
                   "description": "Authored database object, not an assertion about a live catalog.",
                   "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "Declared source event, not a runtime emission.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "Named source error declaration, not an analysis diagnostic.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "Declared callable modifier, not a visibility keyword.",
+                  "type": "string"
                 }
               ]
             },
@@ -7652,7 +7682,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseQueryVersion",
+                  "$ref": "#/$defs/DeclarationQueryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8904,7 +8934,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.2",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -8929,7 +8959,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.3",
+            "contractVersion": "1.4",
             "explainSupported": true,
             "fallbackSummary": "bounded sectioned explanations with typed evidence, source preview, and provenance",
             "generation": "selects_generation",
@@ -9184,7 +9214,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.3",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.explain`.",
@@ -9479,12 +9509,12 @@
               ],
               "type": "object"
             },
-            "DatabaseExplainVersion": {
-              "description": "Exact version of database-aware explanation responses.",
+            "DeclarationVersion": {
+              "description": "Exact version of declaration-aware explanations and change results.",
               "oneOf": [
                 {
-                  "const": "1.3",
-                  "description": "Explanation contract 1.3.",
+                  "const": "1.4",
+                  "description": "Explanation and change contract 1.4.",
                   "type": "string"
                 }
               ]
@@ -9528,7 +9558,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseExplainVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -9620,6 +9650,21 @@
                   "const": "database_object",
                   "description": "Authored database object, not an assertion about a live catalog.",
                   "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "Declared source event, not a runtime emission.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "Named source error declaration, not an analysis diagnostic.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "Declared callable modifier, not a visibility keyword.",
+                  "type": "string"
                 }
               ]
             },
@@ -9652,7 +9697,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseExplainVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -10973,7 +11018,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.3",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -15395,7 +15440,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.3",
+            "contractVersion": "1.4",
             "explainSupported": true,
             "fallbackSummary": "bounded explicit or Git-derived change mapping with scoped conservative coverage",
             "generation": "selects_generation",
@@ -15715,7 +15760,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/change.impact/input/1.3",
+          "$id": "https://rootlight.local/schema/mcp/change.impact/input/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `change.impact`.",
@@ -15941,16 +15986,6 @@
               ],
               "type": "object"
             },
-            "ChangeVersion": {
-              "description": "Exact version of markup-aware change responses.",
-              "oneOf": [
-                {
-                  "const": "1.3",
-                  "description": "Change contract 1.3.",
-                  "type": "string"
-                }
-              ]
-            },
             "CompletenessState": {
               "description": "Authoritative execution state for one bounded analytical result.",
               "oneOf": [
@@ -16108,6 +16143,16 @@
               ],
               "type": "object"
             },
+            "DeclarationVersion": {
+              "description": "Exact version of declaration-aware explanations and change results.",
+              "oneOf": [
+                {
+                  "const": "1.4",
+                  "description": "Explanation and change contract 1.4.",
+                  "type": "string"
+                }
+              ]
+            },
             "DetailKey": {
               "description": "A validated key for a bounded public error detail.",
               "maxLength": 64,
@@ -16124,7 +16169,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ChangeVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -16346,6 +16391,21 @@
                   "const": "markup_attribute",
                   "description": "An attribute written on a source markup element, not a runtime property.",
                   "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "A declared event with a source-defined payload, not a runtime emission or queue.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "A named error declaration, not a diagnostic or an inferred exception class.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "A declared callable modifier that wraps execution, not a visibility keyword.",
+                  "type": "string"
                 }
               ]
             },
@@ -16378,7 +16438,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ChangeVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -17618,7 +17678,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/change.impact/output/1.3",
+          "$id": "https://rootlight.local/schema/mcp/change.impact/output/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -26007,7 +26067,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.3",
+            "contractVersion": "1.4",
             "explainSupported": true,
             "fallbackSummary": "bounded scoped semantic comparison across retained or current Git-resolved states",
             "generation": "compares_generations",
@@ -26305,7 +26365,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/history.compare/input/1.3",
+          "$id": "https://rootlight.local/schema/mcp/history.compare/input/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `history.compare`.",
@@ -26500,16 +26560,6 @@
                 }
               ]
             },
-            "ChangeVersion": {
-              "description": "Exact version of markup-aware change responses.",
-              "oneOf": [
-                {
-                  "const": "1.3",
-                  "description": "Change contract 1.3.",
-                  "type": "string"
-                }
-              ]
-            },
             "CompletenessState": {
               "description": "Authoritative execution state for one bounded analytical result.",
               "oneOf": [
@@ -26667,6 +26717,16 @@
               ],
               "type": "object"
             },
+            "DeclarationVersion": {
+              "description": "Exact version of declaration-aware explanations and change results.",
+              "oneOf": [
+                {
+                  "const": "1.4",
+                  "description": "Explanation and change contract 1.4.",
+                  "type": "string"
+                }
+              ]
+            },
             "DetailKey": {
               "description": "A validated key for a bounded public error detail.",
               "maxLength": 64,
@@ -26683,7 +26743,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ChangeVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -26905,6 +26965,21 @@
                   "const": "markup_attribute",
                   "description": "An attribute written on a source markup element, not a runtime property.",
                   "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "A declared event with a source-defined payload, not a runtime emission or queue.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "A named error declaration, not a diagnostic or an inferred exception class.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "A declared callable modifier that wraps execution, not a visibility keyword.",
+                  "type": "string"
                 }
               ]
             },
@@ -26937,7 +27012,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ChangeVersion",
+                  "$ref": "#/$defs/DeclarationVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -28060,7 +28135,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/history.compare/output/1.3",
+          "$id": "https://rootlight.local/schema/mcp/history.compare/output/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -34584,11 +34659,11 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.2",
+            "contractVersion": "1.3",
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "861e6a0db552e16f662b7ed8856aab579bd43dee00220d7d06bf2d6f259a5e83",
+            "inputShapeHash": "2816b70d66d37efa28b4139fc43bc3ee15fa3a350f0ef802904ba9a3d25b9250",
             "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
@@ -34792,6 +34867,21 @@
                 {
                   "const": "database_object",
                   "description": "Authored database object, not an assertion about a live catalog.",
+                  "type": "string"
+                },
+                {
+                  "const": "event",
+                  "description": "Declared source event, not a runtime emission.",
+                  "type": "string"
+                },
+                {
+                  "const": "error_declaration",
+                  "description": "Named source error declaration, not an analysis diagnostic.",
+                  "type": "string"
+                },
+                {
+                  "const": "modifier",
+                  "description": "Declared callable modifier, not a visibility keyword.",
                   "type": "string"
                 }
               ]
@@ -35439,7 +35529,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.2",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `query.advanced`.",
@@ -35769,12 +35859,12 @@
               ],
               "type": "object"
             },
-            "DatabaseQueryVersion": {
-              "description": "Exact version of database-aware locate and advanced-query responses.",
+            "DeclarationQueryVersion": {
+              "description": "Exact version of event-, error- and modifier-aware queries.",
               "oneOf": [
                 {
-                  "const": "1.2",
-                  "description": "Query contract 1.2.",
+                  "const": "1.3",
+                  "description": "Query contract 1.3.",
                   "type": "string"
                 }
               ]
@@ -35795,7 +35885,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseQueryVersion",
+                  "$ref": "#/$defs/DeclarationQueryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -35834,7 +35924,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DatabaseQueryVersion",
+                  "$ref": "#/$defs/DeclarationQueryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -36820,7 +36910,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.2",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

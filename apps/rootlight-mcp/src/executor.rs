@@ -8793,6 +8793,9 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "markup_element" => EntityKind::MarkupElement,
         "markup_attribute" => EntityKind::MarkupAttribute,
         "database_object" => EntityKind::DatabaseObject,
+        "event" => EntityKind::Event,
+        "error_declaration" => EntityKind::ErrorDeclaration,
+        "modifier" => EntityKind::Modifier,
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)
