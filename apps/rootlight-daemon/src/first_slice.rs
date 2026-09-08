@@ -93,9 +93,9 @@ use rootlight_service::{
     FirstSliceIndexAdmission, FirstSliceIndexAdmissionMetadata, FirstSliceIndexMode,
     FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexOptions,
     FirstSliceIndexPlanning, FirstSliceIndexProgress, FirstSliceIndexProvider,
-    FirstSliceIndexReceipt, FirstSliceObservedFreshness, FirstSliceOperationContext,
-    FirstSlicePlanningDependencyKey, FirstSlicePreparationError, FirstSliceProjectAnalysis,
-    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
+    FirstSliceIndexReceipt, FirstSliceInvalidationTraceView, FirstSliceObservedFreshness,
+    FirstSliceOperationContext, FirstSlicePlanningDependencyKey, FirstSlicePreparationError,
+    FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
     FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
     FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
     FirstSliceSupplementalPrefix, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
@@ -10563,6 +10563,8 @@ fn repository_operation_status(
         );
     }
     if let Some(evidence) = repository_operation_status_evidence(&record, repository_context) {
+        let retained_generation =
+            evidence.build_strategy == RepositoryBuildStrategy::RetainedGeneration;
         let expose_trace = context.selected_protocol_minor >= 16
             || evidence.build_strategy != RepositoryBuildStrategy::CleanRebuild;
         project_repository_operation_evidence(
@@ -10572,12 +10574,18 @@ fn repository_operation_status(
         );
         if expose_trace {
             let generation = published_generation.ok_or_else(internal_error)?;
-            let trace = match read_service(service)?
-                .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
-            {
-                Ok(trace) => Some(trace),
-                Err(FirstSliceError::GenerationNotFound) => None,
-                Err(error) => return Err(service_error(error)),
+            let trace = if retained_generation {
+                // Generation evidence describes its original build, not this
+                // operation's exact reuse. Preserve that history for its owner.
+                Some(FirstSliceInvalidationTraceView::empty())
+            } else {
+                match read_service(service)?
+                    .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
+                {
+                    Ok(trace) => Some(trace),
+                    Err(FirstSliceError::GenerationNotFound) => None,
+                    Err(error) => return Err(service_error(error)),
+                }
             };
             response.invalidation_trace_json = trace
                 .map(|trace| trace.canonical_json().map_err(service_error))

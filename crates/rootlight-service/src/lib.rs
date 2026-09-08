@@ -1730,6 +1730,17 @@ pub struct FirstSliceInvalidationTraceView {
 }
 
 impl FirstSliceInvalidationTraceView {
+    /// Returns a complete empty trace for an operation that performs no invalidation.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            version: INCREMENTAL_SCHEMA_VERSION.to_owned(),
+            entries: Vec::new(),
+            total_entries: 0,
+            complete: true,
+        }
+    }
+
     /// Returns the incremental trace schema version.
     #[must_use]
     pub fn version(&self) -> &str {

@@ -246,11 +246,25 @@ fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
     let edited = index_repository(&mut mcp, "incremental-edit", &repository_root);
     let edited_generation = published_generation(&edited);
     assert_ne!(edited_generation, initial_generation);
-    assert_single_file_rebuild(operation_incremental_evidence(
-        &mut mcp,
-        "incremental-edit-status",
-        &edited,
-    ));
+    let edited_evidence =
+        operation_incremental_evidence(&mut mcp, "incremental-edit-status", &edited);
+    assert!(
+        edited_evidence["invalidation_trace"]["total_entries"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert_single_file_rebuild(edited_evidence.clone());
+
+    let edited_noop = index_repository(&mut mcp, "incremental-edit-noop", &repository_root);
+    assert_eq!(published_generation(&edited_noop), edited_generation);
+    let edited_noop_evidence =
+        operation_incremental_evidence(&mut mcp, "incremental-edit-noop-status", &edited_noop);
+    assert_retained_generation(edited_noop_evidence);
+    assert_eq!(
+        operation_incremental_evidence(&mut mcp, "incremental-edit-history", &edited),
+        edited_evidence,
+        "a no-op must not rewrite the earlier operation's trace"
+    );
 
     write_repository(&repository_root, 1);
     let reverted = index_repository(&mut mcp, "incremental-revert", &repository_root);
@@ -728,6 +742,10 @@ fn assert_retained_generation(evidence: Value) {
     assert_eq!(evidence["invalidated_units"], 0);
     assert_eq!(evidence["rebuilt_files"], 0);
     assert_eq!(evidence["rebuilt_facts"], 0);
+    assert_eq!(
+        evidence["invalidation_trace"],
+        json!({"version": "1.0", "entries": [], "total_entries": 0, "complete": true})
+    );
     assert!(
         evidence["reused_files"]
             .as_u64()
