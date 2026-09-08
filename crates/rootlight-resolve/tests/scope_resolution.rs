@@ -17,13 +17,262 @@ use rootlight_ir::{
 use rootlight_resolve::{
     CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT, DynamicCallCalibration, ExpectedResolution,
     ForeignLinkEngine, ForeignLinkError, ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace,
-    ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError,
-    ResolutionExpectation, ResolutionPenalty, ResolutionPolicy, ResolutionSignal,
+    ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectionReason,
+    ResolutionError, ResolutionExpectation, ResolutionPenalty, ResolutionPolicy, ResolutionSignal,
     ResolverFactContext, UnresolvedReason, evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
 const SOURCE_BYTES: u64 = 64;
+
+#[test]
+fn r_parameter_references_exclude_unrelated_function_scopes() {
+    assert_r_parameter_candidates(OccurrenceRole::Reference);
+}
+
+#[test]
+fn r_parameter_calls_retain_lexical_candidates_without_exact_dispatch() {
+    assert_r_parameter_candidates(OccurrenceRole::CallSite);
+}
+
+fn assert_r_parameter_candidates(role: OccurrenceRole) {
+    let mut fixture = Fixture::new();
+    let file = fixture.primary_file;
+    let outer = fixture.add_entity(10, "outer", file, EntityKind::Function, None);
+    let nested = fixture.add_entity(11, "nested", file, EntityKind::Function, Some(outer));
+    let sibling = fixture.add_entity(12, "sibling", file, EntityKind::Function, None);
+    let parameter = fixture.add_entity(13, "callback", file, EntityKind::Parameter, Some(outer));
+    let other = fixture.add_entity(14, "callback", file, EntityKind::Parameter, Some(sibling));
+    let foreign_file = fixture.add_file(2, "other.R");
+    let foreign_owner = fixture.add_entity(15, "foreign", foreign_file, EntityKind::Function, None);
+    fixture.add_entity(
+        16,
+        "callback",
+        foreign_file,
+        EntityKind::Parameter,
+        Some(foreign_owner),
+    );
+    for (id, owner) in [
+        (20, Some(outer)),
+        (21, Some(nested)),
+        (22, Some(sibling)),
+        (23, None),
+    ] {
+        fixture.add_occurrence(id, "callback", file, role, owner);
+    }
+    for file in &mut fixture.document.files {
+        file.language = "r".to_owned();
+    }
+    fixture.document.provenance[0].language = "r".to_owned();
+    fixture.document.provenance[0].tier = AnalysisTier::TierD;
+    for entity in &mut fixture.document.entities {
+        entity.language = "r".to_owned();
+        entity.tier = AnalysisTier::TierD;
+    }
+    for occurrence in &mut fixture.document.occurrences {
+        occurrence.syntax_kind = if role == OccurrenceRole::CallSite {
+            "r.call.call"
+        } else {
+            "r.identifier.reference"
+        }
+        .to_owned();
+    }
+    fixture.validate();
+    let cancellation = Cancellation::new();
+    // Rejected candidates still consume inspected work, even with one output slot.
+    for limit in [1, DEFAULT_CANDIDATE_LIMIT] {
+        let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(limit, 16).unwrap());
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap()
+                .required,
+            16
+        );
+        let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+        for (decision, expected) in
+            batch
+                .decisions
+                .iter()
+                .zip([Some(parameter), Some(parameter), Some(other), None])
+        {
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(&decision.outcome,
+                    ResolutionOutcome::Candidates { symbols, total_count: 1, completeness: CoverageStatus::Complete, .. }
+                        if symbols == &[expected]),
+                    "{:?}",
+                    decision
+                );
+                assert_eq!(decision.explanation.rejected_total, 2);
+            } else {
+                assert!(matches!(
+                    decision.outcome,
+                    ResolutionOutcome::Unresolved { .. }
+                ));
+                assert_eq!(decision.explanation.rejected_total, 3);
+            }
+        }
+        assert_eq!(batch.decisions.len(), 4);
+        assert!(
+            batch
+                .decisions
+                .iter()
+                .flat_map(|decision| &decision.explanation.rejected_candidates)
+                .all(|candidate| candidate.reason == RejectionReason::OutsideLexicalScope)
+        );
+        let context = ResolverFactContext::new(fixture.content_hash);
+        let applied = engine
+            .apply(fixture.document.clone(), context, &cancellation)
+            .unwrap();
+        let streamed = engine
+            .apply_document(fixture.document.clone(), context, &cancellation)
+            .unwrap();
+        let (bounded, estimate) = engine
+            .apply_document_bounded(fixture.document.clone(), context, &cancellation)
+            .unwrap();
+        assert_eq!(estimate.required, 16);
+        assert_eq!(bounded, streamed);
+        assert_eq!(streamed, applied.document);
+        let dispatch: Vec<_> = bounded
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::DispatchCandidate)
+            .collect();
+        assert_eq!(
+            dispatch.len(),
+            if role == OccurrenceRole::CallSite {
+                3
+            } else {
+                0
+            }
+        );
+        assert!(
+            !bounded
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Calls)
+        );
+    }
+    let insufficient = ResolutionEngine::new(ResolutionLimits::with_work_limit(1, 15).unwrap());
+    assert!(matches!(
+        insufficient.resolve(&fixture.document, &cancellation),
+        Err(ResolutionError::WorkLimit { maximum: 15 })
+    ));
+}
+
+#[test]
+fn r_parameter_call_binding_is_not_exact_even_with_strong_provenance() {
+    let mut fixture = Fixture::new();
+    let owner = fixture.add_entity(
+        10,
+        "apply",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let parameter = fixture.add_entity(
+        11,
+        "callback",
+        fixture.primary_file,
+        EntityKind::Parameter,
+        Some(owner),
+    );
+    fixture.add_occurrence(
+        20,
+        "callback",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        Some(owner),
+    );
+    fixture.document.files[0].language = "r".to_owned();
+    fixture.document.provenance[0].language = "r".to_owned();
+    fixture.document.occurrences[0].syntax_kind = "r.call.call".to_owned();
+    for entity in &mut fixture.document.entities {
+        entity.language = "r".to_owned();
+    }
+    fixture.validate();
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert!(
+        matches!(&batch.decisions[0].outcome, ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter])
+    );
+    let candidate = &batch.decisions[0].explanation.candidates[0];
+    assert_eq!(candidate.score.get(), 899);
+    assert!(
+        candidate
+            .penalties
+            .contains(&ResolutionPenalty::IndirectCallableBinding)
+    );
+}
+
+#[test]
+fn parameter_scope_filter_does_not_change_other_language_candidates() {
+    for language in ["rust", "python"] {
+        let mut fixture = Fixture::new();
+        let file = fixture.primary_file;
+        let owner = fixture.add_entity(10, "owner", file, EntityKind::Function, None);
+        let parameter = fixture.add_entity(11, "value", file, EntityKind::Parameter, Some(owner));
+        fixture.add_occurrence(20, "value", file, OccurrenceRole::Reference, None);
+        fixture.document.files[0].language = language.to_owned();
+        fixture.document.provenance[0].language = language.to_owned();
+        fixture.document.provenance[0].tier = AnalysisTier::TierD;
+        for entity in &mut fixture.document.entities {
+            entity.language = language.to_owned();
+            entity.tier = AnalysisTier::TierD;
+        }
+        fixture.validate();
+        let batch = ResolutionEngine::default()
+            .resolve(&fixture.document, &Cancellation::new())
+            .unwrap();
+        assert!(
+            matches!(&batch.decisions[0].outcome, ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter])
+        );
+        assert_eq!(batch.decisions[0].explanation.rejected_total, 0);
+    }
+}
+
+#[test]
+fn r_parameter_scope_walk_limit_preserves_unknown_ancestry() {
+    let mut fixture = Fixture::new();
+    let file = fixture.primary_file;
+    let outer = fixture.add_entity(10, "outer", file, EntityKind::Function, None);
+    let parameter = fixture.add_entity(11, "value", file, EntityKind::Parameter, Some(outer));
+    let mut enclosing = outer;
+    for identity in 20..90 {
+        enclosing = fixture.add_entity(
+            identity,
+            "nested",
+            file,
+            EntityKind::Function,
+            Some(enclosing),
+        );
+    }
+    fixture.add_occurrence(
+        100,
+        "value",
+        file,
+        OccurrenceRole::Reference,
+        Some(enclosing),
+    );
+    fixture.document.files[0].language = "r".to_owned();
+    fixture.document.provenance[0].language = "r".to_owned();
+    fixture.document.provenance[0].tier = AnalysisTier::TierD;
+    fixture.document.occurrences[0].syntax_kind = "r.identifier.reference".to_owned();
+    for entity in &mut fixture.document.entities {
+        entity.language = "r".to_owned();
+        entity.tier = AnalysisTier::TierD;
+    }
+    fixture.validate();
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert!(
+        matches!(&batch.decisions[0].outcome, ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter])
+    );
+    assert_eq!(batch.decisions[0].explanation.rejected_total, 0);
+}
 
 #[test]
 fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() {

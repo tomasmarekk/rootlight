@@ -209,7 +209,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/31";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/2";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -26619,6 +26619,184 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn r_parameter_candidates_keep_lexical_owners_after_incremental_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "apply_one <- function(callback, value) {\n  callback(value)\n  nested <- function(value) { callback(value) }\n  nested(value)\n}\nunrelated <- function(callback, value) { callback(value) }\n";
+        fs::write(fixture.path().join("callbacks.R"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+                .generation,
+            initial.generation
+        );
+        let changed = source.replacen("callback(value)", "callback(value + 1)", 1);
+        fs::write(fixture.path().join("callbacks.R"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let mut previous_parameters = None;
+        for (receipt, source) in [(&initial, source), (&updated, changed.as_str())] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let entities = document
+                .entities
+                .iter()
+                .map(|entity| (entity.id, entity))
+                .collect::<BTreeMap<_, _>>();
+            let parameters = document
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == "callback")
+                .map(|entity| {
+                    assert_eq!(entity.kind, rootlight_ir::EntityKind::Parameter);
+                    let Some(rootlight_ir::ContainerRef::Entity(owner)) = entity.container else {
+                        panic!("parameter owner")
+                    };
+                    (entities[&owner].canonical_name.as_str(), entity.id)
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(parameters.len(), 2);
+            if let Some(previous) = &previous_parameters {
+                assert_eq!(&parameters.values().copied().collect::<Vec<_>>(), previous);
+            }
+            previous_parameters = Some(parameters.values().copied().collect::<Vec<_>>());
+            let calls = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == rootlight_ir::OccurrenceRole::CallSite
+                        && occurrence.syntactic_text_hash == content_hash(b"callback")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 3);
+            for call in calls {
+                let enclosing = entities[&call.enclosing.unwrap()].canonical_name.as_str();
+                let owner = match enclosing {
+                    "apply_one" | "nested" => "apply_one",
+                    "unrelated" => "unrelated",
+                    _ => panic!("unexpected callback scope: {enclosing}"),
+                };
+                let target = parameters[owner];
+                assert!(
+                    matches!(&call.target,
+                    rootlight_ir::OccurrenceTarget::Candidates { symbols, total_count: 1, completeness: rootlight_ir::CoverageStatus::Complete, .. }
+                        if symbols == &[target]),
+                    "{:?}",
+                    call.target
+                );
+                let dispatch = document
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+                            && relation.predicate
+                                == rootlight_ir::RelationPredicate::DispatchCandidate
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(dispatch.len(), 1);
+                assert_eq!(
+                    dispatch[0].object,
+                    rootlight_ir::RelationEndpoint::Entity(target)
+                );
+                assert!(!document.relations.iter().any(|relation| {
+                    relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+                        && relation.predicate == rootlight_ir::RelationPredicate::Calls
+                }));
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![call.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                let span = call.source.span();
+                assert_eq!(
+                    read.data.chunks[0].bytes,
+                    source
+                        .as_bytes()
+                        .get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap()
+                        )
+                        .unwrap()
+                );
+            }
+            let values = document
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == "value")
+                .map(|entity| {
+                    let Some(rootlight_ir::ContainerRef::Entity(owner)) = entity.container else {
+                        panic!("value owner")
+                    };
+                    (entities[&owner].canonical_name.as_str(), entity.id)
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(values.len(), 3);
+            let references = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == rootlight_ir::OccurrenceRole::Reference
+                        && occurrence.syntactic_text_hash == content_hash(b"value")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(references.len(), 4);
+            for reference in references {
+                let enclosing = entities[&reference.enclosing.unwrap()]
+                    .canonical_name
+                    .as_str();
+                // Retain ancestor candidates: source scopes alone do not prove runtime shadowing.
+                let mut expected = match enclosing {
+                    "apply_one" => vec![values["apply_one"]],
+                    "nested" => vec![values["apply_one"], values["nested"]],
+                    "unrelated" => vec![values["unrelated"]],
+                    _ => panic!("unexpected value scope: {enclosing}"),
+                };
+                expected.sort_unstable();
+                let rootlight_ir::OccurrenceTarget::Candidates {
+                    symbols,
+                    total_count,
+                    completeness,
+                    ..
+                } = &reference.target
+                else {
+                    panic!("parameter candidates")
+                };
+                assert_eq!(symbols, &expected);
+                assert_eq!(*total_count, u64::try_from(expected.len()).unwrap());
+                assert_eq!(*completeness, rootlight_ir::CoverageStatus::Complete);
+            }
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "r-environment-dispatch-resolution-unavailable")
+            );
         }
     }
 

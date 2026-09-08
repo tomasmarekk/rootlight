@@ -296,6 +296,8 @@ pub enum ResolutionPenalty {
     RepositoryScope,
     /// Dynamic-call evidence lacks a reviewed precision calibration.
     DynamicCallUncalibrated,
+    /// A callable binding does not identify the value supplied at runtime.
+    IndirectCallableBinding,
 }
 
 /// Why a same-spelling entity was excluded from the candidate set.
@@ -306,6 +308,8 @@ pub enum RejectionReason {
     LanguageMismatch,
     /// The entity kind cannot satisfy the occurrence role.
     TargetKindMismatch,
+    /// A lexically owned parameter belongs to an unrelated function scope.
+    OutsideLexicalScope,
 }
 
 /// One bounded rejected-candidate explanation.

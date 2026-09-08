@@ -194,10 +194,16 @@ impl ResolutionEngine {
             cancellation.check()?;
             work.consume()?;
             let entity = indexed.entity;
+            let parameter_call = language == "r"
+                && entity.kind == EntityKind::Parameter
+                && occurrence.role == OccurrenceRole::CallSite
+                && occurrence.syntax_kind == "r.call.call";
             let rejection = if entity.language != language {
                 Some(RejectionReason::LanguageMismatch)
-            } else if !kind_supports_role(entity.kind, occurrence.role) {
+            } else if !parameter_call && !kind_supports_role(entity.kind, occurrence.role) {
                 Some(RejectionReason::TargetKindMismatch)
+            } else if parameter_outside_r_scope(occurrence, entity, index) {
+                Some(RejectionReason::OutsideLexicalScope)
             } else {
                 None
             };
@@ -222,6 +228,13 @@ impl ResolutionEngine {
                 .checked_add(1)
                 .ok_or(ResolutionError::CountOverflow)?;
             let mut candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
+            if parameter_call {
+                // A formal binding is not proof of the function value supplied at runtime.
+                candidate.score = confidence(candidate.score.get().min(899))?;
+                candidate
+                    .penalties
+                    .push(ResolutionPenalty::IndirectCallableBinding);
+            }
             if occurrence.role == OccurrenceRole::CallSite
                 && !self.policy.allows_exact_call(language)
             {
@@ -614,6 +627,43 @@ fn declaring_scope_depth(
         });
     }
     None
+}
+
+fn parameter_outside_r_scope(
+    occurrence: &OccurrenceRecord,
+    candidate: &EntityRecord,
+    index: &CandidateIndex<'_>,
+) -> bool {
+    if candidate.language != "r"
+        || candidate.kind != EntityKind::Parameter
+        || !matches!(
+            occurrence.syntax_kind.as_str(),
+            "r.identifier.reference" | "r.call.call"
+        )
+    {
+        return false;
+    }
+    let Some(ContainerRef::Entity(owner)) = candidate.container else {
+        return false;
+    };
+    let mut current = occurrence.enclosing;
+    for _ in 0..MAX_SCOPE_DEPTH {
+        let Some(scope) = current else {
+            return true;
+        };
+        if scope == owner {
+            return false;
+        }
+        let Some(entity) = index.entities.get(&scope) else {
+            return false;
+        };
+        current = match entity.container {
+            Some(ContainerRef::Entity(parent)) => Some(parent),
+            _ => None,
+        };
+    }
+    // Exhausting the bounded walk is uncertainty, not evidence of invisibility.
+    false
 }
 
 fn entity_source_file(entity: &EntityRecord) -> Option<FileId> {
