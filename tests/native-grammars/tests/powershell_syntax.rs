@@ -185,6 +185,13 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
         ("2kB", "0X2LkB"),
         ("0X2LkB", "2E+2MB"),
         ("2E+2MB", "2e-2mb"),
+        ("$bytes = 2e-2mb", "$bytes = $items.Apply{}"),
+        ("Apply{}", "ForEach{ $_ }"),
+        ("ForEach{ $_ }", "Where{ param($entry); $entry }"),
+        ("$items.Where", "[Item]::Read"),
+        ("[Item]::Read", "$items.$method"),
+        ("$items.$method", "$items.\"Read\""),
+        ("{ param($entry); $entry }", "{}"),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();
@@ -319,6 +326,63 @@ fn powershell_numeric_markers_do_not_consume_barewords_or_delimiters() {
         .map(|node| node.utf8_text(source.as_bytes()).unwrap())
         .collect();
     assert_eq!(literals, ["1", "2", "2L"]);
+}
+
+#[test]
+fn powershell_script_block_method_arguments_retain_members_and_exact_ranges() {
+    for (receiver, member) in [
+        ("$items.", "Where"),
+        ("$items.", "ForEach"),
+        ("$items.", "Apply"),
+        ("($items.Keys).", "Apply"),
+        ("[Item]::", "Read"),
+        ("$items.", "\"Read\""),
+        ("$items.", "$method"),
+    ] {
+        for body in ["", "<# no action #>", "param($entry); $entry"] {
+            let block = format!("{{{body}}}");
+            let expression = format!("{receiver}{member}{block}");
+            let source = format!("$result = {expression}\n");
+            let tree = parser().parse(&source, None).unwrap();
+            assert!(
+                !tree.root_node().has_error(),
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+            let invocation = nodes(tree.root_node())
+                .into_iter()
+                .find(|node| node.kind() == "invokation_expression")
+                .unwrap();
+            assert_eq!(invocation.utf8_text(source.as_bytes()).unwrap(), expression);
+            let mut cursor = invocation.walk();
+            let children: Vec<_> = invocation.named_children(&mut cursor).collect();
+            let name = children
+                .iter()
+                .find(|node| node.kind() == "member_name")
+                .unwrap();
+            assert_eq!(name.utf8_text(source.as_bytes()).unwrap(), member);
+            let argument = children
+                .iter()
+                .find(|node| node.kind() == "script_block_expression")
+                .unwrap();
+            assert_eq!(argument.utf8_text(source.as_bytes()).unwrap(), block);
+        }
+    }
+}
+
+#[test]
+fn powershell_script_block_method_arguments_require_adjacent_complete_braces() {
+    for source in [
+        "$items.Apply { $_ }",
+        "$items.ForEach { $_ }",
+        "[Item]::Read { $_ }",
+        "$items.Apply{ $_ }{ $_ }",
+        "$items.Apply{",
+        "$items.Apply{<# unfinished",
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(tree.root_node().has_error(), "accepted {source}");
+    }
 }
 
 #[test]

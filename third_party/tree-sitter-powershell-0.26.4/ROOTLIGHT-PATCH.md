@@ -21,6 +21,14 @@ being split into a valid numeric prefix and another token. This does not impleme
 new numeric types or resolve the upstream ambiguity between compact numeric
 range/member expressions and command names.
 
+Method invocations accept one adjacent bare script-block argument after any
+member name, for instance and static calls. The block retains the ordinary
+`script_block_expression` shape and the member is directly owned by
+`invokation_expression`, so source queries retain the written call name.
+This replaces the special `invokation_foreach_expression` wrapper and rejects
+whitespace before its bare block, matching the PowerShell parser. It does not
+evaluate computed member names or resolve runtime method dispatch.
+
 The published `src/parser.c`, `src/grammar.json`, `src/node-types.json` and parser
 header reproduce byte-for-byte using Tree-sitter CLI 0.26.8 with ABI 15.
 Regenerate the patched outputs from this directory with the same command:

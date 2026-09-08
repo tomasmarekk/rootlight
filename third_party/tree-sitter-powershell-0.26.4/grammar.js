@@ -1065,24 +1065,19 @@ export default grammar({
       ),
 
     invokation_expression: ($) =>
-      choice(
-        seq(
-          $._primary_expression,
-          token.immediate('.'),
-          $.member_name,
-          $.argument_list,
-        ),
-        seq($._primary_expression, '::', $.member_name, $.argument_list),
-        $.invokation_foreach_expression,
-      ),
-
-    // adding this rule to handle .foreach synthax
-    invokation_foreach_expression: ($) =>
       seq(
         $._primary_expression,
-        token.immediate(reservedWord('.foreach')),
-        $.script_block_expression,
+        choice(token.immediate('.'), '::'),
+        $.member_name,
+        choice(
+          $.argument_list,
+          alias($._script_block_argument, $.script_block_expression),
+        ),
       ),
+
+    // A bare method block is an argument only when its opening brace is adjacent.
+    _script_block_argument: ($) =>
+      seq(token.immediate('{'), optional($.param_block), optional($.script_block), '}'),
 
     argument_list: ($) =>
       seq(

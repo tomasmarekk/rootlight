@@ -27,6 +27,58 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_script_block_method_calls_keep_exact_source_and_unresolved_names() {
+    for (expression, member) in [
+        ("$items.Where{ $_ }", "Where"),
+        ("$items.ForEach{}", "ForEach"),
+        ("($items.Keys).Apply{<# no action #>}", "Apply"),
+        ("[Item]::Read{ param($entry); $entry }", "Read"),
+    ] {
+        let source = format!("$result = {expression}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        assert!(
+            !doc.skipped_regions.iter().any(|gap| matches!(
+                gap.reason,
+                SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+            )),
+            "{:?}",
+            doc.skipped_regions
+        );
+        let calls: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .collect();
+        assert_eq!(calls.len(), 1, "{source}: {calls:?}");
+        let call = calls[0];
+        let expected_hash = content_hash(member.as_bytes());
+        assert_eq!(call.syntactic_text_hash, expected_hash);
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Unresolved {
+                text_hash: expected_hash
+            }
+        );
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(expression)
+        );
+        assert!(doc.skipped_regions.iter().any(|gap| gap.detail
+            == "powershell-runtime-command-module-and-dispatch-resolution-unavailable"));
+        assert!(doc.relations.iter().all(|relation| !matches!(
+            relation.predicate,
+            RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+        )));
+    }
+}
+
+#[test]
 fn powershell_numeric_literals_do_not_become_command_references() {
     let source =
         "$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\nfunction Read-Size { return $size }\n";

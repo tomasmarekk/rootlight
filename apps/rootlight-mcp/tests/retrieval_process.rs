@@ -138,6 +138,22 @@ fn powershell_numeric_values_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_method_blocks_preserve_exact_retrieval_across_processes() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "callbacks.ps1",
+        "$selected = $items.Where{ $_ }\n$mapped = $items.ForEach{}\n$read = [Item]::Read{ param($entry); $entry }\n$custom = $items.Apply{ function Read-Entry { return 1 } }\n",
+        &[
+            ("$selected", "variable", 1),
+            ("$mapped", "variable", 1),
+            ("$read", "variable", 1),
+            ("$custom", "variable", 1),
+            ("Read-Entry", "function", 1),
+        ],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

@@ -75,6 +75,7 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
     let casts = format!("{}$value = 1", "[int]".repeat(64));
     let targets = format!("{}$last = 1", "$value, ".repeat(40));
     let tables = "@{ Key = @{ Nested = 1 }; $key = @{ Value = 2 } }\n".repeat(40);
+    let methods = format!("$items{}", ".Apply{ $_ }".repeat(64));
     let sources: &[&[u8]] = &[
         &[0xff, 0xfe, 0x80],
         b"function Broken { param(",
@@ -85,6 +86,7 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
         casts.as_bytes(),
         targets.as_bytes(),
         tables.as_bytes(),
+        methods.as_bytes(),
     ];
     for source in sources {
         for (max_nodes, max_depth) in [(1, 1), (16, 4), (256, 32)] {
