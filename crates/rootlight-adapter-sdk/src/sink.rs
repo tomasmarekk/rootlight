@@ -1888,7 +1888,7 @@ fn evidence_matches_sources(evidence: &FactEvidence, sources: &[SourceRef]) -> b
 #[cfg(test)]
 mod tests {
     #[test]
-    fn markup_stream_version_never_downgrades_with_record_order() {
+    fn entity_stream_version_never_downgrades_with_record_order() {
         use rootlight_ir::{EntityKind, IrDocument, NormalizedIrVersion};
         let IrDocument::NormalizedV1_1(fixture) = rootlight_ir::decode_ir_document(
             include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
@@ -1899,6 +1899,18 @@ mod tests {
             panic!("frozen normalized fixture");
         };
         for kinds in [
+            [
+                EntityKind::Event,
+                EntityKind::MarkupElement,
+                EntityKind::ErrorDeclaration,
+                EntityKind::Modifier,
+            ],
+            [
+                EntityKind::Modifier,
+                EntityKind::Function,
+                EntityKind::ErrorDeclaration,
+                EntityKind::Event,
+            ],
             [
                 EntityKind::MarkupElement,
                 EntityKind::Keyframes,

@@ -547,11 +547,65 @@ fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
             EntityKind::MarkupAttribute,
             rootlight_ir::NormalizedIrVersion::V1_3,
         ),
+        (EntityKind::Event, rootlight_ir::NormalizedIrVersion::V1_4),
+        (
+            EntityKind::ErrorDeclaration,
+            rootlight_ir::NormalizedIrVersion::V1_4,
+        ),
+        (
+            EntityKind::Modifier,
+            rootlight_ir::NormalizedIrVersion::V1_4,
+        ),
     ] {
         let cancellation = Cancellation::new();
         let context = context(&cancellation);
         let (metadata, mut document) = fixture_with_kind(kind);
         document.version = version;
+        let document = rootlight_ir::canonicalize_ir_document(
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("typed fixture canonicalizes");
+        let directory = tempfile::tempdir().expect("private oracle directory");
+        let directory_path = directory
+            .path()
+            .canonicalize()
+            .expect("physical oracle path");
+        let persisted = rootlight_catalog::OracleWriter::create_in(&directory_path)
+            .expect("durable oracle initializes")
+            .seal(verify(metadata, document.clone(), &context), &context)
+            .expect("versioned durable fixture seals");
+        drop(persisted);
+        let oracle_path = directory_path.join(rootlight_catalog::ORACLE_FILENAME);
+        let sealed_bytes = std::fs::read(&oracle_path).expect("sealed oracle bytes");
+        let reopened = rootlight_catalog::OracleReader::open_in(&directory_path, &context)
+            .expect("versioned oracle reopens");
+        let snapshot = reopened
+            .read_generation(&context)
+            .expect("reopened facts read")
+            .into_snapshot();
+        assert_eq!(snapshot.document(), &document);
+        drop(reopened);
+        assert_eq!(std::fs::read(&oracle_path).unwrap(), sealed_bytes);
+        let source_set =
+            rootlight_storage::shared_generation_source_set_hash(snapshot.document()).unwrap();
+        let bundle = rootlight_storage::export_shared_generation(
+            &snapshot,
+            rootlight_storage::SharedGenerationLimits::default(),
+            &cancellation,
+        )
+        .expect("typed facts export");
+        let imported = rootlight_storage::import_shared_generation(
+            &bundle,
+            rootlight_storage::SharedGenerationExpectation::new(document.repository, source_set),
+            rootlight_storage::SharedGenerationLimits::default(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("typed facts import");
+        assert_eq!(imported.generation().document(), &document);
         let oracle = EphemeralOracleWriter::create()
             .expect("oracle initializes")
             .seal(verify(metadata, document.clone(), &context), &context)

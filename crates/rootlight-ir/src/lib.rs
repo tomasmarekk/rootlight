@@ -5,7 +5,8 @@
 //! source mappings, coverage, diagnostics, and extension envelopes.
 //! Version 1.2 admits stylesheet rule and keyframes entities; producers retain
 //! version 1.1 when those kinds are not needed. Version 1.3 adds source markup
-//! elements and attributes. Every supported version decodes explicitly.
+//! elements and attributes; 1.4 adds event, error, and modifier declarations.
+//! Every supported version decodes explicitly.
 //! Untrusted documents and standalone extension envelopes must enter through
 //! the explicit byte-bounded decoders. Public dynamic IR values intentionally
 //! do not implement `Deserialize`.
@@ -49,10 +50,10 @@ pub use normalized::{
     FilePathLocatorEncoding, FilePathLocatorError, FileRecord, IrDocument, IrDocumentDecodeError,
     LegacyIrDocumentDecodeError, MAX_FILE_PATH_LOCATOR_COMPONENTS,
     MAX_FILE_PATH_LOCATOR_ENCODED_BYTES, NORMALIZED_IR_VERSION, NORMALIZED_IR_VERSION_V1_2,
-    NORMALIZED_IR_VERSION_V1_3, NormalizedIrDocument, NormalizedIrVersion,
-    NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerKind,
-    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
-    SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+    NORMALIZED_IR_VERSION_V1_3, NORMALIZED_IR_VERSION_V1_4, NormalizedIrDocument,
+    NormalizedIrVersion, NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
+    RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
     decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
     decode_extension_envelope_with_checkpoint, decode_ir_document,
     decode_ir_document_with_checkpoint, decode_legacy_ir_document,

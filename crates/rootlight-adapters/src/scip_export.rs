@@ -1304,6 +1304,9 @@ fn project_entity_kind(kind: EntityKind) -> Option<Kind> {
         | EntityKind::Keyframes
         | EntityKind::MarkupElement
         | EntityKind::MarkupAttribute
+        | EntityKind::Event
+        | EntityKind::ErrorDeclaration
+        | EntityKind::Modifier
         | EntityKind::Commit
         | EntityKind::Change
         | EntityKind::CommunityView

@@ -10,11 +10,11 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "fb429fa18e2519854c75a2ed8203496a105e6890ec6224797ad4a0877f426c90"
+      "blake3": "3d2fc57f14681f76724a520ffe79b9b1d3622f8dddfd026d802d96858a6b5908"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "20ecbcb7df7c763196ff6a230384897671b3e91b12d1a3a744ebcac36c72ef22"
+      "blake3": "5f0909ceaab8e91edf926ec76e643cf8454fc8be4a1d1930fb72c1af9c204299"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -34,11 +34,11 @@
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "86183ef881bfdc0dbd8201c0beb8ef56a78cea960bbfddf36f822a6d40cc1d10"
+      "blake3": "2a92e1b74383a33e722b1336b878130be92e06d69fe1f8628c04fd1058c4f33d"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
-      "blake3": "f021de329b181c7036841344a081bed93c760bd0c74f925142bcf783473c161a"
+      "blake3": "f2ab5a52facd2d4307d828c766f05a71bc04a3814be7f229e0a1fc6ba4392de0"
     },
     {
       "path": "crates/rootlight-ir/src/validation.rs",
@@ -201,6 +201,14 @@
       "blake3": "21d68bfff69e841831e997dec601f1607380c6a1715a317359470ea6d4344901"
     },
     {
+      "path": "tests/fixtures/compatibility/storage/1.2/oracle-5-schema-fingerprints.json",
+      "blake3": "9327e6feeb6f5123ad577f9e0807cfa08d5ecfe6ad4e685a6eb4e2970b89fc15"
+    },
+    {
+      "path": "tests/fixtures/compatibility/storage/1.2/oracle-6-schema-fingerprints.json",
+      "blake3": "9d2b9374a60ceb4f8963c44a90c78a27c145d92c09e5398eaecb84780209e827"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.2/schema-fingerprints.json",
       "blake3": "2d303968654a6dbfc0bf279f8273c4fcecbee7636b17f39bff8f325147b010e9"
     },
@@ -234,7 +242,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "4786984c437d6cffea03f2986614d759ace1d372c8533b016a0a124c41d85921"
+      "blake3": "001d1e8d10e2f0c3cf8e7541725cdfebbafb96e7a2eaaf141be66c8460d72f18"
     }
   ],
   "artifacts": [
@@ -289,6 +297,10 @@
     {
       "path": "schemas/generated/json/ir-1.3.schema.json",
       "blake3": "3d833481256a20d31058d7066916747df5eea0c1235809c02573bf24f3e772e9"
+    },
+    {
+      "path": "schemas/generated/json/ir-1.4.schema.json",
+      "blake3": "7ac795d7d5311903fc67ce177f4e975cec88953495fe7bb9f74d97064a8c4275"
     },
     {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",

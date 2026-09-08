@@ -23,6 +23,8 @@ pub const NORMALIZED_IR_VERSION: IrVersion = IrVersion::new(1, 1);
 pub const NORMALIZED_IR_VERSION_V1_2: IrVersion = IrVersion::new(1, 2);
 /// The normalized fact-document version admitting source markup entities.
 pub const NORMALIZED_IR_VERSION_V1_3: IrVersion = IrVersion::new(1, 3);
+/// The normalized fact-document version admitting event, error, and modifier declarations.
+pub const NORMALIZED_IR_VERSION_V1_4: IrVersion = IrVersion::new(1, 4);
 /// Maximum components in one lossless file-path locator.
 pub const MAX_FILE_PATH_LOCATOR_COMPONENTS: usize = 256;
 /// Maximum aggregate hexadecimal bytes in one lossless file-path locator.
@@ -38,6 +40,8 @@ pub enum NormalizedIrVersion {
     V1_2,
     /// Common facts including source markup elements and attributes.
     V1_3,
+    /// Common facts including event, error, and callable modifier declarations.
+    V1_4,
 }
 
 impl NormalizedIrVersion {
@@ -54,6 +58,7 @@ impl NormalizedIrVersion {
             Self::V1_1 => NORMALIZED_IR_VERSION,
             Self::V1_2 => NORMALIZED_IR_VERSION_V1_2,
             Self::V1_3 => NORMALIZED_IR_VERSION_V1_3,
+            Self::V1_4 => NORMALIZED_IR_VERSION_V1_4,
         }
     }
 }
@@ -77,8 +82,9 @@ impl<'de> Deserialize<'de> for NormalizedIrVersion {
             NORMALIZED_IR_VERSION => Ok(Self::V1_1),
             NORMALIZED_IR_VERSION_V1_2 => Ok(Self::V1_2),
             NORMALIZED_IR_VERSION_V1_3 => Ok(Self::V1_3),
+            NORMALIZED_IR_VERSION_V1_4 => Ok(Self::V1_4),
             version => Err(de::Error::custom(format_args!(
-                "expected normalized IR version 1.1, 1.2 or 1.3, got {}.{}",
+                "expected normalized IR version 1.1, 1.2, 1.3 or 1.4, got {}.{}",
                 version.major(),
                 version.minor()
             ))),
@@ -97,7 +103,7 @@ impl schemars::JsonSchema for NormalizedIrVersion {
             "type": "object",
             "properties": {
                 "major": { "type": "integer", "const": 1 },
-                "minor": { "type": "integer", "enum": [1, 2, 3] }
+                "minor": { "type": "integer", "enum": [1, 2, 3, 4] }
             },
             "required": ["major", "minor"],
             "additionalProperties": false
@@ -194,6 +200,12 @@ pub enum EntityKind {
     MarkupElement,
     /// An attribute written on a source markup element, not a runtime property.
     MarkupAttribute,
+    /// A declared event with a source-defined payload, not a runtime emission or queue.
+    Event,
+    /// A named error declaration, not a diagnostic or an inferred exception class.
+    ErrorDeclaration,
+    /// A declared callable modifier that wraps execution, not a visibility keyword.
+    Modifier,
 }
 
 impl EntityKind {
@@ -204,6 +216,7 @@ impl EntityKind {
     #[must_use]
     pub const fn minimum_ir_version(self) -> NormalizedIrVersion {
         match self {
+            Self::Event | Self::ErrorDeclaration | Self::Modifier => NormalizedIrVersion::V1_4,
             Self::MarkupElement | Self::MarkupAttribute => NormalizedIrVersion::V1_3,
             Self::StyleRule | Self::Keyframes => NormalizedIrVersion::V1_2,
             Self::Repository
@@ -1106,6 +1119,8 @@ pub enum IrDocument {
     NormalizedV1_2(NormalizedIrDocument),
     /// The normalized 1.3 fact document with source markup entity kinds.
     NormalizedV1_3(NormalizedIrDocument),
+    /// The normalized 1.4 fact document with event, error, and modifier declarations.
+    NormalizedV1_4(NormalizedIrDocument),
 }
 
 impl IrDocument {
@@ -1117,6 +1132,7 @@ impl IrDocument {
             Self::NormalizedV1_1(_) => NORMALIZED_IR_VERSION,
             Self::NormalizedV1_2(_) => NORMALIZED_IR_VERSION_V1_2,
             Self::NormalizedV1_3(_) => NORMALIZED_IR_VERSION_V1_3,
+            Self::NormalizedV1_4(_) => NORMALIZED_IR_VERSION_V1_4,
         }
     }
 }
@@ -1130,7 +1146,8 @@ impl Serialize for IrDocument {
             Self::LegacyV1_0(document) => document.serialize(serializer),
             Self::NormalizedV1_1(document)
             | Self::NormalizedV1_2(document)
-            | Self::NormalizedV1_3(document) => {
+            | Self::NormalizedV1_3(document)
+            | Self::NormalizedV1_4(document) => {
                 if document.version.value() != self.version() {
                     return Err(serde::ser::Error::custom(
                         "IR dispatch and document versions differ",
@@ -1636,6 +1653,7 @@ pub fn decode_ir_document_with_checkpoint(
         && version != NORMALIZED_IR_VERSION
         && version != NORMALIZED_IR_VERSION_V1_2
         && version != NORMALIZED_IR_VERSION_V1_3
+        && version != NORMALIZED_IR_VERSION_V1_4
     {
         return Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -1665,6 +1683,10 @@ pub fn decode_ir_document_with_checkpoint(
         NORMALIZED_IR_VERSION_V1_3 => {
             decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
                 .map(IrDocument::NormalizedV1_3)
+        }
+        NORMALIZED_IR_VERSION_V1_4 => {
+            decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
+                .map(IrDocument::NormalizedV1_4)
         }
         version => Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -2932,6 +2954,100 @@ mod tests {
         }
     }
 
+    #[test]
+    fn declaration_kinds_round_trip_bounded_decoders_and_reject_every_downgrade() {
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        for (kind, wire, identity) in [
+            (EntityKind::Event, "event", "event"),
+            (
+                EntityKind::ErrorDeclaration,
+                "error_declaration",
+                "error-declaration",
+            ),
+            (EntityKind::Modifier, "modifier", "modifier"),
+        ] {
+            assert_eq!(kind.minimum_ir_version(), NormalizedIrVersion::V1_4);
+            assert_eq!(crate::entity_kind_identity_label(kind), identity);
+            let mut value = normalized_value();
+            value["version"]["minor"] = serde_json::json!(4);
+            value["entities"][0]["kind"] = serde_json::json!(wire);
+            let encoded = encode_test_value(&value);
+            let IrDocument::NormalizedV1_4(document) = decode(&encoded, &limits).unwrap() else {
+                panic!("expected IR 1.4");
+            };
+            assert_eq!(document.entities[0].kind, kind);
+            assert_eq!(
+                decode_normalized_ir_document_with_checkpoint(
+                    &encoded,
+                    &limits,
+                    &extensions,
+                    || true
+                )
+                .unwrap(),
+                document,
+            );
+            assert_eq!(
+                serde_json::to_value(IrDocument::NormalizedV1_4(document.clone())).unwrap(),
+                serde_json::to_value(&document).unwrap(),
+            );
+            let packed = rmp_serde::to_vec_named(&document).unwrap();
+            assert_eq!(
+                decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+                    Cursor::new(&packed),
+                    packed.len(),
+                    &limits,
+                    &extensions,
+                    || true,
+                )
+                .unwrap(),
+                document,
+            );
+            assert_eq!(
+                decode_ir_document_with_checkpoint(&encoded, &limits, &extensions, || false),
+                Err(IrDocumentDecodeError::Interrupted),
+            );
+            for wrapper in [
+                IrDocument::NormalizedV1_1(document.clone()),
+                IrDocument::NormalizedV1_2(document.clone()),
+                IrDocument::NormalizedV1_3(document.clone()),
+            ] {
+                assert!(serde_json::to_vec(&wrapper).is_err());
+            }
+            for lower in [
+                NormalizedIrVersion::V1_1,
+                NormalizedIrVersion::V1_2,
+                NormalizedIrVersion::V1_3,
+            ] {
+                let mut downgraded = document.clone();
+                downgraded.version = lower;
+                assert!(crate::validate_ir_document(&downgraded, &limits, &extensions).is_err());
+                let json = serde_json::to_vec(&downgraded).unwrap();
+                assert!(decode(&json, &limits).is_err());
+                assert!(
+                    decode_normalized_ir_document_with_checkpoint(
+                        &json,
+                        &limits,
+                        &extensions,
+                        || true,
+                    )
+                    .is_err()
+                );
+                let packed = rmp_serde::to_vec_named(&downgraded).unwrap();
+                assert!(
+                    decode_normalized_ir_document_messagepack_reader_with_checkpoint(
+                        Cursor::new(&packed),
+                        packed.len(),
+                        &limits,
+                        &extensions,
+                        || true,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
     fn decode(encoded: &[u8], limits: &IrLimits) -> Result<IrDocument, IrDocumentDecodeError> {
         decode_ir_document(encoded, limits, &ExtensionSupport::default())
     }
@@ -3014,10 +3130,10 @@ mod tests {
         );
 
         let mut value = normalized_value();
-        value["version"]["minor"] = serde_json::json!(4);
+        value["version"]["minor"] = serde_json::json!(5);
         assert_eq!(
             decode(&encode_test_value(&value), &IrLimits::default()),
-            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 4 })
+            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 5 })
         );
     }
 
