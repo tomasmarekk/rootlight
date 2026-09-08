@@ -654,6 +654,20 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind == "yaml.alias.reference" {
         return false;
     }
+    // R namespaces, object members and computed callees need their own environment
+    // evidence. A matching local spelling is not even a justified candidate.
+    if matches!(
+        occurrence.syntax_kind.as_str(),
+        "r.namespace_name.reference"
+            | "r.namespace_call.call"
+            | "r.member_name.reference"
+            | "r.member_call.call"
+            | "r.computed_call.call"
+            | "r.unavailable_name.reference"
+            | "r.unavailable_name.call"
+    ) {
+        return false;
+    }
     !matches!(
         occurrence.role,
         OccurrenceRole::Definition

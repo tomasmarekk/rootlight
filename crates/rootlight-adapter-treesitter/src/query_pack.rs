@@ -854,7 +854,7 @@ fn candidate_for_capture(
             GrammarFamily::Ruby => "ruby.call",
             GrammarFamily::Swift => "swift.call",
             GrammarFamily::Bash => "bash.call",
-            GrammarFamily::R => "r.call",
+            GrammarFamily::R => r::call_syntax(capture.node),
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),

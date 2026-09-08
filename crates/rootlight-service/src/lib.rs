@@ -208,8 +208,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/30";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/31";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/2";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -26618,6 +26618,125 @@ mod tests {
                         expected_source.as_bytes()[start..end]
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn r_call_targets_preserve_candidates_and_qualified_uncertainty_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "target <- function(value) { value }\n`target`(1)\n\"target\"(2)\npkg::target(3)\nobject$target(4)\ntarget()(5)\n\"\\xff\"(6)\n";
+        fs::write(fixture.path().join("calls.R"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source.replace("{ value }", "{ value + 1 }");
+        fs::write(fixture.path().join("calls.R"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let mut target_id = None;
+        for (receipt, source) in [(&initial, source), (&updated, changed.as_str())] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "target")
+                .unwrap();
+            if let Some(previous) = target_id {
+                assert_eq!(target.id, previous);
+            }
+            target_id = Some(target.id);
+            let calls: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == rootlight_ir::OccurrenceRole::CallSite)
+                .collect();
+            assert_eq!(calls.len(), 7);
+            for call in calls {
+                let span = call.source.span();
+                let written = source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                if ["`target`(1)", "\"target\"(2)", "target()"].contains(&written) {
+                    let rootlight_ir::OccurrenceTarget::Candidates {
+                        symbols,
+                        total_count,
+                        completeness,
+                        ..
+                    } = &call.target
+                    else {
+                        panic!(
+                            "expected a source-backed candidate, not a runtime guarantee: {written}: {:?}",
+                            call.target
+                        );
+                    };
+                    assert_eq!(symbols, &[target.id]);
+                    assert_eq!(*total_count, 1);
+                    assert_eq!(*completeness, rootlight_ir::CoverageStatus::Complete);
+                } else {
+                    let (syntax, detail) = match written {
+                        "pkg::target(3)" => (
+                            "r.namespace_call.call",
+                            "r-package-namespace-target-unavailable",
+                        ),
+                        "object$target(4)" => {
+                            ("r.member_call.call", "r-object-member-target-unavailable")
+                        }
+                        "target()(5)" => {
+                            ("r.computed_call.call", "r-computed-call-target-unavailable")
+                        }
+                        "\"\\xff\"(6)" => {
+                            ("r.unavailable_name.call", "r-reference-name-unavailable")
+                        }
+                        _ => panic!("unexpected call: {written}"),
+                    };
+                    assert_eq!(call.syntax_kind, syntax);
+                    assert!(matches!(
+                        call.target,
+                        rootlight_ir::OccurrenceTarget::Unresolved { .. }
+                    ));
+                    assert!(document.skipped_regions.iter().any(|gap| {
+                        gap.detail == detail
+                            && gap
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|reference| reference.span() == span)
+                    }));
+                }
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![call.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
             }
         }
     }

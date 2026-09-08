@@ -26,6 +26,101 @@ use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 const SOURCE_BYTES: u64 = 64;
 
 #[test]
+fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() {
+    for syntax in [
+        "r.namespace_name.reference",
+        "r.namespace_call.call",
+        "r.member_name.reference",
+        "r.member_call.call",
+        "r.computed_call.call",
+        "r.unavailable_name.reference",
+        "r.unavailable_name.call",
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.document.files[0].language = "r".to_owned();
+        fixture.document.provenance[0].language = "r".to_owned();
+        fixture.add_entity(
+            10,
+            "target",
+            fixture.primary_file,
+            EntityKind::Function,
+            None,
+        );
+        fixture.document.entities[0].language = "r".to_owned();
+        let role = if syntax.ends_with(".call") {
+            OccurrenceRole::CallSite
+        } else {
+            OccurrenceRole::Reference
+        };
+        let blocked_id = fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
+        fixture.document.occurrences[0].syntax_kind = syntax.to_owned();
+        let blocked = fixture.document.occurrences[0].clone();
+        let control = fixture.add_occurrence(
+            21,
+            "target",
+            fixture.primary_file,
+            OccurrenceRole::Reference,
+            None,
+        );
+        fixture.document.occurrences[1].syntax_kind = "r.identifier.reference".to_owned();
+        fixture.validate();
+        let engine = ResolutionEngine::default();
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap()
+                .required,
+            2
+        );
+        let decisions = engine
+            .resolve(&fixture.document, &cancellation)
+            .unwrap()
+            .decisions;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].occurrence, control);
+        let applied = engine
+            .apply(
+                fixture.document.clone(),
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        let streamed = engine
+            .apply_document(
+                fixture.document.clone(),
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        let (bounded, estimate) = engine
+            .apply_document_bounded(
+                fixture.document,
+                ResolverFactContext::new(fixture.content_hash),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(estimate.required, 2);
+        assert_eq!(bounded, streamed);
+        assert_eq!(streamed, applied.document);
+        assert_eq!(
+            bounded
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.id == blocked_id),
+            Some(&blocked),
+            "{syntax}"
+        );
+        assert!(
+            !bounded
+                .relations
+                .iter()
+                .any(|relation| relation.subject == RelationEndpoint::Occurrence(blocked_id))
+        );
+    }
+}
+
+#[test]
 fn yaml_serialization_aliases_are_not_promoted_by_name_scoring() {
     for resolved in [false, true] {
         let mut fixture = Fixture::new();

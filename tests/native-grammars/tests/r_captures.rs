@@ -60,6 +60,10 @@ fn captures(source: &str, role: &str) -> Vec<Capture> {
                     };
                     range
                 }
+                "call" => {
+                    syntax = r::call_syntax(node);
+                    node.byte_range()
+                }
                 "reference" if r::is_nonlexical_name(node, source.as_bytes()) => continue,
                 _ => node.byte_range(),
             };
@@ -81,6 +85,54 @@ fn texts(source: &str, role: &str) -> Vec<String> {
         .into_iter()
         .map(|capture| capture.text)
         .collect()
+}
+
+#[test]
+fn r_call_targets_retain_namespace_member_and_quoted_identity() {
+    let source = "local(1); `local`(2); \"local\"(3); pkg::local(4); pkg:::local(5); object$local(6); object@local(7)";
+    assert_eq!(
+        texts(source, "call_name"),
+        [
+            "local",
+            "`local`",
+            "\"local\"",
+            "pkg::local",
+            "pkg:::local",
+            "object$local",
+            "object@local"
+        ]
+    );
+}
+
+#[test]
+fn r_call_domains_follow_the_callee_ast_not_a_matching_name_fragment() {
+    for (source, syntax) in [
+        ("local(1)", "r.call"),
+        ("\"local\"(1)", "r.call"),
+        ("pkg :: `local`(1)", "r.namespace_call"),
+        ("pkg:::local(1)", "r.namespace_call"),
+        ("object$local(1)", "r.member_call"),
+        ("object@local(1)", "r.member_call"),
+        ("object[[1]](1)", "r.computed_call"),
+        ("(local)(1)", "r.computed_call"),
+        ("(function(value) value)(1)", "r.computed_call"),
+    ] {
+        let calls = captures(source, "call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].text, source);
+        assert_eq!(calls[0].syntax, syntax);
+    }
+    let calls = captures("factory()(value)", "call");
+    assert_eq!(
+        calls
+            .iter()
+            .map(|capture| (capture.text.as_str(), capture.syntax.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("factory()", "r.call"),
+            ("factory()(value)", "r.computed_call")
+        ]
+    );
 }
 
 #[test]
@@ -200,7 +252,7 @@ fn r_parameter_defaults_named_arguments_and_member_names_are_not_bindings() {
             "..1"
         ]
     );
-    assert_eq!(texts(source, "call_name"), ["print", "median"]);
+    assert_eq!(texts(source, "call_name"), ["print", "stats::median"]);
 }
 
 #[test]

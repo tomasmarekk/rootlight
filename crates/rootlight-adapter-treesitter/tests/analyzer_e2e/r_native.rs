@@ -27,6 +27,95 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn r_quoted_call_names_share_definition_hashes_and_keep_written_source() {
+    let source = "target <- function(value) value\n`target`(1)\n\"target\"(2)\n`\\x74arget`(3)\n";
+    let result = output(source);
+    let calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 3);
+    for call in calls {
+        assert_eq!(
+            call.syntactic_text_hash,
+            rootlight_ids::content_hash(b"target")
+        );
+        assert_eq!(call.syntax_kind, "r.call.call");
+        let span = call.source.span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert!(["`target`(1)", "\"target\"(2)", "`\\x74arget`(3)"].contains(&written));
+    }
+}
+
+#[test]
+fn r_reference_names_decode_without_reinterpreting_string_literals_or_qualified_sources() {
+    let source = "`\\x74arget`\n\"target\"\npkg :: `target`\nobject $ `target`\n`\\u0061`\n";
+    let result = output(source);
+    let document = result.document();
+    let occurrence = |written: &str, role| {
+        document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.role == role
+                    && source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    ) == Some(written)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        occurrence(r"`\x74arget`", OccurrenceRole::Reference).syntactic_text_hash,
+        rootlight_ids::content_hash(b"target")
+    );
+    assert_eq!(
+        occurrence("\"target\"", OccurrenceRole::StringEvidence).syntactic_text_hash,
+        rootlight_ids::content_hash(b"\"target\"")
+    );
+    for (written, syntax, detail) in [
+        (
+            "pkg :: `target`",
+            "r.namespace_name.reference",
+            "r-package-namespace-target-unavailable",
+        ),
+        (
+            "object $ `target`",
+            "r.member_name.reference",
+            "r-object-member-target-unavailable",
+        ),
+        (
+            r"`\u0061`",
+            "r.unavailable_name.reference",
+            "r-reference-name-unavailable",
+        ),
+    ] {
+        let reference = occurrence(written, OccurrenceRole::Reference);
+        assert_eq!(reference.syntax_kind, syntax);
+        assert!(matches!(
+            reference.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == detail
+                && gap
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span() == reference.source.span())
+        }));
+    }
+}
+
+#[test]
 fn r_anonymous_functions_own_parameters_and_nested_callables_without_invented_definitions() {
     let source = "outer <- function(root) { lapply(root, function(value) { function(inner) inner + value }) }\n";
     let result = output(source);

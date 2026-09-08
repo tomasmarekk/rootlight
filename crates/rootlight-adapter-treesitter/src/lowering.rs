@@ -1415,6 +1415,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     fact,
                     text,
                     terminal_call_name,
+                    self.request.limits().ir().max_string_bytes,
                 );
                 let enclosing = entity_plan
                     .nearest_entity_ancestor
@@ -1430,8 +1431,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     provenance_id,
                     syntax_confidence,
                     source.clone(),
-                    resolution_text,
+                    resolution_text.as_deref().unwrap_or(text),
                 )?;
+                if resolution_text.is_none() {
+                    // An undecodable name is not an alternative raw spelling. Keep its
+                    // source, but prevent name-only resolution from guessing a target.
+                    occurrence.syntax_kind = if role == OccurrenceRole::CallSite {
+                        "r.unavailable_name.call"
+                    } else {
+                        "r.unavailable_name.reference"
+                    }
+                    .to_owned();
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let region = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Occurrences,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        "r-reference-name-unavailable",
+                        provenance_id,
+                    )?;
+                    skipped.insert(region.id, region);
+                }
                 if let Some(bindings) = &lua_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
@@ -2636,6 +2658,16 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Relations,
             "r-nonlocal-binding-target-unavailable",
         )),
+        "r.namespace_name.reference" | "r.namespace_call.call" => Some((
+            FactDomain::Relations,
+            "r-package-namespace-target-unavailable",
+        )),
+        "r.member_name.reference" | "r.member_call.call" => {
+            Some((FactDomain::Relations, "r-object-member-target-unavailable"))
+        }
+        "r.computed_call.call" => {
+            Some((FactDomain::Relations, "r-computed-call-target-unavailable"))
+        }
         "sql.file.root" => Some((
             FactDomain::Entities,
             "sql-dialect-statement-coverage-incomplete",
@@ -2836,13 +2868,31 @@ fn structural_resolution_text<'a>(
     fact: &SyntaxFact,
     text: &'a str,
     terminal_call_name: Option<&'a str>,
-) -> &'a str {
+    maximum_name_bytes: usize,
+) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "r"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "r.identifier.reference" | "r.call.call"
+        )
+    {
+        let name = if fact.syntax_kind().as_str() == "r.call.call" {
+            terminal_call_name?
+        } else {
+            text
+        };
+        return rootlight_adapter_sdk::structural_captured_name_for_language(
+            "r",
+            name,
+            maximum_name_bytes,
+        );
+    }
     if let Some(terminal_call_name) = terminal_call_name {
-        return terminal_call_name;
+        return Some(std::borrow::Cow::Borrowed(terminal_call_name));
     }
     // Structural resolution matches entity-name hashes. The full scoped Rust
     // spelling remains available through the occurrence's source span.
-    if language == "rust" && fact.syntax_kind().as_str().ends_with(".scoped_call") {
+    let text = if language == "rust" && fact.syntax_kind().as_str().ends_with(".scoped_call") {
         text.rsplit("::")
             .next()
             .map(str::trim)
@@ -2850,7 +2900,8 @@ fn structural_resolution_text<'a>(
             .unwrap_or(text)
     } else {
         text
-    }
+    };
+    Some(std::borrow::Cow::Borrowed(text))
 }
 
 fn terminal_call_names(

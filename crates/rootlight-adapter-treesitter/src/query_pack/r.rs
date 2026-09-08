@@ -93,6 +93,18 @@ pub(super) fn signature_range(node: Node<'_>, source: &[u8]) -> Option<std::ops:
     Some(function.start_byte()..parameters.end_byte())
 }
 
+pub(super) fn call_syntax(node: Node<'_>) -> &'static str {
+    match node
+        .child_by_field_name("function")
+        .map(|callee| callee.kind())
+    {
+        Some("identifier" | "string") => "r.call",
+        Some("namespace_operator") => "r.namespace_call",
+        Some("extract_operator") => "r.member_call",
+        _ => "r.computed_call",
+    }
+}
+
 pub(super) fn is_nonlexical_name(node: Node<'_>, source: &[u8]) -> bool {
     let Some(parent) = node.parent() else {
         return false;

@@ -6,9 +6,7 @@
 (parameter) @declaration @definition
 (for_statement variable: (_) @declaration @definition)
 (call) @call
-(call function: (identifier) @call_name)
-(call function: (namespace_operator rhs: (identifier) @call_name))
-(call function: (extract_operator rhs: (identifier) @call_name))
+(call function: [(identifier) (string) (namespace_operator) (extract_operator)] @call_name)
 [(identifier) (dots) (dot_dot_i)] @reference
 (namespace_operator) @reference
 (extract_operator) @reference
