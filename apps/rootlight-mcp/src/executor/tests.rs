@@ -8584,56 +8584,122 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
 }
 
 #[tokio::test]
-async fn architecture_overview_workspace_truncation_returns_actionable_narrowing() {
-    let response = ArchitectureOverviewPortResponse::new(
-        ClientArchitectureOverview {
-            context: context(0, 0),
-            components: Vec::new(),
-            connections: Vec::new(),
-            hotspots: Vec::new(),
-            communities: Vec::new(),
-            views: Vec::new(),
-            execution_completeness: truncated_execution(
-                client::LimitingResourceKind::MemoryBytes,
-                client::ContinuationGuidance::NarrowScope,
-            ),
-        },
-        metadata("architecture-overview-workspace"),
-    );
-    let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
+async fn architecture_overview_truncation_returns_actionable_narrowing() {
+    for (resource, public_resource, warning_code) in [
+        (
+            client::LimitingResourceKind::MemoryBytes,
+            ContractLimitingResourceKind::MemoryBytes,
+            "limit_memory",
+        ),
+        (
+            client::LimitingResourceKind::Results,
+            ContractLimitingResourceKind::Results,
+            "limit_results",
+        ),
+        (
+            client::LimitingResourceKind::Rows,
+            ContractLimitingResourceKind::Rows,
+            "limit_rows",
+        ),
+        (
+            client::LimitingResourceKind::Edges,
+            ContractLimitingResourceKind::Edges,
+            "limit_edges",
+        ),
+    ] {
+        let response = ArchitectureOverviewPortResponse::new(
+            ClientArchitectureOverview {
+                context: context(0, 0),
+                components: Vec::new(),
+                connections: Vec::new(),
+                hotspots: Vec::new(),
+                communities: Vec::new(),
+                views: Vec::new(),
+                execution_completeness: truncated_execution(
+                    resource,
+                    client::ContinuationGuidance::NarrowScope,
+                ),
+            },
+            metadata("architecture-overview-workspace"),
+        );
+        let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
 
-    let output: ArchitectureOverviewOutput = decode_current_analysis(
-        execute(
-            &harness.executor,
-            VerticalTool::ArchitectureOverview,
-            json!({"repository": {"repository_id": repository()}}),
-        )
-        .await
-        .expect("workspace exhaustion maps to a bounded public result"),
-    );
-    let AnalysisToolResponse::Success(output) = output else {
-        panic!("expected architecture overview success");
-    };
+        let output: ArchitectureOverviewOutput = decode_current_analysis(
+            execute(
+                &harness.executor,
+                VerticalTool::ArchitectureOverview,
+                json!({"repository": {"repository_id": repository()}}),
+            )
+            .await
+            .expect("resource exhaustion maps to a bounded public result"),
+        );
+        let AnalysisToolResponse::Success(output) = output else {
+            panic!("expected architecture overview success");
+        };
 
-    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::MemoryBytes);
-    assert!(output.data.components.is_empty());
-    let warning_codes: Vec<_> = output
-        .warnings
-        .iter()
-        .map(|warning| warning.code.as_str())
-        .collect();
-    assert!(warning_codes.contains(&"result_truncated"));
-    assert!(warning_codes.contains(&"limit_memory"));
-    assert!(warning_codes.contains(&"narrow_scope"));
-    let narrowing = output
-        .warnings
-        .iter()
-        .find(|warning| warning.code.as_str() == "narrow_architecture_scope")
-        .expect("architecture truncation includes a concrete retry");
-    assert_eq!(
-        narrowing.message.as_str(),
-        "retry architecture overview with scope paths limited to one repository subtree no derived views and include edges false"
-    );
+        assert_public_analysis_truncation(&output, public_resource);
+        assert!(output.data.components.is_empty());
+        let warning_codes: Vec<_> = output
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect();
+        assert!(warning_codes.contains(&"result_truncated"));
+        assert!(warning_codes.contains(&warning_code));
+        assert!(warning_codes.contains(&"narrow_scope"));
+        let narrowing = output
+            .warnings
+            .iter()
+            .find(|warning| warning.code.as_str() == "narrow_architecture_scope")
+            .expect("architecture truncation includes a concrete retry");
+        assert_eq!(
+            narrowing.message.as_str(),
+            "retry architecture overview with scope paths limited to one repository subtree no derived views and include edges false"
+        );
+    }
+}
+
+#[tokio::test]
+async fn architecture_overview_preserves_non_narrowing_guidance() {
+    for completeness in [
+        complete_execution(),
+        truncated_execution(
+            client::LimitingResourceKind::Results,
+            client::ContinuationGuidance::IncreaseBudgetWithinLimit,
+        ),
+    ] {
+        let response = ArchitectureOverviewPortResponse::new(
+            ClientArchitectureOverview {
+                context: context(0, 0),
+                components: Vec::new(),
+                connections: Vec::new(),
+                hotspots: Vec::new(),
+                communities: Vec::new(),
+                views: Vec::new(),
+                execution_completeness: completeness,
+            },
+            metadata("architecture-overview-guidance"),
+        );
+        let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
+        let output: ArchitectureOverviewOutput = decode_current_analysis(
+            execute(
+                &harness.executor,
+                VerticalTool::ArchitectureOverview,
+                json!({"repository": {"repository_id": repository()}}),
+            )
+            .await
+            .expect("authoritative guidance is preserved"),
+        );
+        let AnalysisToolResponse::Success(output) = output else {
+            panic!("expected architecture overview success");
+        };
+        assert!(
+            output
+                .warnings
+                .iter()
+                .all(|warning| { warning.code.as_str() != "narrow_architecture_scope" })
+        );
+    }
 }
 
 #[tokio::test]

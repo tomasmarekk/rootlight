@@ -5508,12 +5508,6 @@ fn map_architecture_overview(
         && response
             .result
             .execution_completeness
-            .limiting_resources
-            .iter()
-            .any(|resource| resource.kind == client::LimitingResourceKind::MemoryBytes)
-        && response
-            .result
-            .execution_completeness
             .guidance
             .contains(&client::ContinuationGuidance::NarrowScope)
     {

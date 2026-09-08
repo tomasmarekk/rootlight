@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "a429f03365eedc2be36d07b621a8e3f742e25aa0",
+  "source_revision": "b9a9b52c9fba91e8983a57e1ffe3a5a40fa9f4f0",
   "tools": [
     {
       "tool": "repo.index",
@@ -547,7 +547,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "58dcfc06e96acafae5a73da8d0c3df6d809c46e6816ecbf70f5d5885bb257398",
+      "sha256": "f3df7752ae6466730b037b32fa6c181d6b5bae4f2e0413b6b8655253be86df83",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -593,10 +593,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "fdfd2965682dd702bcbb9187d8a053f337cae28adb622a8ee2d2102f0bd37a9b",
+    "input_sha256": "4ae082660d620e8382be4712ff2dee742f1a0a6cae128d8d3e8a2b80e36dff32",
     "serialized_bytes": 13148,
     "deterministic_estimated_tokens": 3287,
-    "actual_tokens": 2993,
+    "actual_tokens": 2999,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },
