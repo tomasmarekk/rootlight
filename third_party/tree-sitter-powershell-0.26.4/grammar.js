@@ -52,18 +52,18 @@ export default grammar({
       token(
         seq(
           /[0-9]+/,
-          optional(choice('l', 'd')),
-          optional(choice('kb', 'mb', 'gb', 'tb', 'pb')),
+          optional(/[lLdD]/),
+          optional(/[kKmMgGtTpP][bB]/),
         ),
       ),
 
     hexadecimal_integer_literal: ($) =>
       token(
         seq(
-          '0x',
+          /0[xX]/,
           /[0-9a-fA-F]+/,
-          optional('l'),
-          optional(choice('kb', 'mb', 'gb', 'tb', 'pb')),
+          optional(/[lL]/),
+          optional(/[kKmMgGtTpP][bB]/),
         ),
       ),
 
@@ -73,18 +73,18 @@ export default grammar({
         choice(
           seq(
             /[0-9]+\.[0-9]+/,
-            optional(token(seq('e', optional(choice('+', '-')), /[0-9]+/))),
-            optional(choice('kb', 'mb', 'gb', 'tb', 'pb')),
+            optional(token(seq(/[eE]/, optional(choice('+', '-')), /[0-9]+/))),
+            optional(/[kKmMgGtTpP][bB]/),
           ),
           seq(
             /\.[0-9]+/,
-            optional(token(seq('e', optional(choice('+', '-')), /[0-9]+/))),
-            optional(choice('kb', 'mb', 'gb', 'tb', 'pb')),
+            optional(token(seq(/[eE]/, optional(choice('+', '-')), /[0-9]+/))),
+            optional(/[kKmMgGtTpP][bB]/),
           ),
           seq(
             /[0-9]+/,
-            token(seq('e', optional(choice('+', '-')), /[0-9]+/)),
-            optional(choice('kb', 'mb', 'gb', 'tb', 'pb')),
+            token(seq(/[eE]/, optional(choice('+', '-')), /[0-9]+/)),
+            optional(/[kKmMgGtTpP][bB]/),
           ),
         ),
       ),

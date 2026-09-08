@@ -123,6 +123,21 @@ fn powershell_empty_blocks_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_numeric_values_preserve_exact_retrieval_across_processes() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "values.ps1",
+        "$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\nfunction Read-Size { return $size }\n",
+        &[
+            ("$size", "variable", 1),
+            ("$rate", "variable", 1),
+            ("$mask", "variable", 1),
+            ("Read-Size", "function", 1),
+        ],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

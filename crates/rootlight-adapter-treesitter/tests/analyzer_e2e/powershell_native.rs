@@ -27,6 +27,45 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_numeric_literals_do_not_become_command_references() {
+    let source =
+        "$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\nfunction Read-Size { return $size }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    assert!(
+        !doc.skipped_regions.iter().any(|gap| matches!(
+            gap.reason,
+            SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+        )),
+        "{:?}",
+        doc.skipped_regions
+    );
+    for name in ["$size", "$rate", "$mask", "Read-Size"] {
+        assert!(
+            doc.entities
+                .iter()
+                .any(|entity| entity.canonical_name == name),
+            "{name}: {:?}",
+            doc.entities
+        );
+    }
+    for occurrence in &doc.occurrences {
+        let span = occurrence.source.span();
+        let text = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            !matches!(text, "2kB" | "2E+2MB" | "0X2LPb"),
+            "numeric literal became an occurrence: {occurrence:?}"
+        );
+    }
+}
+
+#[test]
 fn powershell_empty_blocks_keep_definitions_without_false_parse_gaps() {
     for body in ["", " ", "\r\n", "<# no action #>", "# no action\n"] {
         let block = format!("{{{body}}}");

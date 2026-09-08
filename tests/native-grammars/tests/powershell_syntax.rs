@@ -180,6 +180,11 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
         ("{<# no action #>}", "{}"),
         ("{}", "{ param($argument) }"),
         ("{ param($argument) }", "{}"),
+        ("Read-Entry 1 {}", "Read-Entry 1 {}; $bytes = 2kb"),
+        ("2kb", "2kB"),
+        ("2kB", "0X2LkB"),
+        ("0X2LkB", "2E+2MB"),
+        ("2E+2MB", "2e-2mb"),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();
@@ -243,6 +248,77 @@ fn powershell_unfinished_syntax_retains_errors_and_bounded_ranges() {
             );
         }
     }
+}
+
+#[test]
+fn powershell_numeric_markers_preserve_case_insensitive_literal_ranges() {
+    for base in ["2", "0x2", "0X2", "2.5", ".5", "2e2", "2E+2", ".5E-2"] {
+        for multiplier in ["", "kb", "kB", "Kb", "KB", "mB", "GB", "tB", "Pb"] {
+            let literal = format!("{base}{multiplier}");
+            let source = format!("$value = {literal}\n");
+            let tree = parser().parse(&source, None).unwrap();
+            assert!(
+                !tree.root_node().has_error(),
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+            let literals: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| matches!(node.kind(), "integer_literal" | "real_literal"))
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect();
+            assert_eq!(literals, [literal.as_str()]);
+        }
+    }
+    for literal in [
+        "2l", "2L", "2d", "2D", "0x2l", "0X2L", "2LkB", "2DMB", "0X2LPb",
+    ] {
+        let source = format!("$value = {literal}\n");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        let literal_node = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "integer_literal")
+            .unwrap();
+        assert_eq!(literal_node.utf8_text(source.as_bytes()).unwrap(), literal);
+    }
+}
+
+#[test]
+fn powershell_numeric_markers_do_not_consume_barewords_or_delimiters() {
+    for bareword in ["2GBL", "0XG", "2e+", "2XB", "2_GB"] {
+        let source = format!("$value = {bareword}\n");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert!(
+            !nodes(tree.root_node())
+                .iter()
+                .any(|node| matches!(node.kind(), "integer_literal" | "real_literal")),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
+    let source = "$range = 1 .. 2\n$text = '2GB'\n$size = (2L).ToString()\n";
+    let tree = parser().parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    let literals: Vec<_> = nodes(tree.root_node())
+        .into_iter()
+        .filter(|node| matches!(node.kind(), "integer_literal" | "real_literal"))
+        .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+        .collect();
+    assert_eq!(literals, ["1", "2", "2L"]);
 }
 
 #[test]

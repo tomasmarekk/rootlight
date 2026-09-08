@@ -1,4 +1,4 @@
-# PowerShell empty script-block expressions
+# PowerShell source syntax corrections
 
 This is the Rust build payload of the MIT-licensed `tree-sitter-powershell`
 0.26.4 crates.io archive, SHA-256
@@ -13,6 +13,13 @@ are valid expression values and command arguments, including whitespace-only
 and comment-only bodies. Delimiters and the existing nonempty body grammar
 remain required where applicable; incomplete blocks still report syntax errors.
 This changes syntax acceptance, not runtime execution or semantic resolution.
+
+Numeric tokens accept either case for the hexadecimal prefix, decimal and long
+suffixes, exponent marker and byte-size multipliers. Their existing lexical
+priority is retained so invalid suffix combinations remain barewords rather than
+being split into a valid numeric prefix and another token. This does not implement
+new numeric types or resolve the upstream ambiguity between compact numeric
+range/member expressions and command names.
 
 The published `src/parser.c`, `src/grammar.json`, `src/node-types.json` and parser
 header reproduce byte-for-byte using Tree-sitter CLI 0.26.8 with ABI 15.
