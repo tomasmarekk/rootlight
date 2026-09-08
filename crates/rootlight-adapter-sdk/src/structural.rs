@@ -20,6 +20,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "dart.extension.declaration"
+                    | "powershell.hashtable.declaration"
                     | "scala.object.declaration"
                     | "scala.package.declaration"
                     | "scala.package_object.declaration"
@@ -93,6 +94,8 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "json.property.declaration"
+                    | "powershell.property.declaration"
+                    | "powershell.dynamic_property.declaration"
                     | "toml.property.declaration"
                     | "yaml.property.declaration"
             ) =>
@@ -333,6 +336,9 @@ pub fn structural_captured_name_for_fact<'a>(
 /// single segment; multi-segment paths stay quoted to preserve boundaries.
 /// YAML string identities use the same readable-string rule; other scalar types
 /// keep their type prefix so a boolean or number cannot masquerade as a string.
+/// PowerShell literal keys decode quoting and escapes for readable display only;
+/// their canonical identity remains the exact written spelling. Unreadable or
+/// interpolated strings retain that spelling instead of inventing a value.
 /// Other languages are unchanged. The input must already be a
 /// bounded canonical name from [`structural_captured_name_for_language`]; display
 /// text is no longer than that input and must never replace the durable identity.
@@ -341,7 +347,9 @@ pub fn structural_display_name_for_language<'a>(
     language: &str,
     canonical: &'a str,
 ) -> Cow<'a, str> {
-    if matches!(language, "json" | "toml") {
+    if language == "powershell" {
+        crate::powershell_names::display_key(canonical).unwrap_or(Cow::Borrowed(canonical))
+    } else if matches!(language, "json" | "toml") {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "yaml" {
         canonical

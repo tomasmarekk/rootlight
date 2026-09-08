@@ -127,6 +127,20 @@ fn powershell_assignment_targets_cross_real_process_boundaries() {
 }
 
 #[test]
+fn powershell_data_properties_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "settings.psd1",
+        "@{ Title = 'text'; 'quoted key' = 2; Nested = @{ Title = 'inner' } }\n",
+        &[
+            ("Title", "field", 2),
+            ("quoted key", "field", 1),
+            ("Nested", "field", 1),
+        ],
+    );
+}
+
+#[test]
 fn markup_entities_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "html",
@@ -380,7 +394,7 @@ fn source_entities_cross_process_boundaries(
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, count) in queries {
-        let arguments = json!({"query": name, "search_modes": ["exact"],
+        let arguments = json!({"query": name, "search_modes": ["exact"], "max_results": 200,
             "languages": [language], "scope": {"paths": [path]}, "response_profile": "evidence"});
         let located = fixture.standalone(
             &format!("source-locate-{kind}"),
@@ -471,6 +485,7 @@ fn source_entities_cross_process_boundaries(
             // kind independently asserted by these source-backed fixtures.
             let row_kind = match (language, kind) {
                 ("r", "variable") => "parameter",
+                ("powershell", "field") => "property",
                 ("scala" | "dart" | "powershell", "type") => "class",
                 ("scala", "module") => "namespace",
                 ("dart", "method") if name == "Store.named" => "constructor",

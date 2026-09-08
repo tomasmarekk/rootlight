@@ -74,6 +74,7 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
     let storm = "function Read-Entry { param($Name); return $Name }\n".repeat(40);
     let casts = format!("{}$value = 1", "[int]".repeat(64));
     let targets = format!("{}$last = 1", "$value, ".repeat(40));
+    let tables = "@{ Key = @{ Nested = 1 }; $key = @{ Value = 2 } }\n".repeat(40);
     let sources: &[&[u8]] = &[
         &[0xff, 0xfe, 0x80],
         b"function Broken { param(",
@@ -83,6 +84,7 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
         storm.as_bytes(),
         casts.as_bytes(),
         targets.as_bytes(),
+        tables.as_bytes(),
     ];
     for source in sources {
         for (max_nodes, max_depth) in [(1, 1), (16, 4), (256, 32)] {

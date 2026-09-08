@@ -14,7 +14,9 @@
 (unary_expression (variable) @declaration @definition)
 (foreach_statement (variable) @declaration @definition)
 (script_block_expression) @scope
-[(hash_literal_expression) (data_statement)] @scope
+(hash_literal_expression) @declaration @scope
+(hash_entry (key_expression) @definition @scope) @declaration @scope
+(data_statement) @scope
 [(command) (invokation_expression)] @call
 (command command_name: (command_name) @call_name @reference)
 (invokation_expression (member_name (simple_name) @call_name))

@@ -13,6 +13,7 @@ mod ir_accounting;
 mod json_names;
 mod limits;
 mod lua_names;
+mod powershell_names;
 mod r_names;
 mod report;
 mod request;

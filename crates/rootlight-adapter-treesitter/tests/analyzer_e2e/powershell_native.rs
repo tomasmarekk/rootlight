@@ -294,7 +294,7 @@ fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() 
     let analyzer = analyzer(&provider, POWERSHELL);
     let fixture = Fixture::new(
         POWERSHELL,
-        b"function Read-Entry { [int]$first, $second = 1, 2; return $first }\n",
+        b"function Read-Entry { [int]$first, $second = 1, 2; $map = @{ Key = 1; $key = @{ Inner = 2 } }; return $first }\n",
     );
     let budget = limits();
     let initial_request = request(&fixture.snapshot, &fixture.source, POWERSHELL, &budget);
@@ -321,6 +321,21 @@ fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() 
     let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
     assert_eq!(replay.document(), fresh.document());
     assert_eq!(replay.report(), fresh.report());
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.container))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&initial), identities(&replay));
+    for entity in &replay.document().entities {
+        assert_eq!(
+            entity.evidence.source.as_ref().unwrap().generation(),
+            successor.source.generation()
+        );
+    }
     for name in ["$first", "$second"] {
         let before = initial
             .document()
@@ -350,14 +365,154 @@ fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() 
 }
 
 #[test]
-fn powershell_unmodeled_data_members_remain_explicit_source_scoped_gaps() {
+fn powershell_hashtable_entries_retain_written_keys_and_nested_ownership() {
+    let source = "@{ Title = 'text'; 'quoted key' = 2; Empty = @{}; Nested = @{ Title = 'inner' }; Items = @(@{ Code = 1 }, @{ Code = 2 }) }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let properties: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property)
+        .collect();
+    assert_eq!(properties.len(), 8, "{:?}", doc.skipped_regions);
+    for property in properties {
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: property.id,
+                        })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(property.canonical_name.as_str())
+        );
+        let owner = doc
+            .entities
+            .iter()
+            .find(|entity| {
+                property.container == Some(rootlight_ir::ContainerRef::Entity(entity.id))
+            })
+            .unwrap();
+        assert_eq!(owner.kind, EntityKind::Namespace);
+        assert!(owner.flags.contains(&EntityFlag::Synthetic));
+        assert!(
+            doc.relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(owner.id)
+                    && relation.object == RelationEndpoint::Entity(property.id))
+        );
+    }
+    let codes: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "Code")
+        .collect();
+    assert_eq!(codes.len(), 2);
+    assert_ne!(codes[0].id, codes[1].id);
+    assert_ne!(codes[0].container, codes[1].container);
+    let nested = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Nested")
+        .unwrap();
+    assert!(
+        doc.entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Namespace
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(nested.id)))
+    );
+    let changed = output(
+        &source
+            .replace("'text'", "'longer text'")
+            .replace("= 2", "= 200"),
+    );
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, (entity.canonical_name.clone(), entity.container)))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&result), identities(&changed));
+}
+
+#[test]
+fn powershell_literal_key_display_preserves_native_definitions_and_written_identity() {
+    for (written, display) in [
+        ("'quoted key'", "quoted key"),
+        ("'can''t'", "can't"),
+        ("\"a\"\"b\"", "a\"b"),
+        ("\"`$key\"", "$key"),
+        ("'literal $key'", "literal $key"),
+        ("\"`u{96ea}\"", "雪"),
+        ("\"`u{1f44d}\"", "👍"),
+        ("\"a``b\"", "a`b"),
+        ("@'\r\nhere key\r\n'@", "here key"),
+        ("@\"\n`u{96ea}\n\"@", "雪"),
+    ] {
+        let source = format!("@{{ {written} = 1 }}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{written}: {:?}",
+            doc.diagnostics
+        );
+        let properties: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property)
+            .collect();
+        assert_eq!(properties.len(), 1, "{written}");
+        let property = properties[0];
+        assert_eq!(property.canonical_name, written);
+        assert_eq!(property.display_name, display);
+        assert!(!property.flags.contains(&EntityFlag::Synthetic));
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: property.id,
+                        })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+    }
+}
+
+#[test]
+fn powershell_literal_data_keeps_runtime_comparison_uncertainty_scoped() {
     let source = "@{ ModuleVersion = '1.0.0'; RootModule = 'catalog.psm1' }\n";
     let result = output(source);
     let gaps: Vec<_> = result
         .document()
         .skipped_regions
         .iter()
-        .filter(|gap| gap.detail == "powershell-data-member-analysis-unavailable")
+        .filter(|gap| gap.detail == "powershell-hashtable-runtime-key-comparison-unavailable")
         .collect();
     assert_eq!(gaps.len(), 1);
     let span = gaps[0].source.span();
@@ -367,5 +522,89 @@ fn powershell_unmodeled_data_members_remain_explicit_source_scoped_gaps() {
         ),
         Some(source.trim_end())
     );
-    assert_eq!(gaps[0].domain, FactDomain::Entities);
+    assert_eq!(gaps[0].domain, FactDomain::Relations);
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.domain == FactDomain::Entities)
+    );
+}
+
+#[test]
+fn powershell_computed_keys_preserve_entry_ownership_without_invented_definitions() {
+    let source = "@{ $key = @{ Inner = 1 }; \"$name\" = 2; (Get-Key) = 3; 'literal $name' = 4; \"\" = 5; 10 = 6 }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let dynamic: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Property && entity.flags.contains(&EntityFlag::Synthetic)
+        })
+        .collect();
+    assert_eq!(dynamic.len(), 3);
+    assert_eq!(
+        dynamic
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+    for entry in &dynamic {
+        assert_eq!(entry.canonical_name, "<computed-key>");
+        assert!(
+            !doc.occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: entry.id }))
+        );
+    }
+    let gaps: Vec<_> = doc
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "powershell-computed-key-value-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 3);
+    let written: BTreeSet<_> = gaps
+        .iter()
+        .map(|gap| {
+            assert_eq!(gap.domain, FactDomain::Entities);
+            let span = gap.source.span();
+            source
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                )
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(written, BTreeSet::from(["$key", "\"$name\"", "(Get-Key)"]));
+    for name in ["'literal $name'", "\"\"", "10", "Inner"] {
+        assert!(
+            doc.entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Property
+                    && entity.canonical_name == name
+                    && !entity.flags.contains(&EntityFlag::Synthetic))
+        );
+    }
+    let inner = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Inner")
+        .unwrap();
+    let owner = doc
+        .entities
+        .iter()
+        .find(|entity| inner.container == Some(rootlight_ir::ContainerRef::Entity(entity.id)))
+        .unwrap();
+    assert!(
+        dynamic
+            .iter()
+            .any(|entry| owner.container == Some(rootlight_ir::ContainerRef::Entity(entry.id)))
+    );
 }

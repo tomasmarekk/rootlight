@@ -1,9 +1,31 @@
 //! PowerShell source declarations and body-independent callable headers.
 //! Dynamic commands and member assignments must not masquerade as new bindings.
+//! Literal keys retain written spelling, not an evaluated runtime comparison key.
 
 use tree_sitter::Node;
 
 use super::StructuralRole;
+
+pub(super) fn is_literal_key(mut node: Node<'_>) -> bool {
+    loop {
+        match node.kind() {
+            "simple_name" | "integer_literal" | "real_literal" => return true,
+            "key_expression" | "unary_expression" | "string_literal"
+                if node.named_child_count() == 1 =>
+            {
+                let Some(child) = node.named_child(0) else {
+                    return false;
+                };
+                node = child;
+            }
+            "verbatim_string_characters" | "verbatim_here_string_characters" => return true,
+            "expandable_string_literal" | "expandable_here_string_literal" => {
+                return node.named_child_count() == 0;
+            }
+            _ => return false,
+        }
+    }
+}
 
 fn is_assignment_target(mut node: Node<'_>) -> bool {
     while let Some(parent) = node.parent() {
@@ -31,6 +53,9 @@ fn is_assignment_target(mut node: Node<'_>) -> bool {
 }
 
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
+    if node.kind() == "key_expression" && role == StructuralRole::Definition {
+        return is_literal_key(node);
+    }
     if node.kind() == "variable"
         && node
             .parent()
@@ -51,6 +76,13 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
 }
 
 pub(super) fn declaration_syntax(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if node.kind() == "hash_entry" {
+        return Some(if node.named_child(0).is_some_and(is_literal_key) {
+            "powershell.property"
+        } else {
+            "powershell.dynamic_property"
+        });
+    }
     if node.kind() == "class_method_definition" {
         let mut cursor = node.walk();
         let name = node
@@ -111,6 +143,8 @@ pub(super) fn canonical_syntax(native: &str) -> Option<&'static str> {
         "command_name" => "powershell.command_name",
         "script_block_expression" => "powershell.script_block",
         "hash_literal_expression" => "powershell.hashtable",
+        "hash_entry" => "powershell.property",
+        "key_expression" => "powershell.key",
         "data_statement" => "powershell.data",
         "comment" => "powershell.comment",
         "string_literal" => "powershell.string",

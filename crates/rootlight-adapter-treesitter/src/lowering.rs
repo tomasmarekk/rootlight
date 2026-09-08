@@ -2022,6 +2022,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // This label is synthetic, not a written binding. The native
                 // callable span and scope identity retain its source ownership.
                 (std::borrow::Cow::Borrowed("<anonymous>"), None)
+            } else if fact.syntax_kind().as_str() == "powershell.hashtable.declaration" {
+                // Source containers own entries without asserting a runtime variable binding.
+                (std::borrow::Cow::Borrowed("<hashtable>"), None)
+            } else if fact.syntax_kind().as_str() == "powershell.dynamic_property.declaration" {
+                // Keep nested values under their written entry even when its key is evaluated.
+                (std::borrow::Cow::Borrowed("<computed-key>"), None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -2721,7 +2727,15 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Entities,
             "powershell-runtime-script-block-identity-unavailable",
         )),
-        "powershell.hashtable.scope" | "powershell.data.scope" => Some((
+        "powershell.hashtable.scope" => Some((
+            FactDomain::Relations,
+            "powershell-hashtable-runtime-key-comparison-unavailable",
+        )),
+        "powershell.dynamic_key.scope" => Some((
+            FactDomain::Entities,
+            "powershell-computed-key-value-unavailable",
+        )),
+        "powershell.data.scope" => Some((
             FactDomain::Entities,
             "powershell-data-member-analysis-unavailable",
         )),

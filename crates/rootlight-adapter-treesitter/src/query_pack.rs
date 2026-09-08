@@ -759,6 +759,13 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Scope
+            if family == GrammarFamily::PowerShell
+                && capture.node.kind() == "key_expression"
+                && !powershell::is_literal_key(capture.node) =>
+        {
+            "powershell.dynamic_key"
+        }
         StructuralRole::Declaration if family == GrammarFamily::PowerShell => {
             powershell::declaration_syntax(capture.node, source)
                 .ok_or_else(|| query_failure("query-powershell-declaration-kind"))?
