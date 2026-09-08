@@ -96,9 +96,13 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
         status["result"]["structuredContent"]["data"]["resolved_generation"],
         generation
     );
-    assert_eq!(
-        status["result"]["structuredContent"]["data"]["operations"][0]["operation_id"],
-        operation_id
+    assert!(
+        status["result"]["structuredContent"]["data"]["operations"]
+            .as_array()
+            .expect("restart status includes requested operation history")
+            .iter()
+            .any(|operation| operation["operation_id"] == operation_id
+                && operation["kind"] == "repository_index")
     );
     let operation = mcp.call(
         "restart-operation",

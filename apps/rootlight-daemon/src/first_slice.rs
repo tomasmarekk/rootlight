@@ -124,6 +124,7 @@ const DEFAULT_READ_QUEUE: usize = 32;
 const DEFAULT_CONTROL_QUEUE: usize = 32;
 const DEFAULT_OPERATION_METADATA: usize = 256;
 const MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES: usize = 8;
+const MAX_PUBLIC_REPOSITORY_OPERATIONS: usize = 100;
 const RETRY_AFTER_MS: u32 = 100;
 const OPERATION_RETRY_QUEUED_MS: u32 = 250;
 const OPERATION_RETRY_DISCOVERY_MS: u32 = 200;
@@ -4380,7 +4381,11 @@ type RecoveryWorkerStartHook =
 
 #[cfg(test)]
 type RecoveryWorkerCheckpointHook = Box<
-    dyn FnOnce(&FirstSliceServiceLanes, &Cancellation) -> Result<(), FirstSliceHostError>
+    dyn FnOnce(
+            &FirstSliceServiceLanes,
+            &Cancellation,
+            ServiceRequestResources<'_>,
+        ) -> Result<(), FirstSliceHostError>
         + Send
         + 'static,
 >;
@@ -5652,7 +5657,7 @@ impl OperationMetadataSet {
                 .cmp(&left.started_unix_ms)
                 .then_with(|| right_id.cmp(left_id))
         });
-        operations.truncate(100);
+        operations.truncate(MAX_PUBLIC_REPOSITORY_OPERATIONS);
         operations
     }
 
@@ -6887,7 +6892,17 @@ fn durable_recovery_worker(
         reconcile_recovery_support_inventory(&lanes, &cancellation)?;
         #[cfg(test)]
         if let Some(after_active_restore) = deferred.after_active_restore.take() {
-            after_active_restore(&lanes, &cancellation)?;
+            after_active_restore(
+                &lanes,
+                &cancellation,
+                ServiceRequestResources {
+                    journal: &journal,
+                    metadata: metadata.as_ref(),
+                    runtime: &runtime,
+                    catalog_epoch: Instant::now(),
+                    publication_hook: None,
+                },
+            )?;
         }
         let restore = &deferred.restore;
         let installed_generations = &deferred.installed_generations;
@@ -7722,27 +7737,29 @@ fn execute_service_request(
         .check()
         .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
     let requested_repository = request_repository(&request)?;
-    if let Some(repository) = requested_repository {
-        let recovery = lanes
+    let requested_recovery = if let Some(repository) = requested_repository {
+        lanes
             .recovering_repositories
             .read()
             .map_err(|_| internal_error())?
             .get(&repository)
-            .copied();
-        if let Some(recovery) = recovery
-            && recovery.phase.blocks_reads()
-        {
-            lanes
-                .recovery_demand
-                .lock()
-                .map_err(|_| internal_error())?
-                .insert(repository);
-            return Err(recovery_in_progress(
-                Some(repository),
-                Some(recovery),
-                RepositoryRecoveryPhase::ActiveGeneration,
-            ));
-        }
+            .copied()
+    } else {
+        None
+    };
+    if let (Some(repository), Some(recovery)) = (requested_repository, requested_recovery)
+        && recovery.phase.blocks_reads()
+    {
+        lanes
+            .recovery_demand
+            .lock()
+            .map_err(|_| internal_error())?
+            .insert(repository);
+        return Err(recovery_in_progress(
+            Some(repository),
+            Some(recovery),
+            RepositoryRecoveryPhase::ActiveGeneration,
+        ));
     }
     if !lanes.recovery_ready.load(Ordering::Acquire)
         && requested_repository.is_none()
@@ -7813,15 +7830,27 @@ fn execute_service_request(
                 .map(FirstSliceIpcResponse::RepositoryCatalogPage)
         }
         FirstSliceIpcRequest::RepositoryCatalogMutation(_) => Err(internal_error()),
-        FirstSliceIpcRequest::RepositoryStatus(request) => repository_status(
-            &service,
-            resources.journal,
-            resources.metadata,
-            resources.runtime,
-            request,
-            &context,
-        )
-        .map(FirstSliceIpcResponse::RepositoryStatus),
+        FirstSliceIpcRequest::RepositoryStatus(request) => {
+            let include_operations = request.include_operations;
+            let mut status = repository_status(
+                &service,
+                resources.journal,
+                resources.metadata,
+                resources.runtime,
+                request,
+                &context,
+            )?;
+            if let Some(recovery) = requested_recovery {
+                project_current_recovery(
+                    &mut status,
+                    recovery.operation.ok_or_else(internal_error)?,
+                    include_operations,
+                    resources,
+                    &context,
+                )?;
+            }
+            Ok(FirstSliceIpcResponse::RepositoryStatus(status))
+        }
         FirstSliceIpcRequest::SymbolRelationships(request) => {
             symbol_relationships(&service, request, &context)
                 .map(FirstSliceIpcResponse::SymbolRelationships)
@@ -13782,6 +13811,80 @@ fn catalog_coverage_label(status: CoverageStatus) -> Result<&'static str, Public
 fn catalog_now(epoch: Instant) -> Result<CatalogInstant, PublicError> {
     let elapsed = u64::try_from(epoch.elapsed().as_millis()).map_err(|_| internal_error())?;
     Ok(CatalogInstant::from_millis(elapsed))
+}
+
+fn project_current_recovery(
+    status: &mut daemon::RepositoryStatusResponse,
+    operation: OperationId,
+    include_operations: bool,
+    resources: ServiceRequestResources<'_>,
+    context: &FirstSliceIpcContext,
+) -> Result<(), PublicError> {
+    // Recovery is independently bounded by the retained catalog, not the
+    // recent-operation cache. Its identity must remain visible until terminal.
+    let record = match journal_call(
+        resources.runtime,
+        context.deadline,
+        resources
+            .journal
+            .control(ControlRequest::OperationStatus(operation)),
+    )? {
+        ControlResponse::OperationStatus(record) => record,
+        _ => return Err(internal_error()),
+    };
+    if record.kind != OperationKind::Recovery {
+        return Err(internal_error());
+    }
+    if !record.state.is_terminal() {
+        status.state = "indexing".to_owned();
+    }
+    if include_operations {
+        let durable = journal_call(
+            resources.runtime,
+            context.deadline,
+            resources.journal.repository_operation_context(operation),
+        )?;
+        if durable.repository != parse_repository(status.repository.as_ref())? {
+            return Err(internal_error());
+        }
+        status.operations.retain(|item| {
+            item.operation
+                .as_ref()
+                .is_none_or(|id| id.value.as_slice() != operation.as_bytes())
+        });
+        status
+            .operations
+            .truncate(MAX_PUBLIC_REPOSITORY_OPERATIONS - 1);
+        status
+            .operations
+            .try_reserve(1)
+            .map_err(|_| resource_exhausted())?;
+        status.operations.insert(
+            0,
+            daemon::RepositoryStatusOperation {
+                operation: Some(operation_to_wire(operation)),
+                kind: operation_kind_to_wire(record.kind) as i32,
+                state: operation_state_to_wire(record.state) as i32,
+                completed_units: record.progress.completed,
+                total_units: record.progress.total,
+                owned_by_client: record.owner == context.client_instance_id,
+                started_unix_ms: durable.started_unix_ms,
+            },
+        );
+        status.operations.sort_by(|left, right| {
+            right
+                .started_unix_ms
+                .cmp(&left.started_unix_ms)
+                .then_with(|| {
+                    right
+                        .operation
+                        .as_ref()
+                        .map(|id| &id.value)
+                        .cmp(&left.operation.as_ref().map(|id| &id.value))
+                })
+        });
+    }
+    Ok(())
 }
 
 fn repository_status(
@@ -21877,7 +21980,10 @@ mod tests {
             panic!("repository status response expected");
         };
         assert!(
-            status.operations.is_empty(),
+            status.operations.iter().all(|item| {
+                item.kind == daemon::OperationKind::Recovery as i32
+                    && parse_operation(item.operation.as_ref()).is_ok_and(|id| id != operation)
+            }),
             "pruned operation history must not be reconstructed"
         );
 
@@ -23823,6 +23929,33 @@ mod tests {
         ));
 
         let recovery_operation = OperationId::from_bytes([92; 16]);
+        let recovery_context = RepositoryOperationSubmission::new(
+            receipt.repository,
+            Some(receipt.generation),
+            1,
+            0,
+            RepositoryOperationMode::Structural,
+        )
+        .expect("recovery context is valid");
+        journal
+            .submit(
+                OperationSubmission::new(
+                    recovery_operation,
+                    OperationKind::Recovery,
+                    PlanHash::from_bytes([92; 32]),
+                    ClientInstanceId::SYSTEM,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("recovery submission is valid")
+                .with_repository_context(recovery_context)
+                .expect("recovery is repository bound"),
+            )
+            .expect("recovery operation persists");
+        journal
+            .start_execution(recovery_operation)
+            .expect("recovery starts");
         {
             let mut recovering = lanes
                 .recovering_repositories
@@ -24003,6 +24136,9 @@ mod tests {
 
         mark_active_recovery_available(&lanes, receipt.repository)
             .expect("active generation becomes available");
+        journal
+            .update_progress(recovery_operation, Progress::new(1, 2).unwrap())
+            .expect("active recovery phase is durable");
         let retained_error = execute_service_request(
             &lanes,
             resources,
@@ -24970,7 +25106,9 @@ mod tests {
             let shutdown_journal = Arc::clone(&journal);
             let shutdown_stopping = Arc::clone(&stopping);
             Some(Box::new(
-                move |_: &FirstSliceServiceLanes, cancellation: &Cancellation| {
+                move |_: &FirstSliceServiceLanes,
+                      cancellation: &Cancellation,
+                      _: ServiceRequestResources<'_>| {
                     shutdown_stopping.store(true, Ordering::Release);
                     assert!(cancellation.cancel(CancellationReason::Shutdown));
                     shutdown_journal
@@ -25094,6 +25232,130 @@ mod tests {
     }
 
     #[test]
+    fn read_ready_repositories_expose_retained_recovery_beyond_metadata_capacity() {
+        let count = MAX_RECOVERY_LOAD_WORKERS * 2 + 1;
+        let (result, records, _, ready, complete, _) = run_recovery_worker_with_start_hook(
+            count,
+            Box::new(|_, _| Ok(())),
+            Some(Box::new(move |lanes, _, resources| {
+                assert!(lanes.recovery_ready.load(Ordering::Acquire));
+                assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                let recoveries = lanes
+                    .recovering_repositories
+                    .read()
+                    .expect("recovery map reads")
+                    .clone();
+                assert_eq!(recoveries.len(), count);
+                assert!(count > resources.metadata.lock().expect("metadata locks").maximum);
+                for (repository, recovery) in recoveries {
+                    assert_eq!(recovery.phase, RepositoryRecoveryPhase::RetainedHistory);
+                    for include_operations in [true, false] {
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        let context = FirstSliceIpcContext {
+                            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+                            selected_protocol_minor: PROTOCOL_MINOR,
+                            cancellation: Cancellation::with_deadline(deadline),
+                            deadline,
+                            effective_budget: None,
+                            index_admission: None,
+                        };
+                        let mut request = status_request(repository, Some(recovery.generation));
+                        request.include_operations = include_operations;
+                        let response = execute_service_request(
+                            lanes,
+                            resources,
+                            FirstSliceIpcRequest::RepositoryStatus(request),
+                            context.clone(),
+                            &mut None,
+                        )
+                        .expect("active generation remains readable during retained recovery");
+                        let FirstSliceIpcResponse::RepositoryStatus(status) = response else {
+                            panic!("repository status expected");
+                        };
+                        assert_eq!(
+                            parse_generation(status.resolved_generation.as_ref()).unwrap(),
+                            recovery.generation
+                        );
+                        assert_eq!(status.state, "indexing");
+                        if include_operations {
+                            let operations = status
+                                .operations
+                                .iter()
+                                .filter(|operation| {
+                                    operation.kind == daemon::OperationKind::Recovery as i32
+                                })
+                                .collect::<Vec<_>>();
+                            assert_eq!(operations.len(), 1);
+                            let operation = operations[0];
+                            assert_eq!(
+                                Some(parse_operation(operation.operation.as_ref()).unwrap()),
+                                recovery.operation
+                            );
+                            assert_eq!(operation.state, daemon::OperationState::Running as i32);
+                            assert_eq!((operation.completed_units, operation.total_units), (1, 2));
+                            assert!(!operation.owned_by_client);
+                            assert!(operation.started_unix_ms > 0);
+                            let mut bounded = status.clone();
+                            bounded
+                                .operations
+                                .extend((0..MAX_PUBLIC_REPOSITORY_OPERATIONS).map(|index| {
+                                    daemon::RepositoryStatusOperation {
+                                        operation: Some(operation_to_wire(
+                                            OperationId::from_bytes(
+                                                [u8::try_from(index)
+                                                    .expect("bounded fixture ordinal");
+                                                    16],
+                                            ),
+                                        )),
+                                        kind: daemon::OperationKind::RepositoryIndex as i32,
+                                        started_unix_ms: u64::MAX,
+                                        ..Default::default()
+                                    }
+                                }));
+                            project_current_recovery(
+                                &mut bounded,
+                                recovery.operation.expect("recovery identity"),
+                                true,
+                                resources,
+                                &context,
+                            )
+                            .expect("recovery projection remains bounded");
+                            assert_eq!(bounded.operations.len(), MAX_PUBLIC_REPOSITORY_OPERATIONS);
+                            assert_eq!(
+                                bounded
+                                    .operations
+                                    .iter()
+                                    .filter(
+                                        |item| item.kind == daemon::OperationKind::Recovery as i32
+                                    )
+                                    .count(),
+                                1
+                            );
+                            assert!(
+                                bounded
+                                    .operations
+                                    .windows(2)
+                                    .all(|items| items[0].started_unix_ms
+                                        >= items[1].started_unix_ms)
+                            );
+                        } else {
+                            assert!(status.operations.is_empty());
+                        }
+                    }
+                }
+                Ok(())
+            })),
+        );
+        result.expect("recovery finishes after the read-ready checkpoint");
+        assert!(ready && complete);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.state == OperationState::Succeeded)
+        );
+    }
+
+    #[test]
     fn successful_recovery_reports_both_durable_phases_complete() {
         let (result, records, contexts, recovery_ready, recovery_complete, generation_status) =
             run_recovery_worker_with_start_hook(1, Box::new(|_, _| Ok(())), None);
@@ -25185,7 +25447,7 @@ mod tests {
             run_recovery_worker_with_start_hook(
                 1,
                 Box::new(|_, _| Ok(())),
-                Some(Box::new(|lanes, cancellation| {
+                Some(Box::new(|lanes, cancellation, _| {
                     assert!(lanes.recovery_ready.load(Ordering::Acquire));
                     assert!(!lanes.recovery_complete.load(Ordering::Acquire));
                     assert_eq!(
@@ -25261,7 +25523,7 @@ mod tests {
                 run_recovery_worker_with_start_hook(
                     2,
                     Box::new(|_, _| Ok(())),
-                    Some(Box::new(move |lanes, cancellation| {
+                    Some(Box::new(move |lanes, cancellation, _| {
                         *captured_lanes.lock().expect("observation locks") = Some(lanes.clone());
                         let repositories = lanes
                             .recovering_repositories
@@ -25328,7 +25590,7 @@ mod tests {
             run_recovery_worker_with_start_hook(
                 1,
                 Box::new(|_, _| Ok(())),
-                Some(Box::new(|lanes, _| {
+                Some(Box::new(|lanes, _, _| {
                     assert!(!lanes.recovery_complete.load(Ordering::Acquire));
                     assert_eq!(
                         lanes
