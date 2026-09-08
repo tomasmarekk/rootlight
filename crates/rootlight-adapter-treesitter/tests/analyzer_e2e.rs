@@ -39,6 +39,8 @@ const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
 
 #[path = "analyzer_e2e/html_native.rs"]
 mod html_native;
+#[path = "analyzer_e2e/sql_native.rs"]
+mod sql_native;
 #[path = "analyzer_e2e/yaml_native.rs"]
 mod yaml_native;
 const EXPECTED_DOMAINS: [FactDomain; 8] = [

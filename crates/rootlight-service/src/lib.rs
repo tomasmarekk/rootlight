@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/25";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/26";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -5940,6 +5940,8 @@ impl FirstSliceService {
                     "tree-sitter-typescript-tsx-{}",
                     descriptor.grammar_version()
                 )
+            } else if descriptor.family() == GrammarFamily::Sql {
+                format!("tree-sitter-sequel-{}", descriptor.grammar_version())
             } else {
                 format!(
                     "tree-sitter-{}-{}",
@@ -25404,6 +25406,7 @@ mod tests {
             "sample.rb",
             "sample.rs",
             "sample.sh",
+            "sample.sql",
             "sample.swift",
             "sample.toml",
             "sample.ts",
@@ -25457,7 +25460,6 @@ mod tests {
             ("analysis.mlx", "matlab"),
             ("script.pl", "perl"),
             ("plot.R", "r"),
-            ("schema.sql", "sql"),
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("build.scala", "scala"),
@@ -26424,6 +26426,141 @@ mod tests {
             for (name, kind, count) in [
                 ("item", EntityKind::MarkupElement, 2),
                 ("key", EntityKind::MarkupAttribute, 3),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), count);
+                for symbol in symbols {
+                    let explained = restored
+                        .symbol_explain(receipt.generation, symbol, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.kind, kind);
+                    let reference = explained.data.entity.evidence.source.unwrap();
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    let end = usize::try_from(reference.span().end_byte()).unwrap();
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        expected_source.as_bytes()[start..end]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sql_source_declarations_survive_incremental_publication_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "CREATE TABLE app.account(id INT);\nCREATE TABLE app.account(id TEXT);\nCREATE VIEW app.active AS SELECT id FROM app.account;\nCREATE FUNCTION app.identity(value INT) RETURNS INT AS $$ SELECT value; $$ LANGUAGE SQL;\n";
+        fs::write(fixture.path().join("schema.sql"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let status = service.repository_status(initial.repository, None).unwrap();
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|row| row.language == "sql")
+            .unwrap();
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (1, 1));
+        assert_eq!(coverage.tier, "tier_d");
+        assert_ne!(coverage.status, "complete");
+        let original = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let identities = original
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, (entity.kind, entity.canonical_name.clone())))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(identities.len(), 8);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source.replace("SELECT value;", "SELECT value + 1;");
+        fs::write(fixture.path().join("schema.sql"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(original);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected_source) in [(&initial, source), (&updated, changed.as_str())] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .map(|entity| (entity.id, (entity.kind, entity.canonical_name.clone())))
+                    .collect::<BTreeMap<_, _>>(),
+                identities
+            );
+            for detail in [
+                "sql-dialect-statement-coverage-incomplete",
+                "sql-catalog-resolution-unavailable",
+                "sql-function-body-semantics-unavailable",
+            ] {
+                assert!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.detail == detail)
+                );
+            }
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "schema.sql")
+                .unwrap();
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expected_source.as_bytes());
+            assert_eq!(read.data.chunks[0].language, "sql");
+            for (name, kind, count) in [
+                ("app.account", EntityKind::DatabaseObject, 2),
+                ("app.active", EntityKind::DatabaseObject, 1),
+                ("app.identity", EntityKind::Function, 1),
             ] {
                 let located = restored
                     .code_locate(

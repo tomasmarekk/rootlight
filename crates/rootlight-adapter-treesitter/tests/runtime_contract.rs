@@ -89,7 +89,8 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 20] = [
+    let cases: [(&str, &str, &[u8]); 21] = [
+        ("sample.sql", "sql", b"CREATE TABLE sample (id INT);"),
         ("sample.html", "html", b"<main id='sample'>text</main>"),
         ("sample.yaml", "yaml", b"name: sample\n"),
         ("sample.toml", "toml", b"name = 'sample'\n"),

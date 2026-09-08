@@ -15,6 +15,7 @@ mod lua_names;
 mod report;
 mod request;
 mod sink;
+mod sql_names;
 mod structural;
 pub mod testkit;
 mod toml_names;

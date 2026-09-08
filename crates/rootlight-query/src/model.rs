@@ -2532,6 +2532,8 @@ pub enum AdvancedEntityKind {
     MarkupElement,
     /// Written markup attribute.
     MarkupAttribute,
+    /// Source-declared database object.
+    DatabaseObject,
 }
 
 impl AdvancedEntityKind {
@@ -2553,6 +2555,7 @@ impl AdvancedEntityKind {
             Self::Keyframes => "keyframes",
             Self::MarkupElement => "markup_element",
             Self::MarkupAttribute => "markup_attribute",
+            Self::DatabaseObject => "database_object",
         }
     }
 
@@ -2574,6 +2577,7 @@ impl AdvancedEntityKind {
             "keyframes" => Some(Self::Keyframes),
             "markup_element" => Some(Self::MarkupElement),
             "markup_attribute" => Some(Self::MarkupAttribute),
+            "database_object" => Some(Self::DatabaseObject),
             _ => None,
         }
     }
@@ -2613,6 +2617,7 @@ impl AdvancedEntityKind {
             Self::Keyframes => matches!(kind, IrEntityKind::Keyframes),
             Self::MarkupElement => matches!(kind, IrEntityKind::MarkupElement),
             Self::MarkupAttribute => matches!(kind, IrEntityKind::MarkupAttribute),
+            Self::DatabaseObject => matches!(kind, IrEntityKind::DatabaseObject),
         }
     }
 }

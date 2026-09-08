@@ -1,4 +1,4 @@
-//! Versioned envelopes for source markup and stylesheet entities.
+//! Versioned envelopes for source markup, stylesheet and database entities.
 //! Retained tools keep their exact historical schemas; new revisions preserve
 //! source kinds instead of coercing markup into programming-language symbols.
 
@@ -11,9 +11,9 @@ use crate::vertical::{
 };
 
 /// Contract revision for source-kind locate and expert queries.
-pub const QUERY_VERSION: &str = "1.1";
+pub const QUERY_VERSION: &str = "1.2";
 /// Contract revision for source-kind explanations.
-pub const EXPLAIN_VERSION: &str = "1.2";
+pub const EXPLAIN_VERSION: &str = "1.3";
 /// Contract revision for change results containing markup entities.
 pub const CHANGE_VERSION: &str = "1.3";
 
@@ -104,4 +104,36 @@ pub type ChangeImpactOutputV1_3 = EntityToolResponse<
 pub type HistoryCompareOutputV1_3 = EntityToolResponse<
     EntityReadEnvelope<crate::change::HistoryCompareData, ChangeVersion>,
     ChangeVersion,
+>;
+
+/// Exact version of database-aware locate and advanced-query responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DatabaseQueryVersion {
+    /// Query contract 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Exact version of database-aware explanation responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DatabaseExplainVersion {
+    /// Explanation contract 1.3.
+    #[serde(rename = "1.3")]
+    V1_3,
+}
+
+/// Database-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_2 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, DatabaseQueryVersion>,
+    DatabaseQueryVersion,
+>;
+/// Database-aware `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_2 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, DatabaseQueryVersion>,
+    DatabaseQueryVersion,
+>;
+/// Database-aware `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_3 = EntityToolResponse<
+    EntityReadEnvelope<SymbolExplainData, DatabaseExplainVersion>,
+    DatabaseExplainVersion,
 >;

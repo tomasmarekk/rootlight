@@ -16,6 +16,27 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "sql.table.declaration"
+                    | "sql.view.declaration"
+                    | "sql.materialized_view.declaration"
+                    | "sql.index.declaration"
+                    | "sql.sequence.declaration"
+                    | "sql.trigger.declaration"
+                    | "sql.database.declaration"
+                    | "sql.role.declaration"
+                    | "sql.extension.declaration"
+                    | "sql.type.declaration"
+            ) =>
+        {
+            Some(EntityKind::DatabaseObject)
+        }
+        SyntaxFactKind::Declaration if label == "sql.schema.declaration" => {
+            Some(EntityKind::Namespace)
+        }
+        SyntaxFactKind::Declaration if label == "sql.column.declaration" => Some(EntityKind::Field),
         SyntaxFactKind::Declaration if label == "html.element.declaration" => {
             Some(EntityKind::MarkupElement)
         }
@@ -172,6 +193,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// aliases, block scalars or collection keys; those require document context.
 /// HTML preserves grammar-reviewed source names verbatim, including foreign
 /// markup spelling; it does not perform browser case or namespace adjustments.
+/// SQL removes only trivia between qualified name components, retaining case,
+/// delimiters and escape spelling until a dialect-aware resolver is available.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -181,7 +204,9 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "json" {
+    if language == "sql" {
+        crate::sql_names::canonical_sql_name(text, maximum_bytes)
+    } else if language == "json" {
         crate::json_names::canonical_json_key(text, maximum_bytes)
     } else if language == "toml" {
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)

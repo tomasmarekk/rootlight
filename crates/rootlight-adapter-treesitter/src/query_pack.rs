@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod sql;
 mod yaml;
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
@@ -304,6 +305,9 @@ impl QueryPack {
         if family == GrammarFamily::Html {
             expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
         }
+        if family == GrammarFamily::Sql {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+        }
         if matches!(
             family,
             GrammarFamily::Lua | GrammarFamily::Ruby | GrammarFamily::Bash
@@ -550,9 +554,22 @@ impl QueryPack {
                     // literal keys, labels and binding attributes are not lexical reads.
                     continue;
                 }
+                let mut capture = *capture;
+                if input.family == GrammarFamily::Sql
+                    && role == StructuralRole::Reference
+                    && sql::is_declared_name(capture.node)
+                {
+                    continue;
+                }
+                if input.family == GrammarFamily::Sql && role == StructuralRole::Definition {
+                    let Some(name) = sql::definition_node(capture.node) else {
+                        continue;
+                    };
+                    capture.node = name;
+                }
                 retain(candidate_for_capture(
                     input.family,
-                    *capture,
+                    capture,
                     role,
                     input.source,
                 )?)?;
@@ -809,6 +826,7 @@ fn candidate_for_capture(
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
+            GrammarFamily::Sql => return Err(query_failure("query-sql-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -988,6 +1006,26 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Sql, "program") => Some("sql.file"),
+        (GrammarFamily::Sql, "create_table") => Some("sql.table"),
+        (GrammarFamily::Sql, "create_view") => Some("sql.view"),
+        (GrammarFamily::Sql, "create_materialized_view") => Some("sql.materialized_view"),
+        (GrammarFamily::Sql, "create_index") => Some("sql.index"),
+        (GrammarFamily::Sql, "create_schema") => Some("sql.schema"),
+        (GrammarFamily::Sql, "create_database") => Some("sql.database"),
+        (GrammarFamily::Sql, "create_role") => Some("sql.role"),
+        (GrammarFamily::Sql, "create_sequence") => Some("sql.sequence"),
+        (GrammarFamily::Sql, "create_extension") => Some("sql.extension"),
+        (GrammarFamily::Sql, "create_trigger") => Some("sql.trigger"),
+        (GrammarFamily::Sql, "create_type") => Some("sql.type"),
+        (GrammarFamily::Sql, "create_function") => Some("sql.function"),
+        (GrammarFamily::Sql, "function_arguments") => Some("sql.arguments"),
+        (GrammarFamily::Sql, "function_body") => Some("sql.body"),
+        (GrammarFamily::Sql, "function_argument") => Some("sql.parameter"),
+        (GrammarFamily::Sql, "column_definition") => Some("sql.column"),
+        (GrammarFamily::Sql, "object_reference" | "identifier") => Some("sql.identifier"),
+        (GrammarFamily::Sql, "literal") => Some("sql.literal"),
+        (GrammarFamily::Sql, "comment" | "marginalia") => Some("sql.comment"),
         (GrammarFamily::Html, "document") => Some("html.file"),
         (GrammarFamily::Html, "element" | "script_element" | "style_element") => {
             Some("html.element")
@@ -1329,7 +1367,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(20);
+        let mut packs = Vec::with_capacity(21);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1357,6 +1395,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
+            (GrammarFamily::Sql, include_str!("../queries/sql.scm")),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1430,6 +1469,7 @@ mod tests {
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
+            GrammarFamily::Sql,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1440,6 +1480,9 @@ mod tests {
             }
             if family == GrammarFamily::Html {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
+            }
+            if family == GrammarFamily::Sql {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
             }
             if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
                 expected

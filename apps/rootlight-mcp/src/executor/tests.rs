@@ -4083,6 +4083,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
         "keyframes",
         "markup_element",
         "markup_attribute",
+        "database_object",
     ] {
         for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
             let mut locate = locate_response();
@@ -4108,6 +4109,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 Some(tool.contract_version()),
                 tool.previous_contract_version(),
                 tool.legacy_contract_version(),
+                tool.second_legacy_contract_version(),
             ]
             .into_iter()
             .flatten()
@@ -4124,8 +4126,15 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 let HandlerResponse::Success(result) = response else {
                     panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
                 };
-                let current = version == tool.contract_version();
-                assert_eq!(result["isError"], !current);
+                let supported = version == tool.contract_version()
+                    || (kind != "database_object"
+                        && version
+                            == if tool == VerticalTool::CodeLocate {
+                                "1.1"
+                            } else {
+                                "1.2"
+                            });
+                assert_eq!(result["isError"], !supported, "{tool:?} {kind} {version}");
                 let content = &result["structuredContent"];
                 assert_eq!(content["schema_version"], version);
                 let mirror: Value = serde_json::from_str(
@@ -4133,7 +4142,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 )
                 .expect("valid JSON");
                 assert_eq!(&mirror, content);
-                if current {
+                if supported {
                     let (field, evidence) = if tool == VerticalTool::CodeLocate {
                         ("matches", "source_ref")
                     } else {
@@ -4286,6 +4295,7 @@ async fn batch_preserves_source_entity_kinds() {
         "keyframes",
         "markup_element",
         "markup_attribute",
+        "database_object",
     ] {
         let mut locate = locate_response();
         locate.result.hits[0].kind = kind.to_owned();

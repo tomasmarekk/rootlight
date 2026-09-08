@@ -53,6 +53,8 @@ pub enum GrammarFamily {
     Yaml,
     /// HTML source grammar; does not construct a browser DOM.
     Html,
+    /// SQL source declarations; does not execute migrations or infer a live catalog.
+    Sql,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -132,7 +134,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(20);
+        let mut descriptors = Vec::with_capacity(21);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -154,6 +156,7 @@ impl GrammarRegistry {
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
+            GrammarFamily::Sql,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -270,6 +273,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         GrammarFamily::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         GrammarFamily::Html => tree_sitter_html::LANGUAGE.into(),
+        GrammarFamily::Sql => tree_sitter_sequel::LANGUAGE.into(),
     }
 }
 
@@ -284,6 +288,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Sql => GrammarIdentity {
+            language_id: "sql",
+            grammar_version: "0.3.11",
+            source_package_sha256: "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17",
+            parser_sha256: "852e088fb8470952cdb2a1b78c1c58626c7d91562b26baa4672d51f9754bf580",
+            scanner_sha256: Some(
+                "97bf059ac5609e4e11feb44177eb6e89650100287105a1cdd7b203b55e6893f7",
+            ),
+        },
         GrammarFamily::Html => GrammarIdentity {
             language_id: "html",
             grammar_version: "0.23.2",
@@ -504,7 +517,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 20);
+        assert_eq!(registry.descriptors().len(), 21);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -526,6 +539,7 @@ mod tests {
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
+            GrammarFamily::Sql,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -595,6 +609,7 @@ mod tests {
             (GrammarFamily::Toml, "toml", "tree-sitter-toml-ng"),
             (GrammarFamily::Yaml, "yaml", "tree-sitter-yaml"),
             (GrammarFamily::Html, "html", "tree-sitter-html"),
+            (GrammarFamily::Sql, "sql", "tree-sitter-sequel"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

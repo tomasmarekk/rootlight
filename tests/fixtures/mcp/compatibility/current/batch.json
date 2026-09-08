@@ -2,14 +2,14 @@
   "schema": "rootlight.mcp-compatibility-current/1",
   "tools": [
     {
-      "contract_version": "1.1",
+      "contract_version": "1.2",
       "eligible": true,
       "read_only": true,
       "required_profile": "scout",
       "tool": "code.locate"
     },
     {
-      "contract_version": "1.2",
+      "contract_version": "1.3",
       "eligible": true,
       "read_only": true,
       "required_profile": "scout",

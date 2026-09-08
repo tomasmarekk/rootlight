@@ -186,6 +186,19 @@ fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
     fixture.finish();
 }
 
+#[test]
+fn sql_database_objects_cross_process_boundaries_with_exact_source_entities() {
+    source_entities_cross_process_boundaries(
+        "sql",
+        "schema.sql",
+        "CREATE TABLE app.account (id INT);\nCREATE TABLE app.account (id TEXT);\nCREATE VIEW app.active AS SELECT id FROM app.account;\n",
+        &[
+            ("app.account", "database_object", 2),
+            ("app.active", "database_object", 1),
+        ],
+    );
+}
+
 fn source_entities_cross_process_boundaries(
     language: &str,
     path: &str,
@@ -211,7 +224,22 @@ fn source_entities_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.1");
+        assert_eq!(output["schema_version"], "1.2");
+        if language == "sql" {
+            assert!(
+                output["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| {
+                        warning["code"] == "coverage_unsupported"
+                            && warning["message"]
+                                .as_str()
+                                .is_some_and(|message| message.ends_with("language sql"))
+                    }),
+                "SQL source retrieval must not imply complete SQL semantics: {output:#}"
+            );
+        }
         let matches: Vec<_> = output["data"]["matches"]
             .as_array()
             .expect("matches")
@@ -234,7 +262,7 @@ fn source_entities_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.2");
+            assert_eq!(explanation["schema_version"], "1.3");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             let read = fixture.standalone(&format!("source-read-{kind}-{ordinal}"), "source.read",
@@ -540,7 +568,7 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
             .is_empty()
     );
     for (id, languages, expects_toml) in [
-        ("filtered-empty", json!(["sql"]), false),
+        ("filtered-empty", json!(["perl"]), false),
         ("unfiltered-empty", json!([]), false),
     ] {
         let absent = fixture.standalone(
@@ -559,7 +587,7 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
             warning["code"] == "coverage_unsupported"
                 && warning["message"]
                     .as_str()
-                    .is_some_and(|message| message.ends_with("language sql"))
+                    .is_some_and(|message| message.ends_with("language perl"))
         }));
         assert_eq!(
             warnings
@@ -867,7 +895,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.2");
+    assert_eq!(output["schema_version"], "1.3");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -1688,7 +1716,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2")
+            Some("1.0" | "1.1" | "1.2" | "1.3")
         ),
         "read response uses a supported additive schema version"
     );
@@ -1818,7 +1846,7 @@ impl RetrievalFixture {
         .expect("scoped test fixture is written");
 
         if matches!(layout, FixtureLayout::Full) {
-            fs::write(repository_root.join("unsupported.sql"), "SELECT 1;\n")
+            fs::write(repository_root.join("unsupported.pl"), "print 1;\n")
                 .expect("source-fallback fixture writes");
             let terms = (0..5_000)
                 .map(|index| format!("item{index:05}value{index:05}"))

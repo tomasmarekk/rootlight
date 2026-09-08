@@ -858,7 +858,7 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
-        if let Some((_, detail)) = html_coverage_gap(fact) {
+        if let Some((_, detail)) = source_coverage_gap(fact) {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, detail.len(), limits)?;
         }
@@ -1279,7 +1279,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
-            if let Some((domain, detail)) = html_coverage_gap(fact) {
+            if let Some((domain, detail)) = source_coverage_gap(fact) {
                 let region = skipped_region(
                     self.full_source,
                     fact.span(),
@@ -1720,6 +1720,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut json_positions = HashMap::<Option<u64>, u64>::new();
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
+        let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1938,41 +1939,55 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let signature_capture = select_unique_capture(&capture.signatures);
             // JSON permits duplicate keys. Distinguish their source-order
             // occurrences within this object, without hashing offsets or values.
-            let member_scope_identity =
-                if fact.syntax_kind().as_str() == "json.property.declaration" {
-                    let next = json_members
-                        .entry((fact.parent(), name.to_string()))
-                        .or_default();
-                    let position = *next;
-                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                    Some(json_data_identity(
-                        parent_scope
-                            .as_ref()
-                            .and_then(|scope| scope.stable_identity),
-                        "json.property",
-                        position,
-                    ))
-                } else if matches!(
-                    kind,
-                    EntityKind::MarkupElement | EntityKind::MarkupAttribute
-                ) {
-                    // Repeated source tags and even duplicate attributes are distinct
-                    // occurrences. Only same-name sibling order affects identity;
-                    // text bodies, attribute values and byte offsets do not.
-                    let next = markup_members
-                        .entry((parent_entity, kind, name.to_string()))
-                        .or_default();
-                    let position = *next;
-                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                    Some(blake3::derive_key(
-                        "rootlight.html-source-occurrence/1",
-                        &position.to_be_bytes(),
-                    ))
-                } else {
+            let member_scope_identity = if fact.syntax_kind().as_str()
+                == "json.property.declaration"
+            {
+                let next = json_members
+                    .entry((fact.parent(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(json_data_identity(
                     parent_scope
                         .as_ref()
-                        .and_then(|scope| scope.stable_identity)
-                };
+                        .and_then(|scope| scope.stable_identity),
+                    "json.property",
+                    position,
+                ))
+            } else if self.request.language().as_str() == "sql" && kind != EntityKind::Module {
+                // Source DDL is not a final live catalog. Separate repeated
+                // declarations and object categories without body/offset hashes.
+                let label = fact.syntax_kind().as_str();
+                let next = sql_declarations
+                    .entry((parent_entity, label.to_owned(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                let mut hash = blake3::Hasher::new_derive_key("rootlight.sql-source-declaration/1");
+                hash.update(label.as_bytes());
+                hash.update(&position.to_be_bytes());
+                Some(*hash.finalize().as_bytes())
+            } else if matches!(
+                kind,
+                EntityKind::MarkupElement | EntityKind::MarkupAttribute
+            ) {
+                // Repeated source tags and even duplicate attributes are distinct
+                // occurrences. Only same-name sibling order affects identity;
+                // text bodies, attribute values and byte offsets do not.
+                let next = markup_members
+                    .entry((parent_entity, kind, name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(blake3::derive_key(
+                    "rootlight.html-source-occurrence/1",
+                    &position.to_be_bytes(),
+                ))
+            } else {
+                parent_scope
+                    .as_ref()
+                    .and_then(|scope| scope.stable_identity)
+            };
             let (signature, signature_evidence, signature_span) = if supports_signature(kind)
                 && let Some(signature) = signature_capture
             {
@@ -2568,8 +2583,17 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.provenance == right.provenance
 }
 
-fn html_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "sql.file.root" => Some((
+            FactDomain::Entities,
+            "sql-dialect-statement-coverage-incomplete",
+        )),
+        "sql.file.module" => Some((FactDomain::Relations, "sql-catalog-resolution-unavailable")),
+        "sql.body.signature" => Some((
+            FactDomain::Entities,
+            "sql-function-body-semantics-unavailable",
+        )),
         "html.file.module" => Some((FactDomain::Relations, "html-dom-semantics-unavailable")),
         "html.embedded_text.signature" => {
             Some((FactDomain::Entities, "html-embedded-analysis-unavailable"))
@@ -3276,6 +3300,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "toml.file.module"
                 | "yaml.file.module"
                 | "html.file.module"
+                | "sql.file.module"
         )
         && matches!(
             language,
@@ -3291,6 +3316,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "toml"
                 | "yaml"
                 | "html"
+                | "sql"
         )
 }
 
@@ -3314,7 +3340,9 @@ fn span_contains(container: SourceSpan, child: SourceSpan) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
-    fact.kind() == SyntaxFactKind::Signature && fact.syntax_kind().as_str().ends_with(".signature")
+    fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str().ends_with(".signature")
+        && fact.syntax_kind().as_str() != "sql.body.signature"
 }
 
 fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {
