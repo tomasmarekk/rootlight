@@ -1632,6 +1632,249 @@ fn symbol_relationships_returns_tier_d_dispatch_as_weak_non_exact_call() {
     assert_eq!(group.items[0].source_refs.len(), 1);
 }
 
+fn overlapping_relationship_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {
+    let (base, seed, target) = dispatch_candidate_snapshot();
+    let mut document = base.document().clone();
+    let template = document
+        .relations
+        .iter()
+        .find(|relation| relation.predicate == RelationPredicate::DispatchCandidate)
+        .expect("fixture contains a candidate call")
+        .clone();
+    document.relations.clear();
+    for (id, confidence) in [(10, 900), (11, 800), (12, 700), (13, 600), (14, 500)] {
+        let mut relation = template.clone();
+        relation.id = FactId::from_bytes([id; 20]);
+        relation.confidence = Confidence::new(confidence).expect("fixture confidence is valid");
+        if id != 10 {
+            relation.predicate = RelationPredicate::Calls;
+        }
+        if id == 12 {
+            let source = relation
+                .evidence
+                .source
+                .as_ref()
+                .expect("call has evidence");
+            relation.evidence.source = Some(SourceRef::new(
+                source.repository(),
+                source.generation(),
+                SourceSpan::new(source.span().file(), 0, 1).expect("distinct site is valid"),
+                source.content_hash(),
+                None,
+            ));
+        }
+        if id >= 13 {
+            relation.evidence_kind = EvidenceKind::Derived;
+            relation.evidence.source = None;
+            relation.evidence.derivation =
+                vec![rootlight_ir::FactRef::Fact(FactId::from_bytes([10; 20]))];
+        }
+        document.relations.push(relation);
+    }
+    let snapshot = GenerationSnapshot::new(
+        base.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("overlapping relationships are canonical");
+    (snapshot, seed, target)
+}
+
+#[test]
+fn symbol_relationships_coalesces_only_identical_sourced_targets_before_paging() {
+    let (snapshot, seed, target) = overlapping_relationship_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let execute = |offset, limit, minimum| {
+        let plan = service
+            .plan_symbol_relationships(
+                BTreeSet::from([seed]),
+                vec![RelationFamily::Calls],
+                Some(RelationDirection::Outbound),
+                minimum,
+                limit,
+                offset,
+                QueryBudget::new(),
+            )
+            .expect("relationships plan is admitted");
+        service
+            .execute_symbol_relationships(&plan, &Cancellation::new())
+            .expect("query succeeds")
+    };
+    let full = execute(0, 10, 0);
+    assert_eq!(
+        full.usage.edges, 5,
+        "all physical candidates remain charged"
+    );
+    assert_eq!(full.data.total_edges, 4);
+    assert_eq!(full.data.returned_edges, 4);
+    assert!(!full.data.exact, "coalescing must not upgrade uncertainty");
+    assert!(!full.data.truncated);
+    let group = &full.data.groups[0];
+    assert_eq!(group.total_count, 4);
+    assert!(group.items.iter().all(|item| item.symbol == target));
+    assert_eq!(
+        group
+            .items
+            .iter()
+            .map(|item| item.confidence)
+            .collect::<Vec<_>>(),
+        vec![800, 700, 600, 500]
+    );
+    assert_ne!(group.items[0].source_refs, group.items[1].source_refs);
+    assert!(
+        group.items[2..]
+            .iter()
+            .all(|item| item.source_refs.is_empty())
+    );
+    let first = execute(0, 2, 0);
+    let second = execute(2, 2, 0);
+    assert_eq!(first.data.total_edges, 4);
+    assert_eq!(first.data.groups[0].total_count, 4);
+    assert_eq!(first.data.next_page_offset, Some(2));
+    assert_eq!(second.data.next_page_offset, None);
+    assert_eq!(first.data.groups[0].items, group.items[..2]);
+    assert_eq!(second.data.groups[0].items, group.items[2..]);
+    assert_eq!(execute(0, 10, 800).data.returned_edges, 1);
+}
+
+#[test]
+fn symbol_relationships_coalescing_preserves_scan_limits_and_lower_bounds() {
+    let (snapshot, seed, _) = overlapping_relationship_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let first_relation_bytes = u64::try_from(
+        serde_json::to_vec(&snapshot.document().relations[0])
+            .expect("relation encodes")
+            .len(),
+    )
+    .expect("fixture length fits");
+    for (budget, resource, expected) in [
+        (
+            QueryBudget::new().with_max_edges(2),
+            QueryResource::Edges,
+            1,
+        ),
+        (QueryBudget::new().with_max_rows(2), QueryResource::Rows, 1),
+        (
+            QueryBudget::new().with_max_memory_bytes(first_relation_bytes),
+            QueryResource::MemoryBytes,
+            1,
+        ),
+        (
+            QueryBudget::new().with_max_memory_bytes(1),
+            QueryResource::MemoryBytes,
+            0,
+        ),
+    ] {
+        let plan = service
+            .plan_symbol_relationships(
+                BTreeSet::from([seed]),
+                vec![RelationFamily::Calls],
+                Some(RelationDirection::Outbound),
+                0,
+                10,
+                0,
+                budget,
+            )
+            .expect("bounded plan is admitted");
+        let response = service
+            .execute_symbol_relationships(&plan, &Cancellation::new())
+            .expect("bounded query succeeds");
+        assert!(response.data.truncated);
+        assert!(!response.data.exact);
+        assert!(response.data.limiting_resources.contains(&resource));
+        assert_eq!(response.data.next_page_offset, None);
+        assert_eq!(response.data.total_edges, expected);
+        assert_eq!(response.data.returned_edges, expected);
+    }
+}
+
+#[test]
+fn symbol_relationships_coalescing_keeps_seed_family_and_direction_groups_separate() {
+    let (snapshot, seed, target) = overlapping_relationship_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let plan = service
+        .plan_symbol_relationships(
+            BTreeSet::from([seed, target]),
+            vec![RelationFamily::Calls, RelationFamily::CalledBy],
+            Some(RelationDirection::Both),
+            0,
+            20,
+            0,
+            QueryBudget::new(),
+        )
+        .expect("multi-seed plan is admitted");
+    let response = service
+        .execute_symbol_relationships(&plan, &Cancellation::new())
+        .expect("query succeeds");
+    assert_eq!(response.usage.edges, 20);
+    assert_eq!(response.data.total_edges, 16);
+    assert_eq!(response.data.returned_edges, 16);
+    assert_eq!(response.data.groups.len(), 4);
+    for group in &response.data.groups {
+        assert_eq!(group.total_count, 4);
+        let (direction, counterpart) = if group.seed == seed {
+            (RelationDirection::Outbound, target)
+        } else {
+            assert_eq!(group.seed, target);
+            (RelationDirection::Inbound, seed)
+        };
+        assert_eq!(group.direction, direction);
+        assert!(group.items.iter().all(|item| item.symbol == counterpart));
+    }
+}
+
+#[test]
+fn symbol_relationships_coalescing_requires_the_full_source_reference() {
+    let (base, seed, _) = overlapping_relationship_snapshot();
+    let mut document = base.document().clone();
+    let candidate = document
+        .relations
+        .iter_mut()
+        .find(|relation| relation.predicate == RelationPredicate::DispatchCandidate)
+        .expect("candidate exists");
+    let source = candidate
+        .evidence
+        .source
+        .as_ref()
+        .expect("candidate has evidence");
+    candidate.evidence.source = Some(SourceRef::new(
+        source.repository(),
+        source.generation(),
+        source.span(),
+        source.content_hash(),
+        Some(rootlight_ir::LineRange::new(1, 2).expect("line hint is valid")),
+    ));
+    let snapshot = GenerationSnapshot::new(
+        base.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("source hints are valid");
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let plan = service
+        .plan_symbol_relationships(
+            BTreeSet::from([seed]),
+            vec![RelationFamily::Calls],
+            None,
+            0,
+            10,
+            0,
+            QueryBudget::new(),
+        )
+        .expect("plan is admitted");
+    let response = service
+        .execute_symbol_relationships(&plan, &Cancellation::new())
+        .expect("query succeeds");
+    assert_eq!(response.data.total_edges, 5);
+    assert_eq!(response.data.returned_edges, 5);
+}
+
 #[test]
 fn symbol_relationships_preserves_test_and_route_direction_counterparts_and_sources() {
     let (snapshot, production, test, handler, route) = test_and_route_snapshot();

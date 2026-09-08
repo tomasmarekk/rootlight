@@ -682,7 +682,10 @@ where
     /// duration checks cover the complete physical scan, while row and edge
     /// budgets account for seed-scoped candidates. Groups are keyed by seed,
     /// family, and effective direction so a `both` traversal reports each edge
-    /// under the direction it actually matched.
+    /// under the direction it actually matched. Within each group, identical
+    /// target/source projections retain the strongest confidence before counting
+    /// and pagination; source-free edges remain separate. Scan budgets still
+    /// account for every physical candidate, including duplicate projections.
     ///
     /// # Errors
     ///
@@ -753,7 +756,6 @@ where
                         continue;
                     }
                     let key = (seed, *family, direction);
-                    total_edges = total_edges.saturating_add(1);
                     let group = groups.entry(key).or_insert_with(|| RelationshipGroup {
                         seed,
                         family: *family,
@@ -761,7 +763,6 @@ where
                         items: Vec::new(),
                         total_count: 0,
                     });
-                    group.total_count = group.total_count.saturating_add(1);
                     let bytes = serialized_size(relation, u64::MAX, &control)?;
                     if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
                         record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
@@ -784,11 +785,32 @@ where
 
         let mut groups: Vec<RelationshipGroup> = groups.into_values().collect();
         for group in &mut groups {
-            group.items.sort_by(|left, right| {
+            control.check()?;
+            // Source identity preserves distinct call sites. In-place sorting
+            // avoids a second evidence index outside the admitted memory budget.
+            group.items.sort_unstable_by(|left, right| {
+                left.symbol
+                    .cmp(&right.symbol)
+                    .then_with(|| left.source_refs.cmp(&right.source_refs))
+                    .then_with(|| right.confidence.cmp(&left.confidence))
+            });
+            group.items.dedup_by(|right, left| {
+                !left.source_refs.is_empty()
+                    && left.symbol == right.symbol
+                    && left.source_refs == right.source_refs
+            });
+            // Unmaterialized candidates may duplicate retained evidence, so
+            // only admitted unique projections establish a count lower bound.
+            let count = checked_usize_to_u64(group.items.len())?;
+            total_edges = total_edges.saturating_add(count);
+            group.total_count = u32::try_from(count).unwrap_or(u32::MAX);
+            group.items.sort_unstable_by(|left, right| {
                 left.symbol
                     .cmp(&right.symbol)
                     .then_with(|| right.confidence.cmp(&left.confidence))
+                    .then_with(|| left.source_refs.cmp(&right.source_refs))
             });
+            control.check()?;
         }
         let mut ordinal = 0_u64;
         let mut returned_edges = 0_u64;
