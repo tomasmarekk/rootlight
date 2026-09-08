@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/43";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/44";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -27223,7 +27223,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "$action = {}\n$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\n$selected = $items.Where{ $_ }\nInvoke-Check Write-Entry {<# no action #>}\nInvoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\nInvoke-Entry name=\"$value# literal\"\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
+        let source = "$action = {}\n$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\n$selected = $items.Where{ $_ }\nInvoke-Check Write-Entry {<# no action #>}\nInvoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\nInvoke-Entry name=\"$value# literal\"\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; Invoke-Entry { param($leaf) $leaf + 1 }; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
         fs::write(
             fixture.path().join("entry.ps1"),
@@ -27253,6 +27253,29 @@ mod tests {
         let original = service
             .loaded_generation_snapshot(initial.generation)
             .unwrap();
+        let leaf = original
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "$leaf")
+            .unwrap();
+        let block = original
+            .document()
+            .entities
+            .iter()
+            .find(|entity| leaf.container == Some(ContainerRef::Entity(entity.id)))
+            .unwrap();
+        assert_eq!(block.kind, EntityKind::Function);
+        assert!(block.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+        assert!(
+            original
+                .document()
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(block.id)
+                    && relation.object == RelationEndpoint::Entity(leaf.id))
+        );
         for name in [
             "$action",
             "$counter",
@@ -27293,6 +27316,7 @@ mod tests {
         assert_eq!(noop.generation, initial.generation);
         let changed = source
             .replace("return $Name", "Write-Output '雪'; return $Name")
+            .replace("$leaf + 1", "$leaf + 1000")
             .replace("return 'value'", "return 'changed'");
         fs::write(fixture.path().join("catalog.psm1"), &changed).unwrap();
         let updated = service

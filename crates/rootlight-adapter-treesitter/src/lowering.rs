@@ -2018,7 +2018,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if is_explicit_file_module(fact, self.request.language().as_str()) {
                 let name = self.request.source().path().as_str();
                 (std::borrow::Cow::Borrowed(name), None)
-            } else if fact.syntax_kind().as_str() == "r.anonymous_function.declaration" {
+            } else if matches!(
+                fact.syntax_kind().as_str(),
+                "r.anonymous_function.declaration" | "powershell.anonymous_function.declaration"
+            ) {
                 // This label is synthetic, not a written binding. The native
                 // callable span and scope identity retain its source ownership.
                 (std::borrow::Cow::Borrowed("<anonymous>"), None)
@@ -2722,10 +2725,6 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "powershell.file.module" => Some((
             FactDomain::Relations,
             "powershell-runtime-command-module-and-dispatch-resolution-unavailable",
-        )),
-        "powershell.script_block.scope" => Some((
-            FactDomain::Entities,
-            "powershell-runtime-script-block-identity-unavailable",
         )),
         "powershell.hashtable.scope" => Some((
             FactDomain::Relations,

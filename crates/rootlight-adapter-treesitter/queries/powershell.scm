@@ -13,7 +13,7 @@
 (class_method_parameter (variable) @definition)
 (unary_expression (variable) @declaration @definition)
 (foreach_statement (variable) @declaration @definition)
-(script_block_expression) @scope
+(script_block_expression) @scope @declaration @signature
 (hash_literal_expression) @declaration @scope
 (hash_entry (key_expression) @definition @scope) @declaration @scope
 (data_statement) @scope

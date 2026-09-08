@@ -76,6 +76,9 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
 }
 
 pub(super) fn declaration_syntax(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if node.kind() == "script_block_expression" {
+        return Some("powershell.anonymous_function");
+    }
     if node.kind() == "hash_entry" {
         return Some(if node.named_child(0).is_some_and(is_literal_key) {
             "powershell.property"
@@ -108,21 +111,33 @@ pub(super) fn declaration_syntax(node: Node<'_>, source: &[u8]) -> Option<&'stat
 pub(super) fn header_end(node: Node<'_>) -> usize {
     let mut cursor = node.walk();
     let brace = node.children(&mut cursor).find(|child| child.kind() == "{");
-    let mut end = brace.map_or(node.end_byte(), |brace| brace.start_byte());
-    if node.kind() == "function_statement" {
+    let mut end = brace.map_or(node.end_byte(), |brace| {
+        if node.kind() == "script_block_expression" {
+            brace.end_byte()
+        } else {
+            brace.start_byte()
+        }
+    });
+    if matches!(
+        node.kind(),
+        "function_statement" | "script_block_expression"
+    ) {
         let mut cursor = node.walk();
-        if let Some(block) = node
+        let parameters = node
             .named_children(&mut cursor)
-            .find(|child| child.kind() == "script_block")
-        {
-            let mut cursor = block.walk();
-            if let Some(parameters) = block
-                .named_children(&mut cursor)
-                .find(|child| child.kind() == "param_block")
-            {
-                // PowerShell's param block lives inside braces but belongs to the signature.
-                end = parameters.end_byte();
-            }
+            .find_map(|child| match child.kind() {
+                "param_block" => Some(child),
+                "script_block" => {
+                    let mut cursor = child.walk();
+                    child
+                        .named_children(&mut cursor)
+                        .find(|child| child.kind() == "param_block")
+                }
+                _ => None,
+            });
+        if let Some(parameters) = parameters {
+            // A param block belongs to the signature even though it is inside braces.
+            end = parameters.end_byte();
         }
     }
     end

@@ -174,6 +174,16 @@ fn powershell_string_hashes_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_anonymous_blocks_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "blocks.ps1",
+        "function Outer { param($root); Invoke-Entry { param($value) { param($inner) $inner + $value } } }\n",
+        &[("<anonymous>", "function", 2), ("Outer", "function", 1)],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

@@ -27,6 +27,192 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_anonymous_blocks_own_parameters_and_nested_callables() {
+    let source = "function Outer { param($root); Invoke-Entry { param($value) { param($inner) $inner + $value } } }\n";
+    let result = output(source);
+    let doc = result.document();
+    let functions: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 3, "source callables need distinct owners");
+    for (name, full) in [
+        ("$root", source.trim()),
+        (
+            "$value",
+            "{ param($value) { param($inner) $inner + $value } }",
+        ),
+        ("$inner", "{ param($inner) $inner + $value }"),
+    ] {
+        let parameter = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let owner = functions
+            .iter()
+            .find(|entity| {
+                parameter.container == Some(rootlight_ir::ContainerRef::Entity(entity.id))
+            })
+            .unwrap();
+        let span = owner.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(full)
+        );
+        if name != "$root" {
+            assert!(owner.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            assert!(
+                !doc.occurrences
+                    .iter()
+                    .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: owner.id })
+            );
+        }
+        assert!(
+            doc.relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(owner.id)
+                    && relation.object == RelationEndpoint::Entity(parameter.id))
+        );
+    }
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "powershell-runtime-script-block-identity-unavailable")
+    );
+    assert!(
+        doc.skipped_regions.iter().any(|gap| gap.detail
+            == "powershell-runtime-command-module-and-dispatch-resolution-unavailable")
+    );
+}
+
+#[test]
+fn powershell_anonymous_headers_and_source_owners_cover_expression_positions() {
+    for (source, header, full) in [
+        ("{}", "{", "{}"),
+        ("{<# empty #>}", "{", "{<# empty #>}"),
+        (
+            "$handler = { param($value) $value }",
+            "{ param($value)",
+            "{ param($value) $value }",
+        ),
+        (
+            "& { param($value) $value } 'entry'",
+            "{ param($value)",
+            "{ param($value) $value }",
+        ),
+        (
+            "$items.Where{ param($value) $value }",
+            "{ param($value)",
+            "{ param($value) $value }",
+        ),
+        (
+            "@{ Key = { param($value) $value } }",
+            "{ param($value)",
+            "{ param($value) $value }",
+        ),
+        (
+            "function Outer { param($callback = { param($value) $value }); $callback }",
+            "{ param($value)",
+            "{ param($value) $value }",
+        ),
+    ] {
+        let result = output(source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty());
+        assert!(
+            !doc.skipped_regions.iter().any(|gap| matches!(
+                gap.reason,
+                SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+            )),
+            "{source}"
+        );
+        let anonymous: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Function && entity.flags.contains(&EntityFlag::Synthetic)
+            })
+            .collect();
+        assert_eq!(anonymous.len(), 1, "{source}: {:?}", doc.entities);
+        let entity = anonymous[0];
+        let span = entity.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(full)
+        );
+        let signatures: Vec<_> = doc
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                (lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && lexical.subject() == rootlight_ir::FactRef::Entity(entity.id))
+                .then(|| lexical.text().to_owned())
+            })
+            .collect();
+        assert_eq!(signatures, [header], "{source}");
+        assert!(
+            !doc.occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id })
+        );
+        if header.contains("$value") {
+            let parameter = doc
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "$value")
+                .unwrap();
+            assert_eq!(
+                parameter.container,
+                Some(rootlight_ir::ContainerRef::Entity(entity.id))
+            );
+        }
+    }
+}
+
+#[test]
+fn powershell_anonymous_siblings_preserve_identity_across_body_and_offset_edits() {
+    let source = "Invoke-Entry { param($value) $value + 1 } { param($value) $value + 2 }\n";
+    let initial = output(source);
+    let changed = output(
+        &source
+            .replace("Invoke-Entry", "# prefix\nInvoke-Entry")
+            .replace("+ 1", "+ 1000")
+            .replace("+ 2", "+ 2000"),
+    );
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, (entity.canonical_name.clone(), entity.container)))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&initial), identities(&changed));
+    let parameters: Vec<_> = initial
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "$value")
+        .collect();
+    assert_eq!(parameters.len(), 2);
+    assert_ne!(parameters[0].id, parameters[1].id);
+    assert_ne!(parameters[0].container, parameters[1].container);
+}
+
+#[test]
 fn powershell_string_hashes_keep_nested_evidence_and_following_definitions() {
     let source = "$text = \"`r`n## Heading`r`n\"\nInvoke-Entry name=\"$value# function Hidden {}\"\n$text = @\"\n$other# function Hidden {}\n\"@\n$text = \"$(<# $ignored #> Read-Value)# literal\" # $outside\nfunction Visible { return $text }\n";
     let result = output(source);
@@ -269,11 +455,13 @@ fn powershell_empty_blocks_keep_definitions_without_false_parse_gaps() {
             );
         }
         let blocks: Vec<_> = doc
-            .skipped_regions
+            .entities
             .iter()
-            .filter(|gap| gap.detail == "powershell-runtime-script-block-identity-unavailable")
-            .map(|gap| {
-                let span = gap.source.span();
+            .filter(|entity| {
+                entity.kind == EntityKind::Function && entity.flags.contains(&EntityFlag::Synthetic)
+            })
+            .map(|entity| {
+                let span = entity.evidence.source.as_ref().unwrap().span();
                 source
                     .get(
                         usize::try_from(span.start_byte()).unwrap()
@@ -554,7 +742,7 @@ fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() 
     let analyzer = analyzer(&provider, POWERSHELL);
     let fixture = Fixture::new(
         POWERSHELL,
-        b"function Read-Entry { [int]$first, $second = 1, 2; $map = @{ Key = 1; $key = @{ Inner = 2 } }; return $first }\n",
+        b"function Read-Entry { [int]$first, $second = 1, 2; $map = @{ Key = 1; $key = @{ Inner = 2 } }; Invoke-Entry { param($value) { param($inner) $inner + $value } }; return $first }\n",
     );
     let budget = limits();
     let initial_request = request(&fixture.snapshot, &fixture.source, POWERSHELL, &budget);
