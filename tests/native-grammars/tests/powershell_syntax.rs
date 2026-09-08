@@ -116,6 +116,69 @@ Get-Entry -Name 'entry' | Select-Entry
 }
 
 #[test]
+fn powershell_expandable_string_hashes_never_become_comments() {
+    for literal in [
+        "\"`r`n## Heading`r`n\"",
+        "\"prefix`\"$value`\"#suffix\"",
+        "\"$value # function Hidden {}\"",
+        "\"$($value)# function Hidden {}\"",
+        "\"`t# function Hidden {}\"",
+        "\"`\"# function Hidden {}`\"\"",
+        "@\"\n$value# function Hidden {}\n\"@",
+        "@\"\n`n# function Hidden {}\n\"@",
+    ] {
+        let source = format!("$text = {literal}\nfunction Visible {{ return $text }}\n");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        let all = nodes(tree.root_node());
+        assert!(!all.iter().any(|node| node.kind() == "comment"), "{source}");
+        let strings: Vec<_> = all
+            .iter()
+            .filter(|node| node.kind() == "string_literal")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(strings, [literal], "{source}");
+        let definitions: Vec<_> = all
+            .iter()
+            .filter(|node| node.kind() == "function_name")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(definitions, ["Visible"], "{source}");
+    }
+    for source in [
+        "Invoke-Entry \"$value# function Hidden {}\"\n",
+        "Invoke-Entry name=\"$value# function Hidden {}\"\n",
+        "Invoke-Entry name=\"`r`n## Heading`r`n\"\n",
+        "Invoke-Entry name=\"$($value)# literal\"\n",
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{source}");
+        let all = nodes(tree.root_node());
+        assert!(
+            !all.iter()
+                .any(|node| matches!(node.kind(), "comment" | "function_statement"))
+        );
+        assert!(
+            all.iter()
+                .all(|node| source.get(node.byte_range()).is_some())
+        );
+    }
+    let source = "$text = \"$(<# inside expression #> $value)# literal\" # outside string\nfunction Visible {}\n";
+    let tree = parser().parse(source, None).unwrap();
+    assert!(!tree.root_node().has_error());
+    let comments: Vec<_> = nodes(tree.root_node())
+        .iter()
+        .filter(|node| node.kind() == "comment")
+        .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+        .collect();
+    assert_eq!(comments, ["<# inside expression #>", "# outside string"]);
+}
+
+#[test]
 fn powershell_comments_and_strings_do_not_invent_declarations() {
     for literal in [
         "'function Hidden {}'",
@@ -203,6 +266,13 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
             "Name, Description",
             "\"$($items | Select-Entry Name, Description)\"",
         ),
+        (
+            "\"$($items | Select-Entry Name, Description)\"",
+            "\"`n# literal\"",
+        ),
+        ("\"`n# literal\"", "\"$value# literal\""),
+        ("\"$value# literal\"", "\"$($value)# literal\""),
+        ("\"$($value)# literal\"", "\"value\" # outside string"),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();

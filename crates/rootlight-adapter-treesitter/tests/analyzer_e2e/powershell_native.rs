@@ -27,6 +27,52 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_string_hashes_keep_nested_evidence_and_following_definitions() {
+    let source = "$text = \"`r`n## Heading`r`n\"\nInvoke-Entry name=\"$value# function Hidden {}\"\n$text = @\"\n$other# function Hidden {}\n\"@\n$text = \"$(<# $ignored #> Read-Value)# literal\" # $outside\nfunction Visible { return $text }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    assert!(
+        !doc.skipped_regions.iter().any(|gap| matches!(
+            gap.reason,
+            SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+        )),
+        "{:?}",
+        doc.skipped_regions
+    );
+    let functions: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .map(|entity| entity.canonical_name.as_str())
+        .collect();
+    assert_eq!(functions, ["Visible"]);
+    for name in ["$value", "$other", "Read-Value"] {
+        let hash = content_hash(name.as_bytes());
+        assert!(
+            doc.occurrences.iter().any(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.syntactic_text_hash == hash
+                    && source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    ) == Some(name)
+            }),
+            "missing source evidence for {name}"
+        );
+    }
+    for name in ["$ignored", "$outside", "Hidden"] {
+        let hash = content_hash(name.as_bytes());
+        assert!(
+            !doc.occurrences
+                .iter()
+                .any(|occurrence| occurrence.syntactic_text_hash == hash),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn powershell_composite_arguments_preserve_nested_calls_and_variable_evidence() {
     let source = "Invoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post label='function Hidden {}'\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\n";
     let result = output(source);

@@ -36,6 +36,12 @@ consuming pipeline delimiters. Escaped line continuations remain trivia rather
 than additional arguments. Existing command spans may include a trailing
 separator; this patch does not normalize them or implement runtime argument binding.
 
+Expandable string content has lexical priority over comment extras, including
+after variables, nested expressions and escapes. A hash inside a quoted value
+must not consume the closing quote as a comment. Real comments inside nested
+subexpressions and after the closing quote remain comments; here-string and
+composite argument content use the same precedence rule.
+
 The published `src/parser.c`, `src/grammar.json`, `src/node-types.json` and parser
 header reproduce byte-for-byte using Tree-sitter CLI 0.26.8 with ABI 15.
 Regenerate the patched outputs from this directory with the same command:

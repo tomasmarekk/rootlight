@@ -27223,7 +27223,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "$action = {}\n$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\n$selected = $items.Where{ $_ }\nInvoke-Check Write-Entry {<# no action #>}\nInvoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
+        let source = "$action = {}\n$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\n$selected = $items.Where{ $_ }\nInvoke-Check Write-Entry {<# no action #>}\nInvoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\nInvoke-Entry name=\"$value# literal\"\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
         fs::write(
             fixture.path().join("entry.ps1"),

@@ -164,6 +164,16 @@ fn powershell_composite_arguments_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_string_hashes_preserve_exact_retrieval_across_processes() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "strings.ps1",
+        "$text = \"`r`n## Heading`r`n\"\nInvoke-Entry name=\"$value# function Hidden {}\"\n$text = @\"\n$other# function Hidden {}\n\"@\nfunction Visible { return $text }\n",
+        &[("Visible", "function", 1)],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",
