@@ -18,6 +18,29 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "solidity"
+crate_name = "tree-sitter-solidity"
+crate_version = "1.2.13"
+crates_io_checksum = "4eacf8875b70879f0cb670c60b233ad0b68752d9e1474e6c3ef168eea8a90b25"
+repository = "https://github.com/JoranHonig/tree-sitter-solidity"
+tag = "v1.2.13"
+commit = "4e938a46c7030dd001bc99e1ac0f0c750ac98254"
+parser_sha256 = "e71971f6ddc0704e81f4af3f43ecc79793742bb5f1d256a5fdd718aa06d74acb"
+scanner_sha256 = "none"
+abi = 15
+analysis_tier = "D"
+license = "MIT"
+license_source = "https://github.com/JoranHonig/tree-sitter-solidity/blob/4e938a46c7030dd001bc99e1ac0f0c750ac98254/LICENSE"
+license_sha256 = "8844f0cc9b76b9c8a9d0251904eb7536b6bb9976e0ec577e8f27ab96d42523ef"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight native and analyzer source-truth contracts"
+msrv = "not declared; native parser verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "source declarations only; import, inheritance, modifier application, overload and dispatch resolution unavailable; inline assembly remains a scoped entity coverage gap"
+audit_notes = ["upstream highlight query is invalid with Tree-sitter 0.26.11 and is not used; Rootlight uses its reviewed structural query", "CLI 0.25.8 reproduces generated sources byte-exactly; all 125 upstream parse cases pass"]
+
+[[grammars]]
 language = "rust"
 crate_name = "tree-sitter-rust"
 crate_version = "0.24.2"

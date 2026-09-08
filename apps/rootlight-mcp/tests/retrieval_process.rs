@@ -200,6 +200,20 @@ fn sql_database_objects_cross_process_boundaries_with_exact_source_entities() {
 }
 
 #[test]
+fn solidity_declaration_kinds_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "solidity",
+        "vault.sol",
+        "contract Vault { event Changed(uint value); event Changed(address value); error Rejected(uint code); modifier allowed(uint minimum) { require(minimum > 0); _; } }",
+        &[
+            ("Changed", "event", 2),
+            ("Rejected", "error_declaration", 1),
+            ("allowed", "modifier", 1),
+        ],
+    );
+}
+
+#[test]
 fn r_source_owners_cross_process_boundaries_without_claiming_runtime_bindings() {
     source_entities_cross_process_boundaries(
         "r",
@@ -314,7 +328,7 @@ fn source_entities_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.3");
-        if matches!(language, "sql" | "r") {
+        if matches!(language, "sql" | "r" | "solidity") {
             assert!(
                 output["warnings"]
                     .as_array()

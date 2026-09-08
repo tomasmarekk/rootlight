@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "bb568fd7b8b37b0f57e1104cf11b42b98deee56d5e23a0ea5f5af55b78cdf5a3";
+    "53350b84ce526bcac12b87e824ccb11627932c15d33f73f8a1481af053d7e565";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,7 +37,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 22] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 23] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -148,6 +148,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 22] = [
         "0.23.2",
         "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee",
     ),
+    (
+        "tree-sitter-solidity",
+        "1.2.13",
+        "4eacf8875b70879f0cb670c60b233ad0b68752d9e1474e6c3ef168eea8a90b25",
+    ),
 ];
 
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
@@ -241,7 +246,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 22 {
+    if manifest.grammars.len() != 23 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -278,6 +283,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "php",
         "python",
         "r",
+        "solidity",
         "ruby",
         "rust",
         "swift",
@@ -823,7 +829,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of twelve")]
+    #[error("grammar lock contains {0} grammars instead of 23")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

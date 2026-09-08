@@ -57,6 +57,8 @@ pub enum GrammarFamily {
     Sql,
     /// R source assignments and closures; runtime environments are not evaluated.
     R,
+    /// Solidity source declarations; EVM execution and dynamic dispatch are not evaluated.
+    Solidity,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -136,7 +138,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(22);
+        let mut descriptors = Vec::with_capacity(23);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -160,6 +162,7 @@ impl GrammarRegistry {
             GrammarFamily::Html,
             GrammarFamily::Sql,
             GrammarFamily::R,
+            GrammarFamily::Solidity,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -278,6 +281,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Html => tree_sitter_html::LANGUAGE.into(),
         GrammarFamily::Sql => tree_sitter_sequel::LANGUAGE.into(),
         GrammarFamily::R => tree_sitter_r::LANGUAGE.into(),
+        GrammarFamily::Solidity => tree_sitter_solidity::LANGUAGE.into(),
     }
 }
 
@@ -292,6 +296,13 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Solidity => GrammarIdentity {
+            language_id: "solidity",
+            grammar_version: "1.2.13",
+            source_package_sha256: "4eacf8875b70879f0cb670c60b233ad0b68752d9e1474e6c3ef168eea8a90b25",
+            parser_sha256: "e71971f6ddc0704e81f4af3f43ecc79793742bb5f1d256a5fdd718aa06d74acb",
+            scanner_sha256: None,
+        },
         GrammarFamily::R => GrammarIdentity {
             language_id: "r",
             grammar_version: "1.3.0",
@@ -530,7 +541,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 22);
+        assert_eq!(registry.descriptors().len(), 23);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -554,6 +565,7 @@ mod tests {
             GrammarFamily::Html,
             GrammarFamily::Sql,
             GrammarFamily::R,
+            GrammarFamily::Solidity,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -625,6 +637,7 @@ mod tests {
             (GrammarFamily::Html, "html", "tree-sitter-html"),
             (GrammarFamily::Sql, "sql", "tree-sitter-sequel"),
             (GrammarFamily::R, "r", "tree-sitter-r"),
+            (GrammarFamily::Solidity, "solidity", "tree-sitter-solidity"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

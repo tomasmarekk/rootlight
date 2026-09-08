@@ -16,6 +16,18 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "solidity.event.declaration" => {
+            Some(EntityKind::Event)
+        }
+        SyntaxFactKind::Declaration if label == "solidity.error.declaration" => {
+            Some(EntityKind::ErrorDeclaration)
+        }
+        SyntaxFactKind::Declaration if label == "solidity.modifier.declaration" => {
+            Some(EntityKind::Modifier)
+        }
+        SyntaxFactKind::Declaration if label == "solidity.enum_value.declaration" => {
+            Some(EntityKind::Constant)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,

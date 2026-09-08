@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/31";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/32";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -25407,6 +25407,7 @@ mod tests {
             "sample.rb",
             "sample.rs",
             "sample.sh",
+            "sample.sol",
             "sample.sql",
             "sample.swift",
             "sample.toml",
@@ -25465,7 +25466,6 @@ mod tests {
             ("build.scala", "scala"),
             ("pipeline.groovy", "groovy"),
             ("boot.asm", "assembly"),
-            ("token.sol", "solidity"),
         ];
         for (path, _) in languages {
             fs::write(fixture.path().join(path), "unsupported fixture\n")
@@ -27042,6 +27042,145 @@ mod tests {
                         assert_eq!(signature.text(), "function(value)");
                         assert!(!signature.is_truncated());
                     }
+                    let reference = explained.data.entity.evidence.source.unwrap();
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    let end = usize::try_from(reference.span().end_byte()).unwrap();
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        expected_source.as_bytes()[start..end]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solidity_source_declarations_survive_publication_queries_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "contract Vault { event Changed(uint value); event Changed(address value); error Rejected(uint code); modifier allowed(uint minimum) { require(minimum > 0); _; } function update(uint value) public { emit Changed(value); } }";
+        fs::write(fixture.path().join("vault.sol"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let status = service.repository_status(initial.repository, None).unwrap();
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|row| row.language == "solidity")
+            .unwrap();
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (1, 1));
+        assert_eq!(coverage.tier, "tier_d");
+        assert_ne!(coverage.status, "complete");
+        let original = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let identities = original
+            .document()
+            .entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id,
+                    (entity.kind, entity.canonical_name.clone(), entity.container),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(identities.len(), 12);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source.replace("minimum > 0", "minimum > 1");
+        fs::write(fixture.path().join("vault.sol"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        drop(original);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected_source) in [(&initial, source), (&updated, changed.as_str())] {
+            let generation = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .map(|entity| (
+                        entity.id,
+                        (entity.kind, entity.canonical_name.clone(), entity.container)
+                    ))
+                    .collect::<BTreeMap<_, _>>(),
+                identities
+            );
+            assert!(
+                document.skipped_regions.iter().any(|gap| gap.detail
+                    == "solidity-import-inheritance-dispatch-resolution-unavailable")
+            );
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "vault.sol")
+                .unwrap();
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expected_source.as_bytes());
+            assert_eq!(read.data.chunks[0].language, "solidity");
+            for (name, kind, count) in [
+                ("Changed", EntityKind::Event, 2),
+                ("Rejected", EntityKind::ErrorDeclaration, 1),
+                ("allowed", EntityKind::Modifier, 1),
+                ("update", EntityKind::Method, 1),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), count, "{name}");
+                for symbol in symbols {
+                    let explained = restored
+                        .symbol_explain(receipt.generation, symbol, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.kind, kind);
+                    let signature = explained.data.signature.as_ref().unwrap();
+                    assert!(!signature.is_truncated());
+                    assert!(!signature.text().contains("require"));
                     let reference = explained.data.entity.evidence.source.unwrap();
                     assert_eq!(reference.generation(), receipt.generation);
                     let start = usize::try_from(reference.span().start_byte()).unwrap();

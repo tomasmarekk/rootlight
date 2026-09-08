@@ -720,6 +720,21 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Declaration
+            if family == GrammarFamily::Solidity
+                && capture.node.kind() == "state_variable_declaration" =>
+        {
+            let mut cursor = capture.node.walk();
+            if capture
+                .node
+                .children(&mut cursor)
+                .any(|child| child.kind() == "constant")
+            {
+                "solidity.constant"
+            } else {
+                "solidity.field"
+            }
+        }
         StructuralRole::Declaration if family == GrammarFamily::R => {
             r::declaration(capture.node, source)
                 .ok_or_else(|| query_failure("query-r-declaration-kind"))?
@@ -836,6 +851,7 @@ fn candidate_for_capture(
             GrammarFamily::Ruby => "ruby.call_name",
             GrammarFamily::Bash => "bash.call_name",
             GrammarFamily::R => "r.call_name",
+            GrammarFamily::Solidity => "solidity.call_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -855,6 +871,7 @@ fn candidate_for_capture(
             GrammarFamily::Swift => "swift.call",
             GrammarFamily::Bash => "bash.call",
             GrammarFamily::R => r::call_syntax(capture.node),
+            GrammarFamily::Solidity => "solidity.call",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -909,8 +926,10 @@ fn candidate_for_capture(
             .ok_or_else(|| query_failure("query-css-context-body"))?
             .start_byte();
     }
-    if matches!(family, GrammarFamily::Swift | GrammarFamily::Bash)
-        && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
+    if matches!(
+        family,
+        GrammarFamily::Swift | GrammarFamily::Bash | GrammarFamily::Solidity
+    ) && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
     {
         if let Some(body) = capture.node.child_by_field_name("body") {
             end = body.start_byte();
@@ -1063,6 +1082,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Ruby
             | GrammarFamily::Bash
             | GrammarFamily::R
+            | GrammarFamily::Solidity
     )
 }
 
@@ -1072,6 +1092,40 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Solidity, "source_file") => Some("solidity.file"),
+        (GrammarFamily::Solidity, "contract_declaration" | "library_declaration") => {
+            Some("solidity.class")
+        }
+        (GrammarFamily::Solidity, "interface_declaration") => Some("solidity.interface"),
+        (GrammarFamily::Solidity, "struct_declaration") => Some("solidity.struct"),
+        (GrammarFamily::Solidity, "enum_declaration") => Some("solidity.enum"),
+        (GrammarFamily::Solidity, "enum_value") => Some("solidity.enum_value"),
+        (GrammarFamily::Solidity, "user_defined_type_definition") => Some("solidity.type"),
+        (GrammarFamily::Solidity, "function_definition" | "fallback_receive_definition") => {
+            Some("solidity.function")
+        }
+        (GrammarFamily::Solidity, "constructor_definition") => Some("solidity.constructor"),
+        (GrammarFamily::Solidity, "modifier_definition") => Some("solidity.modifier"),
+        (GrammarFamily::Solidity, "event_definition") => Some("solidity.event"),
+        (GrammarFamily::Solidity, "error_declaration") => Some("solidity.error"),
+        (GrammarFamily::Solidity, "state_variable_declaration" | "struct_member") => {
+            Some("solidity.field")
+        }
+        (GrammarFamily::Solidity, "constant_variable_declaration") => Some("solidity.constant"),
+        (GrammarFamily::Solidity, "variable_declaration") => Some("solidity.variable"),
+        (GrammarFamily::Solidity, "parameter" | "event_parameter" | "error_parameter") => {
+            Some("solidity.parameter")
+        }
+        (GrammarFamily::Solidity, "identifier" | "constructor" | "fallback" | "receive") => {
+            Some("solidity.identifier")
+        }
+        (GrammarFamily::Solidity, "user_defined_type") => Some("solidity.type_name"),
+        (GrammarFamily::Solidity, "import_directive") => Some("solidity.import"),
+        (GrammarFamily::Solidity, "function_body" | "block_statement") => Some("solidity.block"),
+        (GrammarFamily::Solidity, "assembly_statement") => Some("solidity.assembly"),
+        (GrammarFamily::Solidity, "for_statement") => Some("solidity.for"),
+        (GrammarFamily::Solidity, "comment") => Some("solidity.comment"),
+        (GrammarFamily::Solidity, "string") => Some("solidity.string"),
         (GrammarFamily::Sql, "program") => Some("sql.file"),
         (GrammarFamily::R, "program") => Some("r.file"),
         (GrammarFamily::R, "function_definition") => Some("r.function"),
@@ -1441,7 +1495,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(22);
+        let mut packs = Vec::with_capacity(23);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1471,6 +1525,10 @@ impl QueryPackRegistry {
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
             (GrammarFamily::Sql, include_str!("../queries/sql.scm")),
             (GrammarFamily::R, include_str!("../queries/r.scm")),
+            (
+                GrammarFamily::Solidity,
+                include_str!("../queries/solidity.scm"),
+            ),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -1546,6 +1604,7 @@ mod tests {
             GrammarFamily::Html,
             GrammarFamily::Sql,
             GrammarFamily::R,
+            GrammarFamily::Solidity,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();

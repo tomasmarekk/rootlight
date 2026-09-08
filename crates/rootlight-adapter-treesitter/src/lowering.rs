@@ -1745,6 +1745,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut r_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut r_scopes = HashMap::<Option<u64>, u64>::new();
+        let mut solidity_scopes = HashMap::<Option<u64>, u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1832,32 +1833,56 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 } else {
                     None
                 };
-                let stable_identity = r_scope_identity.or(json_position
-                    .map(|position| {
-                        json_data_identity(
-                            parent_scope
-                                .as_ref()
-                                .and_then(|scope| scope.stable_identity),
-                            fact.syntax_kind().as_str(),
-                            position,
-                        )
-                    })
-                    .or(scope_digest
-                        .map(|digest| {
-                            scope_identity(
-                                parent_scope
-                                    .as_ref()
-                                    .and_then(|scope| scope.stable_identity),
-                                fact.syntax_kind().as_str(),
-                                digest,
-                            )
-                        })
-                        .transpose()?
-                        .or_else(|| {
-                            parent_scope
-                                .as_ref()
-                                .and_then(|scope| scope.stable_identity)
-                        })));
+                // Anonymous Solidity blocks have no declared name. Their lexical
+                // position distinguishes disjoint bindings without hashing body
+                // contents or byte offsets; this is source identity, not dispatch.
+                let solidity_scope_identity = if matches!(
+                    fact.syntax_kind().as_str(),
+                    "solidity.block.scope" | "solidity.for.scope"
+                ) {
+                    let next = solidity_scopes.entry(fact.parent()).or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(source_occurrence_identity(
+                        "rootlight.solidity-lexical-scope/1",
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.stable_identity),
+                        fact.syntax_kind().as_str(),
+                        position,
+                    ))
+                } else {
+                    None
+                };
+                let stable_identity =
+                    solidity_scope_identity
+                        .or(r_scope_identity)
+                        .or(json_position
+                            .map(|position| {
+                                json_data_identity(
+                                    parent_scope
+                                        .as_ref()
+                                        .and_then(|scope| scope.stable_identity),
+                                    fact.syntax_kind().as_str(),
+                                    position,
+                                )
+                            })
+                            .or(scope_digest
+                                .map(|digest| {
+                                    scope_identity(
+                                        parent_scope
+                                            .as_ref()
+                                            .and_then(|scope| scope.stable_identity),
+                                        fact.syntax_kind().as_str(),
+                                        digest,
+                                    )
+                                })
+                                .transpose()?
+                                .or_else(|| {
+                                    parent_scope
+                                        .as_ref()
+                                        .and_then(|scope| scope.stable_identity)
+                                })));
                 // CSS groups repeated declarations by raw name and enclosing
                 // headers; each declaration retains its source-bound occurrence.
                 // JSON data positions already distinguish repeated members.
@@ -2646,6 +2671,14 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "solidity.file.module" => Some((
+            FactDomain::Relations,
+            "solidity-import-inheritance-dispatch-resolution-unavailable",
+        )),
+        "solidity.assembly.scope" => Some((
+            FactDomain::Entities,
+            "solidity-inline-assembly-analysis-unavailable",
+        )),
         "r.file.root" => Some((
             FactDomain::Entities,
             "r-runtime-generated-definitions-unavailable",
@@ -2711,7 +2744,16 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn r_source_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_derive_key("rootlight.r-source-occurrence/1");
+    source_occurrence_identity("rootlight.r-source-occurrence/1", parent, kind, position)
+}
+
+fn source_occurrence_identity(
+    context: &'static str,
+    parent: Option<[u8; 32]>,
+    kind: &str,
+    position: u64,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key(context);
     match parent {
         Some(parent) => {
             hasher.update(&[1]);
@@ -3420,6 +3462,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "html.file.module"
                 | "sql.file.module"
                 | "r.file.module"
+                | "solidity.file.module"
         )
         && matches!(
             language,
@@ -3437,6 +3480,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "html"
                 | "sql"
                 | "r"
+                | "solidity"
         )
 }
 
@@ -3488,6 +3532,9 @@ const fn supports_signature(kind: EntityKind) -> bool {
             | EntityKind::Enum
             | EntityKind::Trait
             | EntityKind::Interface
+            | EntityKind::Event
+            | EntityKind::ErrorDeclaration
+            | EntityKind::Modifier
     )
 }
 

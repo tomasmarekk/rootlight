@@ -12,8 +12,8 @@
 (constructor_definition "constructor" @definition) @declaration @scope @signature
 (fallback_receive_definition ["fallback" "receive"] @definition) @declaration @scope @signature
 (modifier_definition name: (identifier) @definition) @declaration @scope @signature
-(event_definition name: (identifier) @definition) @declaration
-(error_declaration name: (identifier) @definition) @declaration
+(event_definition name: (identifier) @definition) @declaration @scope @signature
+(error_declaration name: (identifier) @definition) @declaration @scope @signature
 (state_variable_declaration name: (identifier) @definition) @declaration
 (constant_variable_declaration name: (identifier) @definition) @declaration
 (struct_member name: (identifier) @definition) @declaration
@@ -24,6 +24,7 @@
 (import_directive) @import
 (function_body) @scope
 (block_statement) @scope
+(for_statement) @scope
 (assembly_statement) @scope
 (call_expression) @call
 (call_expression function: (expression [(identifier) (member_expression)] @call_name))

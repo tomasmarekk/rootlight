@@ -41,6 +41,8 @@ const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
 mod html_native;
 #[path = "analyzer_e2e/r_native.rs"]
 mod r_native;
+#[path = "analyzer_e2e/solidity_native.rs"]
+mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
 #[path = "analyzer_e2e/yaml_native.rs"]
