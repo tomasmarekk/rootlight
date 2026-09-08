@@ -29,6 +29,13 @@ This replaces the special `invokation_foreach_expression` wrapper and rejects
 whitespace before its bare block, matching the PowerShell parser. It does not
 evaluate computed member names or resolve runtime method dispatch.
 
+Command arguments retain adjacent literal, quoted, variable and subexpression
+fragments as one source token, while exposing nested expressions to queries.
+Comma-separated argument lists accept mixed barewords and expressions without
+consuming pipeline delimiters. Escaped line continuations remain trivia rather
+than additional arguments. Existing command spans may include a trailing
+separator; this patch does not normalize them or implement runtime argument binding.
+
 The published `src/parser.c`, `src/grammar.json`, `src/node-types.json` and parser
 header reproduce byte-for-byte using Tree-sitter CLI 0.26.8 with ABI 15.
 Regenerate the patched outputs from this directory with the same command:

@@ -27,6 +27,70 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_composite_arguments_preserve_nested_calls_and_variable_evidence() {
+    let source = "Invoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post label='function Hidden {}'\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    assert!(
+        !doc.skipped_regions.iter().any(|gap| matches!(
+            gap.reason,
+            SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+        )),
+        "{:?}",
+        doc.skipped_regions
+    );
+    assert!(
+        !doc.entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Hidden")
+    );
+    let calls: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 5, "{calls:?}");
+    for (name, full) in [
+        ("Read-Value", "Read-Value"),
+        // The native command span owns the separator before the next pipe.
+        ("Select-Entry", "Select-Entry Name, Description "),
+        ("Out-String", "Out-String"),
+    ] {
+        let hash = content_hash(name.as_bytes());
+        let call = calls
+            .iter()
+            .find(|call| call.syntactic_text_hash == hash)
+            .unwrap();
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(full)
+        );
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Unresolved { text_hash: hash }
+        );
+    }
+    for name in ["$name", "$env:root", "$items"] {
+        assert!(
+            doc.occurrences.iter().any(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.role == OccurrenceRole::Reference
+                    && source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    ) == Some(name)
+            }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn powershell_script_block_method_calls_keep_exact_source_and_unresolved_names() {
     for (expression, member) in [
         ("$items.Where{ $_ }", "Where"),

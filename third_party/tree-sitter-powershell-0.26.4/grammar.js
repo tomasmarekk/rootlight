@@ -306,7 +306,46 @@ export default grammar({
 
     // Commands
     generic_token: ($) =>
-      token(/[^\(\)\$\"\'\-\{\}@\|\[`\&\s][^\&\s\(\)\}\|;,]*/),
+      choice(
+        seq(
+          token(/[^()$"'\-{}@|\[`&\s,;<>#][^()$"'{}|`&\s,;]*/),
+          repeat($._generic_fragment),
+        ),
+        seq($.variable, $._generic_variable_suffix, repeat($._generic_fragment)),
+        seq($.string_literal, repeat1($._generic_fragment)),
+        seq(token(/`[^\r\n]/), repeat($._generic_fragment)),
+      ),
+
+    // Only adjacent fragments compose an argument; whitespace starts another one.
+    _generic_fragment: ($) => choice(
+      token.immediate(/[^()$"'{}|`&\s,;]+/),
+      $._generic_expansion,
+    ),
+
+    // Initial member/index access remains an expression, not a string suffix.
+    _generic_variable_suffix: ($) => choice(
+      token.immediate(/[^.\[()$"'{}|`&\s,;][^()$"'{}|`&\s,;]*/),
+      $._generic_expansion,
+    ),
+
+    _generic_expansion: ($) => choice(
+      alias($._generic_quoted_string, $.string_literal),
+      alias(token.immediate(/\$(?:[$^?]|(?:[a-zA-Z0-9_]+:)?[a-zA-Z0-9_]+|\{[^}]+\})/), $.variable),
+      alias($._generic_sub_expression, $.sub_expression),
+      token.immediate(/`(?:[^\r\n]|\r?\n)/),
+      token.immediate('$'),
+    ),
+
+    _generic_quoted_string: ($) => choice(
+      alias($._generic_expandable_string, $.expandable_string_literal),
+      alias(token.immediate(/'(?:[^']|'')*'/), $.verbatim_string_characters),
+    ),
+
+    _generic_expandable_string: ($) =>
+      seq(token.immediate('"'), $._expandable_string_literal_immediate),
+
+    _generic_sub_expression: ($) =>
+      seq(token.immediate('$('), field('statements', optional($.statement_list)), ')'),
 
     _command_token: ($) => token(/[^\(\)\{\}\s;\&]+/),
 
@@ -784,8 +823,13 @@ export default grammar({
       prec.right(
         PREC.PARAM,
         choice(
-          seq($.command_argument_sep, optional($.generic_token)),
-          seq($.command_argument_sep, $.array_literal_expression),
+          seq(
+            $.command_argument_sep,
+            optional(seq(
+              choice($.generic_token, $.array_literal_expression),
+              repeat(seq(',', choice($.generic_token, $.unary_expression))),
+            )),
+          ),
           $.parenthesized_expression,
           $.script_block_expression,
         ),

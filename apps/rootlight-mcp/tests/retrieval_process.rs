@@ -154,6 +154,16 @@ fn powershell_method_blocks_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_composite_arguments_preserve_exact_retrieval_across_processes() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "arguments.ps1",
+        "function Read-Entry { param($name); return $name }\nRead-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\n",
+        &[("Read-Entry", "function", 1)],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

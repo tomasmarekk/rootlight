@@ -192,6 +192,17 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
         ("[Item]::Read", "$items.$method"),
         ("$items.$method", "$items.\"Read\""),
         ("{ param($entry); $entry }", "{}"),
+        (
+            "$bytes = $items.\"Read\"{}",
+            "Invoke-Entry name=\"$($value)\"",
+        ),
+        ("name=\"$($value)\"", "pre${value}post"),
+        ("pre${value}post", "$env:root\\Cache\\Data"),
+        ("$env:root\\Cache\\Data", "Name, Description"),
+        (
+            "Name, Description",
+            "\"$($items | Select-Entry Name, Description)\"",
+        ),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();
@@ -382,6 +393,167 @@ fn powershell_script_block_method_arguments_require_adjacent_complete_braces() {
     ] {
         let tree = parser().parse(source, None).unwrap();
         assert!(tree.root_node().has_error(), "accepted {source}");
+    }
+}
+
+#[test]
+fn powershell_composite_command_arguments_preserve_expansion_sources() {
+    for (source, arguments, variables) in [
+        (
+            "Invoke-Entry name=\"$($item.Name)\" mode=auto",
+            vec!["name=\"$($item.Name)\"", "mode=auto"],
+            vec!["$item"],
+        ),
+        (
+            "Invoke-Entry /config /peerlist:\"host,0x8\" /mode:MANUAL",
+            vec!["/config", "/peerlist:\"host,0x8\"", "/mode:MANUAL"],
+            vec![],
+        ),
+        (
+            "Invoke-Entry $env:root\\Cache\\Data backup",
+            vec!["$env:root\\Cache\\Data", "backup"],
+            vec!["$env:root"],
+        ),
+        (
+            "Invoke-Entry pre${name}post",
+            vec!["pre${name}post"],
+            vec!["${name}"],
+        ),
+        (
+            "Invoke-Entry 'left'\"$name\"-right",
+            vec!["'left'\"$name\"-right"],
+            vec!["$name"],
+        ),
+        (
+            "Invoke-Entry pre$(Read-Value)post",
+            vec!["pre$(Read-Value)post"],
+            vec![],
+        ),
+        (
+            "Invoke-Entry key='left''right'",
+            vec!["key='left''right'"],
+            vec![],
+        ),
+        (
+            "Invoke-Entry key=\"雪 # literal\"",
+            vec!["key=\"雪 # literal\""],
+            vec![],
+        ),
+        (
+            "Invoke-Entry pre$left$right",
+            vec!["pre$left$right"],
+            vec!["$left", "$right"],
+        ),
+        ("Invoke-Entry pre` space", vec!["pre` space"], vec![]),
+        ("Invoke-Entry pre$", vec!["pre$"], vec![]),
+        ("Invoke-Entry `#literal", vec!["`#literal"], vec![]),
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        let all = nodes(tree.root_node());
+        let actual: Vec<_> = all
+            .iter()
+            .filter(|node| node.kind() == "generic_token")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(actual, arguments, "{source}");
+        let actual: Vec<_> = all
+            .iter()
+            .filter(|node| node.kind() == "variable")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(actual, variables, "{source}");
+    }
+}
+
+#[test]
+fn powershell_command_argument_lists_preserve_nested_pipeline_boundaries() {
+    for source in [
+        "Invoke-Entry Name, Description",
+        "Invoke-Entry Name,$value,3",
+        "Invoke-Entry $value,Name,3",
+        "Write-Output \"$($items | Select-Entry Name, Description | Out-String)\"",
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert!(
+            nodes(tree.root_node())
+                .iter()
+                .all(|node| source.get(node.byte_range()).is_some())
+        );
+    }
+    for source in [
+        "Invoke-Entry ,Name",
+        "Invoke-Entry Name,,Other",
+        "Invoke-Entry Name,",
+    ] {
+        assert!(
+            parser()
+                .parse(source, None)
+                .unwrap()
+                .root_node()
+                .has_error(),
+            "accepted {source}"
+        );
+    }
+}
+
+#[test]
+fn powershell_composite_arguments_do_not_swallow_separated_reads_or_statements() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!("Invoke-Entry `{newline}\t\"$value\"");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{source}");
+        let all = nodes(tree.root_node());
+        assert!(!all.iter().any(|node| node.kind() == "generic_token"));
+        let variables: Vec<_> = all
+            .iter()
+            .filter(|node| node.kind() == "variable")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(variables, ["$value"]);
+    }
+    let source = "Invoke-Entry key=\"$left\" $right; Read-Next\n";
+    let tree = parser().parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    let all = nodes(tree.root_node());
+    let arguments: Vec<_> = all
+        .iter()
+        .filter(|node| node.kind() == "generic_token")
+        .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+        .collect();
+    assert_eq!(arguments, ["key=\"$left\""]);
+    let commands: Vec<_> = all
+        .iter()
+        .filter(|node| node.kind() == "command_name")
+        .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+        .collect();
+    assert_eq!(commands, ["Invoke-Entry", "Read-Next"]);
+    for source in [
+        "Invoke-Entry key=\"unfinished",
+        "Invoke-Entry pre$(Read-Value",
+        "Invoke-Entry key='unfinished",
+    ] {
+        assert!(
+            parser()
+                .parse(source, None)
+                .unwrap()
+                .root_node()
+                .has_error(),
+            "accepted {source}"
+        );
     }
 }
 
