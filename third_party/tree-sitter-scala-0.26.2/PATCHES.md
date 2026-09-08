@@ -36,6 +36,6 @@ equivalence. The upstream syntax, highlighting and tag tests are unchanged.
 
 Generated parser and grammar files are unchanged. Remove this local patch
 when the pinned upstream scanner provides equivalent framing, position and
-capacity guarantees and passes the native regressions. This package is under
-isolated native qualification, not production registration or full Scala
-language support.
+capacity guarantees and passes the native regressions. Native qualification
+does not by itself establish production adapter coverage or full Scala
+language support; those require separate source and query contracts.

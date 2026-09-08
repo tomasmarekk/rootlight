@@ -1745,7 +1745,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut r_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut r_scopes = HashMap::<Option<u64>, u64>::new();
-        let mut solidity_scopes = HashMap::<Option<u64>, u64>::new();
+        let mut anonymous_scopes = HashMap::<Option<u64>, u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -1833,18 +1833,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 } else {
                     None
                 };
-                // Anonymous Solidity blocks have no declared name. Their lexical
+                // Anonymous source blocks have no declared name. Their lexical
                 // position distinguishes disjoint bindings without hashing body
                 // contents or byte offsets; this is source identity, not dispatch.
-                let solidity_scope_identity = if matches!(
+                let anonymous_scope_identity = if matches!(
                     fact.syntax_kind().as_str(),
-                    "solidity.block.scope" | "solidity.for.scope"
+                    "solidity.block.scope"
+                        | "solidity.for.scope"
+                        | "scala.block.scope"
+                        | "scala.for.scope"
+                        | "scala.case.scope"
+                        | "scala.lambda.scope"
+                        | "scala.extension.scope"
+                        | "scala.anonymous_given.scope"
                 ) {
-                    let next = solidity_scopes.entry(fact.parent()).or_default();
+                    let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        "rootlight.solidity-lexical-scope/1",
+                        if self.request.language().as_str() == "scala" {
+                            "rootlight.scala-lexical-scope/1"
+                        } else {
+                            "rootlight.solidity-lexical-scope/1"
+                        },
                         parent_scope
                             .as_ref()
                             .and_then(|scope| scope.stable_identity),
@@ -1855,7 +1866,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     None
                 };
                 let stable_identity =
-                    solidity_scope_identity
+                    anonymous_scope_identity
                         .or(r_scope_identity)
                         .or(json_position
                             .map(|position| {
@@ -2671,6 +2682,14 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "scala.file.module" => Some((
+            FactDomain::Relations,
+            "scala-import-inheritance-implicit-dispatch-resolution-unavailable",
+        )),
+        "scala.anonymous_given.scope" | "scala.lambda.scope" => Some((
+            FactDomain::Entities,
+            "scala-anonymous-runtime-declaration-identity-unavailable",
+        )),
         "solidity.file.module" => Some((
             FactDomain::Relations,
             "solidity-import-inheritance-dispatch-resolution-unavailable",
@@ -3463,6 +3482,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "sql.file.module"
                 | "r.file.module"
                 | "solidity.file.module"
+                | "scala.file.module"
         )
         && matches!(
             language,
@@ -3481,6 +3501,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "sql"
                 | "r"
                 | "solidity"
+                | "scala"
         )
 }
 

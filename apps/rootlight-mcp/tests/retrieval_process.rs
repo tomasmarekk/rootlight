@@ -214,6 +214,24 @@ fn solidity_declaration_kinds_cross_real_process_boundaries() {
 }
 
 #[test]
+fn scala_companions_overloads_and_written_names_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "scala",
+        "store.scala",
+        "class Entry(val count: Int)\nobject Entry { def read(value: Int) = value; def read(value: String) = value; def `odd name` = 1; def / = 2 }\nenum Color { case Red, Blue }",
+        &[
+            ("Entry", "type", 1),
+            ("Entry", "module", 1),
+            ("read", "function", 2),
+            ("odd name", "function", 1),
+            ("/", "function", 1),
+            ("Red", "constant", 1),
+            ("Blue", "constant", 1),
+        ],
+    );
+}
+
+#[test]
 fn r_source_owners_cross_process_boundaries_without_claiming_runtime_bindings() {
     source_entities_cross_process_boundaries(
         "r",
@@ -328,7 +346,7 @@ fn source_entities_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.3");
-        if matches!(language, "sql" | "r" | "solidity") {
+        if matches!(language, "sql" | "r" | "solidity" | "scala") {
             assert!(
                 output["warnings"]
                     .as_array()
@@ -395,12 +413,13 @@ fn source_entities_cross_process_boundaries(
             let rows = advanced["result"]["structuredContent"]["data"]["rows"]
                 .as_array()
                 .expect("scan rows");
-            // Advanced rows retain the IR kind even when the public selector
-            // groups it with variables. These R fixtures contain parameters.
-            let row_kind = if language == "r" && kind == "variable" {
-                "parameter"
-            } else {
-                kind
+            // Public selectors group kinds; advanced rows retain the exact IR
+            // kind independently asserted by these source-backed fixtures.
+            let row_kind = match (language, kind) {
+                ("r", "variable") => "parameter",
+                ("scala", "type") => "class",
+                ("scala", "module") => "namespace",
+                _ => kind,
             };
             assert!(
                 rows.iter().any(|row| row["id"] == symbol
@@ -415,8 +434,8 @@ fn source_entities_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if language == "r" {
-            // R uses existing function/parameter kinds, unlike the newer data
+        if matches!(language, "r" | "scala") {
+            // These fixtures use existing IR kinds, unlike the newer data
             // kinds that correctly require the updated retrieval schema.
             assert_success(&retained, "code.locate");
             continue;

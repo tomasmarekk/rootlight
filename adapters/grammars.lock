@@ -18,6 +18,55 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "scala"
+crate_name = "tree-sitter-scala"
+crate_version = "0.26.2"
+crates_io_checksum = "24e0ab4505990bfe30051761d40a7bf4033ce5a81c9eda9e20e987a5cdc84826"
+repository = "https://github.com/tree-sitter/tree-sitter-scala"
+tag = "v0.26.2"
+commit = "b931fcc338390925eb893d70ad070033f5856ccf"
+parser_sha256 = "9f6d03fa6c63d2d855b6f9e0368046a58568587eefc38b5e38bdb001e8ec68db"
+scanner_sha256 = "381caf8b105b7df8691781974d8f150ea81aabb32a3e9f24b87025f32f51515f"
+abi = 15
+analysis_tier = "D"
+license = "MIT"
+license_source = "third_party/tree-sitter-scala-0.26.2/LICENSE"
+license_sha256 = "1f95ed26e1f4074074c9c7083e61c0a9e4c3b9f435745044995f3beb4ed28575"
+modifications = "versioned bounded scanner state, full lexer positions and checked layout capacity; see PATCHES.md"
+test_corpus = "untouched upstream syntax/highlighting/tags plus Rootlight native and source-backed analyzer contracts"
+msrv = "not declared; native grammar verified with Rootlight MSRV 1.90"
+offline_behavior = "builds from checked-in native inputs and cached Cargo dependencies; no network in build.rs"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "source declarations only; package/import/inheritance/implicit/extension/overload/dispatch resolution and generated anonymous runtime identities remain unavailable"
+audit_notes = ["CLI 0.26.8 reproduces generated sources with embedded metadata version 0.26.0; package metadata 0.26.2 changes only patch_version", "272 upstream parses pass with one preexisting skipped case; source files match the named VCS revision despite dirty crate metadata", "the unchanged 1024-byte scanner ABI admits 201 full layout frames; excess nesting is a parse error"]
+
+[grammars.vendored]
+manifest_path = "third_party/tree-sitter-scala-0.26.2/Cargo.toml"
+[grammars.vendored.files]
+".cargo_vcs_info.json" = "421d8cd4ea4cfd88e5263ac5de7709fe19cecf8e1e208625a4e5b21b85efcb39"
+"Cargo.toml" = "6ef12a5eb36cf29a9acea189cc4c56655faaacb40804c14d1f342e2591e18ccc"
+"Cargo.toml.orig" = "17cd11a7da42622e6821f5d6fd4c6879014439de25ba83e0dacb4210a4c87977"
+"grammar.js" = "b00659c29a4fed323a1b6d18aba28c650e91d3099cf53c4553760b563b6056d9"
+"LICENSE" = "1f95ed26e1f4074074c9c7083e61c0a9e4c3b9f435745044995f3beb4ed28575"
+"PATCHES.md" = "87bdf61f6bad9ad9c0e9bd6e972e064b742de51a37a5b2e3cec0eca547917836"
+"README.md" = "d821c6a5e5feb01da1fc238dc86b7e0f6e68ca2175792567c80bf2e846b5c2bd"
+"tree-sitter.json" = "4792e2890f254e262fdbbbb9b9046340b6ef8de8ddaf3f75cab46a36a92a0a3a"
+"bindings/rust/build.rs" = "cbb3fc4d0d66310b76b6e63fc46b553b531ccd68eb74ce096a9a6459e4fe04fa"
+"bindings/rust/lib.rs" = "1c6ccb99291721773455daf54f2e5b9fe7ffb7aaa0cbe878682cf2bff84358fa"
+"queries/highlights.scm" = "c6e2d65c4f84b5484af3e1edc3451850fe8d878ce11f79550e426f8ac6e2df4a"
+"queries/indents.scm" = "a16437e3f41b4e0fb0f1574c117ce8ed4b627cb671fdf3f3b68e8cb15d6df302"
+"queries/locals.scm" = "809c455e32a921b4f9f7c8e02ddfd14bd7fad700aa0b5ecf7e74cb0d8c8f78a4"
+"queries/tags.scm" = "f56794ad2bc9ae5c7ffd332a40fa67a3af65880e18ba4124a0053f0bfff54757"
+"src/grammar.json" = "58edeaacdb564515ee96bad8889947afa60f2e957de446deeb9cad6d6d175514"
+"src/node-types.json" = "5855208e63df6ee99d82ef27d8b59a5272afdf44a7d4876149234dfcc0d69f36"
+"src/parser.c" = "9f6d03fa6c63d2d855b6f9e0368046a58568587eefc38b5e38bdb001e8ec68db"
+"src/scanner.c" = "381caf8b105b7df8691781974d8f150ea81aabb32a3e9f24b87025f32f51515f"
+"src/tree_sitter/alloc.h" = "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+"src/tree_sitter/array.h" = "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+"src/tree_sitter/parser.h" = "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+
+
+[[grammars]]
 language = "solidity"
 crate_name = "tree-sitter-solidity"
 crate_version = "1.2.13"

@@ -1707,11 +1707,11 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "scala",
-        suffixes: &[".sc", ".scala"],
+        suffixes: &[".sc", ".scala", ".sbt"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "solidity",
@@ -2515,6 +2515,8 @@ max_source_file_bytes = 2097152
             ("request.dart", "dart"),
             ("setup.ps1", "powershell"),
             ("build.scala", "scala"),
+            ("build.sbt", "scala"),
+            ("script.sc", "scala"),
             ("pipeline.groovy", "groovy"),
             ("boot.asm", "assembly"),
             ("token.sol", "solidity"),

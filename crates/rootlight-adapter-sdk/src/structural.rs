@@ -16,6 +16,17 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "scala.object.declaration" | "scala.package.declaration"
+            ) =>
+        {
+            Some(EntityKind::Namespace)
+        }
+        SyntaxFactKind::Declaration if label == "scala.enum_value.declaration" => {
+            Some(EntityKind::Constant)
+        }
         SyntaxFactKind::Declaration if label == "solidity.event.declaration" => {
             Some(EntityKind::Event)
         }
@@ -210,6 +221,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// R decodes backticks and quoted assignment targets into UTF-8 names without
 /// case folding or Unicode normalization. Invalid or non-UTF-8 escapes remain
 /// unavailable; canonical spelling does not infer runtime binding equivalence.
+/// Scala removes enclosing identifier backticks without changing their contents;
+/// grammar-reviewed symbolic names retain their exact spelling, including `/`.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -219,7 +232,27 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "sql" {
+    if language == "scala" {
+        let candidate = text.trim();
+        if candidate.is_empty() || candidate.len() > maximum_bytes {
+            return None;
+        }
+        if let Some(quoted) = candidate
+            .strip_prefix('`')
+            .and_then(|name| name.strip_suffix('`'))
+        {
+            return (!quoted.is_empty() && !quoted.chars().any(|ch| ch.is_control() || ch == '`'))
+                .then_some(Cow::Borrowed(quoted));
+        }
+        candidate
+            .chars()
+            .all(|ch| {
+                !ch.is_control()
+                    && !ch.is_whitespace()
+                    && !matches!(ch, '(' | ')' | '{' | '}' | '[' | ']' | '`')
+            })
+            .then_some(Cow::Borrowed(candidate))
+    } else if language == "sql" {
         crate::sql_names::canonical_sql_name(text, maximum_bytes)
     } else if language == "json" {
         crate::json_names::canonical_json_key(text, maximum_bytes)
@@ -353,6 +386,41 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scala_names_preserve_operators_and_bounded_backtick_identity() {
+        for (source, canonical) in [
+            ("name", "name"),
+            ("`name`", "name"),
+            ("`odd name`", "odd name"),
+            ("/", "/"),
+            ("\\", "\\"),
+            ("λ", "λ"),
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("scala", source, source.len()).as_deref(),
+                Some(canonical)
+            );
+            assert!(
+                structural_captured_name_for_language("scala", source, source.len() - 1).is_none()
+            );
+        }
+        for invalid in [
+            "",
+            "``",
+            "`name",
+            "name`",
+            "`a`b`",
+            "two names",
+            "call()",
+            "`line\nname`",
+        ] {
+            assert!(
+                structural_captured_name_for_language("scala", invalid, 64).is_none(),
+                "{invalid:?}"
+            );
+        }
+    }
 
     #[test]
     fn json_display_names_decode_only_readable_canonical_keys() {
