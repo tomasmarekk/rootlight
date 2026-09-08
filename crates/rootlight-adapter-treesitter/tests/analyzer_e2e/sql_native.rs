@@ -207,3 +207,110 @@ fn sql_unknown_names_and_parse_errors_remain_visible_gaps() {
             .any(|entity| entity.canonical_name == "owner")
     );
 }
+
+#[test]
+fn sql_function_signatures_preserve_return_contracts_without_bodies() {
+    for (header, body) in [
+        (
+            "CREATE FUNCTION app.identity(value INT) RETURNS INT",
+            "AS $$ SELECT value; $$ LANGUAGE SQL;",
+        ),
+        (
+            "CREATE FUNCTION app.rows(value INT) RETURNS TABLE (id INT, label TEXT)",
+            "AS $$ SELECT value, 'label'; $$ LANGUAGE SQL;",
+        ),
+        (
+            "CREATE FUNCTION app.items() RETURNS SETOF app.item",
+            "AS 'SELECT * FROM app.item;' LANGUAGE SQL;",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION app.identity(value INT) RETURNS BIGINT LANGUAGE SQL IMMUTABLE",
+            "RETURN value;",
+        ),
+        (
+            "CREATE FUNCTION app.identity(value INT) RETURNS INT LANGUAGE SQL",
+            "BEGIN ATOMIC SELECT value; END;",
+        ),
+        (
+            "CREATE FUNCTION \"AS body\"(value INT) RETURNS INT /* AS is not the body */",
+            "AS $$ SELECT value; $$ LANGUAGE SQL;",
+        ),
+    ] {
+        let source = format!("{header}\n{body}");
+        let result = output(&source);
+        assert!(
+            result.document().diagnostics.is_empty(),
+            "{source}: {:?}",
+            result.document().diagnostics
+        );
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function)
+            .unwrap();
+        let signatures = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                (lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && lexical.subject() == rootlight_ir::FactRef::Entity(entity.id))
+                .then_some((extension, lexical))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures.len(), 1, "{source}");
+        let (extension, signature) = &signatures[0];
+        assert_eq!(signature.text(), header, "{source}");
+        assert!(!signature.is_truncated());
+        let reference = extension.evidence.source.as_ref().unwrap();
+        let start = usize::try_from(reference.span().start_byte()).unwrap();
+        let end = usize::try_from(reference.span().end_byte()).unwrap();
+        assert_eq!(source.get(start..end), Some(header));
+    }
+}
+
+#[test]
+fn sql_return_type_changes_invalidate_callable_identity_but_not_unrelated_objects() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, SQL);
+    let fixture = Fixture::new(SQL, SQL.source.as_bytes());
+    let budget = limits();
+    let first = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, SQL, &budget),
+        &ExtensionSupport::default(),
+    );
+    let changed = fixture.rewrite(
+        SQL.source
+            .replace("RETURNS INT", "RETURNS BIGINT")
+            .as_bytes(),
+    );
+    let next = analyze(
+        &analyzer,
+        &request(&changed.snapshot, &changed.source, SQL, &budget),
+        &ExtensionSupport::default(),
+    );
+    let callable = |output: &AnalysisOutput| {
+        output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function)
+            .unwrap()
+            .id
+    };
+    assert_ne!(callable(&first), callable(&next));
+    let objects = |output: &AnalysisOutput| {
+        output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::DatabaseObject)
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(objects(&first), objects(&next));
+}

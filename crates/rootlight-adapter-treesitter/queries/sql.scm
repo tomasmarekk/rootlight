@@ -5,7 +5,7 @@
  (create_index) (create_schema) (create_database) (create_role) (create_sequence)
  (create_extension) (create_trigger) (create_type) (column_definition)
  (function_argument)] @declaration @definition
-(create_function (function_arguments) @signature)
+(create_function (function_body)) @signature
 (function_body) @signature
 (object_reference) @reference
 (literal) @string

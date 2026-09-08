@@ -415,7 +415,9 @@ where
             rows: budget.max_rows,
             edges: budget.max_edges,
             results: budget.max_results,
-            source_bytes: 0,
+            source_bytes: budget.max_source_bytes.min(checked_usize_to_u64(
+                rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES,
+            )?),
             // The normalized generation bounds every record, while the query
             // memory budget remains the conservative aggregate ceiling.
             memory_bytes: budget.max_memory_bytes,
@@ -432,6 +434,7 @@ where
                 QueryOperator::EntityLookup,
                 QueryOperator::RelationScan,
                 QueryOperator::OccurrenceScan,
+                QueryOperator::LexicalEvidenceScan,
                 QueryOperator::ProvenanceLookup,
                 QueryOperator::CoverageProjection,
                 QueryOperator::OutputBudget,
@@ -543,6 +546,17 @@ where
             }
         }
 
+        let signature = if limits_optional_results(&limiting_resources) {
+            None
+        } else {
+            collect_symbol_signature(
+                document,
+                entity,
+                &mut tracker,
+                &control,
+                &mut limiting_resources,
+            )?
+        };
         let symbols = BTreeSet::from([plan.symbol]);
         let files = entity
             .evidence
@@ -567,6 +581,7 @@ where
         let data = SymbolExplainResult {
             generation: self.generation.metadata().generation(),
             entity: entity.clone(),
+            signature,
             relations,
             occurrences,
             provenance: provenance.clone(),
@@ -2547,6 +2562,68 @@ where
             .field("generation", &self.generation.metadata().generation())
             .finish_non_exhaustive()
     }
+}
+
+fn collect_symbol_signature(
+    document: &NormalizedIrDocument,
+    entity: &rootlight_ir::EntityRecord,
+    tracker: &mut UsageTracker,
+    control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<Option<rootlight_ir::LexicalEvidenceV1>, QueryError> {
+    let mut signature = None;
+    for envelope in &document.extensions {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            return Ok(None);
+        }
+        tracker.add_rows(1)?;
+        if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+            || envelope.evidence.derivation.as_slice() != [rootlight_ir::FactRef::Entity(entity.id)]
+        {
+            continue;
+        }
+        // Reserve decode and canonical-validation scratch before allocating.
+        // The generation has already admitted each bounded envelope payload.
+        let bytes = checked_usize_to_u64(envelope.payload.len())?
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or(QueryError::MemoryUnavailable)?;
+        if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+            return Ok(None);
+        }
+        tracker.add_memory(bytes)?;
+        let evidence = rootlight_ir::decode_lexical_evidence_envelope(envelope)
+            .map_err(|_| QueryError::IndexDrift)?;
+        if evidence.kind() != rootlight_ir::LexicalEvidenceKind::Signature {
+            continue;
+        }
+        if signature
+            .as_ref()
+            .is_some_and(|previous| previous != &evidence)
+        {
+            // Conflicting retained declarations cannot yield one exact signature.
+            return Ok(None);
+        }
+        signature = Some(evidence);
+    }
+    if let Some(evidence) = &signature {
+        // Retained signature text is raw source too, even without a VFS read.
+        let source_bytes = checked_usize_to_u64(evidence.text().len())?;
+        if !tracker.can_add(QueryResource::SourceBytes, source_bytes) {
+            record_limit(limiting_resources, QueryResource::SourceBytes)?;
+            return Ok(None);
+        }
+        if !tracker.can_add(QueryResource::Results, 1) {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            return Ok(None);
+        }
+        tracker.add_source_bytes(source_bytes)?;
+        tracker.add_results(1)?;
+    }
+    Ok(signature)
 }
 
 fn find_entity(

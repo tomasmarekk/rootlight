@@ -913,6 +913,148 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
     ));
 }
 
+fn signature_snapshot(signatures: &[&str]) -> (GenerationSnapshot, SymbolId) {
+    let base = fixture_snapshot();
+    let mut document = base.document().clone();
+    let entity = &document.entities[0];
+    let symbol = entity.id;
+    for signature in signatures {
+        let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::FactRef::Entity(symbol),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            signature,
+        )
+        .unwrap();
+        document.extensions.push(
+            rootlight_ir::new_lexical_evidence_envelope(
+                document.repository,
+                document.generation,
+                entity.provenance,
+                entity.evidence.source.clone().unwrap(),
+                &evidence,
+            )
+            .unwrap(),
+        );
+    }
+    (
+        GenerationSnapshot::new(
+            base.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap(),
+        symbol,
+    )
+}
+
+#[test]
+fn explanations_preserve_retained_multiline_signatures_and_truncation() {
+    let long = format!("fn large({})", "value: é, ".repeat(600));
+    for text in [
+        "fn item(\n    value: &str,\n) -> Result<é, Error>",
+        long.as_str(),
+    ] {
+        let (snapshot, symbol) = signature_snapshot(&[text]);
+        let search = fixture_search(&snapshot);
+        let service = QueryService::new(&snapshot, &search).unwrap();
+        let plan = service
+            .plan_symbol_explain(symbol, QueryBudget::new())
+            .unwrap();
+        let result = service
+            .execute_symbol_explain(&plan, &Cancellation::new())
+            .unwrap();
+        let signature = result.data.signature.as_ref().unwrap();
+        assert!(text.starts_with(signature.text()));
+        assert_eq!(
+            signature.is_truncated(),
+            text.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES
+        );
+        assert_eq!(
+            signature.complete_text_hash(),
+            content_hash(text.as_bytes())
+        );
+        assert!(!result.data.truncated);
+        assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn explanations_do_not_guess_missing_or_conflicting_signatures() {
+    for signatures in [Vec::new(), vec!["fn item() -> A", "fn item() -> B"]] {
+        let (snapshot, symbol) = signature_snapshot(&signatures);
+        let search = fixture_search(&snapshot);
+        let service = QueryService::new(&snapshot, &search).unwrap();
+        let plan = service
+            .plan_symbol_explain(symbol, QueryBudget::new())
+            .unwrap();
+        let result = service
+            .execute_symbol_explain(&plan, &Cancellation::new())
+            .unwrap();
+        assert!(result.data.signature.is_none());
+        assert!(!result.data.truncated);
+        assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn explanations_do_not_return_signatures_from_incomplete_scans() {
+    let (snapshot, symbol) = signature_snapshot(&["fn item() -> A"]);
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    let plan = service
+        .plan_symbol_explain(symbol, QueryBudget::new().with_max_rows(2))
+        .unwrap();
+    let result = service
+        .execute_symbol_explain(&plan, &Cancellation::new())
+        .unwrap();
+    assert!(result.data.signature.is_none());
+    assert!(result.data.truncated);
+    assert!(
+        result
+            .data
+            .limiting_resources
+            .contains(&QueryResource::Rows)
+    );
+    assert_eq!(result.usage.rows, 2);
+    assert_exact_response_accounting(&result);
+}
+
+#[test]
+fn retained_signatures_obey_source_byte_budgets() {
+    let text = "fn item(value: é) -> Output";
+    let bytes = u64::try_from(text.len()).unwrap();
+    let (snapshot, symbol) = signature_snapshot(&[text]);
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for maximum in [bytes - 1, bytes, bytes + 1] {
+        let plan = service
+            .plan_symbol_explain(symbol, QueryBudget::new().with_max_source_bytes(maximum))
+            .unwrap();
+        let result = service
+            .execute_symbol_explain(&plan, &Cancellation::new())
+            .unwrap();
+        if maximum < bytes {
+            assert!(result.data.signature.is_none());
+            assert_eq!(result.usage.source_bytes, 0);
+            assert!(result.data.truncated);
+            assert!(
+                result
+                    .data
+                    .limiting_resources
+                    .contains(&QueryResource::SourceBytes)
+            );
+        } else {
+            assert_eq!(result.data.signature.as_ref().unwrap().text(), text);
+            assert_eq!(result.usage.source_bytes, bytes);
+            assert!(!result.data.truncated);
+        }
+        assert!(result.usage.source_bytes <= plan.explanation().estimate.source_bytes);
+        assert_exact_response_accounting(&result);
+    }
+}
+
 #[test]
 fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
     let snapshot = fixture_snapshot();

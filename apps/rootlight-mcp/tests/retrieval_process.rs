@@ -199,6 +199,69 @@ fn sql_database_objects_cross_process_boundaries_with_exact_source_entities() {
     );
 }
 
+#[test]
+fn sql_return_headers_reach_mcp_explanations_without_body_text() {
+    let header = "CREATE FUNCTION app.rows(\nvalue INT\n)\nRETURNS TABLE (id INT) LANGUAGE SQL";
+    let source = format!("{header} AS $$ SELECT value; $$;\n");
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("schema.sql", &source)), FixtureLayout::Data);
+    let located = fixture.standalone("sql-header-locate", "code.locate", json!({
+        "query": "app.rows", "search_modes": ["exact"], "languages": ["sql"], "response_profile": "evidence"
+    }));
+    assert_success(&located, "code.locate");
+    let matches = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap();
+    let found = matches
+        .iter()
+        .find(|item| item["kind"] == "function")
+        .unwrap();
+    let symbol = found["symbol_id"].clone();
+    let arguments = json!({"symbol_ids": [symbol], "response_profile": "evidence"});
+    let explained = fixture.standalone("sql-header-explain", "symbol.explain", arguments.clone());
+    let batched = fixture.batch("sql-header-batch", "symbol.explain", arguments, "evidence");
+    assert_standalone_batch_parity(&explained, &batched, "symbol.explain");
+    let output = &explained["result"]["structuredContent"];
+    assert_common_read_contract(output, &fixture.repository_id);
+    assert_eq!(output["data"]["symbols"][0]["signature"], header);
+    let limited = fixture.standalone(
+        "sql-header-source-budget",
+        "symbol.explain",
+        json!({
+            "symbol_ids": [found["symbol_id"]], "response_profile": "evidence",
+            "budget": {"max_source_bytes": 1}
+        }),
+    );
+    assert_success(&limited, "symbol.explain");
+    let limited = &limited["result"]["structuredContent"];
+    assert_eq!(limited["completeness"]["state"], "truncated");
+    assert!(
+        limited["completeness"]["limiting_resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|resource| resource["kind"] == "source_bytes")
+    );
+    assert!(limited["data"]["symbols"][0]["signature"].is_null());
+    let read = fixture.standalone(
+        "sql-header-source",
+        "source.read",
+        json!({
+            "references": [{"source_ref": found["source_ref"]}], "response_profile": "evidence"
+        }),
+    );
+    assert_success(&read, "source.read");
+    let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+    let reference = &found["source_ref"];
+    for field in ["repository", "generation", "content_hash", "span"] {
+        assert_eq!(chunk["source_ref"][field], reference[field]);
+    }
+    let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(chunk["content"].as_str(), source.get(start..end));
+    fixture.finish();
+}
+
 fn source_entities_cross_process_boundaries(
     language: &str,
     path: &str,

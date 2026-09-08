@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/26";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/27";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -26545,6 +26545,20 @@ mod tests {
                         .any(|gap| gap.detail == detail)
                 );
             }
+            let function = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Function)
+                .unwrap();
+            let explained = restored
+                .symbol_explain(receipt.generation, function.id, &deadline())
+                .unwrap();
+            let signature = explained.data.signature.as_ref().unwrap();
+            assert_eq!(
+                signature.text(),
+                "CREATE FUNCTION app.identity(value INT) RETURNS INT"
+            );
+            assert!(!signature.is_truncated());
             let file = document
                 .files
                 .iter()

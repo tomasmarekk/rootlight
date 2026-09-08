@@ -2656,6 +2656,53 @@ fn real_analyzer_keeps_rust_methods_bound_to_stable_impl_headers() {
 }
 
 #[test]
+fn rust_signatures_keep_return_types_and_where_clauses_without_bodies() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let case = CASES[0];
+    let analyzer = analyzer(&provider, case);
+    for header in [
+        "pub fn item(value: u32) -> u64",
+        "pub async fn item<T>(\nvalue: T,\n) -> T where T: Copy",
+        "pub fn item() -> [u8; { 1 + 2 }] /* { not a body } */",
+    ] {
+        let source = format!("{header}\n{{ todo!() }}\n");
+        let fixture = Fixture::new(case, source.as_bytes());
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, case, &limits),
+            &ExtensionSupport::default(),
+        );
+        let function = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function)
+            .unwrap();
+        let signatures = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|envelope| {
+                let evidence = rootlight_ir::decode_lexical_evidence_envelope(envelope).unwrap();
+                (evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && evidence.subject() == rootlight_ir::FactRef::Entity(function.id))
+                .then_some((envelope, evidence))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures.len(), 1);
+        let (envelope, evidence) = &signatures[0];
+        assert_eq!(evidence.text(), header);
+        assert!(!evidence.is_truncated());
+        let reference = envelope.evidence.source.as_ref().unwrap();
+        let start = usize::try_from(reference.span().start_byte()).unwrap();
+        let end = usize::try_from(reference.span().end_byte()).unwrap();
+        assert_eq!(source.get(start..end), Some(header));
+    }
+}
+
+#[test]
 fn real_analyzer_distinguishes_trait_and_inherent_impl_owners() {
     let provider = Arc::new(provider());
     let limits = limits();

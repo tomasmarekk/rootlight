@@ -833,6 +833,31 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Rust
+        && role == StructuralRole::Signature
+        && let Some(function) = capture.node.parent()
+        && function.kind() == "function_item"
+    {
+        // Return types and where clauses belong to the signature; braces in
+        // const expressions or comments are not the native function body.
+        start = function.start_byte();
+        end = function
+            .child_by_field_name("body")
+            .ok_or_else(|| query_failure("query-rust-signature-body"))?
+            .start_byte();
+        while end > start && source.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
+            end -= 1;
+        }
+    }
+    if family == GrammarFamily::Sql
+        && role == StructuralRole::Signature
+        && capture.node.kind() == "create_function"
+    {
+        let range = sql::signature_range(capture.node, source)
+            .ok_or_else(|| query_failure("query-sql-signature-header"))?;
+        start = range.start;
+        end = range.end;
+    }
     if family == GrammarFamily::Css && role == StructuralRole::ScopeType {
         // Keep raw header bytes: whitespace may terminate a CSS escape, and
         // braces inside strings must not be mistaken for the parser's body.

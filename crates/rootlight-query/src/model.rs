@@ -395,6 +395,8 @@ pub enum QueryOperator {
     HotspotRank,
     /// Scan source occurrences with a row cap.
     OccurrenceScan,
+    /// Scan source-bound lexical evidence with a row and memory cap.
+    LexicalEvidenceScan,
     /// Resolve deduplicated provenance.
     ProvenanceLookup,
     /// Project relevant completeness records.
@@ -995,6 +997,10 @@ pub struct SymbolExplainResult {
     pub generation: GenerationId,
     /// Exact normalized entity.
     pub entity: EntityRecord,
+    /// Unique retained signature evidence for the entity, including truncation.
+    /// Absent when evidence is unavailable, ambiguous, or its scan is incomplete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<rootlight_ir::LexicalEvidenceV1>,
     /// Typed relations touching the entity.
     pub relations: Vec<RelationRecord>,
     /// Source occurrences enclosing or targeting the entity.

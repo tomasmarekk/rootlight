@@ -38,11 +38,16 @@ fn captures(source: &str, role: &str) -> Vec<(String, String, usize, usize)> {
                 } else {
                     capture.node
                 };
+                let range = if role == "signature" && node.kind() == "create_function" {
+                    sql::signature_range(node, source.as_bytes()).unwrap()
+                } else {
+                    node.byte_range()
+                };
                 output.push((
                     node.kind().to_owned(),
-                    node.utf8_text(source.as_bytes()).unwrap().to_owned(),
-                    node.start_byte(),
-                    node.end_byte(),
+                    source.get(range.clone()).unwrap().to_owned(),
+                    range.start,
+                    range.end,
                 ));
             }
         }
@@ -153,11 +158,14 @@ fn reference_captures_retain_written_targets_without_claiming_resolution() {
 }
 
 #[test]
-fn callable_signature_does_not_include_body_or_returned_table_columns() {
+fn callable_signature_includes_returned_columns_but_not_the_body() {
     let source = "CREATE FUNCTION app.rows(value INT) RETURNS TABLE (id INT) AS $body$ SELECT value; $body$ LANGUAGE SQL;";
     let signatures = captures(source, "signature");
     assert_eq!(signatures.len(), 2);
-    assert_eq!(signatures[0].1, "(value INT)");
+    assert_eq!(
+        signatures[0].1,
+        "CREATE FUNCTION app.rows(value INT) RETURNS TABLE (id INT)"
+    );
     assert!(signatures[1].1.contains("SELECT value;"));
     assert_eq!(
         captures(source, "definition")

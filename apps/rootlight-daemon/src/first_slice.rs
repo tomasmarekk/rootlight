@@ -11347,9 +11347,11 @@ fn symbol_explain(
         let source_lines = u8::try_from(request.source_preview_lines.unwrap_or(0))
             .map_err(|_| invalid_argument())?;
         let needs_signature = sections.contains("signature");
-        let requested_source_lines = source_lines.max(u8::from(needs_signature));
-        let (signature, source_preview) = if requested_source_lines == 0 {
-            (None, None)
+        let signature = response.data.signature.as_ref().filter(|_| needs_signature);
+        let signature_truncated = signature.is_some_and(|evidence| evidence.is_truncated());
+        let signature = signature.map(|evidence| evidence.text().to_owned());
+        let source_preview = if source_lines == 0 {
+            None
         } else {
             match remaining_service_budget(context, &usage) {
                 Ok(remaining) => {
@@ -11357,36 +11359,33 @@ fn symbol_explain(
                         service,
                         generation.generation,
                         definition,
-                        requested_source_lines,
+                        source_lines,
                         remaining,
                         &context.cancellation,
                     )?;
                     usage.add(&source_usage)?;
-                    let signature = needs_signature
-                        .then(|| compact_signature(&source))
-                        .flatten();
-                    let preview = (source_lines > 0)
-                        .then(|| first_source_lines(&source, source_lines))
-                        .filter(|preview| !preview.is_empty());
-                    (signature, preview)
+                    (!source.is_empty()).then_some(source)
                 }
                 Err(BudgetExhaustion::Resource(resource)) => {
                     if !limiting_resources.contains(&resource) {
                         limiting_resources.push(resource);
                     }
                     execution_state = execution_state.max(ExecutionCompletenessState::Truncated);
-                    (None, None)
+                    None
                 }
                 Err(BudgetExhaustion::Duration) => return Err(budget_exceeded()),
             }
         };
-        let section_gaps = explain_section_gaps(
+        let mut section_gaps = explain_section_gaps(
             &sections,
             signature.as_deref(),
             container.as_deref(),
             source_preview.as_deref(),
             &response.data.relations,
         );
+        if signature_truncated {
+            section_gaps.push("signature_truncated".to_owned());
+        }
         let (language, tier) = service
             .source_language_coverage_until(
                 generation.generation,
@@ -11623,22 +11622,6 @@ fn first_source_lines(source: &str, maximum: u8) -> String {
         .take(usize::from(maximum))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn compact_signature(source: &str) -> Option<String> {
-    let mut signature = source
-        .lines()
-        .find(|line| !line.trim().is_empty())?
-        .trim()
-        .to_owned();
-    if signature.len() > 4_096 {
-        let mut end = 4_096;
-        while end > 0 && !signature.is_char_boundary(end) {
-            end -= 1;
-        }
-        signature.truncate(end);
-    }
-    (!signature.is_empty()).then_some(signature)
 }
 
 fn explain_section_gaps(
@@ -22027,10 +22010,9 @@ mod tests {
         let explanation = &response.symbols[0];
         assert!(!explanation.qualified_name.is_empty());
         assert!(
-            explanation
-                .signature
-                .as_deref()
-                .is_some_and(|signature| signature.contains("explained_symbol"))
+            explanation.signature.as_deref() == Some("pub fn explained_symbol() -> u32"),
+            "retained signature: {:?}",
+            explanation.signature
         );
         assert!(
             explanation

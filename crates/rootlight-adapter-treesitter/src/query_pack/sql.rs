@@ -4,6 +4,22 @@
 
 use tree_sitter::Node;
 
+pub(super) fn signature_range(node: Node<'_>, source: &[u8]) -> Option<std::ops::Range<usize>> {
+    let body = first_child(node, "function_body")?;
+    let start = node.start_byte();
+    let prefix = source.get(start..body.start_byte())?;
+    // AS/RETURN/BEGIN inside names, comments or defaults are not body boundaries.
+    // A contiguous header retains RETURNS and pre-body modifiers; modifiers
+    // written after the body cannot be represented by this source span.
+    let trailing = prefix
+        .iter()
+        .rev()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    let end = body.start_byte().checked_sub(trailing)?;
+    (start < end).then_some(start..end)
+}
+
 pub(super) fn is_declared_name(node: Node<'_>) -> bool {
     node.parent().and_then(definition_node) == Some(node)
 }
