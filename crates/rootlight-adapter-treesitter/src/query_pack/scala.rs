@@ -1,10 +1,32 @@
 //! Scala source binding positions and private native syntax labels.
 //! Pattern names are distinguished from extractor/type/member references before lowering.
 
+use rootlight_adapter_sdk::AdapterError;
+use rootlight_cancel::Cancellation;
 use tree_sitter::Node;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use super::StructuralRole;
+
+pub(super) fn leading_package_end(
+    root: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<usize>, AdapterError> {
+    cancellation.check()?;
+    let mut end = None;
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        cancellation.check()?;
+        match child.kind() {
+            "comment" => {}
+            "package_clause" if child.child_by_field_name("body").is_none() => {
+                end = Some(child.end_byte());
+            }
+            _ => break,
+        }
+    }
+    Ok(end)
+}
 
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]) -> bool {
     if matches!(node.kind(), "identifier" | "operator_identifier") {

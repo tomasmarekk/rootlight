@@ -953,13 +953,68 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
 }
 
 #[test]
+fn overlapping_captures_preserve_fresh_and_cached_fact_budget_parity() {
+    for (language, source) in [
+        (
+            "rust",
+            "/// Reads a value.\nfn read(value: i32) -> i32 { value }\n",
+        ),
+        (
+            "python",
+            "def read(value):\n    \"\"\"Reads a value.\"\"\"\n    return value\n",
+        ),
+        (
+            "java",
+            "/** Stores values. */\nclass Store { int read(int value) { return value; } }\n",
+        ),
+    ] {
+        let case = *CASES.iter().find(|case| case.name == language).unwrap();
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, case);
+        let fixture = Fixture::new(case, source.as_bytes());
+        let initial_limits = limits();
+        let initial_request = request(&fixture.snapshot, &fixture.source, case, &initial_limits);
+        let (_, artifact) = analyzer
+            .analyze_and_capture(
+                &initial_request,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let reduced_records = artifact.syntax_fact_count().checked_add(1).unwrap();
+        let reduced_limits = limits_with_syntax_records(reduced_records);
+        assert!(reduced_records < initial_limits.syntax_stream().max_records());
+        let successor = fixture.next_generation();
+        let successor_request = request(
+            &successor.snapshot,
+            &successor.source,
+            case,
+            &reduced_limits,
+        );
+        let reused = analyzer
+            .analyze_from_artifact(
+                &successor_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let fresh = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
+        assert_eq!(reused.document(), fresh.document(), "{language}");
+        assert_eq!(reused.report(), fresh.report(), "{language}");
+    }
+}
+
+#[test]
 fn complete_structural_artifact_replays_under_a_smaller_fact_partition() {
     let case = CASES[0];
     let primary_provider = Arc::new(provider());
     let primary_analyzer = analyzer(&primary_provider, case);
     let initial_limits = limits();
     let extensions = ExtensionSupport::default();
-    let fixture = Fixture::new(case, b"fn stable() {}\n");
+    let fixture = Fixture::new(case, b"fn stable() { dependency(); }\n");
     let initial_request = request(&fixture.snapshot, &fixture.source, case, &initial_limits);
     let (_, artifact) = primary_analyzer
         .analyze_and_capture(
@@ -969,7 +1024,9 @@ fn complete_structural_artifact_replays_under_a_smaller_fact_partition() {
             &deadline(),
         )
         .expect("complete structural artifact is captured");
-    let bounded_limits = limits_with_syntax_records(artifact.syntax_fact_count().max(1));
+    let required_records = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    assert!(artifact.syntax_fact_count() > required_records);
+    let bounded_limits = limits_with_syntax_records(required_records);
     let bounded_request = request(&fixture.snapshot, &fixture.source, case, &bounded_limits);
     let (bounded, bounded_artifact) = primary_analyzer
         .analyze_and_capture(

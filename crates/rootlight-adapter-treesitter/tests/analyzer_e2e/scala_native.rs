@@ -98,6 +98,202 @@ object Store {
 }
 
 #[test]
+fn scala_package_prefixes_match_explicit_nested_ownership() {
+    let declarations = "class Entry\nobject Entry { def read(value: Int) = value }";
+    let implicit = output(&format!("package outer\npackage inner\n{declarations}"));
+    let explicit = output(&format!(
+        "package outer {{ package inner {{ {declarations} }} }}"
+    ));
+    for result in [&implicit, &explicit] {
+        let doc = result.document();
+        let package = |name: &str| {
+            doc.entities
+                .iter()
+                .find(|e| e.canonical_name == name && e.kind == EntityKind::Namespace)
+                .unwrap()
+        };
+        let outer = package("outer");
+        let inner = package("inner");
+        assert_eq!(
+            inner.container,
+            Some(rootlight_ir::ContainerRef::Entity(outer.id)),
+            "{:?}",
+            doc.entities
+        );
+        for entry in doc.entities.iter().filter(|e| e.canonical_name == "Entry") {
+            assert_eq!(
+                entry.container,
+                Some(rootlight_ir::ContainerRef::Entity(inner.id)),
+                "{:?}",
+                doc.entities
+            );
+        }
+        assert_eq!(
+            doc.entities
+                .iter()
+                .filter(|e| e.canonical_name == "Entry")
+                .count(),
+            2
+        );
+    }
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|e| (e.id, (e.kind, e.canonical_name.clone(), e.container)))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&implicit), identities(&explicit));
+}
+
+#[test]
+fn scala_package_prefix_preserves_explicit_siblings_and_definition_bytes() {
+    let source = "// prefix\npackage root\n/* between */\npackage left { class Entry }\npackage right { class Entry }\nclass Outside";
+    let result = output(source);
+    let doc = result.document();
+    let owner = |name: &str| {
+        doc.entities
+            .iter()
+            .find(|e| e.canonical_name == name)
+            .unwrap()
+    };
+    for (name, parent) in [("left", "root"), ("right", "root"), ("Outside", "root")] {
+        assert_eq!(
+            owner(name).container,
+            Some(rootlight_ir::ContainerRef::Entity(owner(parent).id))
+        );
+    }
+    let entries: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|e| e.canonical_name == "Entry")
+        .collect();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries.iter().map(|e| e.container).collect::<BTreeSet<_>>(),
+        ["left", "right"]
+            .into_iter()
+            .map(|name| Some(rootlight_ir::ContainerRef::Entity(owner(name).id)))
+            .collect()
+    );
+    for name in ["root", "left", "right"] {
+        let entity = owner(name);
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|o| {
+                o.role == OccurrenceRole::Definition
+                    && o.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let span = definitions[0].source.span();
+        let written = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert_eq!(written, name);
+        assert_eq!(
+            definitions[0].syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+    }
+    let span = owner("left").evidence.source.as_ref().unwrap().span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "package left { class Entry }"
+    );
+}
+
+#[test]
+fn scala_nonleading_unbraced_package_never_claims_following_declarations() {
+    let source = "object Before {}\npackage late\nclass After";
+    let result = output(source);
+    let doc = result.document();
+    let after = doc
+        .entities
+        .iter()
+        .find(|e| e.canonical_name == "After")
+        .unwrap();
+    let file_module = doc
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::Module)
+        .unwrap();
+    assert_eq!(
+        after.container,
+        Some(rootlight_ir::ContainerRef::Entity(file_module.id))
+    );
+    let gap = doc
+        .skipped_regions
+        .iter()
+        .find(|g| g.detail == "scala-nonleading-unbraced-package-scope-unavailable")
+        .unwrap();
+    let span = gap.source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "package late"
+    );
+}
+
+#[test]
+fn scala_package_ownership_replays_exactly_with_retained_generation_evidence() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, SCALA);
+    let fixture = Fixture::new(
+        SCALA,
+        b"package outer\npackage inner\nobject Store { def read(value: Int) = value }",
+    );
+    let initial_limits = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, SCALA, &initial_limits);
+    let (initial, artifact) = analyzer
+        .analyze_and_capture(
+            &initial_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let successor = fixture.next_generation();
+    let reduced_limits =
+        limits_with_syntax_records(artifact.syntax_fact_count().checked_add(1).unwrap());
+    let successor_request = request(
+        &successor.snapshot,
+        &successor.source,
+        SCALA,
+        &reduced_limits,
+    );
+    let reused = analyzer
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    assert_eq!(reused.report(), fresh.report());
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|e| (e.id, e.container))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&initial), identities(&reused));
+    assert!(reused.document().entities.iter().all(|e| {
+        e.evidence
+            .source
+            .as_ref()
+            .is_some_and(|r| r.generation() == successor.source.generation())
+    }));
+}
+
+#[test]
 fn scala_overloads_and_disjoint_blocks_preserve_unique_stable_owners() {
     let source = "object Store { def read(value: Int): Int = value; def read(value: String): String = value; def run = { { val local = 1 }; { val local = 2 } } }";
     let initial = output(source);

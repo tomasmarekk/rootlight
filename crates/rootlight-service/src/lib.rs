@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/33";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/34";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -27212,7 +27212,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "object Store { def read(value: Int): Int = value; def read(value: String): String = value; def `odd name` = 1 }";
+        let source = "package outer\npackage inner\nobject Store { def read(value: Int): Int = value; def read(value: String): String = value; def `odd name` = 1 }";
         fs::write(fixture.path().join("store.scala"), source).unwrap();
         let mut service =
             FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
@@ -27243,7 +27243,29 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(identities.len(), 7);
+        assert_eq!(identities.len(), 9);
+        for (name, parent, qualified) in [
+            ("inner", "outer", "store.scala::outer::inner"),
+            ("Store", "inner", "store.scala::outer::inner::Store"),
+        ] {
+            let entity = original
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            let owner = original
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == parent)
+                .unwrap();
+            assert_eq!(
+                entity.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+            assert_eq!(entity.qualified_name, qualified);
+        }
         let noop = service
             .index_repository(fixture.path(), &deadline())
             .unwrap();

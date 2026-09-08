@@ -2682,6 +2682,10 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "scala.unbraced_package_unavailable.scope" => Some((
+            FactDomain::Relations,
+            "scala-nonleading-unbraced-package-scope-unavailable",
+        )),
         "scala.file.module" => Some((
             FactDomain::Relations,
             "scala-import-inheritance-implicit-dispatch-resolution-unavailable",

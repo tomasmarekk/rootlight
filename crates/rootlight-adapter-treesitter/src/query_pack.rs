@@ -511,6 +511,11 @@ impl QueryPack {
         limits: QueryScanLimits,
         mut retain: impl FnMut(QueryCandidate) -> Result<(), AdapterError>,
     ) -> Result<Option<QueryLimit>, AdapterError> {
+        let scala_package_prefix_end = if input.family == GrammarFamily::Scala {
+            scala::leading_package_end(input.tree.root_node(), input.cancellation)?
+        } else {
+            None
+        };
         let mut cursor = QueryCursor::new();
         cursor.set_match_limit(QUERY_CURSOR_MATCH_LIMIT);
         let mut callback_cancelled = false;
@@ -599,12 +604,25 @@ impl QueryPack {
                     };
                     capture.node = name;
                 }
-                retain(candidate_for_capture(
-                    input.family,
-                    capture,
-                    role,
-                    input.source,
-                )?)?;
+                let mut candidate =
+                    candidate_for_capture(input.family, capture, role, input.source)?;
+                if input.family == GrammarFamily::Scala
+                    && matches!(role, StructuralRole::Scope | StructuralRole::Declaration)
+                    && capture.node.kind() == "package_clause"
+                    && capture.node.child_by_field_name("body").is_none()
+                {
+                    if scala_package_prefix_end.is_some_and(|end| capture.node.end_byte() <= end)
+                        && capture.node.parent() == Some(input.tree.root_node())
+                    {
+                        // Leading unbraced Scala packages wrap the remaining unit,
+                        // just like nested explicit packagings (SLS 9). Only the
+                        // container expands; written name evidence stays unchanged.
+                        candidate.end = input.tree.root_node().end_byte();
+                    } else if role == StructuralRole::Scope {
+                        candidate.syntax = "scala.unbraced_package_unavailable";
+                    }
+                }
+                retain(candidate)?;
             }
         }
         drop(matches);

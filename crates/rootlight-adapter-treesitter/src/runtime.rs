@@ -1404,6 +1404,7 @@ fn normalize_query_candidates(
             ))
     })?;
     dedup_query_candidates(&mut candidates, cancellation)?;
+    remove_shadowed_candidates(&mut candidates, cancellation)?;
     mark_required_scope_closure(&mut candidates, cancellation)?;
     // Included ranges can remove declarations and their enclosing scopes. Keep
     // every mandatory candidate until that restriction establishes the exact
@@ -1518,61 +1519,14 @@ fn normalize_query_candidates(
             ))
     })?;
 
-    let mut selected = Vec::new();
+    let mut drafts = Vec::new();
     try_reserve_exact_cancellable(
-        &mut selected,
+        &mut drafts,
         restricted.len(),
         cancellation,
         "query-fact-allocation",
     )?;
-    let mut group_start = 0usize;
-    while group_start < restricted.len() {
-        if group_start.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-            cancellation.check()?;
-        }
-        let start = restricted[group_start].start;
-        let end = restricted[group_start].end;
-        let mut group_end = group_start + 1;
-        while group_end < restricted.len()
-            && restricted[group_end].start == start
-            && restricted[group_end].end == end
-        {
-            if (group_end - group_start).is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-                cancellation.check()?;
-            }
-            group_end += 1;
-        }
-        let group = &restricted[group_start..group_end];
-        let mut has_definition = false;
-        let mut has_documentation = false;
-        for (index, candidate) in group.iter().enumerate() {
-            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-                cancellation.check()?;
-            }
-            has_definition |= candidate.role == StructuralRole::Definition;
-            has_documentation |= candidate.role == StructuralRole::Documentation;
-        }
-        for (index, candidate) in group.iter().copied().enumerate() {
-            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-                cancellation.check()?;
-            }
-            if !(has_definition && candidate.role == StructuralRole::Reference
-                || has_documentation && candidate.role == StructuralRole::Comment)
-            {
-                selected.push(candidate);
-            }
-        }
-        group_start = group_end;
-    }
-
-    let mut drafts = Vec::new();
-    try_reserve_exact_cancellable(
-        &mut drafts,
-        selected.len(),
-        cancellation,
-        "query-fact-allocation",
-    )?;
-    for (index, candidate) in selected.into_iter().enumerate() {
+    for (index, candidate) in restricted.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
         }
@@ -1770,6 +1724,55 @@ fn dedup_query_candidates(
                 .checked_add(1)
                 .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
         }
+    }
+    candidates.truncate(write);
+    cancellation.check()?;
+    Ok(())
+}
+
+fn remove_shadowed_candidates(
+    candidates: &mut Vec<QueryCandidate>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    // Definition/reference and documentation/comment captures at an identical
+    // span represent one occurrence. Eliminate the weaker role before charging
+    // output capacity, or discarded duplicates can displace real references.
+    cancellation.check()?;
+    let mut group_start = 0usize;
+    let mut write = 0usize;
+    while let Some(first) = candidates.get(group_start).copied() {
+        cancellation.check()?;
+        let mut group_end = group_start;
+        let mut has_definition = false;
+        let mut has_documentation = false;
+        while let Some(candidate) = candidates.get(group_end) {
+            if candidate.start != first.start || candidate.end != first.end {
+                break;
+            }
+            if group_end.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            has_definition |= candidate.role == StructuralRole::Definition;
+            has_documentation |= candidate.role == StructuralRole::Documentation;
+            group_end += 1;
+        }
+        for read in group_start..group_end {
+            if read.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            let candidate = *candidates
+                .get(read)
+                .ok_or_else(|| provider_failure("query-shadow-invariant"))?;
+            if !(has_definition && candidate.role == StructuralRole::Reference
+                || has_documentation && candidate.role == StructuralRole::Comment)
+            {
+                *candidates
+                    .get_mut(write)
+                    .ok_or_else(|| provider_failure("query-shadow-invariant"))? = candidate;
+                write += 1;
+            }
+        }
+        group_start = group_end;
     }
     candidates.truncate(write);
     cancellation.check()?;
@@ -2587,6 +2590,52 @@ fn require_provider_limit(
 mod tests {
     use super::*;
     use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn shadowed_captures_do_not_displace_distinct_facts_at_capacity() {
+        let candidate = |start, end, role| QueryCandidate {
+            start,
+            end,
+            role,
+            syntax: "identifier",
+            required: role == StructuralRole::Definition,
+            native_depth: 1,
+        };
+        let expected = vec![
+            candidate(0, 4, StructuralRole::Definition),
+            candidate(0, 5, StructuralRole::Reference),
+            candidate(8, 12, StructuralRole::Documentation),
+            candidate(14, 18, StructuralRole::Reference),
+            candidate(14, 18, StructuralRole::Call),
+            candidate(20, 24, StructuralRole::Comment),
+        ];
+        let mut captures = expected.clone();
+        captures.push(candidate(0, 4, StructuralRole::Reference));
+        captures.push(candidate(8, 12, StructuralRole::Comment));
+        captures.sort_by_key(|c| (c.start, c.end, c.role));
+        let cancellation = Cancellation::new();
+        remove_shadowed_candidates(&mut captures, &cancellation).unwrap();
+        let retention =
+            prune_optional_candidates_within_limit(&mut captures, expected.len(), &cancellation)
+                .unwrap();
+        assert!(!retention.limited);
+        assert_eq!(retention.required, 1);
+        let identities = |items: &[QueryCandidate]| {
+            let mut identities: Vec<_> = items.iter().map(|c| (c.start, c.end, c.role)).collect();
+            identities.sort();
+            identities
+        };
+        assert_eq!(identities(&captures), identities(&expected));
+    }
+
+    #[test]
+    fn shadowed_capture_normalization_honors_empty_input_cancellation() {
+        let cancellation = Cancellation::new();
+        let mut captures = Vec::new();
+        remove_shadowed_candidates(&mut captures, &cancellation).unwrap();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(remove_shadowed_candidates(&mut captures, &cancellation).is_err());
+    }
 
     #[test]
     fn every_reuse_identity_dimension_has_a_distinct_invalidation() {
