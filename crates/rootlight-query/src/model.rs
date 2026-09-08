@@ -2518,7 +2518,7 @@ pub enum AdvancedEntityKind {
     Type,
     /// Function declaration.
     Function,
-    /// Method declaration.
+    /// Method or constructor declaration.
     Method,
     /// Field declaration.
     Field,
@@ -2601,6 +2601,9 @@ impl AdvancedEntityKind {
     }
 
     /// Whether a normalized IR entity kind belongs to this advanced kind.
+    ///
+    /// Constructors match the public method category while remaining available
+    /// through the historical function selector for query compatibility.
     #[must_use]
     pub fn matches_ir(self, kind: IrEntityKind) -> bool {
         match self {
@@ -2625,7 +2628,7 @@ impl AdvancedEntityKind {
                 kind,
                 IrEntityKind::Function | IrEntityKind::Constructor | IrEntityKind::Closure
             ),
-            Self::Method => matches!(kind, IrEntityKind::Method),
+            Self::Method => matches!(kind, IrEntityKind::Method | IrEntityKind::Constructor),
             Self::Field => matches!(kind, IrEntityKind::Field | IrEntityKind::Property),
             Self::Constant => matches!(kind, IrEntityKind::Constant),
             Self::Variable => matches!(kind, IrEntityKind::Variable | IrEntityKind::Parameter),
@@ -3335,15 +3338,24 @@ pub(crate) fn search_mode(mode: LocateMode) -> SearchMode {
 mod tests {
     use std::time::Duration;
 
-    use rootlight_ir::RelationPredicate;
+    use rootlight_ir::{EntityKind, RelationPredicate};
 
     use super::{
-        ExecutionCompleteness, ExecutionCompletenessState, HARD_MAX_QUERY_DURATION,
-        HARD_MAX_QUERY_EDGES, HARD_MAX_QUERY_JSON_BYTES, HARD_MAX_QUERY_MEMORY_BYTES,
-        HARD_MAX_QUERY_RESULTS, HARD_MAX_QUERY_ROWS, HARD_MAX_QUERY_SOURCE_BYTES,
-        HARD_MAX_QUERY_TOKENS, HistorySemanticChangeKind, QueryBudget, QueryError, QueryResource,
-        RelationFamily,
+        AdvancedEntityKind, ExecutionCompleteness, ExecutionCompletenessState,
+        HARD_MAX_QUERY_DURATION, HARD_MAX_QUERY_EDGES, HARD_MAX_QUERY_JSON_BYTES,
+        HARD_MAX_QUERY_MEMORY_BYTES, HARD_MAX_QUERY_RESULTS, HARD_MAX_QUERY_ROWS,
+        HARD_MAX_QUERY_SOURCE_BYTES, HARD_MAX_QUERY_TOKENS, HistorySemanticChangeKind, QueryBudget,
+        QueryError, QueryResource, RelationFamily,
     };
+
+    #[test]
+    fn constructor_scans_match_public_methods_without_losing_legacy_functions() {
+        assert!(AdvancedEntityKind::Method.matches_ir(EntityKind::Constructor));
+        assert!(AdvancedEntityKind::Function.matches_ir(EntityKind::Constructor));
+        assert!(AdvancedEntityKind::Method.matches_ir(EntityKind::Method));
+        assert!(!AdvancedEntityKind::Method.matches_ir(EntityKind::Function));
+        assert!(!AdvancedEntityKind::Function.matches_ir(EntityKind::Method));
+    }
 
     const RESOURCES: [QueryResource; 10] = [
         QueryResource::Rows,
