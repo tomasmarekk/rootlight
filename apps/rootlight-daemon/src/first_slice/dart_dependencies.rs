@@ -4,8 +4,7 @@
 
 use super::{
     Cancellation, FirstSliceProjectAnalysisError, PROJECT_ADAPTER_PARTITION_CONTEXT_WORK,
-    ProjectIncludeSource, ProjectPartitionDependencyScope, exact_project_include,
-    relative_include_path,
+    ProjectIncludeSource, exact_project_include, relative_include_path,
 };
 use std::collections::BTreeMap;
 
@@ -41,12 +40,11 @@ pub(super) fn for_each_import(
     Ok(count)
 }
 
-pub(super) fn scan_partitioned<'a, T: ProjectIncludeSource>(
+pub(super) fn scan_top_level_partitions<'a, T: ProjectIncludeSource>(
     inputs: &[&'a T],
     partitions: &BTreeMap<&str, usize>,
     remaining_scan_bytes: &mut usize,
     remaining_imports: &mut usize,
-    scope: ProjectPartitionDependencyScope,
     cancellation: &Cancellation,
     mut visit: impl FnMut(&'a T, &'a T) -> Result<bool, FirstSliceProjectAnalysisError>,
 ) -> Result<(), FirstSliceProjectAnalysisError> {
@@ -83,10 +81,9 @@ pub(super) fn scan_partitioned<'a, T: ProjectIncludeSource>(
             else {
                 return Ok(true);
             };
-            if matches!(scope, ProjectPartitionDependencyScope::All)
-                || partitions.get(consumer.include_path())
-                    != partitions.get(provider.include_path())
-            {
+            // Adaptive analysis already recovers dependencies within each primary
+            // partition. Replaying them here repeats native parsing and IR merges.
+            if partitions.get(consumer.include_path()) != partitions.get(provider.include_path()) {
                 keep_scanning = visit(consumer, provider)?;
             }
             Ok(keep_scanning)
@@ -231,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_dependencies_use_exact_confined_paths_and_partition_scope() {
+    fn top_level_dependencies_skip_work_owned_by_primary_partitions() {
         let inputs = [
             Input("other/provider.dart", b"void selected() {}"),
             Input(
@@ -247,47 +244,43 @@ mod tests {
                 ("src/consumer.dart", 0),
                 ("src/provider.dart", usize::from(cross)),
             ]);
-            for scope in [
-                ProjectPartitionDependencyScope::All,
-                ProjectPartitionDependencyScope::CrossPartition,
-            ] {
-                let mut bytes = 4096;
-                let mut imports = 8;
-                let mut pairs = Vec::new();
-                scan_partitioned(
-                    &refs,
-                    &partitions,
-                    &mut bytes,
-                    &mut imports,
-                    scope,
-                    &Cancellation::new(),
-                    |consumer, provider| {
-                        pairs.push((
-                            consumer.include_path().to_owned(),
-                            provider.include_path().to_owned(),
-                        ));
-                        Ok(true)
-                    },
-                )
-                .unwrap();
-                let expected =
-                    usize::from(cross || matches!(scope, ProjectPartitionDependencyScope::All));
-                assert_eq!(pairs.len(), expected);
-                if let Some(pair) = pairs.first() {
-                    assert_eq!(
-                        pair,
-                        &(
-                            "src/consumer.dart".to_owned(),
-                            "src/provider.dart".to_owned()
-                        )
-                    );
-                }
-                assert_eq!(imports, 5);
+            let mut bytes = 4096;
+            let mut imports = 8;
+            let mut pairs = Vec::new();
+            scan_top_level_partitions(
+                &refs,
+                &partitions,
+                &mut bytes,
+                &mut imports,
+                &Cancellation::new(),
+                |consumer, provider| {
+                    pairs.push((
+                        consumer.include_path().to_owned(),
+                        provider.include_path().to_owned(),
+                    ));
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                pairs.len(),
+                usize::from(cross),
+                "primary partitions already own same-partition dependency recovery"
+            );
+            if let Some(pair) = pairs.first() {
                 assert_eq!(
-                    bytes,
-                    4096 - inputs.iter().map(|input| input.1.len()).sum::<usize>()
+                    pair,
+                    &(
+                        "src/consumer.dart".to_owned(),
+                        "src/provider.dart".to_owned()
+                    )
                 );
             }
+            assert_eq!(imports, 5);
+            assert_eq!(
+                bytes,
+                4096 - inputs.iter().map(|input| input.1.len()).sum::<usize>()
+            );
         }
     }
 
@@ -302,12 +295,11 @@ mod tests {
         let input = Input("entry.dart", b"import 'other.dart';");
         let mut bytes = 1;
         let mut imports = 8;
-        scan_partitioned(
+        scan_top_level_partitions(
             &[&input],
             &BTreeMap::from([("entry.dart", 0)]),
             &mut bytes,
             &mut imports,
-            ProjectPartitionDependencyScope::All,
             &Cancellation::new(),
             |_, _| panic!("unadmitted bytes must not schedule work"),
         )

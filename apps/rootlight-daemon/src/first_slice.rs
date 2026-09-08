@@ -1695,12 +1695,11 @@ impl ProjectIncludeBridgePlanner {
         if request.language() == "dart" {
             let mut remaining_scan_bytes = self.remaining_scan_bytes;
             let mut remaining_imports = self.remaining_imports;
-            dart_dependencies::scan_partitioned(
+            dart_dependencies::scan_top_level_partitions(
                 inputs,
                 partitions,
                 &mut remaining_scan_bytes,
                 &mut remaining_imports,
-                ProjectPartitionDependencyScope::All,
                 cancellation,
                 |consumer, provider| {
                     if self.discovery_exhausted() {
