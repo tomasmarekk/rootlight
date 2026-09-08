@@ -312,7 +312,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "powershell",
             grammar_version: "0.26.4",
             source_package_sha256: "3faf304d44b9ddd4a7d97804bb8de7daf564336dd5a526dc6de5b39238243022",
-            parser_sha256: "4c30a7d70418a1958b7d9b4e5034d08b8240865b9127a81fe6871dfb059fe3e5",
+            parser_sha256: "a24c859e229f39f1c77547fe58b68e29a8368c9e56d1a4e63c38bbd6c287ac2c",
             scanner_sha256: Some(
                 "cf366b70e258a0ac1eb264ac0f4165c8f0c1b943d1a6e9db9d291c6cf178221f",
             ),

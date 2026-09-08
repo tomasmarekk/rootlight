@@ -34,6 +34,127 @@ fn point(source: &str, offset: usize) -> Point {
 }
 
 #[test]
+fn powershell_nested_literals_do_not_amplify_expression_precedence_depth() {
+    let mut value = "{ param($leaf) $leaf }".to_owned();
+    for _ in 0..8 {
+        value = format!("@{{ Entry = {value} }}");
+    }
+    let source = format!("Invoke-Entry {{ $value = {value} }}\n");
+    let tree = parser().parse(&source, None).unwrap();
+    assert!(!tree.root_node().has_error());
+    let mut pending = vec![(tree.root_node(), 0usize)];
+    let mut maximum_depth = 0;
+    while let Some((node, depth)) = pending.pop() {
+        maximum_depth = maximum_depth.max(depth);
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor).map(|child| (child, depth + 1)));
+    }
+    assert!(maximum_depth < 128, "native depth: {maximum_depth}");
+    let all = nodes(tree.root_node());
+    assert_eq!(
+        all.iter()
+            .filter(|node| node.kind() == "hash_literal_expression")
+            .count(),
+        8
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|node| node.kind() == "script_block_expression")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn powershell_binary_nodes_preserve_precedence_and_left_association() {
+    for (expression, expected) in [
+        (
+            "1 + 2 * 3",
+            vec![
+                ("additive_expression", "1 + 2 * 3"),
+                ("multiplicative_expression", "2 * 3"),
+            ],
+        ),
+        (
+            "8 - 3 - 1",
+            vec![
+                ("additive_expression", "8 - 3"),
+                ("additive_expression", "8 - 3 - 1"),
+            ],
+        ),
+        (
+            "8 / 2 % 3",
+            vec![
+                ("multiplicative_expression", "8 / 2"),
+                ("multiplicative_expression", "8 / 2 % 3"),
+            ],
+        ),
+        ("8 \\ 2", vec![("multiplicative_expression", "8 \\ 2")]),
+        (
+            "1 + 2 -eq 3 -and 4 -gt 2",
+            vec![
+                ("additive_expression", "1 + 2"),
+                ("comparison_expression", "1 + 2 -eq 3"),
+                ("comparison_expression", "4 -gt 2"),
+                ("logical_expression", "1 + 2 -eq 3 -and 4 -gt 2"),
+            ],
+        ),
+        (
+            "1 -bor 2 -band 3",
+            vec![
+                ("bitwise_expression", "1 -bor 2"),
+                ("bitwise_expression", "1 -bor 2 -band 3"),
+            ],
+        ),
+        (
+            "1 .. 3 + 4",
+            vec![
+                ("range_expression", "1 .. 3"),
+                ("additive_expression", "1 .. 3 + 4"),
+            ],
+        ),
+        (
+            "'{0}' -f 1 + 2",
+            vec![
+                ("format_expression", "'{0}' -f 1"),
+                ("additive_expression", "'{0}' -f 1 + 2"),
+            ],
+        ),
+        (
+            "1 + (2 - 3)",
+            vec![
+                ("additive_expression", "1 + (2 - 3)"),
+                ("additive_expression", "2 - 3"),
+            ],
+        ),
+    ] {
+        let source = format!("$value = {expression}\n");
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{expression}");
+        let mut actual: Vec<_> = nodes(tree.root_node())
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    "logical_expression"
+                        | "bitwise_expression"
+                        | "comparison_expression"
+                        | "additive_expression"
+                        | "multiplicative_expression"
+                        | "format_expression"
+                        | "range_expression"
+                )
+            })
+            .map(|node| (node.kind(), node.utf8_text(source.as_bytes()).unwrap()))
+            .collect();
+        actual.sort_unstable();
+        let mut expected = expected;
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{expression}");
+    }
+}
+
+#[test]
 fn powershell_declarations_parameters_and_invocations_have_exact_captures() {
     let source = r#"# source: 雪
 function script:Get-Entry {
@@ -273,6 +394,11 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
         ("\"`n# literal\"", "\"$value# literal\""),
         ("\"$value# literal\"", "\"$($value)# literal\""),
         ("\"$($value)# literal\"", "\"value\" # outside string"),
+        ("$value + 1000", "$value"),
+        ("before $($value)", "before $($value + 2 * 3)"),
+        ("$value + 2 * 3", "($value + 2) * 3"),
+        ("($value + 2) * 3", "@{ Outer = @{ Inner = $value } }"),
+        ("@{ Outer = @{ Inner = $value } }", "$value"),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();

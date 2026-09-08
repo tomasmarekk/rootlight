@@ -27224,6 +27224,11 @@ mod tests {
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let source = "$action = {}\n$size = 2kB\n$rate = 2E+2MB\n$mask = 0X2LPb\n$selected = $items.Where{ $_ }\nInvoke-Check Write-Entry {<# no action #>}\nInvoke-Entry name=\"$($name)\" $env:root\\Cache\\Data pre$(Read-Value)post\nWrite-Output \"$($items | Select-Entry Name, Description | Out-String)\"\nInvoke-Entry name=\"$value# literal\"\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; Invoke-Entry { param($leaf) $leaf + 1 }; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
+        let nested = (0..8).fold("{ param($deep) $deep + 1 }".to_owned(), |value, _| {
+            format!("@{{ Entry = {value} }}")
+        });
+        let complete_source = format!("{source}$nested = {nested}\n");
+        let source = complete_source.as_str();
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
         fs::write(
             fixture.path().join("entry.ps1"),
@@ -27317,6 +27322,7 @@ mod tests {
         let changed = source
             .replace("return $Name", "Write-Output '雪'; return $Name")
             .replace("$leaf + 1", "$leaf + 1000")
+            .replace("$deep + 1", "$deep + 1000")
             .replace("return 'value'", "return 'changed'");
         fs::write(fixture.path().join("catalog.psm1"), &changed).unwrap();
         let updated = service

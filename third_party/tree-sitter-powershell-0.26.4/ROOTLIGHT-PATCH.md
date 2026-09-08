@@ -42,6 +42,14 @@ must not consume the closing quote as a comment. Real comments inside nested
 subexpressions and after the closing quote remain comments; here-string and
 composite argument content use the same precedence rule.
 
+Expression precedence alternatives are hidden when no operator is present.
+Named logical, bitwise, comparison, additive, multiplicative, format and range
+nodes still represent written binary operations with their original precedence
+and left association. This removes seven redundant same-span wrappers from
+ordinary nested literals without increasing the production depth limit.
+Upstream concrete-tree expectations containing those wrappers no longer apply;
+native regression tests retain exact operators, captures and source positions.
+
 The published `src/parser.c`, `src/grammar.json`, `src/node-types.json` and parser
 header reproduce byte-for-byte using Tree-sitter CLI 0.26.8 with ABI 15.
 Regenerate the patched outputs from this directory with the same command:

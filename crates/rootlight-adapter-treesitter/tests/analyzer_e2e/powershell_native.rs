@@ -27,6 +27,64 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_nested_literals_preserve_complete_bounded_source_ownership() {
+    let mut value = "{ param($leaf) $leaf }".to_owned();
+    for _ in 0..8 {
+        value = format!("@{{ Entry = {value} }}");
+    }
+    let source = format!("Invoke-Entry {{ $value = {value} }}\nfunction Visible {{ return 1 }}\n");
+    let result = output(&source);
+    let doc = result.document();
+    assert!(
+        !doc.skipped_regions.iter().any(|gap| matches!(
+            gap.reason,
+            SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+        )),
+        "{:?}",
+        doc.skipped_regions
+    );
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property)
+            .count(),
+        8
+    );
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Function)
+            .count(),
+        3
+    );
+    let leaf = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "$leaf")
+        .unwrap();
+    let owner = doc
+        .entities
+        .iter()
+        .find(|entity| leaf.container == Some(rootlight_ir::ContainerRef::Entity(entity.id)))
+        .unwrap();
+    assert!(owner.flags.contains(&EntityFlag::Synthetic));
+    let span = owner.evidence.source.as_ref().unwrap().span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("{ param($leaf) $leaf }")
+    );
+    assert!(
+        doc.relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::Contains
+                && relation.subject == RelationEndpoint::Entity(owner.id)
+                && relation.object == RelationEndpoint::Entity(leaf.id))
+    );
+}
+
+#[test]
 fn powershell_anonymous_blocks_own_parameters_and_nested_callables() {
     let source = "function Outer { param($root); Invoke-Entry { param($value) { param($inner) $inner + $value } } }\n";
     let result = output(source);

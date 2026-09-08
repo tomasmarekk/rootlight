@@ -174,6 +174,20 @@ fn powershell_string_hashes_preserve_exact_retrieval_across_processes() {
 }
 
 #[test]
+fn powershell_nested_literals_cross_real_process_boundaries() {
+    let nested = (0..8).fold("{ param($leaf) $leaf }".to_owned(), |value, _| {
+        format!("@{{ Entry = {value} }}")
+    });
+    let source = format!("Invoke-Entry {{ $value = {nested} }}\n");
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "nested.ps1",
+        &source,
+        &[("<anonymous>", "function", 2), ("Entry", "field", 8)],
+    );
+}
+
+#[test]
 fn powershell_anonymous_blocks_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

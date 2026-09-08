@@ -914,92 +914,48 @@ export default grammar({
     enum_member: ($) =>
       seq($.simple_name, optional(seq('=', $.integer_literal))),
 
-    // Expressions
-    _expression: ($) => $.logical_expression,
+    // Hidden precedence alternatives avoid adding seven same-span wrappers to
+    // every literal. Named nodes still represent each written binary operation.
+    _expression: ($) => $._logical_expression,
 
-    logical_expression: ($) =>
-      prec.left(
-        choice(
-          $.bitwise_expression,
-          seq(
-            $.logical_expression,
-            choice(
-              reservedWord('-and'),
-              reservedWord('-or'),
-              reservedWord('-xor'),
-            ),
-            $.bitwise_expression,
-          ),
-        ),
-      ),
+    _logical_expression: ($) => choice($._bitwise_expression, $.logical_expression),
+    logical_expression: ($) => prec.left(seq(
+      $._logical_expression,
+      choice(reservedWord('-and'), reservedWord('-or'), reservedWord('-xor')),
+      $._bitwise_expression,
+    )),
 
-    bitwise_expression: ($) =>
-      prec.left(
-        choice(
-          $.comparison_expression,
-          seq(
-            $.bitwise_expression,
-            choice(
-              reservedWord('-band'),
-              reservedWord('-bor'),
-              reservedWord('-bxor'),
-            ),
-            $.comparison_expression,
-          ),
-        ),
-      ),
+    _bitwise_expression: ($) => choice($._comparison_expression, $.bitwise_expression),
+    bitwise_expression: ($) => prec.left(seq(
+      $._bitwise_expression,
+      choice(reservedWord('-band'), reservedWord('-bor'), reservedWord('-bxor')),
+      $._comparison_expression,
+    )),
 
-    comparison_expression: ($) =>
-      prec.left(
-        choice(
-          $.additive_expression,
-          seq(
-            $.comparison_expression,
-            $.comparison_operator,
-            $.additive_expression,
-          ),
-        ),
-      ),
+    _comparison_expression: ($) => choice($._additive_expression, $.comparison_expression),
+    comparison_expression: ($) => prec.left(seq(
+      $._comparison_expression, $.comparison_operator, $._additive_expression,
+    )),
 
-    additive_expression: ($) =>
-      prec.left(
-        choice(
-          $.multiplicative_expression,
-          seq(
-            $.additive_expression,
-            choice('+', '-'),
-            $.multiplicative_expression,
-          ),
-        ),
-      ),
+    _additive_expression: ($) => choice($._multiplicative_expression, $.additive_expression),
+    additive_expression: ($) => prec.left(seq(
+      $._additive_expression, choice('+', '-'), $._multiplicative_expression,
+    )),
 
-    multiplicative_expression: ($) =>
-      prec.left(
-        choice(
-          $.format_expression,
-          seq(
-            $.multiplicative_expression,
-            choice('/', '\\', '%', '*'),
-            $.format_expression,
-          ),
-        ),
-      ),
+    _multiplicative_expression: ($) => choice($._format_expression, $.multiplicative_expression),
+    multiplicative_expression: ($) => prec.left(seq(
+      $._multiplicative_expression, choice('/', '\\', '%', '*'), $._format_expression,
+    )),
 
-    format_expression: ($) =>
-      prec.left(
-        choice(
-          $.range_expression,
-          seq($.format_expression, $.format_operator, $.range_expression),
-        ),
-      ),
+    _format_expression: ($) => choice($._range_expression, $.format_expression),
+    format_expression: ($) => prec.left(seq(
+      $._format_expression, $.format_operator, $._range_expression,
+    )),
 
-    range_expression: ($) =>
-      prec.left(
-        choice(
-          $.array_literal_expression,
-          seq($.range_expression, '..', $.array_literal_expression),
-        ),
-      ),
+    _range_expression: ($) => choice($.array_literal_expression, $.range_expression),
+    range_expression: ($) => prec.left(seq(
+      $._range_expression, '..', $.array_literal_expression,
+    )),
 
     array_literal_expression: ($) =>
       prec.left(seq($.unary_expression, repeat(seq(',', $.unary_expression)))),
