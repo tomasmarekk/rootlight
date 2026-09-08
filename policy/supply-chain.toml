@@ -5,6 +5,7 @@ schema_version = "1.0"
 allowed_registries = ["registry+https://github.com/rust-lang/crates.io-index"]
 allowed_git_sources = []
 allowed_path_dependencies = [
+  "tree-sitter-powershell@0.26.4:third_party/tree-sitter-powershell-0.26.4/Cargo.toml",
   "lru@0.16.4:third_party/lru-0.16.4/Cargo.toml",
   "tree-sitter-bash@0.25.1:third_party/tree-sitter-bash-0.25.1/Cargo.toml",
   "tree-sitter-css@0.25.0:third_party/tree-sitter-css-0.25.0/Cargo.toml",

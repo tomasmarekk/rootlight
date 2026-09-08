@@ -113,6 +113,16 @@ fn powershell_declarations_cross_real_process_boundaries() {
 }
 
 #[test]
+fn powershell_empty_blocks_preserve_exact_retrieval_across_processes() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "actions.ps1",
+        "$action = {}\nInvoke-Check Write-Entry {<# no action #>}\nfunction Read-Entry { return 1 }\n",
+        &[("$action", "variable", 1), ("Read-Entry", "function", 1)],
+    );
+}
+
+#[test]
 fn powershell_assignment_targets_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "powershell",

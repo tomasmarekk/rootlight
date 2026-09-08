@@ -27223,7 +27223,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "function Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
+        let source = "$action = {}\nInvoke-Check Write-Entry {<# no action #>}\nfunction Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
         fs::write(
             fixture.path().join("entry.ps1"),
@@ -27253,7 +27253,7 @@ mod tests {
         let original = service
             .loaded_generation_snapshot(initial.generation)
             .unwrap();
-        for name in ["$counter", "$next"] {
+        for name in ["$action", "$counter", "$next"] {
             assert!(
                 original
                     .document()
@@ -27299,6 +27299,11 @@ mod tests {
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
             let document = generation.document();
+            assert!(!document.skipped_regions.iter().any(|gap| matches!(
+                gap.reason,
+                rootlight_ir::SkippedRegionReason::ParseError
+                    | rootlight_ir::SkippedRegionReason::ResourceLimit
+            )));
             assert_eq!(
                 document
                     .entities

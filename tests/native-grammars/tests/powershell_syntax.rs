@@ -174,6 +174,12 @@ fn powershell_incremental_edits_equal_fresh_trees_and_source_positions() {
         ),
         ("$value + 1", "$value + 1000"),
         ("; Write-Output 2", ""),
+        ("Read-Entry 1", "Read-Entry 1 {}"),
+        ("{}", "{ Write-Output '雪' }"),
+        ("{ Write-Output '雪' }", "{<# no action #>}"),
+        ("{<# no action #>}", "{}"),
+        ("{}", "{ param($argument) }"),
+        ("{ param($argument) }", "{}"),
     ] {
         let start = source.find(old).unwrap();
         let end = start + old.len();
@@ -225,6 +231,8 @@ fn powershell_unfinished_syntax_retains_errors_and_bounded_ranges() {
         "$value = 'unfinished",
         "$value = @'\nunfinished",
         "$value = (1 +",
+        "$action = {",
+        "Invoke-Check {<# unfinished",
     ] {
         let tree = parser().parse(source, None).unwrap();
         assert!(tree.root_node().has_error(), "accepted {source}");
@@ -233,6 +241,40 @@ fn powershell_unfinished_syntax_retains_errors_and_bounded_ranges() {
                 source.get(node.byte_range()).is_some(),
                 "{source}: {node:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn powershell_empty_script_blocks_retain_exact_expression_ranges() {
+    for body in [
+        "",
+        " ",
+        "\r\n",
+        "<# no action #>",
+        "# no action\n",
+        "param()",
+        "param($argument)",
+    ] {
+        let block = format!("{{{body}}}");
+        for source in [
+            format!("$action = {block}\n"),
+            format!("Invoke-Check Write-Entry {block}\n"),
+            format!("Invoke-Check -Action {block}\n"),
+            format!("$actions = @({block}, {block})\n"),
+        ] {
+            let tree = parser().parse(&source, None).unwrap();
+            assert!(
+                !tree.root_node().has_error(),
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+            let blocks: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "script_block_expression")
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect();
+            assert_eq!(blocks, vec![block.as_str(); source.matches(&block).count()]);
         }
     }
 }

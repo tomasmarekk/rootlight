@@ -27,6 +27,65 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_empty_blocks_keep_definitions_without_false_parse_gaps() {
+    for body in ["", " ", "\r\n", "<# no action #>", "# no action\n"] {
+        let block = format!("{{{body}}}");
+        let source = format!(
+            "$action = {block}\nInvoke-Check Write-Entry {block}\nfunction Read-Entry {{ return 1 }}\n"
+        );
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        assert!(
+            !doc.skipped_regions.iter().any(|gap| matches!(
+                gap.reason,
+                SkippedRegionReason::ParseError | SkippedRegionReason::ResourceLimit
+            )),
+            "{:?}",
+            doc.skipped_regions
+        );
+        for name in ["$action", "Read-Entry"] {
+            let entity = doc
+                .entities
+                .iter()
+                .find(|e| e.canonical_name == name)
+                .unwrap();
+            let definition = doc
+                .occurrences
+                .iter()
+                .find(|o| {
+                    o.role == OccurrenceRole::Definition
+                        && o.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+                })
+                .unwrap();
+            let span = definition.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+        }
+        let blocks: Vec<_> = doc
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "powershell-runtime-script-block-identity-unavailable")
+            .map(|gap| {
+                let span = gap.source.span();
+                source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(blocks, vec![block.as_str(); 2]);
+    }
+}
+
+#[test]
 fn powershell_written_declarations_have_exact_definitions_and_owners() {
     let source = "function script:Read-Entry { param([string]$Name); return $Name }\nclass Cache { [string]$Label; Cache([string]$name) { $this.Label = $name } [string] Read([int]$slot) { return $this.Label } }\nenum Mode { Open = 1; Closed = 2 }\n";
     let result = output(source);
