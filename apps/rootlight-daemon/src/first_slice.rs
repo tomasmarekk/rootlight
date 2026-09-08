@@ -9,6 +9,8 @@
 // unboxing across every dispatch branch.
 #![allow(clippy::result_large_err)]
 
+mod dart_dependencies;
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
@@ -1690,6 +1692,28 @@ impl ProjectIncludeBridgePlanner {
         partitions: &BTreeMap<&str, usize>,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceProjectAnalysisError> {
+        if request.language() == "dart" {
+            let mut remaining_scan_bytes = self.remaining_scan_bytes;
+            let mut remaining_imports = self.remaining_imports;
+            dart_dependencies::scan_partitioned(
+                inputs,
+                partitions,
+                &mut remaining_scan_bytes,
+                &mut remaining_imports,
+                ProjectPartitionDependencyScope::All,
+                cancellation,
+                |consumer, provider| {
+                    if self.discovery_exhausted() {
+                        return Ok(false);
+                    }
+                    self.consider_request_exact_pair(request, consumer, provider, (false, 1))?;
+                    Ok(!self.discovery_exhausted())
+                },
+            )?;
+            self.remaining_scan_bytes = remaining_scan_bytes;
+            self.remaining_imports = remaining_imports;
+            return Ok(());
+        }
         if request.language() == "java" {
             let mut remaining_scan_bytes = self.remaining_scan_bytes;
             let mut remaining_references = self.remaining_imports;
@@ -1946,6 +1970,36 @@ impl ProjectIncludeBridgePlanner {
                 continue;
             };
             match consumer.language.as_str() {
+                "dart" => {
+                    let file = adapter_project_input_file_id(consumer)?;
+                    if self.remaining_imports == 0
+                        || !self.claim_input_scan(file, consumer.source.len())
+                    {
+                        return Ok(());
+                    }
+                    let observed = dart_dependencies::for_each_import(
+                        source,
+                        self.remaining_imports,
+                        cancellation,
+                        |uri| {
+                            if self.discovery_exhausted() {
+                                return Ok(false);
+                            }
+                            let Some(path) = relative_include_path(&consumer.path, uri) else {
+                                return Ok(true);
+                            };
+                            let Some(provider) = provider_paths
+                                .exact(&path)
+                                .filter(|provider| provider.path != consumer.path)
+                            else {
+                                return Ok(true);
+                            };
+                            self.consider_exact_pair(consumer, provider, (false, 1))?;
+                            Ok(!self.discovery_exhausted())
+                        },
+                    )?;
+                    self.remaining_imports = self.remaining_imports.saturating_sub(observed);
+                }
                 "c" | "cpp" => {
                     let file = adapter_project_input_file_id(consumer)?;
                     if !self.claim_input_scan(file, consumer.source.len()) {
@@ -18343,6 +18397,58 @@ mod tests {
                 ("beta".to_owned(), "beta".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn bounded_syntax_partition_emits_direct_dart_bridge() {
+        let input = |id: u8, path: &str, source: &[u8]| adapter::ProjectInput {
+            file: Some(common::FileId {
+                value: vec![id; 20],
+            }),
+            path: path.to_owned(),
+            language: "dart".to_owned(),
+            source_digest: Some(common::ContentHash {
+                value: content_hash(source).as_bytes().to_vec(),
+            }),
+            source: source.to_vec(),
+            generated: false,
+            origins: Vec::new(),
+        };
+        let inputs = [
+            input(
+                1,
+                "src/consumer.dart",
+                b"import 'provider.dart' as api show selected;\nvoid start() { api.selected(); }\n",
+            ),
+            input(2, "src/provider.dart", b"void selected() {}\n"),
+            input(3, "other/provider.dart", b"void selected() {}\n"),
+        ];
+        for split in [false, true] {
+            let mut planner = ProjectIncludeBridgePlanner::new(0, 0).unwrap();
+            if split {
+                planner
+                    .scan_partition_pair(&inputs[..1], &inputs[1..], &Cancellation::new())
+                    .unwrap();
+            } else {
+                planner
+                    .scan_bounded_partition(&inputs, &Cancellation::new())
+                    .unwrap();
+            }
+            let bridges = planner.finish(&Cancellation::new()).unwrap();
+            assert_eq!(
+                bridges.len(),
+                1,
+                "Dart direct imports need bounded dependency recovery"
+            );
+            assert_eq!(
+                bridges[0]
+                    .inputs
+                    .iter()
+                    .map(|input| input.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["src/consumer.dart", "src/provider.dart"]
+            );
+        }
     }
 
     #[test]
