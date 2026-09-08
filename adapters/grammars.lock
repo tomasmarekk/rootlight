@@ -18,6 +18,29 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "powershell"
+crate_name = "tree-sitter-powershell"
+crate_version = "0.26.4"
+crates_io_checksum = "3faf304d44b9ddd4a7d97804bb8de7daf564336dd5a526dc6de5b39238243022"
+repository = "https://github.com/airbus-cert/tree-sitter-powershell"
+tag = "v0.26.4"
+commit = "d398441825243b00e317e87e1829b9d6a3e54ce0"
+parser_sha256 = "f39f67abaae4c488ccea5d9bbd003ef0b00c303779e0491950886a12a9305720"
+scanner_sha256 = "cf366b70e258a0ac1eb264ac0f4165c8f0c1b943d1a6e9db9d291c6cf178221f"
+abi = 15
+analysis_tier = "D"
+license = "MIT"
+license_source = "https://github.com/airbus-cert/tree-sitter-powershell/blob/d398441825243b00e317e87e1829b9d6a3e54ce0/LICENSE"
+license_sha256 = "1fca8454c0d77a73f9922a52d39e1f7c339f5da5d03f2766eff66b859fa19477"
+modifications = "none"
+test_corpus = "nine Rootlight native syntax/scanner contracts and source-backed analyzer contracts"
+msrv = "not declared; native grammar verified with Rootlight MSRV 1.90"
+offline_behavior = "builds bundled C11 parser and scanner from the Cargo cache without network access"
+capabilities = ["declarations", "scopes", "occurrences", "call-sites", "comments", "strings"]
+semantic_depth = "source declarations only; runtime command, module, alias, scope and member dispatch resolution remain unavailable"
+audit_notes = ["package provenance uses .cargo_vcs_info.json; release tag separately points to 4ffe56d66aa926c28442befbb5b89d1437d7199c", "stateless zero-width terminator scanner owns no allocation and emits no serialized state", "direct FFI tests cover every serialized input length from zero through 1024 bytes; no sanitizer or locale-independent Unicode whitespace claim"]
+
+[[grammars]]
 language = "dart"
 crate_name = "tree-sitter-dart"
 crate_version = "0.2.0"

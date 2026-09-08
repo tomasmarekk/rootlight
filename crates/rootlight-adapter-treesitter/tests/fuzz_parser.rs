@@ -66,6 +66,100 @@ fn cleanup_fixtures_fit_the_bounded_parser_budget() {
     }
 }
 
+#[test]
+fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup() {
+    let provider = provider();
+    let mut pre_parse_limits = 0;
+    let nested = format!("$value = {}1{}", "(".repeat(256), ")".repeat(256));
+    let storm = "function Read-Entry { param($Name); return $Name }\n".repeat(40);
+    let sources: &[&[u8]] = &[
+        &[0xff, 0xfe, 0x80],
+        b"function Broken { param(",
+        b"$value = @'\nunfinished",
+        "$value = '雪'\r\n$value = 2\r\n".as_bytes(),
+        nested.as_bytes(),
+        storm.as_bytes(),
+    ];
+    for source in sources {
+        for (max_nodes, max_depth) in [(1, 1), (16, 4), (256, 32)] {
+            let fixture = Fixture::new("input.ps1", source);
+            let budget = limits(max_nodes, max_depth);
+            let request = request(&fixture, &budget, "powershell");
+            match execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            ) {
+                Ok(output) => {
+                    assert!(std::str::from_utf8(source).is_ok());
+                    assert!(output.report().resources().syntax_nodes() <= max_nodes);
+                    assert!(output.report().resources().max_syntax_depth() <= max_depth);
+                    assert!(output.facts().len() <= 8);
+                    assert!(output.facts().iter().all(|fact| {
+                        usize::try_from(fact.span().end_byte()).is_ok_and(|end| end <= source.len())
+                    }));
+                }
+                Err(AdapterError::ProviderFailed { code })
+                    if matches!(
+                        code.as_str(),
+                        "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"
+                    ) =>
+                {
+                    // Native work may exhaust admission before a tree exists; that is
+                    // a typed rejection, never a successful partial publication.
+                    assert!(std::str::from_utf8(source).is_ok());
+                    pre_parse_limits += 1;
+                }
+                Err(AdapterError::ProviderFailed { code }) => {
+                    assert_eq!(code.as_str(), "invalid-utf8");
+                    assert!(std::str::from_utf8(source).is_err());
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed,
+                    limit,
+                })) => {
+                    assert_eq!(limit, 8);
+                    assert!(observed > limit);
+                    assert_eq!(
+                        provider.required_syntax_fact_count(&request, &deadline()),
+                        Ok(observed)
+                    );
+                }
+                other => panic!("unexpected bounded PowerShell parse: {other:?}"),
+            }
+            let cancellation = deadline();
+            assert!(cancellation.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+        }
+        let cleanup = Fixture::new("cleanup.ps1", b"function Cleanup {}\n");
+        let budget = limits(256, 32);
+        assert!(
+            execute_parse(
+                &provider,
+                &request(&cleanup, &budget, "powershell"),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .is_ok()
+        );
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+    assert!(pre_parse_limits > 0);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: FUZZ_CASES,

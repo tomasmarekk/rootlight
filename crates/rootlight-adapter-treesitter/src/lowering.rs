@@ -1743,8 +1743,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
         let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
-        let mut r_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
-        let mut r_scopes = HashMap::<Option<u64>, u64>::new();
+        let mut written_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
+        let mut written_scopes = HashMap::<Option<u64>, u64>::new();
         let mut anonymous_scopes = HashMap::<Option<u64>, u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
@@ -1816,23 +1816,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings must not depend on sibling positions. JSON
                 // data is different: array positions are part of its address,
                 // while whitespace and value-body edits are not.
-                // R records source occurrences, not an evaluated environment. Anonymous
+                // R and PowerShell record source occurrences, not evaluated environments. Anonymous
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
-                let r_scope_identity = if self.request.language().as_str() == "r" {
-                    let next = r_scopes.entry(fact.parent()).or_default();
-                    let position = *next;
-                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                    Some(r_source_identity(
-                        parent_scope
-                            .as_ref()
-                            .and_then(|scope| scope.stable_identity),
-                        fact.syntax_kind().as_str(),
-                        position,
-                    ))
-                } else {
-                    None
-                };
+                let written_scope_identity =
+                    if matches!(self.request.language().as_str(), "r" | "powershell") {
+                        let next = written_scopes.entry(fact.parent()).or_default();
+                        let position = *next;
+                        *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                        Some(written_source_identity(
+                            self.request.language().as_str(),
+                            parent_scope
+                                .as_ref()
+                                .and_then(|scope| scope.stable_identity),
+                            fact.syntax_kind().as_str(),
+                            position,
+                        ))
+                    } else {
+                        None
+                    };
                 // Anonymous source blocks have no declared name. Their lexical
                 // position distinguishes disjoint bindings without hashing body
                 // contents or byte offsets; this is source identity, not dispatch.
@@ -1875,7 +1877,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 };
                 let stable_identity =
                     anonymous_scope_identity
-                        .or(r_scope_identity)
+                        .or(written_scope_identity)
                         .or(json_position
                             .map(|position| {
                                 json_data_identity(
@@ -2056,16 +2058,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
-            } else if self.request.language().as_str() == "r" && kind != EntityKind::Module {
+            } else if matches!(self.request.language().as_str(), "r" | "powershell")
+                && kind != EntityKind::Module
+            {
                 // Reassignment can replace a binding at runtime. Preserve each written
                 // declaration and its children without claiming runtime binding identity.
                 let label = fact.syntax_kind().as_str();
-                let next = r_declarations
+                let next = written_declarations
                     .entry((fact.parent(), label.to_owned(), name.to_string()))
                     .or_default();
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                Some(r_source_identity(
+                Some(written_source_identity(
+                    self.request.language().as_str(),
                     parent_scope
                         .as_ref()
                         .and_then(|scope| scope.stable_identity),
@@ -2708,6 +2713,18 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Relations,
             "scala-nonleading-unbraced-package-scope-unavailable",
         )),
+        "powershell.file.module" => Some((
+            FactDomain::Relations,
+            "powershell-runtime-command-module-and-dispatch-resolution-unavailable",
+        )),
+        "powershell.script_block.scope" => Some((
+            FactDomain::Entities,
+            "powershell-runtime-script-block-identity-unavailable",
+        )),
+        "powershell.hashtable.scope" | "powershell.data.scope" => Some((
+            FactDomain::Entities,
+            "powershell-data-member-analysis-unavailable",
+        )),
         "dart.file.module" => Some((
             FactDomain::Relations,
             "dart-import-inheritance-extension-dispatch-resolution-unavailable",
@@ -2796,8 +2813,18 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
     *hasher.finalize().as_bytes()
 }
 
-fn r_source_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
-    source_occurrence_identity("rootlight.r-source-occurrence/1", parent, kind, position)
+fn written_source_identity(
+    language: &str,
+    parent: Option<[u8; 32]>,
+    kind: &str,
+    position: u64,
+) -> [u8; 32] {
+    let context = if language == "r" {
+        "rootlight.r-source-occurrence/1"
+    } else {
+        "rootlight.powershell-source-occurrence/1"
+    };
+    source_occurrence_identity(context, parent, kind, position)
 }
 
 fn source_occurrence_identity(
@@ -3518,6 +3545,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
+                | "powershell.file.module"
         )
         && matches!(
             language,
@@ -3538,6 +3566,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "solidity"
                 | "scala"
                 | "dart"
+                | "powershell"
         )
 }
 

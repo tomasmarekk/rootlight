@@ -228,6 +228,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// grammar-reviewed symbolic names retain their exact spelling, including `/`.
 /// Dart removes trivia between qualified name components and additionally retains
 /// its grammar-reviewed division and bracket operators, without resolving receivers.
+/// PowerShell preserves written names, including braced variables, without runtime
+/// scope expansion, escape evaluation or case-insensitive binding equivalence.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -267,7 +269,7 @@ pub fn structural_captured_name_for_language<'a>(
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
     } else if language == "r" {
         crate::r_names::canonical_r_name(text, maximum_bytes)
-    } else if matches!(language, "css" | "html") {
+    } else if matches!(language, "css" | "html" | "powershell") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {
@@ -515,6 +517,31 @@ mod tests {
             structural_captured_name_for_language("html", "`identity`", 128).as_deref(),
             Some("`identity`")
         );
+    }
+
+    #[test]
+    fn powershell_written_names_are_bounded_without_runtime_normalization() {
+        for source in [
+            "Read-Entry",
+            "script:Read-Entry",
+            "$Name",
+            "${name with space}",
+            "${雪}",
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("powershell", source, source.len())
+                    .as_deref(),
+                Some(source)
+            );
+            assert!(
+                structural_captured_name_for_language("powershell", source, source.len() - 1)
+                    .is_none()
+            );
+        }
+        for source in ["", "name\0tail"] {
+            assert!(structural_captured_name_for_language("powershell", source, 128).is_none());
+        }
+        assert!(structural_captured_name_for_language("rust", "${name with space}", 128).is_none());
     }
 
     #[test]

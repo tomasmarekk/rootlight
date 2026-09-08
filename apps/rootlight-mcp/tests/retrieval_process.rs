@@ -99,6 +99,20 @@ fn stylesheet_entities_cross_real_process_boundaries() {
 }
 
 #[test]
+fn powershell_declarations_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "catalog.psm1",
+        "function Read-Entry { param([string]$Name); return $Name }\nclass Cache { [string]$Label; [string] Read([int]$slot) { return $this.Label } }\n",
+        &[
+            ("Read-Entry", "function", 1),
+            ("Cache", "type", 1),
+            ("Read", "method", 1),
+        ],
+    );
+}
+
+#[test]
 fn markup_entities_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "html",
@@ -369,7 +383,10 @@ fn source_entities_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.3");
-        if matches!(language, "sql" | "r" | "solidity" | "scala" | "dart") {
+        if matches!(
+            language,
+            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell"
+        ) {
             assert!(
                 output["warnings"]
                     .as_array()
@@ -440,7 +457,7 @@ fn source_entities_cross_process_boundaries(
             // kind independently asserted by these source-backed fixtures.
             let row_kind = match (language, kind) {
                 ("r", "variable") => "parameter",
-                ("scala" | "dart", "type") => "class",
+                ("scala" | "dart" | "powershell", "type") => "class",
                 ("scala", "module") => "namespace",
                 ("dart", "method") if name == "Store.named" => "constructor",
                 _ => kind,
@@ -458,7 +475,7 @@ fn source_entities_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if matches!(language, "r" | "scala" | "dart") {
+        if matches!(language, "r" | "scala" | "dart" | "powershell") {
             // These fixtures use existing IR kinds, unlike the newer data
             // kinds that correctly require the updated retrieval schema.
             assert_success(&retained, "code.locate");
