@@ -5,20 +5,42 @@ use tree_sitter::Node;
 
 use super::StructuralRole;
 
-fn assignment_variable(mut node: Node<'_>) -> Option<Node<'_>> {
-    while node.kind() != "variable" {
-        if node.named_child_count() != 1 {
-            return None;
+fn is_assignment_target(mut node: Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "left_assignment_expression" => return true,
+            "array_literal_expression" => {}
+            "cast_expression" if parent.named_child(1) == Some(node) => {}
+            "logical_expression"
+            | "bitwise_expression"
+            | "comparison_expression"
+            | "additive_expression"
+            | "multiplicative_expression"
+            | "format_expression"
+            | "range_expression"
+            | "unary_expression"
+            | "expression_with_unary_operator"
+                if parent.byte_range() == node.byte_range() => {}
+            // A variable inside a receiver, index or evaluated expression is a
+            // read, not a written binding. Only casts and comma targets may widen.
+            _ => return false,
         }
-        node = node.named_child(0)?;
+        node = parent;
     }
-    Some(node)
+    false
 }
 
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
-    if node.kind() == "left_assignment_expression" {
-        return assignment_variable(node)
-            .is_some_and(|variable| variable.byte_range() == node.byte_range());
+    if node.kind() == "variable"
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "unary_expression")
+        && matches!(
+            role,
+            StructuralRole::Declaration | StructuralRole::Definition
+        )
+    {
+        return is_assignment_target(node);
     }
     if matches!(role, StructuralRole::CallName | StructuralRole::Reference)
         && node.kind() == "command_name"
@@ -84,7 +106,6 @@ pub(super) fn canonical_syntax(native: &str) -> Option<&'static str> {
         "enum_statement" => "powershell.enum",
         "enum_member" => "powershell.constant",
         "script_parameter" | "class_method_parameter" => "powershell.parameter",
-        "left_assignment_expression" => "powershell.variable",
         "simple_name" | "function_name" | "variable" => "powershell.identifier",
         "type_name" => "powershell.type_name",
         "command_name" => "powershell.command_name",

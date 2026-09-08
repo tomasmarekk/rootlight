@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/41";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/42";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -27223,7 +27223,7 @@ mod tests {
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "function Read-Entry { param([string]$Name); return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
+        let source = "function Read-Entry { param([string]$Name); [int]$counter, $next = 1, 2; return $Name }\nclass Cache { [string] Read([int]$slot) { return 'value' } }\n";
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
         fs::write(
             fixture.path().join("entry.ps1"),
@@ -27253,6 +27253,16 @@ mod tests {
         let original = service
             .loaded_generation_snapshot(initial.generation)
             .unwrap();
+        for name in ["$counter", "$next"] {
+            assert!(
+                original
+                    .document()
+                    .entities
+                    .iter()
+                    .any(|entity| entity.kind == EntityKind::Variable
+                        && entity.canonical_name == name)
+            );
+        }
         let identities = original
             .document()
             .entities

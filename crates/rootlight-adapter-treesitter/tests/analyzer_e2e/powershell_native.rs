@@ -210,6 +210,146 @@ fn powershell_repeated_written_declarations_keep_distinct_source_identities() {
 }
 
 #[test]
+fn powershell_typed_and_multiple_assignment_targets_keep_exact_definitions() {
+    let source = "[int]$number = 1\n[string]${display name} = 'text'\n$first, $second = 1, 2\n$head, [int]$tail = 3, 4\n$object.Field, $array[$index], $last = 5, 6, 7\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let variables: BTreeMap<_, _> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Variable)
+        .map(|entity| (entity.canonical_name.as_str(), entity.id))
+        .collect();
+    assert_eq!(
+        variables.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "$number",
+            "${display name}",
+            "$first",
+            "$second",
+            "$head",
+            "$tail",
+            "$last"
+        ])
+    );
+    for (name, id) in variables {
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: id })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "{name}");
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+    let updated = output(
+        &source
+            .replace("= 1", "= 100")
+            .replace("'text'", "'longer text'"),
+    );
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id,
+                    (entity.kind, entity.canonical_name.clone(), entity.container),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&result), identities(&updated));
+}
+
+#[test]
+fn powershell_assignment_reads_do_not_become_written_definitions() {
+    let source = "$target = $read + $other\n$object[$index + $offset] = $value\n$object.Field, $array[$slot] = $left, $right\n[Console]::WriteLine($argument)\n";
+    let result = output(source);
+    assert!(result.document().diagnostics.is_empty());
+    let names: BTreeSet<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Variable)
+        .map(|entity| entity.canonical_name.as_str())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["$target"]));
+}
+
+#[test]
+fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, POWERSHELL);
+    let fixture = Fixture::new(
+        POWERSHELL,
+        b"function Read-Entry { [int]$first, $second = 1, 2; return $first }\n",
+    );
+    let budget = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, POWERSHELL, &budget);
+    let (initial, artifact) = analyzer
+        .analyze_and_capture(
+            &initial_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let successor = fixture.next_generation();
+    let reduced = limits_with_syntax_records(artifact.syntax_fact_count().checked_add(1).unwrap());
+    let next_request = request(&successor.snapshot, &successor.source, POWERSHELL, &reduced);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+    assert_eq!(replay.document(), fresh.document());
+    assert_eq!(replay.report(), fresh.report());
+    for name in ["$first", "$second"] {
+        let before = initial
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let after = replay
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!((before.id, before.container), (after.id, after.container));
+        let owner = replay
+            .document()
+            .entities
+            .iter()
+            .find(|entity| after.container == Some(rootlight_ir::ContainerRef::Entity(entity.id)))
+            .unwrap();
+        assert_eq!(owner.canonical_name, "Read-Entry");
+        assert_eq!(
+            after.evidence.source.as_ref().unwrap().generation(),
+            successor.source.generation()
+        );
+    }
+}
+
+#[test]
 fn powershell_unmodeled_data_members_remain_explicit_source_scoped_gaps() {
     let source = "@{ ModuleVersion = '1.0.0'; RootModule = 'catalog.psm1' }\n";
     let result = output(source);

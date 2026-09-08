@@ -113,6 +113,20 @@ fn powershell_declarations_cross_real_process_boundaries() {
 }
 
 #[test]
+fn powershell_assignment_targets_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "powershell",
+        "bindings.ps1",
+        "[int]$number = 1\n$first, [string]$second = 2, 'text'\n",
+        &[
+            ("$number", "variable", 1),
+            ("$first", "variable", 1),
+            ("$second", "variable", 1),
+        ],
+    );
+}
+
+#[test]
 fn markup_entities_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "html",

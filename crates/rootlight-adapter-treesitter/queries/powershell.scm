@@ -11,7 +11,7 @@
 [(script_parameter) (class_method_parameter)] @declaration
 (script_parameter (variable) @definition)
 (class_method_parameter (variable) @definition)
-(left_assignment_expression) @declaration @definition
+(unary_expression (variable) @declaration @definition)
 (foreach_statement (variable) @declaration @definition)
 (script_block_expression) @scope
 [(hash_literal_expression) (data_statement)] @scope

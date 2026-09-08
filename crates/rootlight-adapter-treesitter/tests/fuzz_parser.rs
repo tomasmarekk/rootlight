@@ -72,6 +72,8 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
     let mut pre_parse_limits = 0;
     let nested = format!("$value = {}1{}", "(".repeat(256), ")".repeat(256));
     let storm = "function Read-Entry { param($Name); return $Name }\n".repeat(40);
+    let casts = format!("{}$value = 1", "[int]".repeat(64));
+    let targets = format!("{}$last = 1", "$value, ".repeat(40));
     let sources: &[&[u8]] = &[
         &[0xff, 0xfe, 0x80],
         b"function Broken { param(",
@@ -79,6 +81,8 @@ fn powershell_hostile_sources_preserve_budgets_cancellation_and_parser_cleanup()
         "$value = '雪'\r\n$value = 2\r\n".as_bytes(),
         nested.as_bytes(),
         storm.as_bytes(),
+        casts.as_bytes(),
+        targets.as_bytes(),
     ];
     for source in sources {
         for (max_nodes, max_depth) in [(1, 1), (16, 4), (256, 32)] {
