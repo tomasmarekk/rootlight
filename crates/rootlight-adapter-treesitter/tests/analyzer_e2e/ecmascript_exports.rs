@@ -5,6 +5,94 @@
 use super::*;
 
 #[test]
+fn reexport_metadata_replays_with_exact_module_and_name_fields() {
+    for case in CASES
+        .iter()
+        .copied()
+        .filter(|case| matches!(case.name, "javascript" | "typescript"))
+    {
+        for (source, expected) in [
+            (
+                "export {Actual as Public} from './provider';\r\n",
+                vec![
+                    "'./provider'",
+                    "Actual",
+                    "Actual as Public",
+                    "Public",
+                    "export {Actual as Public} from './provider';",
+                ],
+            ),
+            (
+                "export * from './provider';\r\n",
+                vec!["'./provider'", "export * from './provider';"],
+            ),
+            (
+                "export * as Actual from './provider';\r\n",
+                vec![
+                    "'./provider'",
+                    "Actual",
+                    "export * as Actual from './provider';",
+                ],
+            ),
+        ] {
+            let provider = Arc::new(provider());
+            let analyzer = analyzer(&provider, case);
+            let fixture = Fixture::new(case, source.as_bytes());
+            let budget = limits();
+            let initial = request(&fixture.snapshot, &fixture.source, case, &budget);
+            let required = provider
+                .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+                .unwrap();
+            let bounded = limits_with_syntax_records(required);
+            let initial = request(&fixture.snapshot, &fixture.source, case, &bounded);
+            let parsed = rootlight_adapter_sdk::execute_parse(
+                provider.as_ref(),
+                &initial.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+            let mut metadata: Vec<_> = parsed
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature
+                        && fact.syntax_kind().as_str().contains(".export_")
+                })
+                .map(|fact| {
+                    &source[usize::try_from(fact.span().start_byte()).unwrap()
+                        ..usize::try_from(fact.span().end_byte()).unwrap()]
+                })
+                .collect();
+            metadata.sort_unstable();
+            assert_eq!(metadata, expected);
+            let (_, artifact) = analyzer
+                .analyze_and_capture(
+                    &initial,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            let next = fixture.next_generation();
+            let next_request = request(&next.snapshot, &next.source, case, &bounded);
+            let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+            let replay = analyzer
+                .analyze_from_artifact(
+                    &next_request,
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(fresh.document(), replay.document());
+            assert_eq!(fresh.report(), replay.report());
+        }
+    }
+}
+
+#[test]
 fn named_export_metadata_survives_required_budget_and_replay() {
     let source =
         "export function Actual(value) { return value; }\r\nexport {Actual as Public};\r\n";

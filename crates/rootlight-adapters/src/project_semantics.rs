@@ -1630,6 +1630,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     declarations: Vec<DeclarationDraft>,
     imports: Vec<ImportDraft>,
     exports: BTreeMap<FileId, BTreeMap<String, Vec<ecmascript::exports::ExportTarget>>>,
+    export_reference_names: BTreeMap<SourceSpan, String>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1655,6 +1656,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             declarations: Vec::new(),
             imports: Vec::new(),
             exports: BTreeMap::new(),
+            export_reference_names: BTreeMap::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1669,6 +1671,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.materialize_entities()?;
         self.materialize_default_exports()?;
         self.materialize_named_exports()?;
+        self.materialize_reexports()?;
         self.materialize_imports_and_occurrences()?;
         self.materialize_inheritance()?;
         self.materialize_generated_mappings()?;
@@ -3545,10 +3548,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             occurrence.syntax_kind.as_str(),
             "typescript.export_name.reference" | "javascript.export_name.reference"
         ) {
-            // An exported public name or a re-export refers outside the local
-            // binding namespace; spelling alone cannot identify its target.
+            // Export fields identify the public binding independently of a
+            // same-spelled local declaration or an intermediate module alias.
             return ResolutionCandidates {
-                symbols: Vec::new(),
+                symbols: self
+                    .export_reference_names
+                    .get(&occurrence.source.span())
+                    .and_then(|name| self.exports.get(&occurrence.file)?.get(name))
+                    .into_iter()
+                    .flatten()
+                    .map(|target| target.entity.symbol)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
                 kind: ResolutionKind::Binding,
             };
         }

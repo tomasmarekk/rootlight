@@ -4,6 +4,9 @@
 
 use super::*;
 
+mod reexports;
+
+#[derive(Clone)]
 pub(in crate::project_semantics) struct ExportTarget {
     pub(in crate::project_semantics) entity: SemanticEntity,
     pub(in crate::project_semantics) type_only: bool,
@@ -26,6 +29,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
             .collect();
         let mut additions = Vec::new();
         let mut gaps = Vec::new();
+        let mut explicit = Vec::new();
         for input in &self.parsed {
             self.cancellation.check()?;
             if !input.facts.iter().any(is_export_metadata) {
@@ -74,6 +78,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                 }
                 let label = fact.syntax_kind().as_str();
                 let mut selected = Vec::new();
+                let mut deferred = false;
                 if label.ends_with(".export_named_declaration.signature") {
                     for (_, entities) in
                         declarations.range(fact.span().start_byte()..fact.span().end_byte())
@@ -119,20 +124,23 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                             Some(alias) => alias,
                         };
                         let type_only = label.ends_with(".export_type_specifier.signature");
-                        if let Some(public) = public
-                            && let Some(entities) = locals.get(&local)
-                        {
-                            selected.extend(
-                                entities
-                                    .iter()
-                                    .map(|entity| (public.clone(), *entity, type_only)),
-                            );
+                        if let Some(public) = public {
+                            explicit.push((file, public.clone()));
+                            if let Some(entities) = locals.get(&local) {
+                                selected.extend(
+                                    entities
+                                        .iter()
+                                        .map(|entity| (public.clone(), *entity, type_only)),
+                                );
+                            } else {
+                                deferred = self.imports.iter().filter(|import| import.file == file).any(|import| import.bindings.iter().any(|binding| matches!(binding, ImportBinding::Named { local: name, .. } if name == &local)));
+                            }
                         }
                     }
-                } else if !label.ends_with(".export_remote_specifier.signature") {
+                } else if !label.ends_with(".export_unsupported_specifier.signature") {
                     continue;
                 }
-                if selected.is_empty() {
+                if selected.is_empty() && !deferred {
                     gaps.push(fact.span());
                 }
                 additions.extend(selected.into_iter().map(|(name, entity, type_only)| {
@@ -146,6 +154,13 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                     )
                 }));
             }
+        }
+        for (file, name) in explicit {
+            self.exports
+                .entry(file)
+                .or_default()
+                .entry(name)
+                .or_default();
         }
         for (file, name, target) in additions {
             self.exports

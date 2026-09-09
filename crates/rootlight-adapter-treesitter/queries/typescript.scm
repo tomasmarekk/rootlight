@@ -39,6 +39,8 @@
 (import_specifier name: [(identifier) (string)] @signature)
 (export_statement declaration: (_) @signature)
 (export_statement "default" value: (_) @signature)
+(export_statement source: (string) @signature) @signature
+(namespace_export [(identifier) (string)] @signature)
 (export_specifier) @signature
 (export_specifier name: [(identifier) (string)] @signature)
 (export_specifier alias: [(identifier) (string)] @signature)

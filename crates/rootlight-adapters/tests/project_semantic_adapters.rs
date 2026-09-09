@@ -40,6 +40,8 @@ use tempfile::{TempDir, tempdir_in};
 
 #[path = "project_semantic_adapters/dart.rs"]
 mod dart;
+#[path = "project_semantic_adapters/reexports.rs"]
+mod reexports;
 
 #[test]
 fn native_local_export_names_cannot_be_string_literals() {
@@ -780,33 +782,14 @@ fn typescript_export_names_do_not_become_local_value_references() {
         .iter()
         .filter(|gap| gap.detail == "ecmascript-export-entry-target-unavailable")
         .collect();
-    assert_eq!(entry_gaps.len(), 1);
-    let span = entry_gaps[0].source.span();
-    assert_eq!(
-        &source[usize::try_from(span.start_byte()).unwrap()
-            ..usize::try_from(span.end_byte()).unwrap()],
-        "Token as Remote"
-    );
-    assert_eq!(
-        entry_gaps[0].source.content_hash(),
-        content_hash(source.as_bytes())
-    );
+    assert!(entry_gaps.is_empty());
     let gaps: Vec<_> = output
         .document()
         .skipped_regions
         .iter()
         .filter(|gap| gap.detail == "ecmascript-export-target-unavailable")
         .collect();
-    assert_eq!(gaps.len(), 3);
-    assert_eq!(
-        output.report().work().coverage().status(),
-        CoverageStatus::Bounded
-    );
-    for gap in gaps {
-        assert_eq!(gap.domain, FactDomain::Relations);
-        assert_eq!(gap.source.content_hash(), content_hash(source.as_bytes()));
-        assert_eq!(gap.source.span().file(), fixture.snapshots[0].file());
-    }
+    assert!(gaps.is_empty());
     let token = output
         .document()
         .entities
@@ -814,17 +797,29 @@ fn typescript_export_names_do_not_become_local_value_references() {
         .find(|entity| entity.kind == EntityKind::TypeAlias && entity.canonical_name == "Token")
         .unwrap()
         .id;
-    for (needle, offset, role, resolved) in [
-        ("export {Token}", 8, OccurrenceRole::Reference, true),
-        ("type {Token", 6, OccurrenceRole::TypeUse, true),
-        ("as Public", 3, OccurrenceRole::Reference, false),
+    let remote = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Variable
+                && entity.canonical_name == "Token"
+                && entity.evidence.source.as_ref().unwrap().span().file()
+                    == fixture.snapshots[1].file()
+        })
+        .unwrap()
+        .id;
+    for (needle, offset, role, target) in [
+        ("export {Token}", 8, OccurrenceRole::Reference, token),
+        ("type {Token", 6, OccurrenceRole::TypeUse, token),
+        ("as Public", 3, OccurrenceRole::Reference, token),
         (
             "export {Token as Remote",
             8,
             OccurrenceRole::Reference,
-            false,
+            remote,
         ),
-        ("as Remote", 3, OccurrenceRole::Reference, false),
+        ("as Remote", 3, OccurrenceRole::Reference, remote),
     ] {
         let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
         let occurrence = output
@@ -837,18 +832,15 @@ fn typescript_export_names_do_not_become_local_value_references() {
             })
             .unwrap();
         assert_eq!(occurrence.role, role, "{needle}");
-        if resolved {
-            assert_eq!(
-                occurrence.target,
-                OccurrenceTarget::Resolved { symbol: token },
-                "{needle}"
-            );
-        } else {
-            assert!(
-                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
-                "{needle}: {occurrence:?}"
-            );
-        }
+        assert_eq!(
+            occurrence.target,
+            OccurrenceTarget::Resolved { symbol: target },
+            "{needle}"
+        );
+        assert_eq!(
+            occurrence.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
     }
 }
 

@@ -60,8 +60,68 @@ pub(super) fn import_signature_syntax(
 pub(super) fn export_signature_syntax(
     family: GrammarFamily,
     node: Node<'_>,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "namespace_export")
+    {
+        return Ok(Some(if family == GrammarFamily::TypeScript {
+            "typescript.export_namespace_name"
+        } else {
+            "javascript.export_namespace_name"
+        }));
+    }
+    if node.kind() == "export_statement" {
+        let recovered_type = if family == GrammarFamily::TypeScript {
+            recovered_star_type_modifier(node, source, cancellation)?
+        } else {
+            None
+        };
+        let mut clause = false;
+        let mut namespace = false;
+        let mut malformed = false;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            cancellation.check()?;
+            clause |= child.kind() == "export_clause";
+            namespace |= child.kind() == "namespace_export";
+            malformed |= (child.has_error() || child.is_missing()) && Some(child) != recovered_type;
+        }
+        let unsupported = namespace
+            || malformed
+            || !node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "program");
+        let type_only = recovered_type.is_some() || has_type_modifier(node, cancellation)?;
+        return Ok(Some(
+            match (
+                family == GrammarFamily::TypeScript,
+                unsupported,
+                clause,
+                type_only,
+            ) {
+                (true, true, _, _) => "typescript.export_unsupported_statement",
+                (false, true, _, _) => "javascript.export_unsupported_statement",
+                (true, false, true, _) => "typescript.export_reexport_statement",
+                (false, false, true, _) => "javascript.export_reexport_statement",
+                (true, false, false, true) => "typescript.export_type_star_statement",
+                (false, false, false, true) => "javascript.export_type_star_statement",
+                (true, false, false, false) => "typescript.export_star_statement",
+                (false, false, false, false) => "javascript.export_star_statement",
+            },
+        ));
+    }
+    if node.parent().is_some_and(|parent| {
+        parent.kind() == "export_statement" && parent.child_by_field_name("source") == Some(node)
+    }) {
+        return Ok(Some(if family == GrammarFamily::TypeScript {
+            "typescript.export_source"
+        } else {
+            "javascript.export_source"
+        }));
+    }
     let specifier = if node.kind() == "export_specifier" {
         Some(node)
     } else {
@@ -78,12 +138,19 @@ pub(super) fn export_signature_syntax(
             } else {
                 "alias"
             }
-        } else if statement.child_by_field_name("source").is_some()
-            || !statement
-                .parent()
-                .is_some_and(|parent| parent.kind() == "program")
+        } else if !statement
+            .parent()
+            .is_some_and(|parent| parent.kind() == "program")
         {
-            "remote"
+            "unsupported"
+        } else if statement.child_by_field_name("source").is_some() {
+            if has_type_modifier(specifier, cancellation)?
+                || has_type_modifier(statement, cancellation)?
+            {
+                "remote_type"
+            } else {
+                "remote"
+            }
         } else if has_type_modifier(specifier, cancellation)?
             || has_type_modifier(statement, cancellation)?
         {
@@ -100,8 +167,12 @@ pub(super) fn export_signature_syntax(
             (false, "type") => "javascript.export_type_specifier",
             (true, "local") => "typescript.export_local_specifier",
             (false, "local") => "javascript.export_local_specifier",
-            (true, _) => "typescript.export_remote_specifier",
-            (false, _) => "javascript.export_remote_specifier",
+            (true, "remote") => "typescript.export_remote_specifier",
+            (false, "remote") => "javascript.export_remote_specifier",
+            (true, "remote_type") => "typescript.export_remote_type_specifier",
+            (false, "remote_type") => "javascript.export_remote_type_specifier",
+            (true, _) => "typescript.export_unsupported_specifier",
+            (false, _) => "javascript.export_unsupported_specifier",
         }));
     }
     let Some(parent) = node
@@ -184,6 +255,39 @@ fn has_type_modifier(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
         }
     }
     Ok(false)
+}
+
+fn recovered_star_type_modifier<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    // The pinned grammar represents the type token in `export type *` as ERROR
+    // (https://github.com/tree-sitter/tree-sitter-typescript/issues/348).
+    // Recover only this exact native prefix until the grammar supports it;
+    // parser diagnostics remain intact and other errors are not admitted.
+    let mut cursor = node.walk();
+    let mut prefix = Vec::new();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.kind() != "comment" {
+            prefix.push(child);
+            if prefix.len() == 3 {
+                break;
+            }
+        }
+    }
+    Ok(match prefix.as_slice() {
+        [export, modifier, star]
+            if export.kind() == "export"
+                && modifier.is_error()
+                && source.get(modifier.byte_range()) == Some(b"type".as_slice())
+                && star.kind() == "*" =>
+        {
+            Some(*modifier)
+        }
+        _ => None,
+    })
 }
 
 pub(super) fn retain_capture(
@@ -312,4 +416,85 @@ fn import_kind(
         current = owner.parent();
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn type_star_export_keeps_its_type_only_modifier() {
+        for language in [
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+            tree_sitter_typescript::LANGUAGE_TSX,
+        ] {
+            for source in [
+                "export type * from './provider';",
+                "export /* before */ type /* after */ * from './provider';",
+                "export type *\nfrom './provider';",
+            ] {
+                let mut parser = tree_sitter::Parser::new();
+                parser.set_language(&language.into()).unwrap();
+                let tree = parser.parse(source, None).unwrap();
+                let statement = tree.root_node().named_child(0).unwrap();
+                assert_eq!(
+                    export_signature_syntax(
+                        GrammarFamily::TypeScript,
+                        statement,
+                        source.as_bytes(),
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                    Some("typescript.export_type_star_statement"),
+                    "{source}: {}",
+                    tree.root_node().to_sexp()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn star_export_recovery_does_not_admit_other_errors_or_type_spellings() {
+        for (source, expected) in [
+            (
+                "export * from './type';",
+                "typescript.export_star_statement",
+            ),
+            (
+                "export /* type */ * from './provider';",
+                "typescript.export_star_statement",
+            ),
+            (
+                "export type extra * from './provider';",
+                "typescript.export_unsupported_statement",
+            ),
+            (
+                "export extra * from './provider';",
+                "typescript.export_unsupported_statement",
+            ),
+            (
+                "export type * from './provider' extra;",
+                "typescript.export_unsupported_statement",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let statement = tree.root_node().named_child(0).unwrap();
+            assert_eq!(
+                export_signature_syntax(
+                    GrammarFamily::TypeScript,
+                    statement,
+                    source.as_bytes(),
+                    &Cancellation::new()
+                )
+                .unwrap(),
+                Some(expected),
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
 }
