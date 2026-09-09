@@ -20,6 +20,9 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
                 "~~~yaml\nname: &entry second\ncopy: *entry\n~~~\n\n",
                 "~~~toml\n[config]\nname = 'first'\n~~~\n\n",
                 "~~~toml\n[config]\nname = 'second'\n~~~\n",
+                "\n~~~lua\nlocal stored = 1\nreturn stored\n~~~\n",
+                "\n~~~lua\nlocal stored = 2\nreturn stored\n~~~\n",
+                "\n~~~lua\nreturn stored\n~~~\n",
             ),
             3,
         ),
@@ -109,6 +112,45 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
         }
         assert_eq!(call_count, expected_calls);
         assert_eq!(local_targets.len(), if host == "markdown" { 2 } else { 1 });
+        if host == "markdown" {
+            let mut references: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|item| item.syntax_kind == "lua.identifier.reference")
+                .collect();
+            references.sort_by_key(|item| item.source.span().start_byte());
+            assert_eq!(references.len(), 3);
+            let mut targets = BTreeSet::new();
+            for reference in &references[..2] {
+                let rootlight_ir::OccurrenceTarget::Resolved { symbol } = reference.target else {
+                    panic!("native Lua binding must be exact: {reference:?}");
+                };
+                targets.insert(symbol);
+                assert!(
+                    !batch
+                        .decisions
+                        .iter()
+                        .any(|item| item.occurrence == reference.id)
+                );
+                assert!(document.relations.iter().any(|relation| {
+                    relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                        && relation.subject
+                            == rootlight_ir::RelationEndpoint::Occurrence(reference.id)
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+                        && relation.evidence.source.as_ref() == Some(&reference.source)
+                }));
+            }
+            assert_eq!(targets.len(), 2);
+            let missing = batch
+                .decisions
+                .iter()
+                .find(|item| item.occurrence == references[2].id)
+                .unwrap();
+            assert!(matches!(
+                missing.outcome,
+                ResolutionOutcome::Unresolved { .. }
+            ));
+        }
         let required = artifact.required_syntax_fact_count(&cancellation).unwrap();
         let limits =
             analysis_limits_with_syntax_records(&service.analysis_limits, required).unwrap();

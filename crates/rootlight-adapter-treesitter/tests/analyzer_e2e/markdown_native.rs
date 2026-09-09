@@ -27,6 +27,137 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_lua_bindings_keep_visibility_and_example_boundaries() {
+    let source = "# Examples\r\n\r\n~~~lua\r\nlocal outer = 1\r\ndo\r\n  local outer = outer\r\n  local function capture(parameter)\r\n    local snapshot = outer\r\n    local recursive = capture\r\n    return parameter\r\n  end\r\nend\r\nreturn outer\r\n~~~\r\n\r\n~~~lua\r\nlocal first = outer\r\nlocal outer = 2\r\nlocal second = outer\r\nlocal assigned = function() return assigned end\r\n~~~\r\n\r\n~~~rust\r\nfn foreign() {}\r\n~~~\r\n\r\n~~~lua\r\nlocal third = outer\r\nlocal missing = foreign\r\n~~~\r\n";
+    let result = assert_lua_reference_bindings_in(
+        MARKDOWN,
+        source,
+        &[
+            ("local outer = outer", "outer", Some("local outer = 1")),
+            (
+                "local snapshot = outer",
+                "outer",
+                Some("local outer = outer"),
+            ),
+            (
+                "local recursive = capture",
+                "capture",
+                Some("local function capture"),
+            ),
+            ("return parameter", "parameter", Some("parameter)")),
+            ("return outer", "outer", Some("local outer = 1")),
+            ("local first = outer", "outer", None),
+            ("local second = outer", "outer", Some("local outer = 2")),
+            ("return assigned", "assigned", None),
+            ("local third = outer", "outer", None),
+            ("local missing = foreign", "foreign", None),
+        ],
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "markdown-code-semantics-unavailable")
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+}
+
+#[test]
+fn markdown_lua_bounded_plans_keep_references_without_guessing_targets() {
+    let source = format!(
+        "> paragraph\n{}\n~~~lua\nlocal value = 1\nreturn value\n~~~\n",
+        "> continued\n".repeat(33)
+    );
+    let result =
+        assert_lua_reference_bindings_in(MARKDOWN, &source, &[("return value", "value", None)]);
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "markdown-inline-budget-unavailable")
+    );
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == rootlight_ir::RelationPredicate::RefersTo)
+    );
+}
+
+#[test]
+fn markdown_lua_binding_artifacts_rebind_exact_relations() {
+    let source = "~~~lua\nlocal value = 1\nreturn value\n~~~\n\n~~~lua\nlocal value = 2\nreturn value\n~~~\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(replay.document(), fresh.document());
+    assert_eq!(replay.report(), fresh.report());
+    let references: Vec<_> = first
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "lua.identifier.reference")
+        .collect();
+    assert_eq!(references.len(), 2);
+    assert_ne!(references[0].target, references[1].target);
+    for occurrence in references {
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Resolved { .. }
+        ));
+        let current = replay
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.syntax_kind == occurrence.syntax_kind
+                    && item.source.span() == occurrence.source.span()
+            })
+            .unwrap();
+        assert_eq!(current.target, occurrence.target);
+        assert_eq!(current.source.generation(), changed.source.generation());
+    }
+    let relations: Vec<_> = replay
+        .document()
+        .relations
+        .iter()
+        .filter(|relation| relation.predicate == rootlight_ir::RelationPredicate::RefersTo)
+        .collect();
+    assert_eq!(relations.len(), 2);
+    for relation in relations {
+        assert_eq!(
+            relation.evidence.source.as_ref().unwrap().generation(),
+            changed.source.generation()
+        );
+    }
+}
+
+#[test]
 fn markdown_code_labels_require_declared_languages_without_content_inference() {
     for (label, supported) in [
         ("rust", true),

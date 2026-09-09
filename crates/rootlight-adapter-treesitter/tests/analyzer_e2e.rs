@@ -2028,7 +2028,21 @@ fn lua_bounded_capture_plans_do_not_assert_exact_lexical_targets() {
 }
 
 fn assert_lua_reference_bindings(source: &str, expected: &[(&str, &str, Option<&str>)]) {
-    let case = LUA_CASE;
+    assert_lua_reference_bindings_in(LUA_CASE, source, expected);
+    let markdown = LanguageCase {
+        name: "markdown",
+        path: "docs/example.md",
+        frontend: "tree-sitter-md-0.5.3",
+        ..LUA_CASE
+    };
+    assert_lua_reference_bindings_in(markdown, &format!("~~~lua\n{source}\n~~~\n"), expected);
+}
+
+fn assert_lua_reference_bindings_in(
+    case: LanguageCase,
+    source: &str,
+    expected: &[(&str, &str, Option<&str>)],
+) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let limits = limits();
     let fixture = Fixture::new(case, source.as_bytes());
@@ -2087,6 +2101,7 @@ fn assert_lua_reference_bindings(source: &str, expected: &[(&str, &str, Option<&
             );
         }
     }
+    output
 }
 
 #[test]

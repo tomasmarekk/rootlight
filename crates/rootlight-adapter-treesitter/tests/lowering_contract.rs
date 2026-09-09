@@ -1109,47 +1109,49 @@ fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
         )
     })
     .collect::<Vec<_>>();
-    let language = LanguageId::new("lua").expect("Lua language is valid");
-    let output = analyze_custom(
-        &snapshot,
-        &source,
-        language.clone(),
-        &limits(IrLimits::default()),
-        facts.clone(),
-    )
-    .expect("source-backed Lua references lower");
-    assert_eq!(
-        output
-            .document()
-            .relations
-            .iter()
-            .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
-            .count(),
-        1
-    );
-    for total_quota in [false, true] {
-        let mut ir = IrLimits::default();
-        let (expected_observed, expected_limit) = if total_quota {
-            ir.max_total_records = 22;
-            (23, 22)
-        } else {
-            ir.max_relations = 2;
-            (3, 2)
-        };
-        let error = analyze_custom(
+    for host in ["lua", "markdown"] {
+        let language = LanguageId::new(host).expect("host language is valid");
+        let output = analyze_custom(
             &snapshot,
             &source,
             language.clone(),
-            &limits(ir),
+            &limits(IrLimits::default()),
             facts.clone(),
         )
-        .expect_err("lexical relation is reserved before output materializes");
-        assert!(
-            matches!(error, AdapterError::Sink(SinkError::StreamLimit {
+        .expect("source-backed Lua references lower");
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+                .count(),
+            1
+        );
+        for total_quota in [false, true] {
+            let mut ir = IrLimits::default();
+            let (expected_observed, expected_limit) = if total_quota {
+                ir.max_total_records = 22;
+                (23, 22)
+            } else {
+                ir.max_relations = 2;
+                (3, 2)
+            };
+            let error = analyze_custom(
+                &snapshot,
+                &source,
+                language.clone(),
+                &limits(ir),
+                facts.clone(),
+            )
+            .expect_err("lexical relation is reserved before output materializes");
+            assert!(
+                matches!(error, AdapterError::Sink(SinkError::StreamLimit {
             resource: rootlight_adapter_sdk::ResourceKind::Records, observed, limit,
         }) if observed == expected_observed && limit == expected_limit),
-            "{error:?}"
-        );
+                "{error:?}"
+            );
+        }
     }
 }
 

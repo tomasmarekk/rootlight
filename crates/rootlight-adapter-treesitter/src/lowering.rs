@@ -905,7 +905,7 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
-            if request.language().as_str() == "lua"
+            if language_for_fact(request, fact) == "lua"
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
                 && fact.syntax_kind().as_str() == "lua.identifier.reference"
             {
@@ -1200,8 +1200,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let terminal_call_names = terminal_call_names(self.parse_output.facts(), cancellation)?;
         // A truncated capture plan may omit a shadowing declaration. Exact lexical
         // targets require a complete plan even when remaining text is readable.
-        let lua_bindings = if self.request.language().as_str() == "lua"
-            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        let lua_bindings = if self.parse_output.report().coverage().status()
+            == CoverageStatus::Complete
+            && (self.request.language().as_str() == "lua"
+                || (self.request.language().as_str() == "markdown"
+                    && self
+                        .parse_output
+                        .facts()
+                        .iter()
+                        .any(|fact| fact.syntax_kind().as_str() == "lua.identifier.reference")))
         {
             let symbols = materialized
                 .values()
