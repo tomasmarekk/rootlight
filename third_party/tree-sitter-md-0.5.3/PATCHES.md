@@ -31,7 +31,7 @@ it. Allocation failure and null scanner payloads cannot be dereferenced.
 Regression tests in `tests/native-grammars` cover exact block and inline source
 ranges, container-marker exclusions, UTF-8/CRLF positions, long delimiters and
 indentation, full-capacity snapshots, malformed frames, deep nesting, parser reuse
-and clean/incremental equivalence. The native grammar remains separate from the
-production registry until its source-backed adapter and capability contracts are
-implemented. These tests do not claim full CommonMark/GFM semantics, Markdown
+and clean/incremental equivalence. The block grammar is registered for explicit
+source-backed analysis; inline parsing and automatic indexing capability are
+separate integration contracts. These tests do not claim full CommonMark/GFM semantics, Markdown
 rendering equivalence, MDX/Astro support or installed MCP acceptance.

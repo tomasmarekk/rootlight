@@ -2033,6 +2033,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if fact.syntax_kind().as_str() == "powershell.dynamic_property.declaration" {
                 // Keep nested values under their written entry even when its key is evaluated.
                 (std::borrow::Cow::Borrowed("<computed-key>"), None)
+            } else if fact.syntax_kind().as_str() == "markdown.section.declaration" {
+                // Empty written headings still own a section; this is not a fragment ID.
+                (std::borrow::Cow::Borrowed("<untitled>"), None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -2090,9 +2093,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 kind,
-                EntityKind::MarkupElement | EntityKind::MarkupAttribute
+                EntityKind::MarkupElement
+                    | EntityKind::MarkupAttribute
+                    | EntityKind::DocumentSection
+                    | EntityKind::LinkDefinition
             ) {
-                // Repeated source tags and even duplicate attributes are distinct
+                // Repeated markup and document declarations are distinct
                 // occurrences. Only same-name sibling order affects identity;
                 // text bodies, attribute values and byte offsets do not.
                 let next = markup_members
@@ -2101,7 +2107,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                 Some(blake3::derive_key(
-                    "rootlight.html-source-occurrence/1",
+                    if matches!(
+                        kind,
+                        EntityKind::DocumentSection | EntityKind::LinkDefinition
+                    ) {
+                        "rootlight.document-source-occurrence/1"
+                    } else {
+                        "rootlight.html-source-occurrence/1"
+                    },
                     &position.to_be_bytes(),
                 ))
             } else {
@@ -2907,6 +2920,18 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             "sql-function-body-semantics-unavailable",
         )),
         "html.file.module" => Some((FactDomain::Relations, "html-dom-semantics-unavailable")),
+        "markdown.file.module" => Some((
+            FactDomain::Relations,
+            "markdown-link-resolution-unavailable",
+        )),
+        "markdown.inline.signature" => Some((
+            FactDomain::Occurrences,
+            "markdown-inline-analysis-unavailable",
+        )),
+        "markdown.embedded_text.signature" => Some((
+            FactDomain::Entities,
+            "markdown-embedded-analysis-unavailable",
+        )),
         "html.embedded_text.signature" => {
             Some((FactDomain::Entities, "html-embedded-analysis-unavailable"))
         }
@@ -3685,6 +3710,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "scala.file.module"
                 | "dart.file.module"
                 | "powershell.file.module"
+                | "markdown.file.module"
         )
         && matches!(
             language,
@@ -3706,6 +3732,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "scala"
                 | "dart"
                 | "powershell"
+                | "markdown"
         )
 }
 

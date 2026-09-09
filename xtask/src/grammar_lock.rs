@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "f2a33f2b158b4f36d5eec8f6b386e7eed1a5e666179b9773eb08d3e83687cbaa";
+    "e76e5e807fb99067a2c829959f0f9caa7c4ea8ef0c5bc044210caed981a94891";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,11 +37,16 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 26] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 27] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "tree-sitter-md",
+        "0.5.3",
+        "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882",
     ),
     (
         "tree-sitter-powershell",
@@ -198,6 +203,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-md-0.5.3-LICENSE",
+        "52ec8a1bf8256511e2a92613e0bb41ffefba3897f16fa958d7bb28c466dd4804",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-powershell-0.26.4-LICENSE",
         "1fca8454c0d77a73f9922a52d39e1f7c339f5da5d03f2766eff66b859fa19477",
     )?;
@@ -266,7 +276,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 26 {
+    if manifest.grammars.len() != 27 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -301,6 +311,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "json",
         "kotlin",
         "lua",
+        "markdown",
         "php",
         "powershell",
         "python",
@@ -675,8 +686,21 @@ fn validate_vendored_tree(
         return Err(invalid());
     }
     let scanner = (grammar.scanner_sha256 != "none").then_some(&grammar.scanner_sha256);
-    if vendored.files.get("src/parser.c") != Some(&grammar.parser_sha256)
-        || vendored.files.get("src/scanner.c") != scanner
+    // Explicit source paths accommodate multi-grammar packages without accepting
+    // a digest from an unrelated file or resolving a path outside the package.
+    let parser_path = vendored.parser_path.as_deref().unwrap_or("src/parser.c");
+    let scanner_path = vendored.scanner_path.as_deref().unwrap_or("src/scanner.c");
+    for path in [parser_path, scanner_path] {
+        if path.is_empty()
+            || path.split('/').any(|part| {
+                part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':'])
+            })
+        {
+            return Err(invalid());
+        }
+    }
+    if vendored.files.get(parser_path) != Some(&grammar.parser_sha256)
+        || vendored.files.get(scanner_path) != scanner
         || vendored.files.get("LICENSE") != Some(&grammar.license_sha256)
     {
         return Err(invalid());
@@ -803,6 +827,10 @@ struct GrammarEvidence {
 #[serde(deny_unknown_fields)]
 struct VendoredGrammarEvidence {
     manifest_path: String,
+    #[serde(default)]
+    parser_path: Option<String>,
+    #[serde(default)]
+    scanner_path: Option<String>,
     files: BTreeMap<String, String>,
 }
 
@@ -852,7 +880,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 26")]
+    #[error("grammar lock contains {0} grammars instead of 27")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -924,6 +952,51 @@ mod tests {
             ),
             Err(GrammarLockError::PackageEvidence { .. })
         ));
+    }
+
+    #[test]
+    fn vendored_tree_accepts_explicit_nested_sources_but_not_path_aliases() {
+        let (directory, mut grammar) = vendored_fixture();
+        fs::create_dir(directory.path().join("block")).unwrap();
+        fs::rename(
+            directory.path().join("src"),
+            directory.path().join("block/src"),
+        )
+        .unwrap();
+        let vendored = grammar.vendored.as_mut().unwrap();
+        for name in ["parser", "scanner"] {
+            let digest = vendored.files.remove(&format!("src/{name}.c")).unwrap();
+            vendored.files.insert(format!("block/src/{name}.c"), digest);
+        }
+        vendored.parser_path = Some("block/src/parser.c".into());
+        vendored.scanner_path = Some("block/src/scanner.c".into());
+        validate_vendored_tree(
+            directory.path(),
+            &grammar,
+            grammar.vendored.as_ref().unwrap(),
+        )
+        .unwrap();
+        for path in [
+            "",
+            "../block/src/parser.c",
+            "/block/src/parser.c",
+            "block/./src/parser.c",
+            "block//src/parser.c",
+            "block\\src\\parser.c",
+            "C:/block/src/parser.c",
+            "block/src/scanner.c",
+        ] {
+            grammar.vendored.as_mut().unwrap().parser_path = Some(path.into());
+            assert!(
+                validate_vendored_tree(
+                    directory.path(),
+                    &grammar,
+                    grammar.vendored.as_ref().unwrap()
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -1009,6 +1082,8 @@ mod tests {
             audit_notes: Vec::new(),
             vendored: Some(VendoredGrammarEvidence {
                 manifest_path: "third_party/grammar/Cargo.toml".into(),
+                parser_path: None,
+                scanner_path: None,
                 files,
             }),
         };

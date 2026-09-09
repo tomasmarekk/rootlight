@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod dart;
+mod markdown;
 mod powershell;
 mod r;
 mod scala;
@@ -308,6 +309,14 @@ impl QueryPack {
         }
         if family == GrammarFamily::Html {
             expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
+        }
+        if family == GrammarFamily::Markdown {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "import" | "reference" | "scope" | "comment" | "documentation"
+                )
+            });
         }
         if family == GrammarFamily::Sql {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
@@ -621,6 +630,13 @@ impl QueryPack {
                 }
                 let mut candidate =
                     candidate_for_capture(input.family, capture, role, input.source)?;
+                if input.family == GrammarFamily::Markdown
+                    && role == StructuralRole::Declaration
+                    && matches!(capture.node.kind(), "atx_heading" | "setext_heading")
+                {
+                    candidate.syntax = "markdown.section";
+                    candidate.end = markdown::section_end(capture.node, input.cancellation)?;
+                }
                 if input.family == GrammarFamily::Scala
                     && matches!(role, StructuralRole::Scope | StructuralRole::Declaration)
                     && capture.node.kind() == "package_clause"
@@ -949,6 +965,7 @@ fn candidate_for_capture(
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
             GrammarFamily::Sql => return Err(query_failure("query-sql-call-kind")),
+            GrammarFamily::Markdown => return Err(query_failure("query-markdown-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -1183,6 +1200,21 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Markdown, "document") => Some("markdown.file"),
+        (GrammarFamily::Markdown, "section") => Some("markdown.section"),
+        (GrammarFamily::Markdown, "link_reference_definition") => Some("markdown.link_definition"),
+        (GrammarFamily::Markdown, "inline") => Some("markdown.inline"),
+        (GrammarFamily::Markdown, "link_label") => Some("markdown.link_label"),
+        (GrammarFamily::Markdown, "paragraph") => Some("markdown.paragraph"),
+        (GrammarFamily::Markdown, "atx_heading" | "setext_heading") => Some("markdown.heading"),
+        (
+            GrammarFamily::Markdown,
+            "fenced_code_block"
+            | "indented_code_block"
+            | "html_block"
+            | "minus_metadata"
+            | "plus_metadata",
+        ) => Some("markdown.embedded_text"),
         (GrammarFamily::Dart, native) => dart::canonical_syntax(native),
         (GrammarFamily::PowerShell, native) => powershell::canonical_syntax(native),
         (GrammarFamily::Scala, native) => scala::canonical_syntax(native),
@@ -1589,7 +1621,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(26);
+        let mut packs = Vec::with_capacity(27);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1617,6 +1649,10 @@ impl QueryPackRegistry {
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
+            (
+                GrammarFamily::Markdown,
+                include_str!("../queries/markdown.scm"),
+            ),
             (GrammarFamily::Sql, include_str!("../queries/sql.scm")),
             (GrammarFamily::R, include_str!("../queries/r.scm")),
             (GrammarFamily::Scala, include_str!("../queries/scala.scm")),
@@ -1708,11 +1744,20 @@ mod tests {
             GrammarFamily::Scala,
             GrammarFamily::Dart,
             GrammarFamily::PowerShell,
+            GrammarFamily::Markdown,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Markdown {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "import" | "reference" | "scope" | "comment" | "documentation"
+                    )
+                });
+            }
             if family == GrammarFamily::Yaml {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
             }

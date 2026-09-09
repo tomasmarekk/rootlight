@@ -122,6 +122,7 @@ tree-sitter-solidity = { version = "=1.2.13", default-features = false }
 tree-sitter-scala = { version = "=0.26.2", default-features = false }
 tree-sitter-dart = { version = "=0.2.0", default-features = false }
 tree-sitter-powershell = { version = "=0.26.4", default-features = false }
+tree-sitter-md = { version = "=0.5.3", default-features = false }
 tree-sitter-toml-ng = { version = "=0.7.0", default-features = false }
 tree-sitter-yaml = { version = "=0.7.2", default-features = false }
 tree-sitter-c = { version = "=0.24.2", default-features = false }
@@ -154,6 +155,7 @@ zip = { version = "=2.4.2", default-features = false }
 
 [patch.crates-io]
 tree-sitter-powershell = { path = "third_party/tree-sitter-powershell-0.26.4" }
+tree-sitter-md = { path = "third_party/tree-sitter-md-0.5.3" }
 tree-sitter-scala = { path = "third_party/tree-sitter-scala-0.26.2" }
 tree-sitter-bash = { path = "third_party/tree-sitter-bash-0.25.1" }
 tree-sitter-json = { path = "third_party/tree-sitter-json-0.24.8" }

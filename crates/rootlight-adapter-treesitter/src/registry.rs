@@ -65,6 +65,8 @@ pub enum GrammarFamily {
     Dart,
     /// PowerShell written declarations; runtime command resolution remains separate.
     PowerShell,
+    /// Markdown block grammar; inline and embedded interpretation is a separate stage.
+    Markdown,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -144,7 +146,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(26);
+        let mut descriptors = Vec::with_capacity(27);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -172,6 +174,7 @@ impl GrammarRegistry {
             GrammarFamily::Scala,
             GrammarFamily::Dart,
             GrammarFamily::PowerShell,
+            GrammarFamily::Markdown,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -294,6 +297,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Scala => tree_sitter_scala::LANGUAGE.into(),
         GrammarFamily::Dart => tree_sitter_dart::LANGUAGE.into(),
         GrammarFamily::PowerShell => tree_sitter_powershell::LANGUAGE.into(),
+        GrammarFamily::Markdown => tree_sitter_md::LANGUAGE.into(),
     }
 }
 
@@ -308,6 +312,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Markdown => GrammarIdentity {
+            language_id: "markdown",
+            grammar_version: "0.5.3",
+            source_package_sha256: "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882",
+            parser_sha256: "0f51c93b5d79d08bc74088d91a9aafb7e40ad7e2f169164865c01d392277bb07",
+            scanner_sha256: Some(
+                "9120998e67c8e97911c89ef78e34ed51e0613421da9df9aba1758907f1f94736",
+            ),
+        },
         GrammarFamily::PowerShell => GrammarIdentity {
             language_id: "powershell",
             grammar_version: "0.26.4",
@@ -580,7 +593,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 26);
+        assert_eq!(registry.descriptors().len(), 27);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -608,6 +621,7 @@ mod tests {
             GrammarFamily::Scala,
             GrammarFamily::Dart,
             GrammarFamily::PowerShell,
+            GrammarFamily::Markdown,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -682,6 +696,7 @@ mod tests {
             (GrammarFamily::Solidity, "solidity", "tree-sitter-solidity"),
             (GrammarFamily::Scala, "scala", "tree-sitter-scala"),
             (GrammarFamily::Dart, "dart", "tree-sitter-dart"),
+            (GrammarFamily::Markdown, "markdown", "tree-sitter-md"),
             (
                 GrammarFamily::PowerShell,
                 "powershell",

@@ -16,6 +16,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "markdown.section.declaration" => {
+            Some(EntityKind::DocumentSection)
+        }
+        SyntaxFactKind::Declaration if label == "markdown.link_definition.declaration" => {
+            Some(EntityKind::LinkDefinition)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -233,6 +239,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// its grammar-reviewed division and bracket operators, without resolving receivers.
 /// PowerShell preserves written names, including braced variables, without runtime
 /// scope expansion, escape evaluation or case-insensitive binding equivalence.
+/// Markdown preserves authored heading and label text; rendered text, reference
+/// case folding and generated fragment identifiers require separate interpretation.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -272,7 +280,7 @@ pub fn structural_captured_name_for_language<'a>(
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
     } else if language == "r" {
         crate::r_names::canonical_r_name(text, maximum_bytes)
-    } else if matches!(language, "css" | "html" | "powershell") {
+    } else if matches!(language, "css" | "html" | "powershell" | "markdown") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {
@@ -550,6 +558,30 @@ mod tests {
             assert!(structural_captured_name_for_language("powershell", source, 128).is_none());
         }
         assert!(structural_captured_name_for_language("rust", "${name with space}", 128).is_none());
+    }
+
+    #[test]
+    fn markdown_names_preserve_authored_spelling_with_exact_byte_limits() {
+        for source in [
+            "Storage *rules*",
+            "[Guide]",
+            "[guide]",
+            "雪 &amp; `code`",
+            "First\r\nsecond",
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("markdown", source, source.len()),
+                Some(Cow::Borrowed(source))
+            );
+            assert!(
+                structural_captured_name_for_language("markdown", source, source.len() - 1)
+                    .is_none()
+            );
+        }
+        for source in ["", "head\0tail"] {
+            assert!(structural_captured_name_for_language("markdown", source, 128).is_none());
+        }
+        assert!(structural_captured_name_for_language("rust", "Storage *rules*", 128).is_none());
     }
 
     #[test]
