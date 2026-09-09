@@ -1,8 +1,8 @@
-//! Binding classification over native ECMAScript pattern edges.
-//! Identical patterns occur in declarations and assignments; only ancestry
-//! through the declared binding fields may introduce a source definition.
+//! Native ECMAScript binding and reference classification.
+//! Pattern ancestry distinguishes declarations from assignments; native type
+//! tokens and export fields keep lexical names separate from public aliases.
 
-use super::{AdapterError, Cancellation, StructuralRole};
+use super::{AdapterError, Cancellation, GrammarFamily, StructuralRole};
 use tree_sitter::Node;
 
 #[derive(Clone, Copy)]
@@ -18,6 +18,52 @@ pub(super) fn is_foreign_import_name(node: Node<'_>) -> bool {
             && parent.child_by_field_name("alias").is_some()
             && parent.child_by_field_name("name") == Some(node)
     })
+}
+
+pub(super) fn export_reference_syntax(
+    family: GrammarFamily,
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    let Some(specifier) = node
+        .parent()
+        .filter(|parent| parent.kind() == "export_specifier")
+    else {
+        return Ok(None);
+    };
+    let Some(statement) = specifier
+        .parent()
+        .and_then(|clause| clause.parent())
+        .filter(|parent| parent.kind() == "export_statement")
+    else {
+        return Ok(None);
+    };
+    let external = specifier.child_by_field_name("alias") == Some(node)
+        || statement.child_by_field_name("source").is_some();
+    let type_only =
+        has_type_modifier(specifier, cancellation)? || has_type_modifier(statement, cancellation)?;
+    Ok(Some(
+        match (family == GrammarFamily::TypeScript, external, type_only) {
+            (true, true, _) => "typescript.export_name",
+            (false, true, _) => "javascript.export_name",
+            (true, false, true) => "typescript.type_export_local",
+            (false, false, true) => "javascript.type_export_local",
+            (true, false, false) => "typescript.export_local",
+            (false, false, false) => "javascript.export_local",
+        },
+    ))
+}
+
+fn has_type_modifier(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        // A local/exported identifier spelled type is not a type-only token.
+        if !child.is_named() && matches!(child.kind(), "type" | "typeof") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(super) fn retain_capture(
@@ -138,12 +184,7 @@ fn import_kind(
             owner.kind(),
             "import_statement" | "import_specifier" | "import_alias"
         ) {
-            let mut cursor = owner.walk();
-            for child in owner.children(&mut cursor) {
-                cancellation.check()?;
-                // A local/exported identifier spelled type is not a type-only token.
-                type_only |= !child.is_named() && matches!(child.kind(), "type" | "typeof");
-            }
+            type_only |= has_type_modifier(owner, cancellation)?;
         }
         if matches!(owner.kind(), "import_statement" | "import_alias") {
             return Ok(Some(BindingKind::Import { type_only }));

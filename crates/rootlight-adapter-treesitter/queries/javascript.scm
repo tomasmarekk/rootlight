@@ -54,6 +54,7 @@
       property: (property_identifier))
   ] @call)
 [(identifier) (property_identifier)] @reference
+[(shorthand_property_identifier) (shorthand_property_identifier_pattern)] @reference
 (comment) @comment
 
 ((comment) @documentation

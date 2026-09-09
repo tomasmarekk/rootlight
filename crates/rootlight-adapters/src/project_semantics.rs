@@ -1737,7 +1737,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 },
             );
             if self.analyzer.language == SemanticProjectLanguage::Dart {
-                self.push_dart_gap(
+                self.push_relation_gap(
                     input,
                     source.span(),
                     "dart-project-inheritance-extension-dispatch-unavailable",
@@ -2157,7 +2157,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         if self.analyzer.language == SemanticProjectLanguage::Dart
                             && imports.is_empty()
                         {
-                            self.push_dart_gap(
+                            self.push_relation_gap(
                                 input,
                                 fact.span(),
                                 "dart-library-directive-resolution-unavailable",
@@ -2235,6 +2235,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             OccurrenceRole::ImportUse
                         } else if call {
                             OccurrenceRole::CallSite
+                        } else if matches!(
+                            fact.syntax_kind().as_str(),
+                            "typescript.type_identifier.reference"
+                                | "typescript.type_export_local.reference"
+                                | "javascript.type_export_local.reference"
+                        ) {
+                            OccurrenceRole::TypeUse
                         } else {
                             OccurrenceRole::Reference
                         };
@@ -2481,6 +2488,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 self.request.limits().ir().max_nested_items_per_record,
             )?;
             let candidates = &resolution.symbols;
+            if candidates.is_empty()
+                && matches!(
+                    draft.syntax_kind.as_str(),
+                    "typescript.export_name.reference" | "javascript.export_name.reference"
+                )
+            {
+                let input = self.input_for_file(draft.file)?;
+                self.push_relation_gap(
+                    input,
+                    draft.source.span(),
+                    "ecmascript-export-target-unavailable",
+                )?;
+            }
             let confidence_value = match draft.role {
                 OccurrenceRole::Definition => EXACT_CONFIDENCE,
                 OccurrenceRole::ImportUse => IMPORT_CONFIDENCE,
@@ -2561,7 +2581,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .unwrap_or_default();
             if targets.is_empty() && self.analyzer.language == SemanticProjectLanguage::Dart {
                 let input = self.input_for_file(import.file)?;
-                self.push_dart_gap(input, import.span, "dart-library-uri-target-unavailable")?;
+                self.push_relation_gap(input, import.span, "dart-library-uri-target-unavailable")?;
             }
             for target_file in targets {
                 let Some(target_module) = self.module_by_file.get(&target_file).copied() else {
@@ -3362,6 +3382,49 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if self.analyzer.language == SemanticProjectLanguage::Dart {
             return self.resolve_dart_occurrence(occurrence, definitions, import_targets);
         }
+        if matches!(
+            occurrence.syntax_kind.as_str(),
+            "typescript.export_name.reference" | "javascript.export_name.reference"
+        ) {
+            // An exported public name or a re-export refers outside the local
+            // binding namespace; spelling alone cannot identify its target.
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        // TypeScript permits a type and a value with the same written name.
+        // Native type identifiers select the type namespace; typeof operands
+        // remain ordinary value identifiers. Imports may expose both namespaces.
+        let admits_namespace = |entity: &&SemanticEntity| {
+            if !matches!(
+                self.analyzer.language,
+                SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+            ) {
+                return true;
+            }
+            match occurrence.role {
+                OccurrenceRole::TypeUse => matches!(
+                    entity.kind,
+                    EntityKind::Class
+                        | EntityKind::Enum
+                        | EntityKind::Interface
+                        | EntityKind::TypeAlias
+                ),
+                OccurrenceRole::Reference
+                    if matches!(
+                        occurrence.syntax_kind.as_str(),
+                        "typescript.export_local.reference" | "javascript.export_local.reference"
+                    ) =>
+                {
+                    true
+                }
+                OccurrenceRole::Reference | OccurrenceRole::CallSite => {
+                    !matches!(entity.kind, EntityKind::Interface | EntityKind::TypeAlias)
+                }
+                _ => true,
+            }
+        };
         if let Some(resolution) = self.resolve_reviewed_static_call(occurrence, definitions) {
             return resolution;
         }
@@ -3388,6 +3451,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     namespace_symbols.extend(
                         candidates
                             .iter()
+                            .filter(admits_namespace)
                             .filter(|entity| target_files.contains(&entity.file))
                             .map(|entity| entity.symbol),
                     );
@@ -3491,6 +3555,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .get(&occurrence.name)
             .into_iter()
             .flatten()
+            .filter(admits_namespace)
             .filter(|entity| entity.file == occurrence.file)
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
@@ -3522,6 +3587,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     symbols.extend(
                         candidates
                             .iter()
+                            .filter(admits_namespace)
                             .filter(|entity| target_files.contains(&entity.file))
                             .map(|entity| entity.symbol),
                     );
@@ -3554,7 +3620,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             && permit_global_fallback
             && let Some(candidates) = definitions.get(&occurrence.name)
         {
-            symbols.extend(candidates.iter().map(|entity| entity.symbol));
+            symbols.extend(
+                candidates
+                    .iter()
+                    .filter(admits_namespace)
+                    .map(|entity| entity.symbol),
+            );
         }
         ResolutionCandidates {
             symbols: symbols.into_iter().collect(),
@@ -3853,7 +3924,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         Ok(())
     }
 
-    fn push_dart_gap(
+    fn push_relation_gap(
         &mut self,
         input: &ProjectSourceInput<'_>,
         span: SourceSpan,

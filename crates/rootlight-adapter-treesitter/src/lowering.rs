@@ -4057,6 +4057,16 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,
         SyntaxFactKind::Occurrence if is_call_name_capture(fact) => None,
+        SyntaxFactKind::Occurrence
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "typescript.type_identifier.reference"
+                    | "typescript.type_export_local.reference"
+                    | "javascript.type_export_local.reference"
+            ) =>
+        {
+            Some(OccurrenceRole::TypeUse)
+        }
         SyntaxFactKind::Occurrence if fact.syntax_kind().as_str().contains("call") => {
             Some(OccurrenceRole::CallSite)
         }

@@ -793,12 +793,21 @@ fn candidate_for_capture(
             if matches!(
                 family,
                 GrammarFamily::JavaScript | GrammarFamily::TypeScript
-            ) && ecmascript::is_foreign_import_name(capture.node) =>
+            ) =>
         {
-            if family == GrammarFamily::TypeScript {
-                "typescript.import_name"
+            if let Some(syntax) =
+                ecmascript::export_reference_syntax(family, capture.node, cancellation)?
+            {
+                syntax
+            } else if ecmascript::is_foreign_import_name(capture.node) {
+                if family == GrammarFamily::TypeScript {
+                    "typescript.import_name"
+                } else {
+                    "javascript.import_name"
+                }
             } else {
-                "javascript.import_name"
+                canonical_syntax(family, capture.node.kind())
+                    .ok_or_else(|| query_failure("query-node-kind"))?
             }
         }
         StructuralRole::Scope
@@ -1514,9 +1523,12 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
         (GrammarFamily::JavaScript, "for_statement" | "for_in_statement") => Some("javascript.for"),
         (GrammarFamily::JavaScript, "catch_clause") => Some("javascript.catch"),
-        (GrammarFamily::JavaScript, "identifier" | "shorthand_property_identifier_pattern") => {
-            Some("javascript.identifier")
-        }
+        (
+            GrammarFamily::JavaScript,
+            "identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern",
+        ) => Some("javascript.identifier"),
         (
             GrammarFamily::JavaScript,
             "function_expression"
@@ -1605,9 +1617,12 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
         (GrammarFamily::TypeScript, "for_statement" | "for_in_statement") => Some("typescript.for"),
         (GrammarFamily::TypeScript, "catch_clause") => Some("typescript.catch"),
-        (GrammarFamily::TypeScript, "identifier" | "shorthand_property_identifier_pattern") => {
-            Some("typescript.identifier")
-        }
+        (
+            GrammarFamily::TypeScript,
+            "identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern",
+        ) => Some("typescript.identifier"),
         (
             GrammarFamily::TypeScript,
             "function_expression"

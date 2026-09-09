@@ -45,6 +45,8 @@ mod dart_native;
 mod ecmascript_imports;
 #[path = "analyzer_e2e/ecmascript_native.rs"]
 mod ecmascript_native;
+#[path = "analyzer_e2e/ecmascript_references.rs"]
+mod ecmascript_references;
 #[path = "analyzer_e2e/html_native.rs"]
 mod html_native;
 #[path = "analyzer_e2e/markdown_native.rs"]

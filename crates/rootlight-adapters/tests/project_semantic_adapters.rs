@@ -42,6 +42,226 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 
 #[test]
+fn typescript_imported_references_preserve_both_declaration_namespaces() {
+    let source = "import {Token as Local, Both} from './provider'; let typed: Local = Local; type Query = typeof Local; let instance: Both; const constructor = Both;\n";
+    let provider =
+        "export type Token = string; export const Token = 'value'; export class Both {}\n";
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/provider.ts"],
+        [source, provider],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    for (needle, offset, name, role, kind) in [
+        (
+            "typed: Local",
+            7,
+            "Token",
+            OccurrenceRole::TypeUse,
+            EntityKind::TypeAlias,
+        ),
+        (
+            "= Local;",
+            2,
+            "Token",
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "typeof Local",
+            7,
+            "Token",
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "instance: Both",
+            10,
+            "Both",
+            OccurrenceRole::TypeUse,
+            EntityKind::Class,
+        ),
+        (
+            "= Both;",
+            2,
+            "Both",
+            OccurrenceRole::Reference,
+            EntityKind::Class,
+        ),
+    ] {
+        let target = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == kind
+                    && entity.canonical_name == name
+                    && entity.evidence.source.as_ref().unwrap().span().file()
+                        == fixture.snapshots[1].file()
+            })
+            .unwrap()
+            .id;
+        let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert_eq!(occurrence.role, role, "{needle}");
+        assert_eq!(
+            occurrence.target,
+            OccurrenceTarget::Resolved { symbol: target },
+            "{needle}"
+        );
+    }
+}
+
+#[test]
+fn typescript_export_names_do_not_become_local_value_references() {
+    let source = "type Token = string; const Public = 1; export {Token}; export type {Token as Public}; export {Token as Remote} from './provider';\n";
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/provider.ts"],
+        [source, "export const Token = 1;"],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let gaps: Vec<_> = output
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "ecmascript-export-target-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 3);
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+    for gap in gaps {
+        assert_eq!(gap.domain, FactDomain::Relations);
+        assert_eq!(gap.source.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(gap.source.span().file(), fixture.snapshots[0].file());
+    }
+    let token = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::TypeAlias && entity.canonical_name == "Token")
+        .unwrap()
+        .id;
+    for (needle, offset, role, resolved) in [
+        ("export {Token}", 8, OccurrenceRole::Reference, true),
+        ("type {Token", 6, OccurrenceRole::TypeUse, true),
+        ("as Public", 3, OccurrenceRole::Reference, false),
+        (
+            "export {Token as Remote",
+            8,
+            OccurrenceRole::Reference,
+            false,
+        ),
+        ("as Remote", 3, OccurrenceRole::Reference, false),
+    ] {
+        let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert_eq!(occurrence.role, role, "{needle}");
+        if resolved {
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol: token },
+                "{needle}"
+            );
+        } else {
+            assert!(
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+                "{needle}: {occurrence:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn typescript_references_select_the_written_type_or_value_namespace() {
+    let source = "type Token = string; const Token = 'value'; let typed: Token = Token; type Query = typeof Token; const object = {Token};\n";
+    let language = SemanticProjectLanguage::TypeScript;
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/other.ts"],
+        [source, "export const unrelated = 0;"],
+        language,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let target = |kind| {
+        output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == kind && entity.canonical_name == "Token")
+            .unwrap()
+            .id
+    };
+    for (needle, offset, role, kind) in [
+        (
+            "typed: Token",
+            "typed: ".len(),
+            OccurrenceRole::TypeUse,
+            EntityKind::TypeAlias,
+        ),
+        (
+            "= Token;",
+            "= ".len(),
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "typeof Token",
+            "typeof ".len(),
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "{Token}",
+            1,
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+    ] {
+        let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+                    && occurrence.source.span().end_byte() == start + 5
+            })
+            .unwrap();
+        assert_eq!(occurrence.role, role, "{needle}");
+        assert_eq!(
+            occurrence.target,
+            OccurrenceTarget::Resolved {
+                symbol: target(kind)
+            },
+            "{needle}"
+        );
+        assert_eq!(
+            occurrence.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+}
+
+#[test]
 fn every_language_emits_complete_tier_b_project_semantics() {
     for case in language_cases() {
         let fixture = ProjectFixture::new(case.paths, case.sources, case.language);
