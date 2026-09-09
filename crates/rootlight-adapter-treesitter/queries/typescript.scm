@@ -16,6 +16,7 @@
   (abstract_method_signature)
   (variable_declarator)
   (type_parameter)
+  (mapped_type_clause)
 ] @declaration
 
 [
@@ -31,6 +32,7 @@
   (abstract_method_signature name: [(property_identifier) (identifier)] @definition)
   (variable_declarator name: (identifier) @definition)
   (type_parameter name: (type_identifier) @definition)
+  (mapped_type_clause name: (type_identifier) @definition)
 ]
 
 (import_statement) @import
@@ -61,6 +63,8 @@
 (variable_declaration (variable_declarator) @signature)
 (for_in_statement kind: "var") @signature
 (statement_block) @scope
+; The key binder belongs to this mapped member, never a sibling type expression.
+(index_signature (mapped_type_clause)) @scope
 [(class_declaration type_parameters: (type_parameters))
  (abstract_class_declaration type_parameters: (type_parameters))
  (interface_declaration type_parameters: (type_parameters))

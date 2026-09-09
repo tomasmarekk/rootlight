@@ -1952,6 +1952,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "dart.extension.scope"
                         | "javascript.lambda.scope"
                         | "typescript.lambda.scope"
+                        | "typescript.mapped_type.scope"
                 ) {
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
@@ -4406,6 +4407,10 @@ mod tests {
             ("typescript.type_alias.declaration", EntityKind::TypeAlias),
             (
                 "typescript.type_parameter.declaration",
+                EntityKind::TypeParameter,
+            ),
+            (
+                "typescript.mapped_type_parameter.declaration",
                 EntityKind::TypeParameter,
             ),
             ("typescript.variable.declaration", EntityKind::Variable),

@@ -2099,7 +2099,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     if declaration.kind() == SyntaxFactKind::Scope
                         && matches!(
                             declaration.syntax_kind().as_str(),
-                            "javascript.lambda.scope" | "typescript.lambda.scope"
+                            "javascript.lambda.scope"
+                                | "typescript.lambda.scope"
+                                | "typescript.mapped_type.scope"
                         )
                     {
                         let next = ecmascript_scope_positions

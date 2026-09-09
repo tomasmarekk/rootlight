@@ -40,6 +40,8 @@ use tempfile::{TempDir, tempdir_in};
 
 #[path = "project_semantic_adapters/dart.rs"]
 mod dart;
+#[path = "project_semantic_adapters/inner_type_bindings.rs"]
+mod inner_type_bindings;
 #[path = "project_semantic_adapters/reexports.rs"]
 mod reexports;
 #[path = "project_semantic_adapters/type_parameters.rs"]

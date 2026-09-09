@@ -6,12 +6,20 @@ use super::*;
 
 #[test]
 fn typescript_type_parameter_definitions_keep_exact_identity_and_replay() {
+    for source in [
+        "function first<名>(value: 名) {}\r\ntype Box<名> = 名;\r\nclass Holder<名> { value!: 名; }",
+        "type Box = { [名 in 'a']: 名 } |\r\n{ [名 in 'b']: { [名 in 'c']: 名 } };",
+    ] {
+        assert_type_parameter_identity_and_replay(source);
+    }
+}
+
+fn assert_type_parameter_identity_and_replay(source: &str) {
     let case = CASES
         .iter()
         .copied()
         .find(|case| case.name == "typescript")
         .unwrap();
-    let source = "function first<名>(value: 名) {}\r\ntype Box<名> = 名;\r\nclass Holder<名> { value!: 名; }";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, case);
     let fixture = Fixture::new(case, source.as_bytes());
@@ -34,8 +42,11 @@ fn typescript_type_parameter_definitions_keep_exact_identity_and_replay() {
     assert_eq!(parameters.len(), 3);
     let identities: BTreeSet<_> = parameters.iter().map(|entity| entity.id).collect();
     assert_eq!(identities.len(), 3);
-    for (offset, _) in source.match_indices("<名>") {
-        let start = u64::try_from(offset + 1).unwrap();
+    for (offset, _) in source
+        .match_indices('名')
+        .filter(|(offset, _)| source[..*offset].ends_with('<') || source[..*offset].ends_with('['))
+    {
+        let start = u64::try_from(offset).unwrap();
         let definition = first
             .document()
             .occurrences
