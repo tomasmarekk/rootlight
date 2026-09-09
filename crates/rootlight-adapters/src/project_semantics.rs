@@ -1307,7 +1307,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
         structural_entity_kind(fact).is_some()
             || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
-            || ecmascript::is_default_export(fact)
+            || ecmascript::is_export_metadata(fact)
             || is_identity_capture_fact(fact)
     }) {
         select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
@@ -1629,7 +1629,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     entities: Vec<SemanticEntity>,
     declarations: Vec<DeclarationDraft>,
     imports: Vec<ImportDraft>,
-    default_exports: BTreeMap<FileId, Vec<SemanticEntity>>,
+    exports: BTreeMap<FileId, BTreeMap<String, Vec<ecmascript::exports::ExportTarget>>>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1654,7 +1654,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             entities: Vec::new(),
             declarations: Vec::new(),
             imports: Vec::new(),
-            default_exports: BTreeMap::new(),
+            exports: BTreeMap::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1668,6 +1668,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.collect_syntax()?;
         self.materialize_entities()?;
         self.materialize_default_exports()?;
+        self.materialize_named_exports()?;
         self.materialize_imports_and_occurrences()?;
         self.materialize_inheritance()?;
         self.materialize_generated_mappings()?;
@@ -1720,7 +1721,16 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 && let Some(entities) = candidates.remove(&key(*span))
                 && entities.len() == 1
             {
-                self.default_exports.insert(file, entities);
+                self.exports.entry(file).or_default().insert(
+                    "default".to_owned(),
+                    entities
+                        .into_iter()
+                        .map(|entity| ecmascript::exports::ExportTarget {
+                            entity,
+                            type_only: false,
+                        })
+                        .collect(),
+                );
                 continue;
             }
             // Expression exports and duplicate defaults need their own binding
@@ -3579,7 +3589,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         }
         if let Some(qualifier) = occurrence.qualifier.as_deref() {
             let mut namespace_symbols = BTreeSet::new();
-            let mut default_namespace = false;
+            let mut native_namespace = false;
             for import in self
                 .imports
                 .iter()
@@ -3598,18 +3608,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .get(&(import.file, import.module.clone()))
                     .cloned()
                     .unwrap_or_default();
-                if occurrence.name == "default"
-                    && matches!(
-                        self.analyzer.language,
-                        SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
-                    )
-                {
-                    default_namespace = true;
+                if matches!(
+                    self.analyzer.language,
+                    SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+                ) {
+                    native_namespace = true;
                     namespace_symbols.extend(
                         target_files
                             .iter()
-                            .filter_map(|file| self.default_exports.get(file))
+                            .filter_map(|file| self.exports.get(file)?.get(&occurrence.name))
                             .flatten()
+                            .filter(|target| {
+                                !target.type_only || occurrence.role == OccurrenceRole::TypeUse
+                            })
+                            .map(|target| &target.entity)
                             .filter(admits_namespace)
                             .map(|entity| entity.symbol),
                     );
@@ -3623,7 +3635,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     );
                 }
             }
-            if default_namespace || !namespace_symbols.is_empty() {
+            if native_namespace || !namespace_symbols.is_empty() {
                 return ResolutionCandidates {
                     symbols: namespace_symbols.into_iter().collect(),
                     kind: ResolutionKind::Binding,
@@ -3725,7 +3737,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .filter(|entity| entity.file == occurrence.file)
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
-        let mut default_import = false;
+        let mut native_import = false;
         for import in self
             .imports
             .iter()
@@ -3751,18 +3763,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .cloned()
                 .unwrap_or_default();
             for lookup_name in lookup_names {
-                if lookup_name == "default"
-                    && matches!(
-                        self.analyzer.language,
-                        SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
-                    )
-                {
-                    default_import = true;
+                if matches!(
+                    self.analyzer.language,
+                    SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+                ) {
+                    native_import = true;
                     symbols.extend(
                         target_files
                             .iter()
-                            .filter_map(|file| self.default_exports.get(file))
+                            .filter_map(|file| self.exports.get(file)?.get(lookup_name))
                             .flatten()
+                            .filter(|target| {
+                                !target.type_only || occurrence.role == OccurrenceRole::TypeUse
+                            })
+                            .map(|target| &target.entity)
                             .filter(admits_namespace)
                             .map(|entity| entity.symbol),
                     );
@@ -3803,7 +3817,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         }
         if symbols.is_empty()
             && permit_global_fallback
-            && !default_import
+            && !native_import
             && let Some(candidates) = definitions.get(&occurrence.name)
         {
             symbols.extend(
@@ -4986,7 +5000,7 @@ fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxF
 fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
-        && !ecmascript::is_default_export(fact)
+        && !ecmascript::is_export_metadata(fact)
 }
 
 const fn supports_symbol_signature(kind: EntityKind) -> bool {

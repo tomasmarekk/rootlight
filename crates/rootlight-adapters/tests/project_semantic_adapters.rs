@@ -42,6 +42,264 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 
 #[test]
+fn native_local_export_names_cannot_be_string_literals() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        let provider = "function Actual() {} export {'Actual' as Public};";
+        let source = "import {Public as Local} from './provider'; const value = Local;";
+        let fixture = ProjectFixture::new(
+            ["src/main.ts", "src/provider.ts"],
+            [source, provider],
+            language,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let start = u64::try_from(source.rfind("Local;").unwrap()).unwrap();
+        let reference = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(matches!(
+            reference.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(
+            output
+                .document()
+                .skipped_regions
+                .iter()
+                .any(
+                    |gap| gap.detail == "ecmascript-export-entry-target-unavailable"
+                        && gap.source.content_hash() == content_hash(provider.as_bytes())
+                )
+        );
+    }
+}
+
+#[test]
+fn native_named_imports_require_source_backed_export_entries() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (provider, exported, expected) in [
+            ("export default function Actual() {}", "Actual", None),
+            ("function Actual() {}", "Actual", None),
+            ("{ function Actual() {} } export {Actual};", "Actual", None),
+            ("{ const Actual = 1; } export {Actual};", "Actual", None),
+            (
+                "function Actual() {} export {Actual as '\\uD800'};",
+                "Actual",
+                None,
+            ),
+            ("export function Actual() {}", "Actual", Some("Actual")),
+            (
+                "function Actual() {} export {Actual as Public};",
+                "Public",
+                Some("Actual"),
+            ),
+            (
+                "export default function Actual() {} export {Actual};",
+                "Actual",
+                Some("Actual"),
+            ),
+            (
+                "function Actual() {} export {Actual as default};",
+                "default",
+                Some("Actual"),
+            ),
+            (
+                "function Actual() {} export {Actual as 'public-name'};",
+                "'public-name'",
+                Some("Actual"),
+            ),
+            (
+                "function Actual() {} export {Actual as 'pub\\u006cic'};",
+                "public",
+                Some("Actual"),
+            ),
+            (
+                "export function Outer() { function Actual() {} }",
+                "Actual",
+                None,
+            ),
+            (
+                "export const Actual = 1, Second = 2;",
+                "Second",
+                Some("Second"),
+            ),
+            (
+                "export const {key: Actual} = {key: 1};",
+                "Actual",
+                Some("Actual"),
+            ),
+        ] {
+            let source =
+                format!("import {{{exported} as Local}} from './provider'; const value = Local;");
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source.as_str(), provider],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let start = u64::try_from(source.rfind("Local;").unwrap()).unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.source.span().start_byte() == start
+                })
+                .unwrap();
+            if let Some(name) = expected {
+                let target = output
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == name
+                            && !entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    reference.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{language:?}: {provider}"
+                );
+            } else {
+                assert!(
+                    matches!(reference.target, OccurrenceTarget::Unresolved { .. }),
+                    "{language:?}: {provider}: {:?}",
+                    reference.target
+                );
+            }
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn native_namespace_calls_use_public_export_names_only() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (provider, member, resolved) in [
+            (
+                "function Actual() {} export {Actual as Public};",
+                "Public",
+                true,
+            ),
+            (
+                "function Actual() {} export {Actual as Public};",
+                "Actual",
+                false,
+            ),
+            ("export default function Actual() {}", "Actual", false),
+            ("export function Actual() {}", "Actual", true),
+        ] {
+            let source = format!(
+                "import * as Space from './provider'; function run() {{ Space.{member}(); }}"
+            );
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source.as_str(), provider],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let call = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+                .unwrap();
+            if resolved {
+                let target = output
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "Actual" && entity.kind == EntityKind::Function
+                    })
+                    .unwrap();
+                assert_eq!(
+                    call.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+                assert!(
+                    output
+                        .document()
+                        .relations
+                        .iter()
+                        .any(|relation| relation.predicate == RelationPredicate::Calls
+                            && relation.object
+                                == rootlight_ir::RelationEndpoint::Entity(target.id))
+                );
+            } else {
+                assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+            }
+        }
+    }
+}
+
+#[test]
+fn typescript_type_only_export_aliases_do_not_expose_runtime_values() {
+    for export in [
+        "export type {Actual as Public};",
+        "export {type Actual as Public};",
+    ] {
+        let provider = format!("class Actual {{}} {export}");
+        let source =
+            "import {Public as Local} from './provider'; let item: Local; const invalid = Local;";
+        let fixture = ProjectFixture::new(
+            ["src/main.ts", "src/provider.ts"],
+            [source, provider.as_str()],
+            SemanticProjectLanguage::TypeScript,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let target = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Actual" && entity.kind == EntityKind::Class)
+            .unwrap();
+        for (needle, resolved) in [(": Local;", true), ("= Local;", false)] {
+            let start = u64::try_from(source.find(needle).unwrap() + 2).unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.source.span().start_byte() == start
+                })
+                .unwrap();
+            if resolved {
+                assert_eq!(
+                    reference.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+            } else {
+                assert!(matches!(
+                    reference.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn native_default_exports_resolve_the_exact_declared_symbol() {
     for language in [
         SemanticProjectLanguage::JavaScript,
@@ -516,6 +774,23 @@ fn typescript_export_names_do_not_become_local_value_references() {
         SemanticProjectLanguage::TypeScript,
     );
     let output = analyze_with_real_parser(&fixture);
+    let entry_gaps: Vec<_> = output
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "ecmascript-export-entry-target-unavailable")
+        .collect();
+    assert_eq!(entry_gaps.len(), 1);
+    let span = entry_gaps[0].source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "Token as Remote"
+    );
+    assert_eq!(
+        entry_gaps[0].source.content_hash(),
+        content_hash(source.as_bytes())
+    );
     let gaps: Vec<_> = output
         .document()
         .skipped_regions
@@ -3610,6 +3885,22 @@ fn fixture_facts(source: &str, file: rootlight_ids::FileId, language: &str) -> V
                     SyntaxKindLabel::new(&declaration_kind).expect("label is valid"),
                 ));
                 local_id += 1;
+                if matches!(language, "javascript" | "typescript")
+                    && line.trim_start().starts_with("export ")
+                {
+                    facts.push(SyntaxFact::new(
+                        local_id,
+                        Some(declaration_id),
+                        SyntaxFactKind::Signature,
+                        span(file, line_start, line_end),
+                        2,
+                        SyntaxKindLabel::new(&format!(
+                            "{language}.export_named_declaration.signature"
+                        ))
+                        .expect("label is valid"),
+                    ));
+                    local_id += 1;
+                }
                 facts.push(SyntaxFact::new(
                     local_id,
                     Some(declaration_id),

@@ -3999,6 +3999,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
         && !fact.syntax_kind().as_str().contains(".default_export_")
+        && !fact.syntax_kind().as_str().contains(".export_")
         && fact.syntax_kind().as_str() != "sql.body.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
         && !fact.syntax_kind().as_str().starts_with("astro.")

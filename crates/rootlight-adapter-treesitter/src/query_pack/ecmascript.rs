@@ -57,11 +57,53 @@ pub(super) fn import_signature_syntax(
     }
 }
 
-pub(super) fn default_export_signature_syntax(
+pub(super) fn export_signature_syntax(
     family: GrammarFamily,
     node: Node<'_>,
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    let specifier = if node.kind() == "export_specifier" {
+        Some(node)
+    } else {
+        node.parent()
+            .filter(|parent| parent.kind() == "export_specifier")
+    };
+    if let Some(specifier) = specifier {
+        let Some(statement) = specifier.parent().and_then(|clause| clause.parent()) else {
+            return Ok(None);
+        };
+        let role = if node != specifier {
+            if specifier.child_by_field_name("name") == Some(node) {
+                "name"
+            } else {
+                "alias"
+            }
+        } else if statement.child_by_field_name("source").is_some()
+            || !statement
+                .parent()
+                .is_some_and(|parent| parent.kind() == "program")
+        {
+            "remote"
+        } else if has_type_modifier(specifier, cancellation)?
+            || has_type_modifier(statement, cancellation)?
+        {
+            "type"
+        } else {
+            "local"
+        };
+        return Ok(Some(match (family == GrammarFamily::TypeScript, role) {
+            (true, "name") => "typescript.export_binding_name",
+            (false, "name") => "javascript.export_binding_name",
+            (true, "alias") => "typescript.export_binding_alias",
+            (false, "alias") => "javascript.export_binding_alias",
+            (true, "type") => "typescript.export_type_specifier",
+            (false, "type") => "javascript.export_type_specifier",
+            (true, "local") => "typescript.export_local_specifier",
+            (false, "local") => "javascript.export_local_specifier",
+            (true, _) => "typescript.export_remote_specifier",
+            (false, _) => "javascript.export_remote_specifier",
+        }));
+    }
     let Some(parent) = node
         .parent()
         .filter(|parent| parent.kind() == "export_statement")
@@ -87,7 +129,15 @@ pub(super) fn default_export_signature_syntax(
             },
         ));
     }
-    Ok(None)
+    Ok(
+        (parent.child_by_field_name("declaration") == Some(node)).then_some(
+            if family == GrammarFamily::TypeScript {
+                "typescript.export_named_declaration"
+            } else {
+                "javascript.export_named_declaration"
+            },
+        ),
+    )
 }
 
 pub(super) fn export_reference_syntax(

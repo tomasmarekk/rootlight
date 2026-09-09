@@ -1,10 +1,24 @@
-//! Import bindings reconstructed from native grammar-field evidence.
+//! Module bindings reconstructed from native grammar-field evidence.
 //! Source-ordered metadata avoids rescanning whole files per import; absent or
 //! unsupported literal evidence cannot fall back to guessed textual bindings.
 
 use super::*;
 
+pub(super) mod exports;
 mod string_literal;
+
+pub(super) fn is_export_metadata(fact: &SyntaxFact) -> bool {
+    is_default_export(fact)
+        || (fact.kind() == SyntaxFactKind::Signature
+            && (fact
+                .syntax_kind()
+                .as_str()
+                .starts_with("typescript.export_")
+                || fact
+                    .syntax_kind()
+                    .as_str()
+                    .starts_with("javascript.export_")))
+}
 
 struct NativeImports<'a> {
     facts: BTreeMap<u64, Vec<&'a SyntaxFact>>,

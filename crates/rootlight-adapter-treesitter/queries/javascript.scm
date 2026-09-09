@@ -23,8 +23,11 @@
 (namespace_import (identifier) @signature)
 (import_specifier) @signature
 (import_specifier name: [(identifier) (string)] @signature)
-(export_statement "default" declaration: (_) @signature)
+(export_statement declaration: (_) @signature)
 (export_statement "default" value: (_) @signature)
+(export_specifier) @signature
+(export_specifier name: [(identifier) (string)] @signature)
+(export_specifier alias: [(identifier) (string)] @signature)
 (import_clause (identifier) @declaration @definition)
 (namespace_import (identifier) @declaration @definition)
 (import_specifier name: (identifier) @declaration @definition)
