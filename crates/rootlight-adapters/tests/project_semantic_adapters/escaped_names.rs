@@ -4,6 +4,208 @@
 
 use super::*;
 
+fn assert_bounded_call_relation(
+    output: &rootlight_adapter_sdk::ProjectAnalysisOutput,
+    call: &rootlight_ir::OccurrenceRecord,
+    target: rootlight_ids::SymbolId,
+) {
+    assert!(
+        output
+            .document()
+            .relations
+            .iter()
+            .any(|relation| relation.subject
+                == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+                && relation.predicate == RelationPredicate::Calls
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(target))
+    );
+    assert!(
+        output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .count()
+            <= 256
+    );
+}
+
+#[test]
+fn bounded_analysis_preserves_imported_calls_independently_of_identifier_spelling() {
+    for (import, call) in [
+        ("import {Run} from './provider';", "Run()"),
+        ("import {Run} from './provider';", r"\u0052un()"),
+        (r"import {Run as \u004cocal} from './provider';", "Local()"),
+        (
+            "import * as Space from './provider';",
+            r"\u0053pace.\u0052un()",
+        ),
+        (
+            r"import * as \u0053pace from './provider';",
+            "Space /* receiver */ . Run()",
+        ),
+    ] {
+        for language in [
+            SemanticProjectLanguage::JavaScript,
+            SemanticProjectLanguage::TypeScript,
+        ] {
+            let mut source = format!("{import}\nfunction check() {{\n");
+            for index in 0..320 {
+                source.push_str(&format!("unknown_{index}();\n"));
+            }
+            source.push_str(&format!("{call};\n}}"));
+            let fixture = ProjectFixture::new(
+                ["main.ts", "provider.ts"],
+                [source.as_str(), "export function Run() {}"],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            assert!(
+                output
+                    .document()
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "project-syntax-fact-limit"
+                        && diagnostic.coverage_effect == CoverageStatus::Bounded)
+            );
+            let target = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Run" && entity.kind == EntityKind::Function
+                })
+                .unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.role == OccurrenceRole::CallSite
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+                })
+                .unwrap_or_else(|| panic!("lost imported call: {language:?}: {import} / {call}"));
+            assert_bounded_call_relation(&output, reference, target.id);
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_analysis_preserves_nonrecursive_local_calls_with_escaped_names() {
+    for (definition, call) in [
+        (r"\u0052un", "Run"),
+        ("Run", r"\u0052un"),
+        (r"R\u0075n", r"\u0052un"),
+    ] {
+        for language in [
+            SemanticProjectLanguage::JavaScript,
+            SemanticProjectLanguage::TypeScript,
+        ] {
+            let mut source =
+                format!("function {definition}() {{ {call}(); }}\nfunction check() {{\n");
+            for index in 0..320 {
+                source.push_str(&format!("unknown_{index}();\n"));
+            }
+            let call_start = u64::try_from(source.len()).unwrap();
+            source.push_str(&format!("{call}();\n}}"));
+            let fixture = ProjectFixture::new(["main.ts"], [source.as_str()], language);
+            let output = analyze_with_real_parser(&fixture);
+            assert!(
+                output
+                    .document()
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "project-syntax-fact-limit")
+            );
+            let target = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Run" && entity.kind == EntityKind::Function
+                })
+                .unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::CallSite
+                        && occurrence.source.span().start_byte() == call_start
+                })
+                .unwrap_or_else(|| {
+                    panic!("lost nonrecursive call: {language:?}: {definition} / {call}")
+                });
+            assert_bounded_call_relation(&output, reference, target.id);
+            assert_eq!(
+                reference.target,
+                OccurrenceTarget::Resolved { symbol: target.id }
+            );
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_namespace_calls_retain_each_member_of_the_same_import() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        let mut source = "import * as Space from './provider'; function check() {\n".to_owned();
+        for index in 0..320 {
+            source.push_str(&format!("unknown_{index}();\n"));
+        }
+        source.push_str(r"\u0053pace.Run(); Space.Other(); Space.\u0052un(); }");
+        let fixture = ProjectFixture::new(
+            ["main.ts", "provider.ts"],
+            [
+                source.as_str(),
+                "export function Run() {} export function Other() {}",
+            ],
+            language,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        assert!(
+            output
+                .document()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "project-syntax-fact-limit")
+        );
+        for name in ["Run", "Other"] {
+            let target = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name && entity.kind == EntityKind::Function)
+                .unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::CallSite
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+                })
+                .unwrap_or_else(|| panic!("lost member {name} in {language:?}"));
+            assert_bounded_call_relation(&output, reference, target.id);
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
 #[test]
 fn escaped_local_declarations_and_references_keep_the_exact_binding() {
     for body in [

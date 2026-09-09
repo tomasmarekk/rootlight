@@ -293,7 +293,12 @@ impl SemanticProjectAnalyzer {
                 max_syntax_depth: output.report().resources().max_syntax_depth(),
             });
         }
-        bound_project_syntax_facts(self.language, &mut parsed)?;
+        bound_project_syntax_facts(
+            self.language,
+            &mut parsed,
+            request.limits().ir().max_string_bytes,
+            cancellation,
+        )?;
         ProjectFactsBuilder::new(self, request, parsed, cancellation).build()
     }
 }
@@ -301,6 +306,8 @@ impl SemanticProjectAnalyzer {
 fn bound_project_syntax_facts(
     language: SemanticProjectLanguage,
     parsed: &mut [ParsedInput<'_, '_>],
+    maximum_name_bytes: usize,
+    cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     let maximum_optional_facts = project_optional_syntax_fact_limit(parsed.len());
     let total_optional_facts = parsed.iter().try_fold(0_usize, |total, input| {
@@ -318,6 +325,26 @@ fn bound_project_syntax_facts(
         return Ok(());
     }
 
+    let scheduling_names = parsed
+        .iter()
+        .map(|input| {
+            if matches!(
+                language,
+                SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+            ) {
+                ecmascript::scheduling::SchedulingNames::new(
+                    &input.facts,
+                    input.input.source().bytes(),
+                    maximum_name_bytes,
+                    cancellation,
+                )
+                .map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<Vec<_>, AdapterError>>()?;
+
     let code = DiagnosticCode::new(PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
     let mut remaining_optional_facts = maximum_optional_facts;
@@ -327,12 +354,14 @@ fn bound_project_syntax_facts(
     // of repository path order.
     let priorities = parsed
         .iter()
-        .map(|input| {
+        .zip(&scheduling_names)
+        .map(|(input, names)| {
             project_input_relationship_priority(
                 language,
                 &input.facts,
                 input.input.source().bytes(),
                 &input.native_imports,
+                names.as_ref(),
             )
         })
         .collect::<Vec<_>>();
@@ -392,6 +421,7 @@ fn bound_project_syntax_facts(
             &input.facts,
             input.input.source().bytes(),
             &input.native_imports,
+            scheduling_names[input_index].as_ref(),
         );
         // Preserve enough Python syntax ancestry for one priority call and one
         // distinct nested local relationship in every later bounded input.
@@ -429,6 +459,7 @@ fn bound_project_syntax_facts(
             input.input.source().bytes(),
             allowance,
             &input.native_imports,
+            scheduling_names[input_index].as_ref(),
         );
         if input.facts.len() < original_len {
             input.diagnostics.push(AdapterDiagnostic::new(
@@ -464,6 +495,7 @@ fn retain_project_syntax_facts(
     source: &[u8],
     allowance: usize,
     native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) {
     let facts_by_id = facts
         .iter()
@@ -475,7 +507,7 @@ fn retain_project_syntax_facts(
     let mut remaining = allowance;
 
     let call_names = terminal_call_names(facts);
-    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names, names);
     for group in
         preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
     {
@@ -491,6 +523,7 @@ fn retain_project_syntax_facts(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        names,
     )
     .and_then(|group| facts_by_id.get(&group.call_id).copied())
     {
@@ -500,29 +533,36 @@ fn retain_project_syntax_facts(
             &facts_by_id,
             &mut selected,
             &mut remaining,
+            names,
         );
     }
     let imported_call_groups = imported_call_syntax_fact_groups(
         language,
-        facts,
         source,
         &facts_by_id,
         &call_names,
         &declared_calls,
         native_imports,
+        names,
     );
     for group in imported_call_groups {
         if remaining == 0 {
             break;
         }
-        let required = imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names);
+        let required =
+            imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names, names);
         select_syntax_fact_ids(required, &mut selected, &mut remaining);
     }
     // Spend remaining syntax on distinct callable-owner/callee shapes before
     // extra repeated sites. This schedules evidence, not semantic resolution.
-    for call in
-        distinct_call_syntax_representatives(facts, source, &facts_by_id, &call_names, &selected)
-    {
+    for call in distinct_call_syntax_representatives(
+        facts,
+        source,
+        &facts_by_id,
+        &call_names,
+        &selected,
+        names,
+    ) {
         if remaining == 0 {
             break;
         }
@@ -532,6 +572,7 @@ fn retain_project_syntax_facts(
             &facts_by_id,
             &mut selected,
             &mut remaining,
+            names,
         );
     }
     for call in facts
@@ -548,6 +589,7 @@ fn retain_project_syntax_facts(
             &facts_by_id,
             &mut selected,
             &mut remaining,
+            names,
         );
     }
     for fact in facts
@@ -573,6 +615,7 @@ fn retain_project_syntax_facts(
             &facts_by_id,
             &mut selected,
             &mut remaining,
+            names,
         );
     }
     for kind in [
@@ -604,6 +647,7 @@ fn preferred_relationship_allowance(
     facts: &[SyntaxFact],
     source: &[u8],
     native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> usize {
     let facts_by_id = facts
         .iter()
@@ -611,7 +655,7 @@ fn preferred_relationship_allowance(
         .collect::<BTreeMap<_, _>>();
     let mandatory = mandatory_project_syntax_fact_ids(facts);
     let call_names = terminal_call_names(facts);
-    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names, names);
     let mut preferred = mandatory.clone();
     let mut remaining = MAX_OPTIONAL_PROJECT_SYNTAX_FACTS;
     for group in
@@ -626,27 +670,25 @@ fn preferred_relationship_allowance(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        names,
     )
     .and_then(|group| facts_by_id.get(&group.call_id).copied())
     {
-        let terminal = call_names
-            .get(&call.local_id())
-            .and_then(|name| facts_by_id.get(name))
-            .copied();
-        let group = syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id);
+        let group = call_syntax_fact_group_ids(call, &call_names, &facts_by_id, names);
         select_syntax_fact_ids(group, &mut preferred, &mut remaining);
     }
     let groups = imported_call_syntax_fact_groups(
         language,
-        facts,
         source,
         &facts_by_id,
         &call_names,
         &declared_calls,
         native_imports,
+        names,
     );
     for group in groups {
-        let required = imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names);
+        let required =
+            imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names, names);
         select_syntax_fact_ids(required, &mut preferred, &mut remaining);
     }
     preferred
@@ -772,13 +814,14 @@ fn project_input_relationship_priority(
     facts: &[SyntaxFact],
     source: &[u8],
     native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> ProjectInputRelationshipPriority {
     let facts_by_id = facts
         .iter()
         .map(|fact| (fact.local_id(), fact))
         .collect::<BTreeMap<_, _>>();
     let call_names = terminal_call_names(facts);
-    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names);
+    let declared_calls = declared_call_ids(facts, source, &facts_by_id, &call_names, names);
     let domain_demand =
         preferred_domain_syntax_fact_groups(language, facts, source, &facts_by_id, &call_names)
             .len();
@@ -789,30 +832,26 @@ fn project_input_relationship_priority(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        names,
     )
     .unwrap_or_default();
     if local.demand > 1
         && let Some(call) = facts_by_id.get(&local.call_id).copied()
     {
-        let terminal = call_names
-            .get(&call.local_id())
-            .and_then(|name| facts_by_id.get(name))
-            .copied();
         let mandatory = mandatory_project_syntax_fact_ids(facts);
-        local.required_facts =
-            syntax_fact_group_ids(std::iter::once(call).chain(terminal), &facts_by_id)
-                .iter()
-                .filter(|local_id| !mandatory.contains(local_id))
-                .count();
+        local.required_facts = call_syntax_fact_group_ids(call, &call_names, &facts_by_id, names)
+            .iter()
+            .filter(|local_id| !mandatory.contains(local_id))
+            .count();
     }
     let imported_demand = imported_call_syntax_fact_groups(
         language,
-        facts,
         source,
         &facts_by_id,
         &call_names,
         &declared_calls,
         native_imports,
+        names,
     )
     .into_iter()
     .map(|group| group.demand)
@@ -832,6 +871,7 @@ fn preferred_local_call_syntax_fact_group(
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
     declared_calls: &BTreeSet<u64>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> Option<PreferredLocalCallGroup> {
     let test_declarations = positive_test_declarations(language, facts);
     let mut groups = BTreeMap::<(bool, String), Vec<&SyntaxFact>>::new();
@@ -840,7 +880,7 @@ fn preferred_local_call_syntax_fact_group(
         if !is_test && !declared_calls.contains(&call.local_id()) {
             continue;
         }
-        let Some(name) = retained_call_name(source, call, call_names, facts_by_id) else {
+        let Some(name) = scheduled_call_name(source, call, call_names, facts_by_id, names) else {
             continue;
         };
         groups
@@ -914,7 +954,9 @@ fn preferred_local_call_syntax_fact_group(
         .filter_map(|definition| {
             let (owner, kind) = definition_owner(definition, facts_by_id)?;
             is_callable_entity_kind(kind)
-                .then(|| source_text(source, definition.span()).map(|name| (owner, name)))
+                .then(|| {
+                    scheduled_definition_name(source, definition, names).map(|name| (owner, name))
+                })
                 .flatten()
         })
         .collect::<BTreeMap<_, _>>();
@@ -993,6 +1035,7 @@ fn declared_call_ids(
     source: &[u8],
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> BTreeSet<u64> {
     let declared_names = facts
         .iter()
@@ -1000,13 +1043,21 @@ fn declared_call_ids(
         .filter(|fact| {
             definition_owner(fact, facts_by_id).is_none_or(|(_, kind)| kind != EntityKind::Import)
         })
-        .filter_map(|fact| source_text(source, fact.span()))
+        .filter_map(|fact| scheduled_definition_name(source, fact, names))
         .collect::<BTreeSet<_>>();
     facts
         .iter()
         .filter(|fact| is_call_fact(fact))
+        .filter(|call| {
+            names.is_none_or(|names| {
+                names
+                    .calls
+                    .get(&call.local_id())
+                    .is_some_and(|call| call.receiver.is_none())
+            })
+        })
         .filter_map(|call| {
-            retained_call_name(source, call, call_names, facts_by_id)
+            scheduled_call_name(source, call, call_names, facts_by_id, names)
                 .filter(|name| declared_names.contains(name))
                 .map(|_| call.local_id())
         })
@@ -1042,6 +1093,7 @@ fn distinct_call_syntax_representatives<'fact>(
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
     selected: &BTreeSet<u64>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> Vec<&'fact SyntaxFact> {
     let declaration_kinds = facts
         .iter()
@@ -1049,7 +1101,7 @@ fn distinct_call_syntax_representatives<'fact>(
         .collect::<BTreeMap<_, _>>();
     let mut groups = BTreeMap::<CallSyntaxShape<'_>, (&SyntaxFact, bool)>::new();
     for call in facts.iter().filter(|fact| is_call_fact(fact)) {
-        let Some(name) = retained_call_name(source, call, call_names, facts_by_id) else {
+        let Some(name) = scheduled_call_name(source, call, call_names, facts_by_id, names) else {
             continue;
         };
         let Some(text) = source_text(source, call.span()) else {
@@ -1058,7 +1110,15 @@ fn distinct_call_syntax_representatives<'fact>(
         let shape = CallSyntaxShape {
             owner: enclosing_callable_declaration(call, facts_by_id, &declaration_kinds),
             name,
-            receiver: call_receiver(text, name),
+            receiver: names.map_or_else(
+                || call_receiver(text, name),
+                |names| {
+                    names
+                        .calls
+                        .get(&call.local_id())
+                        .and_then(|call| call.receiver.as_deref())
+                },
+            ),
             arity: call_arity(text),
         };
         let represented = selected.contains(&call.local_id());
@@ -1083,7 +1143,7 @@ fn distinct_call_syntax_representatives<'fact>(
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ImportedCallBinding {
     Named(String),
-    Namespace(String),
+    Namespace { local: String, member: String },
     Wildcard(String),
 }
 
@@ -1097,25 +1157,37 @@ struct ImportedCallSyntaxFactGroup {
 
 fn imported_call_syntax_fact_groups(
     language: SemanticProjectLanguage,
-    facts: &[SyntaxFact],
     source: &[u8],
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
     declared_calls: &BTreeSet<u64>,
     native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> Vec<ImportedCallSyntaxFactGroup> {
-    let calls = facts
-        .iter()
+    let calls = facts_by_id
+        .values()
+        .copied()
         .filter(|fact| is_call_fact(fact))
         .filter(|fact| !declared_calls.contains(&fact.local_id()))
         .filter_map(|call| {
-            let name = retained_call_name(source, call, call_names, facts_by_id)?;
+            let name = scheduled_call_name(source, call, call_names, facts_by_id, names)?;
             let (name, receiver) = if language == SemanticProjectLanguage::Dart {
                 dart::call_name(name)?
             } else {
                 (
                     name,
-                    source_text(source, call.span()).and_then(|text| call_receiver(text, name)),
+                    names.map_or_else(
+                        || {
+                            source_text(source, call.span())
+                                .and_then(|text| call_receiver(text, name))
+                        },
+                        |names| {
+                            names
+                                .calls
+                                .get(&call.local_id())
+                                .and_then(|call| call.receiver.as_deref())
+                        },
+                    ),
                 )
             };
             Some((
@@ -1125,13 +1197,15 @@ fn imported_call_syntax_fact_groups(
             ))
         })
         .collect::<Vec<_>>();
-    let declaration_kinds = facts
-        .iter()
+    let declaration_kinds = facts_by_id
+        .values()
+        .copied()
         .filter_map(|fact| structural_entity_kind(fact).map(|kind| (fact.local_id(), kind)))
         .collect::<BTreeMap<_, _>>();
     let mut grouped_calls = BTreeMap::<(u64, ImportedCallBinding, Option<u64>), Vec<u64>>::new();
-    for import in facts
-        .iter()
+    for import in facts_by_id
+        .values()
+        .copied()
         .filter(|fact| fact.kind() == SyntaxFactKind::Import)
     {
         // Scheduling and resolution must share native binding evidence. A
@@ -1157,9 +1231,23 @@ fn imported_call_syntax_fact_groups(
                         ImportedCallBinding::Named(local.clone())
                     }
                     ImportBinding::Namespace { local }
-                        if receiver.as_deref() == Some(local.as_str()) =>
+                        if receiver.as_deref().is_some_and(|receiver| {
+                            receiver == local
+                                || (names.is_some()
+                                    && receiver.split('.').next() == Some(local.as_str()))
+                        }) =>
                     {
-                        ImportedCallBinding::Namespace(local.clone())
+                        ImportedCallBinding::Namespace {
+                            local: local.clone(),
+                            member: match receiver
+                                .as_deref()
+                                .and_then(|receiver| receiver.strip_prefix(local))
+                                .and_then(|tail| tail.strip_prefix('.'))
+                            {
+                                Some(tail) => format!("{tail}.{call_name}"),
+                                None => call_name.clone(),
+                            },
+                        }
                     }
                     ImportBinding::Wildcard if receiver.is_none() => {
                         ImportedCallBinding::Wildcard(call_name.clone())
@@ -1245,6 +1333,7 @@ fn imported_call_syntax_fact_group_ids(
     group: &ImportedCallSyntaxFactGroup,
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) -> BTreeSet<u64> {
     let facts = std::iter::once(group.import_id)
         .chain(group.call_ids.iter().copied())
@@ -1255,7 +1344,12 @@ fn imported_call_syntax_fact_group_ids(
                 .flatten()
                 .and_then(|name| facts_by_id.get(name))
                 .copied();
-            std::iter::once(fact).chain(terminal)
+            let path = names
+                .and_then(|names| names.calls.get(&fact.local_id()))
+                .and_then(|call| call.path_fact)
+                .and_then(|id| facts_by_id.get(&id))
+                .copied();
+            std::iter::once(fact).chain(terminal).chain(path)
         });
     syntax_fact_group_ids(facts, facts_by_id)
 }
@@ -1266,19 +1360,67 @@ fn select_call_syntax_fact_group(
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     selected: &mut BTreeSet<u64>,
     remaining: &mut usize,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
 ) {
-    // A call and its terminal name form one relationship-bearing unit.
-    // Admitting either capture alone spends budget without a resolvable site.
+    let group = call_syntax_fact_group_ids(call, call_names, facts_by_id, names);
+    select_syntax_fact_ids(group, selected, remaining);
+}
+
+fn call_syntax_fact_group_ids(
+    call: &SyntaxFact,
+    call_names: &BTreeMap<u64, u64>,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    names: Option<&ecmascript::scheduling::SchedulingNames<'_>>,
+) -> BTreeSet<u64> {
+    // Member-path evidence belongs to the call's atomic syntax unit. Retaining
+    // a terminal without its receiver loses the exact imported relationship.
     let terminal = call_names
         .get(&call.local_id())
         .and_then(|name| facts_by_id.get(name))
         .copied();
-    select_syntax_fact_group(
-        std::iter::once(call).chain(terminal),
+    let path = names
+        .and_then(|names| names.calls.get(&call.local_id()))
+        .and_then(|call| call.path_fact)
+        .and_then(|id| facts_by_id.get(&id))
+        .copied();
+    syntax_fact_group_ids(
+        std::iter::once(call).chain(terminal).chain(path),
         facts_by_id,
-        selected,
-        remaining,
-    );
+    )
+}
+
+fn scheduled_definition_name<'a>(
+    source: &'a [u8],
+    fact: &SyntaxFact,
+    names: Option<&'a ecmascript::scheduling::SchedulingNames<'_>>,
+) -> Option<&'a str> {
+    names.map_or_else(
+        || source_text(source, fact.span()),
+        |names| {
+            names
+                .definitions
+                .get(&fact.local_id())
+                .map(|name| name.as_ref())
+        },
+    )
+}
+
+fn scheduled_call_name<'a>(
+    source: &'a [u8],
+    call: &SyntaxFact,
+    call_names: &BTreeMap<u64, u64>,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+    names: Option<&'a ecmascript::scheduling::SchedulingNames<'_>>,
+) -> Option<&'a str> {
+    names.map_or_else(
+        || retained_call_name(source, call, call_names, facts_by_id),
+        |names| {
+            names
+                .calls
+                .get(&call.local_id())
+                .map(|call| call.name.as_ref())
+        },
+    )
 }
 
 fn retained_call_name<'a>(

@@ -7,6 +7,7 @@ use super::*;
 pub(super) mod exports;
 pub(super) mod lexical;
 pub(super) mod references;
+pub(super) mod scheduling;
 mod string_literal;
 
 pub(super) fn is_export_metadata(fact: &SyntaxFact) -> bool {
@@ -269,15 +270,18 @@ mod tests {
             ),
         ];
         let by_id = facts.iter().map(|fact| (fact.local_id(), fact)).collect();
+        let names =
+            scheduling::SchedulingNames::new(&facts, source.as_bytes(), 1024, &Cancellation::new())
+                .unwrap();
         let schedule = |imports: &BTreeMap<u64, ParsedImport>| {
             imported_call_syntax_fact_groups(
                 SemanticProjectLanguage::TypeScript,
-                &facts,
                 source.as_bytes(),
                 &by_id,
                 &terminal_call_names(&facts),
                 &BTreeSet::new(),
                 imports,
+                Some(&names),
             )
         };
         assert!(schedule(&BTreeMap::new()).is_empty());
