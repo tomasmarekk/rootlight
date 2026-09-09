@@ -57,6 +57,7 @@ exclude = [
     "third_party/tree-sitter-sequel-0.3.11",
     "third_party/tree-sitter-swift-0.7.3",
     "third_party/tree-sitter-toml-ng-0.7.0",
+    "third_party/tree-sitter-typescript-0.23.2",
     "third_party/tree-sitter-yaml-0.7.2",
 ]
 resolver = "3"
@@ -170,6 +171,7 @@ tree-sitter-yaml = { path = "third_party/tree-sitter-yaml-0.7.2" }
 lru = { path = "third_party/lru-0.16.4" }
 tree-sitter-css = { path = "third_party/tree-sitter-css-0.25.0" }
 tree-sitter-swift = { path = "third_party/tree-sitter-swift-0.7.3" }
+tree-sitter-typescript = { path = "third_party/tree-sitter-typescript-0.23.2" }
 
 # Debug daemons hash large executables inside the bounded support-bundle request.
 [profile.dev.package.sha2]

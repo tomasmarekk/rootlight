@@ -60,7 +60,6 @@ pub(super) fn import_signature_syntax(
 pub(super) fn export_signature_syntax(
     family: GrammarFamily,
     node: Node<'_>,
-    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
     if node
@@ -74,11 +73,6 @@ pub(super) fn export_signature_syntax(
         }));
     }
     if node.kind() == "export_statement" {
-        let recovered_type = if family == GrammarFamily::TypeScript {
-            recovered_star_type_modifier(node, source, cancellation)?
-        } else {
-            None
-        };
         let mut clause = false;
         let mut namespace = false;
         let mut malformed = false;
@@ -87,14 +81,14 @@ pub(super) fn export_signature_syntax(
             cancellation.check()?;
             clause |= child.kind() == "export_clause";
             namespace |= child.kind() == "namespace_export";
-            malformed |= (child.has_error() || child.is_missing()) && Some(child) != recovered_type;
+            malformed |= child.has_error() || child.is_missing();
         }
         let unsupported = namespace
             || malformed
             || !node
                 .parent()
                 .is_some_and(|parent| parent.kind() == "program");
-        let type_only = recovered_type.is_some() || has_type_modifier(node, cancellation)?;
+        let type_only = has_type_modifier(node, cancellation)?;
         return Ok(Some(
             match (
                 family == GrammarFamily::TypeScript,
@@ -257,39 +251,6 @@ fn has_type_modifier(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
     Ok(false)
 }
 
-fn recovered_star_type_modifier<'tree>(
-    node: Node<'tree>,
-    source: &[u8],
-    cancellation: &Cancellation,
-) -> Result<Option<Node<'tree>>, AdapterError> {
-    // The pinned grammar represents the type token in `export type *` as ERROR
-    // (https://github.com/tree-sitter/tree-sitter-typescript/issues/348).
-    // Recover only this exact native prefix until the grammar supports it;
-    // parser diagnostics remain intact and other errors are not admitted.
-    let mut cursor = node.walk();
-    let mut prefix = Vec::new();
-    for child in node.children(&mut cursor) {
-        cancellation.check()?;
-        if child.kind() != "comment" {
-            prefix.push(child);
-            if prefix.len() == 3 {
-                break;
-            }
-        }
-    }
-    Ok(match prefix.as_slice() {
-        [export, modifier, star]
-            if export.kind() == "export"
-                && modifier.is_error()
-                && source.get(modifier.byte_range()) == Some(b"type".as_slice())
-                && star.kind() == "*" =>
-        {
-            Some(*modifier)
-        }
-        _ => None,
-    })
-}
-
 pub(super) fn retain_capture(
     node: Node<'_>,
     role: StructuralRole,
@@ -432,16 +393,21 @@ mod export_tests {
                 "export type * from './provider';",
                 "export /* before */ type /* after */ * from './provider';",
                 "export type *\nfrom './provider';",
+                "export\ntype\n* from './provider';",
             ] {
                 let mut parser = tree_sitter::Parser::new();
                 parser.set_language(&language.into()).unwrap();
                 let tree = parser.parse(source, None).unwrap();
+                assert!(
+                    !tree.root_node().has_error(),
+                    "{source}: {}",
+                    tree.root_node().to_sexp()
+                );
                 let statement = tree.root_node().named_child(0).unwrap();
                 assert_eq!(
                     export_signature_syntax(
                         GrammarFamily::TypeScript,
                         statement,
-                        source.as_bytes(),
                         &Cancellation::new()
                     )
                     .unwrap(),
@@ -454,7 +420,7 @@ mod export_tests {
     }
 
     #[test]
-    fn star_export_recovery_does_not_admit_other_errors_or_type_spellings() {
+    fn star_export_classification_does_not_admit_errors_or_type_spellings() {
         for (source, expected) in [
             (
                 "export * from './type';",
@@ -484,13 +450,8 @@ mod export_tests {
             let tree = parser.parse(source, None).unwrap();
             let statement = tree.root_node().named_child(0).unwrap();
             assert_eq!(
-                export_signature_syntax(
-                    GrammarFamily::TypeScript,
-                    statement,
-                    source.as_bytes(),
-                    &Cancellation::new()
-                )
-                .unwrap(),
+                export_signature_syntax(GrammarFamily::TypeScript, statement, &Cancellation::new())
+                    .unwrap(),
                 Some(expected),
                 "{source}: {}",
                 tree.root_node().to_sexp()

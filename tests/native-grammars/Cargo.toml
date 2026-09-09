@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 resolver = "3"
 
 [dev-dependencies]
+tree-sitter-typescript = { path = "../../third_party/tree-sitter-typescript-0.23.2", version = "=0.23.2", default-features = false }
 tree-sitter-astro-next = { path = "../../third_party/tree-sitter-astro-next-0.1.1", version = "=0.1.1", default-features = false }
 tree-sitter-md = { path = "../../third_party/tree-sitter-md-0.5.3", version = "=0.5.3", default-features = false }
 tree-sitter-powershell = { path = "../../third_party/tree-sitter-powershell-0.26.4", version = "=0.26.4", default-features = false }

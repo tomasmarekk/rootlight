@@ -487,7 +487,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "javascript",
             grammar_version: "0.23.2",
             source_package_sha256: "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
-            parser_sha256: "1902cb53fa7ff5179df89b2eea863165e84c8cc866226419dc26921d8c055885",
+            parser_sha256: "6d33e03eed242446c970d3ca7cf1d8f2086bf7e72f7ddbee13d70d8c01147d5b",
             scanner_sha256: Some(
                 "d563cd30b2f39718c9ae4292795c5ce03a2ad01954ba3a86ef84c2781a736673",
             ),
@@ -510,7 +510,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "typescript",
             grammar_version: "0.23.2",
             source_package_sha256: "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
-            parser_sha256: "74fe453edd70f4eae9af0a1050cbd7943d8971d59165b6aaebbaa0a0b716d1aa",
+            parser_sha256: "7f78650545def935784733b4f9a08d1fb9dd75b94896b0905b16e1c9a129cc76",
             scanner_sha256: Some(
                 "9125013b42cb888379d9be909f1d73dfb75a37626c2cdbf4122718a2b431a6d3",
             ),

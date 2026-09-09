@@ -799,7 +799,6 @@ fn candidate_for_capture(
                 .or(ecmascript::export_signature_syntax(
                     family,
                     capture.node,
-                    source,
                     cancellation,
                 )?)
                 .or_else(|| canonical_syntax(family, capture.node.kind()))

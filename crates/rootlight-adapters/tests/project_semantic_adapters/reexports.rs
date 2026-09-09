@@ -234,6 +234,7 @@ fn typescript_reexport_type_only_edges_cannot_be_widened_downstream() {
             "Middle",
         ),
         ("export type * from './provider';", "Actual"),
+        ("export\r\ntype\r\n* from './provider';", "Actual"),
     ] {
         let facade = format!("export {{{imported} as Public}} from './bridge';");
         let source =

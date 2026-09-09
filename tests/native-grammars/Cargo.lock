@@ -126,6 +126,7 @@ dependencies = [
  "tree-sitter-solidity",
  "tree-sitter-swift",
  "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
  "tree-sitter-yaml",
 ]
 
@@ -318,6 +319,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-toml-ng"
 version = "0.7.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
