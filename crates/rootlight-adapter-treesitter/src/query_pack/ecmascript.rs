@@ -39,6 +39,69 @@ pub(super) fn is_foreign_import_name(node: Node<'_>) -> bool {
     })
 }
 
+pub(super) fn qualified_reference_syntax(
+    family: GrammarFamily,
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    let typescript = family == GrammarFamily::TypeScript;
+    if matches!(
+        node.kind(),
+        "member_expression" | "nested_identifier" | "nested_type_identifier"
+    ) {
+        return Ok(Some(if typescript {
+            "typescript.member_path"
+        } else {
+            "javascript.member_path"
+        }));
+    }
+    let member = node.parent().is_some_and(|parent| {
+        matches!(parent.kind(), "member_expression" | "nested_identifier")
+            && parent.child_by_field_name("property") == Some(node)
+            || parent.kind() == "nested_type_identifier"
+                && parent.child_by_field_name("name") == Some(node)
+    });
+    let mut current = node;
+    let mut type_namespace = false;
+    let mut type_name = false;
+    let mut type_query = false;
+    while let Some(parent) = current.parent() {
+        cancellation.check()?;
+        match parent.kind() {
+            "member_expression" | "nested_identifier" => {
+                if parent.child_by_field_name("object") != Some(current)
+                    && parent.child_by_field_name("property") != Some(current)
+                {
+                    break;
+                }
+            }
+            "nested_type_identifier" => {
+                type_namespace = parent.child_by_field_name("module") == Some(current);
+                type_name = parent.child_by_field_name("name") == Some(current);
+                break;
+            }
+            "type_query" => {
+                type_query = true;
+                break;
+            }
+            _ => break,
+        }
+        current = parent;
+    }
+    Ok(
+        match (typescript, member, type_name, type_namespace, type_query) {
+            (true, true, true, _, _) => Some("typescript.type_member_name"),
+            (true, true, _, true, _) => Some("typescript.type_namespace_member"),
+            (true, true, _, _, true) => Some("typescript.type_query_member_name"),
+            (true, false, _, true, _) => Some("typescript.type_namespace_root"),
+            (true, false, _, _, true) => Some("typescript.type_query_value"),
+            (true, true, _, _, _) => Some("typescript.member_name"),
+            (false, true, _, _, _) => Some("javascript.member_name"),
+            _ => None,
+        },
+    )
+}
+
 pub(super) fn import_signature_syntax(
     family: GrammarFamily,
     node: Node<'_>,

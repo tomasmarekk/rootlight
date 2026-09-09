@@ -160,7 +160,12 @@ impl LocalBindings {
                 .flatten()
             {
                 cancellation.check()?;
-                let admitted = if occurrence.role == OccurrenceRole::TypeUse {
+                let admitted = if occurrence.role == OccurrenceRole::TypeUse
+                    || matches!(
+                        occurrence.syntax_kind.as_str(),
+                        "typescript.type_namespace_root.reference"
+                            | "typescript.type_namespace_member.reference"
+                    ) {
                     matches!(
                         binding.kind,
                         EntityKind::Class

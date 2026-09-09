@@ -3,6 +3,7 @@
 //! the bounded export graph rather than flattening every transitive namespace.
 
 use super::*;
+use crate::project_semantics::ecmascript::references;
 
 impl ProjectFactsBuilder<'_, '_, '_> {
     pub(super) fn materialize_namespace_members(
@@ -45,6 +46,10 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                 occurrence.role,
                 OccurrenceRole::Reference | OccurrenceRole::CallSite | OccurrenceRole::TypeUse
             ) {
+                continue;
+            }
+            if references::is_member_name(&occurrence.syntax_kind) && occurrence.qualifier.is_none()
+            {
                 continue;
             }
             let qualifier = occurrence.qualifier.as_deref().unwrap_or(&occurrence.name);
@@ -165,8 +170,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                 }
             }
             if handled {
-                let type_position = occurrence.role == OccurrenceRole::TypeUse
-                    || occurrence.syntax_kind == "typescript.type_query_value.reference";
+                let type_position = references::is_type_position(occurrence);
                 let mut typed_value = false;
                 let mut called_namespace = false;
                 selected.retain(|_, target| {

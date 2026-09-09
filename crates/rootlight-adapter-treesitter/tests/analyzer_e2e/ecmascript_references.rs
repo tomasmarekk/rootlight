@@ -5,6 +5,94 @@
 use super::*;
 
 #[test]
+fn qualified_reference_fields_keep_leaf_roles_and_generation_bound_replay() {
+    for case in CASES
+        .iter()
+        .copied()
+        .filter(|case| matches!(case.name, "javascript" | "typescript"))
+    {
+        let source = if case.name == "typescript" {
+            "import type * as Space from './provider'; type Value = typeof Space /* café */ .Public; let typed: Space.Nested.Contract;"
+        } else {
+            "import * as Space from './provider'; const value = Space /* café */ ?.Public; const nested = Space.Nested.Item;"
+        };
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, case);
+        let fixture = Fixture::new(case, source.as_bytes());
+        let budget = limits();
+        let initial = request(&fixture.snapshot, &fixture.source, case, &budget);
+        let parsed = rootlight_adapter_sdk::execute_parse(
+            provider.as_ref(),
+            &initial.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        let expected = if case.name == "typescript" {
+            [
+                ("Public", "type_query_member_name.reference"),
+                ("Nested", "type_namespace_member.reference"),
+                ("Contract", "type_member_name.reference"),
+            ]
+        } else {
+            [
+                ("Public", "member_name.reference"),
+                ("Nested", "member_name.reference"),
+                ("Item", "member_name.reference"),
+            ]
+        };
+        for (name, suffix) in expected {
+            let start = u64::try_from(source.find(name).unwrap()).unwrap();
+            assert!(
+                parsed
+                    .facts()
+                    .iter()
+                    .any(|fact| fact.syntax_kind().as_str().ends_with(suffix)
+                        && fact.span().start_byte() == start
+                        && fact.span().end_byte() == start + u64::try_from(name.len()).unwrap()),
+                "{source}: {name}/{suffix}"
+            );
+        }
+        let (first, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            !first
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.syntax_kind.ends_with(".member_path.reference"))
+        );
+        let next = fixture.next_generation();
+        let next_request = request(&next.snapshot, &next.source, case, &budget);
+        let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(fresh.document(), replay.document());
+        assert_eq!(fresh.report(), replay.report());
+        for occurrence in &replay.document().occurrences {
+            assert_eq!(occurrence.source.generation(), next.source.generation());
+            assert_eq!(
+                occurrence.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
 fn typescript_reference_roles_replay_under_reduced_and_required_budgets() {
     let source = "type 名 = string; const 名 = 'value'; let typed: 名 = 名; const object = {名}; export type {名 as Public};\r\n";
     let case = *CASES.iter().find(|case| case.name == "typescript").unwrap();

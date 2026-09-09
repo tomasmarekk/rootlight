@@ -746,6 +746,19 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("markdown.") {
         return false;
     }
+    // ECMAScript member leaves require their receiver's module/type evidence.
+    // Re-scoring a source-backed adapter gap by spelling would invent a target.
+    if matches!(
+        occurrence.syntax_kind.as_str(),
+        "javascript.member_name.reference"
+            | "typescript.member_name.reference"
+            | "typescript.type_member_name.reference"
+            | "typescript.type_namespace_member.reference"
+            | "typescript.type_query_member_name.reference"
+            | "typescript.type_namespace_root.reference"
+    ) {
+        return false;
+    }
     // R namespaces, object members and computed callees need their own environment
     // evidence. A matching local spelling is not even a justified candidate.
     if matches!(

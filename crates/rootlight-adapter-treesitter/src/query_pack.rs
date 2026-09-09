@@ -811,7 +811,11 @@ fn candidate_for_capture(
                 GrammarFamily::JavaScript | GrammarFamily::TypeScript
             ) =>
         {
-            if family == GrammarFamily::TypeScript
+            if let Some(syntax) =
+                ecmascript::qualified_reference_syntax(family, capture.node, cancellation)?
+            {
+                syntax
+            } else if family == GrammarFamily::TypeScript
                 && capture
                     .node
                     .parent()

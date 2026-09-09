@@ -5,6 +5,234 @@
 use super::*;
 
 #[test]
+fn qualified_namespace_reads_and_types_reach_exact_source_definitions() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (source, role, target_name) in [
+            (
+                "import * as Space from './provider'; const observed = Space.Public;",
+                OccurrenceRole::Reference,
+                "Actual",
+            ),
+            (
+                "import * as Space from './provider'; const observed = Space /* café */ . Public;",
+                OccurrenceRole::Reference,
+                "Actual",
+            ),
+            (
+                "import * as Space from './provider'; const observed = Space?.Public;",
+                OccurrenceRole::Reference,
+                "Actual",
+            ),
+            (
+                "import * as Facade from './facade'; const observed = Facade.Space.Public;",
+                OccurrenceRole::Reference,
+                "Actual",
+            ),
+            (
+                "import * as Space from './provider'; let observed: Space.Public;",
+                OccurrenceRole::TypeUse,
+                "Actual",
+            ),
+            (
+                "import * as Facade from './facade'; let observed: Facade.Space.Public;",
+                OccurrenceRole::TypeUse,
+                "Actual",
+            ),
+            (
+                "import type * as Space from './provider'; type Observed = typeof Space.Public;",
+                OccurrenceRole::Reference,
+                "Actual",
+            ),
+            (
+                "import type * as Space from './provider'; let observed: Space.Contract;",
+                OccurrenceRole::TypeUse,
+                "Contract",
+            ),
+            (
+                "import * as Space from './provider'; function run(Space: unknown) { let observed: Space.Public; }",
+                OccurrenceRole::TypeUse,
+                "Actual",
+            ),
+            (
+                "import type * as Facade from './facade'; let observed: Facade.Space.Contract;",
+                OccurrenceRole::TypeUse,
+                "Contract",
+            ),
+        ] {
+            if language == SemanticProjectLanguage::JavaScript
+                && (role == OccurrenceRole::TypeUse || source.contains("type "))
+            {
+                continue;
+            }
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/facade.ts", "src/provider.ts"],
+                [
+                    source,
+                    "export * as Space from './provider';",
+                    if language == SemanticProjectLanguage::TypeScript {
+                        "class Actual {} export {Actual as Public}; export interface Contract {}"
+                    } else {
+                        "class Actual {} export {Actual as Public};"
+                    },
+                ],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let name = if source.contains("Space.Contract") {
+                "Contract"
+            } else {
+                "Public"
+            };
+            let start = u64::try_from(source.rfind(name).unwrap()).unwrap();
+            let occurrence = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.source.span().start_byte() == start
+                        && occurrence.role == role
+                })
+                .unwrap_or_else(|| panic!("missing leaf: {language:?}: {source}"));
+            let target = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == target_name
+                        && entity.evidence.source.as_ref().unwrap().span().file()
+                            == fixture.snapshots[2].file()
+                })
+                .unwrap();
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{language:?}: {source}"
+            );
+            assert_eq!(
+                occurrence.source.span().end_byte(),
+                start + u64::try_from(name.len()).unwrap()
+            );
+            assert_eq!(
+                occurrence.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn qualified_member_names_never_bind_to_unrelated_lexical_names() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for body in [
+            "const observed = Space.Missing;",
+            "function run(Space) { return Space.Public; }",
+            "function run(object) { return object.Public; }",
+            "function run(object) { return object.Space; }",
+            "const observed = Space.Private;",
+            "function run(get) { return get().Space; }",
+            "const observed = Space.Unknown.Public;",
+        ] {
+            let source = format!(
+                "import * as Space from './provider'; class Public {{}} class Missing {{}} class Private {{}} {body}"
+            );
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source.as_str(), "export class Public {} class Private {}"],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let start = u64::try_from(source.rfind('.').unwrap() + 1).unwrap();
+            let occurrence = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.source.span().start_byte() == start
+                        && occurrence.role == OccurrenceRole::Reference
+                })
+                .unwrap();
+            assert!(
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+                "{language:?}: {source}: {:?}",
+                occurrence.target
+            );
+            assert!(
+                output
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source.span() == occurrence.source.span()),
+                "missing scoped gap: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn qualified_type_only_and_local_value_paths_cannot_be_widened() {
+    for (source, role) in [
+        (
+            "import type * as Space from './provider'; const observed = Space.Public;",
+            OccurrenceRole::Reference,
+        ),
+        (
+            "import * as Space from './provider'; const observed = Space.Contract;",
+            OccurrenceRole::Reference,
+        ),
+        (
+            "import * as Space from './provider'; class Missing {} let observed: Space.Missing;",
+            OccurrenceRole::TypeUse,
+        ),
+        (
+            "import * as Space from './provider'; function run(Space: unknown) { type Observed = typeof Space.Public; }",
+            OccurrenceRole::Reference,
+        ),
+    ] {
+        let fixture = ProjectFixture::new(
+            ["src/main.ts", "src/provider.ts"],
+            [
+                source,
+                "export class Public {} export interface Contract {}",
+            ],
+            SemanticProjectLanguage::TypeScript,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let start = u64::try_from(source.rfind('.').unwrap() + 1).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.role == role
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(
+            matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}: {:?}",
+            occurrence.target
+        );
+        assert!(
+            output
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span() == occurrence.source.span()),
+            "missing scoped gap: {source}"
+        );
+    }
+}
+
+#[test]
 fn namespace_imports_respect_local_binding_scopes() {
     for language in [
         SemanticProjectLanguage::JavaScript,
@@ -207,6 +435,16 @@ fn namespace_export_members_resolve_through_authored_module_chains() {
         SemanticProjectLanguage::TypeScript,
     ] {
         for (facade, source, target_name) in [
+            (
+                "export * as Space from './bridge';",
+                "import {Space as Local} from './facade'; function run() { Local /* receiver */ . Public(); }",
+                "Actual",
+            ),
+            (
+                "export * as Space from './bridge';",
+                "import {Space as Local} from './facade'; function run() { Local?.Public(); }",
+                "Actual",
+            ),
             (
                 "export * as Space from './bridge';",
                 "import {Space as Local} from './facade'; function run() { Local.Public(); }",

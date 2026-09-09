@@ -4063,7 +4063,16 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         SyntaxFactKind::Occurrence
             if matches!(
                 fact.syntax_kind().as_str(),
+                "javascript.member_path.reference" | "typescript.member_path.reference"
+            ) =>
+        {
+            None
+        }
+        SyntaxFactKind::Occurrence
+            if matches!(
+                fact.syntax_kind().as_str(),
                 "typescript.type_identifier.reference"
+                    | "typescript.type_member_name.reference"
                     | "typescript.type_export_local.reference"
                     | "javascript.type_export_local.reference"
             ) =>

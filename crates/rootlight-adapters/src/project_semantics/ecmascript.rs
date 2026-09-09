@@ -6,6 +6,7 @@ use super::*;
 
 pub(super) mod exports;
 pub(super) mod lexical;
+pub(super) mod references;
 mod string_literal;
 
 pub(super) fn is_export_metadata(fact: &SyntaxFact) -> bool {

@@ -91,6 +91,7 @@
   ] @call)
 
 [(identifier) (type_identifier) (property_identifier)] @reference
+[(member_expression) (nested_identifier) (nested_type_identifier)] @reference
 [(shorthand_property_identifier) (shorthand_property_identifier_pattern)] @reference
 (comment) @comment
 

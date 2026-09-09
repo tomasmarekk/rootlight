@@ -1532,6 +1532,11 @@ struct ImportDraft {
 
 impl ImportDraft {
     fn admits(&self, occurrence: &OccurrenceDraft) -> bool {
+        if ecmascript::references::is_member_name(&occurrence.syntax_kind)
+            && occurrence.qualifier.is_none()
+        {
+            return true;
+        }
         !self
             .type_only
             .contains(occurrence.qualifier.as_deref().unwrap_or(&occurrence.name))
@@ -1543,6 +1548,7 @@ impl ImportDraft {
                 occurrence.syntax_kind.as_str(),
                 "typescript.type_query_value.reference" | "typescript.export_local.reference"
             )
+            || ecmascript::references::is_type_position(occurrence)
     }
 }
 
@@ -1885,6 +1891,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let input = self.parsed[file_index].input;
             let facts = self.parsed[file_index].facts.clone();
             let bytes = input.source().bytes();
+            let member_paths = ecmascript::references::member_paths(&facts, self.cancellation)?;
             let hoisted_bindings: BTreeMap<_, _> = facts
                 .iter()
                 .filter(|fact| ecmascript::lexical::is_binding_metadata(fact))
@@ -2355,7 +2362,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         }
                     }
                     SyntaxFactKind::Occurrence => {
-                        if is_call_name_fact(fact) {
+                        if is_call_name_fact(fact) || ecmascript::references::is_member_path(fact) {
                             continue;
                         }
                         let Some(observed_text) = source_text(bytes, fact.span()) else {
@@ -2374,10 +2381,36 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else {
                             None
                         };
+                        let member = if call
+                            || ecmascript::references::is_member_name(fact.syntax_kind().as_str())
+                        {
+                            member_paths
+                                .get(&fact.span().end_byte())
+                                .copied()
+                                .flatten()
+                                .filter(|span| contains_span(*span, fact.span()))
+                                .and_then(|span| source_text(bytes, span))
+                                .map(|text| {
+                                    ecmascript::references::parse_member_path(
+                                        text,
+                                        self.request.limits().ir().max_string_bytes,
+                                        self.cancellation,
+                                    )
+                                })
+                                .transpose()?
+                                .flatten()
+                        } else {
+                            None
+                        };
                         let parsed_name = if let Some(name) = public_name.as_deref() {
                             Some(ParsedOccurrenceName {
                                 name,
                                 qualifier: None,
+                            })
+                        } else if let Some((qualifier, name)) = &member {
+                            Some(ParsedOccurrenceName {
+                                name,
+                                qualifier: Some(qualifier),
                             })
                         } else if call {
                             terminal_name
@@ -2432,6 +2465,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else if matches!(
                             fact.syntax_kind().as_str(),
                             "typescript.type_identifier.reference"
+                                | "typescript.type_member_name.reference"
                                 | "typescript.type_export_local.reference"
                                 | "javascript.type_export_local.reference"
                         ) {
@@ -2693,6 +2727,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     input,
                     draft.source.span(),
                     "ecmascript-type-only-value-use",
+                )?;
+            }
+            if candidates.is_empty() && ecmascript::references::is_member_name(&draft.syntax_kind) {
+                let input = self.input_for_file(draft.file)?;
+                self.push_relation_gap(
+                    input,
+                    draft.source.span(),
+                    "ecmascript-member-target-unavailable",
                 )?;
             }
             if candidates.is_empty()
@@ -3652,9 +3694,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 symbols: targets
                     .iter()
                     .filter(|target| {
-                        !target.type_only
-                            || occurrence.role == OccurrenceRole::TypeUse
-                            || occurrence.syntax_kind == "typescript.type_query_value.reference"
+                        !target.type_only || ecmascript::references::is_type_position(occurrence)
                     })
                     .filter(|target| {
                         !target.module_namespace || occurrence.role != OccurrenceRole::CallSite
@@ -3665,6 +3705,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if ecmascript::references::is_member_name(&occurrence.syntax_kind) {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
                 kind: ResolutionKind::Binding,
             };
         }

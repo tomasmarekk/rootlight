@@ -354,7 +354,7 @@ fn r_parameter_scope_walk_limit_preserves_unknown_ancestry() {
 }
 
 #[test]
-fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() {
+fn language_owned_targets_bypass_name_scoring_in_all_apply_paths() {
     for syntax in [
         "r.namespace_name.reference",
         "r.namespace_call.call",
@@ -363,10 +363,17 @@ fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() 
         "r.computed_call.call",
         "r.unavailable_name.reference",
         "r.unavailable_name.call",
+        "javascript.member_name.reference",
+        "typescript.member_name.reference",
+        "typescript.type_member_name.reference",
+        "typescript.type_namespace_member.reference",
+        "typescript.type_query_member_name.reference",
+        "typescript.type_namespace_root.reference",
     ] {
+        let language = syntax.split('.').next().unwrap();
         let mut fixture = Fixture::new();
-        fixture.document.files[0].language = "r".to_owned();
-        fixture.document.provenance[0].language = "r".to_owned();
+        fixture.document.files[0].language = language.to_owned();
+        fixture.document.provenance[0].language = language.to_owned();
         fixture.add_entity(
             10,
             "target",
@@ -374,7 +381,7 @@ fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() 
             EntityKind::Function,
             None,
         );
-        fixture.document.entities[0].language = "r".to_owned();
+        fixture.document.entities[0].language = language.to_owned();
         let role = if syntax.ends_with(".call") {
             OccurrenceRole::CallSite
         } else {
@@ -390,7 +397,7 @@ fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() 
             OccurrenceRole::Reference,
             None,
         );
-        fixture.document.occurrences[1].syntax_kind = "r.identifier.reference".to_owned();
+        fixture.document.occurrences[1].syntax_kind = format!("{language}.identifier.reference");
         fixture.validate();
         let engine = ResolutionEngine::default();
         let cancellation = Cancellation::new();
