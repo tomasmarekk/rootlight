@@ -26,6 +26,7 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 mod incremental;
+mod objective_c;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
@@ -1837,11 +1838,7 @@ fn shebang_language(content: &[u8]) -> Option<&'static str> {
 fn content_language(content: &[u8]) -> Option<&'static str> {
     let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES))?;
     let text = String::from_utf8_lossy(sample);
-    if text.contains("@interface")
-        || text.contains("@implementation")
-        || text.contains("#import <Foundation/")
-        || text.contains("#import \"")
-    {
+    if objective_c::has_content_hint(sample) {
         Some("objective-c")
     } else if text.contains("classdef ")
         || text
@@ -2428,6 +2425,67 @@ max_source_file_bytes = 2097152
         );
         assert_eq!(first.inputs.len(), 1);
         assert_eq!(first.exclusions.len(), 1);
+    }
+
+    #[test]
+    fn objective_c_content_hints_exclude_comments_and_literals() {
+        for source in [
+            "/* @interface Example @end */\nint read_item(void);",
+            "// @implementation Example\nint read_item(void);",
+            "// example \\\n@interface Example\nint read_item(void);",
+            "const char *text = \"@interface Example @end\";",
+            "const char *text = \"escaped \\\" @implementation Example\";",
+            "int marker = '@interface';",
+            "const char *text = R\"tag(\" @interface Example)tag\";",
+            "const char *text = u8R\"tag(\" @implementation Example)tag\";",
+            "const auto *text = uR\"tag(\" @implementation Example)tag\";",
+            "const auto *text = UR\"tag(\" @implementation Example)tag\";",
+            "const auto *text = LR\"tag(\" @implementation Example)tag\";",
+            "// example \\\r\n@interface Example\r\nint read_item(void);",
+            "/* #import \"Example.h\" */\nint read_item(void);",
+            "const char *text = \"#import <Foundation/Foundation.h>\";",
+            "@interfaceSuffix Example;",
+            "@implementationSuffix Example;",
+            "@interface_Example;",
+            "@interfaceÉxample;",
+            "/* unfinished @interface Example",
+            "\"unfinished @interface Example",
+        ] {
+            assert_ne!(
+                content_language(source.as_bytes()),
+                Some("objective-c"),
+                "{source}"
+            );
+        }
+        for source in [
+            "/* documentation */ @interface Example\n@end",
+            "\"literal\"; @implementation Example\n@end",
+            "// documentation\n@interface Example\n@end",
+            "#import \"Example.h\"",
+            "#import <Foundation/Foundation.h>",
+            "@interface Example\n@end",
+            "R\"tag(\" @interface Hidden)tag\"; @interface Example\n@end",
+            "long count = 1'000; @interface Example\n@end",
+            "long mask = 0xF'F; @interface Example\n@end",
+        ] {
+            assert_eq!(
+                content_language(source.as_bytes()),
+                Some("objective-c"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn objective_c_content_hints_respect_the_existing_sample_limit() {
+        let mut source = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        source.extend_from_slice(b"@interface Example\n@end");
+        assert_eq!(content_language(&source), None);
+        source.splice(..0, b"@interface Example\n@end\n".iter().copied());
+        assert_eq!(content_language(&source), Some("objective-c"));
+        let mut truncated = vec![b' '; MAX_CLASSIFICATION_BYTES - 1];
+        truncated.extend_from_slice("É@interface Example".as_bytes());
+        assert_eq!(content_language(&truncated), None);
     }
 
     #[test]

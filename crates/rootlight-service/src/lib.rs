@@ -213,7 +213,7 @@ const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-trunca
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/75";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/3";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -23233,6 +23233,65 @@ mod tests {
                 && hit.language == "c"
                 && hit.symbol.is_some()
         }));
+    }
+
+    #[test]
+    fn objc_examples_in_c_headers_preserve_symbols_and_source() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let content = concat!(
+            "/* Objective-C example: @interface Example @end */\n",
+            "const char *sample = \"@implementation Example\";\n",
+            "int read_item(void) { return 7; }\n",
+        );
+        write_language_fixture(fixture.path(), &[("reader.h", content)]);
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("C header publishes");
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let file = generation
+            .document()
+            .files
+            .first()
+            .expect("header is retained");
+        assert_eq!(file.language, "c");
+        let reference = file
+            .evidence
+            .source
+            .clone()
+            .expect("header has source provenance");
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("header source reads");
+        assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "read_item".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("C symbol locates");
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.identifier == "read_item"
+                    && hit.path == "reader.h"
+                    && hit.language == "c"
+                    && hit.symbol.is_some())
+        );
+        let repeated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("no-op indexing succeeds");
+        assert_eq!(repeated, receipt);
     }
 
     #[test]
