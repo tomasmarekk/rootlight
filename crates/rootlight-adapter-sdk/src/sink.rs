@@ -1900,6 +1900,18 @@ mod tests {
         };
         for kinds in [
             [
+                EntityKind::DocumentSection,
+                EntityKind::Function,
+                EntityKind::LinkDefinition,
+                EntityKind::Event,
+            ],
+            [
+                EntityKind::Event,
+                EntityKind::LinkDefinition,
+                EntityKind::Function,
+                EntityKind::DocumentSection,
+            ],
+            [
                 EntityKind::Event,
                 EntityKind::MarkupElement,
                 EntityKind::ErrorDeclaration,

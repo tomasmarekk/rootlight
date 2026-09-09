@@ -323,7 +323,8 @@ pub fn import_shared_generation(
         IrDocument::NormalizedV1_1(document)
         | IrDocument::NormalizedV1_2(document)
         | IrDocument::NormalizedV1_3(document)
-        | IrDocument::NormalizedV1_4(document) => document,
+        | IrDocument::NormalizedV1_4(document)
+        | IrDocument::NormalizedV1_5(document) => document,
         IrDocument::LegacyV1_0(_) => return Err(SharedGenerationError::Document),
     };
     if document.repository != manifest.repository || document.generation != manifest.generation {
@@ -558,6 +559,7 @@ mod tests {
             rootlight_ir::NormalizedIrVersion::V1_2,
             rootlight_ir::NormalizedIrVersion::V1_3,
             rootlight_ir::NormalizedIrVersion::V1_4,
+            rootlight_ir::NormalizedIrVersion::V1_5,
         ] {
             let (generation, cancellation, limits, extensions) = fixture_for_version(version);
             let source_set_hash = shared_generation_source_set_hash(generation.document())

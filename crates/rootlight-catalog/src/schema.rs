@@ -30,7 +30,7 @@ mod macos_acl;
 const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
-const ORACLE_SCHEMA_VERSION: u32 = 6;
+const ORACLE_SCHEMA_VERSION: u32 = 7;
 const ORACLE_SCHEMA_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 const ORACLE_FIXED_BYTES_PER_ROW: u64 = 2 * 1024;
 const ORACLE_TEXT_REPLICATION_FACTOR: u64 = 3;
@@ -153,6 +153,45 @@ const FILES_SQL: &str = "CREATE TABLE files (
 ) STRICT";
 
 const ENTITIES_SQL: &str = "CREATE TABLE entities (
+    entity_id BLOB PRIMARY KEY NOT NULL CHECK(length(entity_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    kind TEXT NOT NULL CHECK(kind IN (
+        'repository', 'worktree', 'package', 'build_target', 'directory', 'file',
+        'module', 'namespace', 'class', 'struct', 'enum', 'union', 'type_alias',
+        'trait', 'interface', 'protocol', 'function', 'method', 'constructor',
+        'closure', 'field', 'property', 'constant', 'variable', 'parameter',
+        'type_parameter', 'import', 'export', 'route', 'service', 'message_topic',
+        'database_object', 'test', 'configuration_key', 'commit', 'change',
+        'community_view', 'external_symbol', 'style_rule', 'keyframes', 'markup_element', 'markup_attribute',
+        'event', 'error_declaration', 'modifier', 'document_section', 'link_definition'
+    )),
+    language TEXT NOT NULL CHECK(length(language) BETWEEN 1 AND 32768),
+    tier TEXT NOT NULL CHECK(tier IN ('tier_a', 'tier_b', 'tier_c', 'tier_d')),
+    canonical_name TEXT NOT NULL CHECK(length(canonical_name) <= 32768),
+    display_name TEXT NOT NULL CHECK(length(display_name) <= 32768),
+    qualified_name TEXT NOT NULL CHECK(length(qualified_name) <= 32768),
+    container_kind TEXT CHECK(container_kind IN ('repository', 'file', 'entity')),
+    container_id BLOB,
+    visibility TEXT NOT NULL CHECK(visibility IN ('public', 'restricted', 'private', 'unknown')),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    evidence_source_ordinal INTEGER,
+    CHECK((container_kind IS NULL AND container_id IS NULL)
+       OR (container_kind IS NOT NULL AND container_id IS NOT NULL)),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(container_kind, container_id)
+        REFERENCES identity_registry(kind, identity)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(evidence_source_ordinal) REFERENCES source_refs(ordinal)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
+// Sealed version-6 databases retain their exact pre-document entity vocabulary.
+const ENTITIES_V6_SQL: &str = "CREATE TABLE entities (
     entity_id BLOB PRIMARY KEY NOT NULL CHECK(length(entity_id) = 20),
     repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
     generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
@@ -911,6 +950,28 @@ fn oracle_v5_definition() -> SchemaDefinition<'static> {
     }
 }
 
+fn oracle_v6_definition() -> SchemaDefinition<'static> {
+    static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
+        oracle_definition()
+            .objects
+            .iter()
+            .copied()
+            .map(|object| {
+                if object.name == "entities" {
+                    NamedSql::table("entities", ENTITIES_V6_SQL)
+                } else {
+                    object
+                }
+            })
+            .collect()
+    });
+    SchemaDefinition {
+        version: 6,
+        objects: &OBJECTS,
+        ..oracle_definition()
+    }
+}
+
 fn oracle_reader_definition(
     connection: &Connection,
 ) -> Result<SchemaDefinition<'static>, CatalogError> {
@@ -921,6 +982,7 @@ fn oracle_reader_definition(
         3 => Ok(oracle_v3_definition()),
         4 => Ok(oracle_v4_definition()),
         5 => Ok(oracle_v5_definition()),
+        6 => Ok(oracle_v6_definition()),
         ORACLE_SCHEMA_VERSION => Ok(oracle_definition()),
         _ => Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema)),
     }
@@ -1722,7 +1784,12 @@ mod tests {
             schema_checksum(&definition).to_string(),
             "b3_wa4fmp4kocvfes455pgml6t4xhhumsadj6slity5mcfilivei3iinugtqm"
         );
-        for definition in [definition, oracle_v4_definition(), oracle_v5_definition()] {
+        for definition in [
+            definition,
+            oracle_v4_definition(),
+            oracle_v5_definition(),
+            oracle_v6_definition(),
+        ] {
             #[cfg(target_os = "macos")]
             let directory = tempfile::Builder::new()
                 .prefix("rootlight-catalog-")
@@ -1761,6 +1828,7 @@ mod tests {
             oracle_v3_definition(),
             oracle_v4_definition(),
             oracle_v5_definition(),
+            oracle_v6_definition(),
             oracle_definition(),
         ] {
             let connection = Connection::open_in_memory().expect("fixture opens");
@@ -1820,6 +1888,19 @@ mod tests {
     }
 
     #[test]
+    fn document_oracle_schema_has_an_explicit_fingerprint() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/storage/1.2/oracle-7-schema-fingerprints.json"
+        ))
+        .expect("document schema fingerprint parses");
+        assert_eq!(fixture["oracle"]["schema_version"], 7);
+        assert_eq!(
+            fixture["oracle"]["checksum"],
+            oracle_compatibility().checksum().to_string()
+        );
+    }
+
+    #[test]
     fn schema_checksums_are_distinct_and_stable_width() {
         let control = control_compatibility();
         let oracle = oracle_compatibility();
@@ -1827,6 +1908,21 @@ mod tests {
         assert_ne!(control.checksum(), oracle.checksum());
         assert_eq!(control.checksum().as_bytes().len(), 32);
         assert_eq!(oracle.checksum().as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn declaration_oracle_schema_retains_its_exact_fingerprint() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/storage/1.2/oracle-6-schema-fingerprints.json"
+        ))
+        .expect("frozen declaration fingerprint parses");
+        assert_eq!(fixture["oracle"]["schema_version"], 6);
+        assert_eq!(
+            fixture["oracle"]["checksum"],
+            compatibility(&oracle_v6_definition())
+                .checksum()
+                .to_string()
+        );
     }
 
     #[test]

@@ -24,12 +24,14 @@ fn mixed_version_appends_preserve_every_fact_and_required_version() {
         NormalizedIrVersion::V1_2,
         NormalizedIrVersion::V1_3,
         NormalizedIrVersion::V1_4,
+        NormalizedIrVersion::V1_5,
     ] {
         for source_version in [
             NormalizedIrVersion::V1_1,
             NormalizedIrVersion::V1_2,
             NormalizedIrVersion::V1_3,
             NormalizedIrVersion::V1_4,
+            NormalizedIrVersion::V1_5,
         ] {
             for path in ["structural", "project", "partition"] {
                 let source = fixture(source_version);
@@ -78,6 +80,8 @@ fn mixed_version_supplemental_relations_preserve_bound_evidence() {
     for (left, right) in [
         (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2),
         (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_1),
+        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_5),
+        (NormalizedIrVersion::V1_5, NormalizedIrVersion::V1_1),
     ] {
         let source = fixture(right);
         let mut target = fixture(left);
@@ -94,6 +98,8 @@ fn mixed_version_refinement_retains_occurrences_and_their_version() {
     for (left, right) in [
         (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_2),
         (NormalizedIrVersion::V1_2, NormalizedIrVersion::V1_1),
+        (NormalizedIrVersion::V1_1, NormalizedIrVersion::V1_5),
+        (NormalizedIrVersion::V1_5, NormalizedIrVersion::V1_1),
     ] {
         let source = fixture(right);
         let mut target = fixture(left);
@@ -105,7 +111,7 @@ fn mixed_version_refinement_retains_occurrences_and_their_version() {
             &Cancellation::new(),
         )
         .expect("refinement accepts compatible supported versions");
-        assert_eq!(actual.version, NormalizedIrVersion::V1_2);
+        assert_eq!(actual.version, left.max(right));
         assert_eq!(actual.occurrences, source.occurrences);
         assert_eq!(actual.entities, source.entities);
         assert_eq!(actual.files, source.files);
@@ -219,6 +225,7 @@ fn entity_promotion_rejects_invalid_lower_version_entities_without_mutation() {
         NormalizedIrVersion::V1_1,
         NormalizedIrVersion::V1_2,
         NormalizedIrVersion::V1_3,
+        NormalizedIrVersion::V1_4,
     ] {
         for kind in [
             EntityKind::MarkupElement,
@@ -226,6 +233,8 @@ fn entity_promotion_rejects_invalid_lower_version_entities_without_mutation() {
             EntityKind::Event,
             EntityKind::ErrorDeclaration,
             EntityKind::Modifier,
+            EntityKind::DocumentSection,
+            EntityKind::LinkDefinition,
         ] {
             if lower >= kind.minimum_ir_version() {
                 continue;

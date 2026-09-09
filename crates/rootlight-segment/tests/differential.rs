@@ -549,6 +549,14 @@ fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
         ),
         (EntityKind::Event, rootlight_ir::NormalizedIrVersion::V1_4),
         (
+            EntityKind::DocumentSection,
+            rootlight_ir::NormalizedIrVersion::V1_5,
+        ),
+        (
+            EntityKind::LinkDefinition,
+            rootlight_ir::NormalizedIrVersion::V1_5,
+        ),
+        (
             EntityKind::ErrorDeclaration,
             rootlight_ir::NormalizedIrVersion::V1_4,
         ),

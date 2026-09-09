@@ -1768,6 +1768,7 @@ mod tests {
             crate::NormalizedIrVersion::V1_2,
             crate::NormalizedIrVersion::V1_3,
             crate::NormalizedIrVersion::V1_4,
+            crate::NormalizedIrVersion::V1_5,
         ] {
             let (mut original, _, _) = fixture_with_identity_extensions();
             original.version = version;

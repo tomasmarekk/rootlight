@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "5f0909ceaab8e91edf926ec76e643cf8454fc8be4a1d1930fb72c1af9c204299"
+      "blake3": "c1994429ee9f5792825d7bb8a528764387f64e022573e0bc4478808eac7bd4ac"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -34,11 +34,11 @@
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "77897c22533d7637ec084181d860090e15fbb3823a2b5e403b240c53a1a44277"
+      "blake3": "fdea52561e8500aa9b690885613164dac9a65a0a1a95475b0a32a75cd860c7ec"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
-      "blake3": "f2ab5a52facd2d4307d828c766f05a71bc04a3814be7f229e0a1fc6ba4392de0"
+      "blake3": "ff5aea1ca43ea5289f64f5e4c5ae253119be2e3457b6a4dfca3e47f5afe40852"
     },
     {
       "path": "crates/rootlight-ir/src/source_projection.rs",
@@ -213,6 +213,10 @@
       "blake3": "9d2b9374a60ceb4f8963c44a90c78a27c145d92c09e5398eaecb84780209e827"
     },
     {
+      "path": "tests/fixtures/compatibility/storage/1.2/oracle-7-schema-fingerprints.json",
+      "blake3": "654fa0bebd52bf5feda693f90ebdccded74c0d968aea091503025c1d297dee0f"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.2/schema-fingerprints.json",
       "blake3": "2d303968654a6dbfc0bf279f8273c4fcecbee7636b17f39bff8f325147b010e9"
     },
@@ -246,7 +250,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "6db7c9694da0cbfdab24c02e5771c3379ddf41ca3e09e12bd5291b30668761e6"
+      "blake3": "4e2d6360b18c1414cc02e1371cf7aba0028f58c09e7b20038edffc278c49a6c4"
     }
   ],
   "artifacts": [
@@ -305,6 +309,10 @@
     {
       "path": "schemas/generated/json/ir-1.4.schema.json",
       "blake3": "7ac795d7d5311903fc67ce177f4e975cec88953495fe7bb9f74d97064a8c4275"
+    },
+    {
+      "path": "schemas/generated/json/ir-1.5.schema.json",
+      "blake3": "88f3d5b8f8f5c19ed4a80db7083a6d4951abe82bee87ce8dc648cfa0af9587a0"
     },
     {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",

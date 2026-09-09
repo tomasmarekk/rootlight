@@ -1301,7 +1301,7 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
     assert_eq!(catalog.schema_version(), 2);
-    assert_eq!(oracle.schema_version(), 6);
+    assert_eq!(oracle.schema_version(), 7);
     assert_ne!(catalog.application_id(), oracle.application_id());
     assert_ne!(catalog.checksum(), oracle.checksum());
     assert_eq!(GENERATION_CONTRACT_VERSION.major(), 1);

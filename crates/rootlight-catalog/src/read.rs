@@ -119,6 +119,7 @@ pub(crate) fn read_header(
         (1, 2) => NormalizedIrVersion::V1_2,
         (1, 3) => NormalizedIrVersion::V1_3,
         (1, 4) => NormalizedIrVersion::V1_4,
+        (1, 5) => NormalizedIrVersion::V1_5,
         _ => return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema)),
     };
     let metadata = GenerationMetadata::new_for_contract(
