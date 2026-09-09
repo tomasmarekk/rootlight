@@ -61,10 +61,13 @@ fn markdown_code_labels_require_declared_languages_without_content_inference() {
 }
 
 #[test]
-fn markdown_inline_and_fenced_code_share_the_existing_range_budget() {
+fn markdown_foreign_code_keeps_its_range_budget_after_native_paragraphs() {
     let source = format!(
-        "{}~~~rust\nfn admitted() {{}}\n~~~\n\n~~~rust\nfn exhausted() {{}}\n~~~\n",
-        "Paragraph.\n\n".repeat(31)
+        "{}{}",
+        "Paragraph.\n\n".repeat(31),
+        (0..33)
+            .map(|index| format!("~~~rust\nfn item_{index}() {{}}\n~~~\n\n"))
+            .collect::<String>()
     );
     let result = output(&source);
     let names: BTreeSet<_> = result
@@ -74,7 +77,9 @@ fn markdown_inline_and_fenced_code_share_the_existing_range_budget() {
         .filter(|entity| entity.kind == EntityKind::Function)
         .map(|entity| entity.canonical_name.as_str())
         .collect();
-    assert_eq!(names, BTreeSet::from(["admitted"]));
+    assert_eq!(names.len(), 32);
+    assert!(names.contains("item_0"));
+    assert!(!names.contains("item_32"));
     let gaps: Vec<_> = result
         .document()
         .skipped_regions
@@ -87,7 +92,7 @@ fn markdown_inline_and_fenced_code_share_the_existing_range_budget() {
     assert_eq!(
         &source[usize::try_from(span.start_byte()).unwrap()
             ..usize::try_from(span.end_byte()).unwrap()],
-        "~~~rust\nfn exhausted() {}\n~~~\n"
+        "~~~rust\nfn item_32() {}\n~~~\n"
     );
 }
 
@@ -396,16 +401,24 @@ fn markdown_reference_comparison_preserves_unicode_and_container_source() {
 
 #[test]
 fn markdown_bounded_plans_do_not_guess_reference_targets() {
-    let source = format!("{}\n[ref]: target.md\n", "[ref]\n\n".repeat(34));
+    let source = format!(
+        "> paragraph\n{}\n{}\n[ref]: target.md\n",
+        "> continued\n".repeat(33),
+        "[ref]\n\n".repeat(34)
+    );
     let result = output(&source);
     assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(result.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "markdown-inline-budget-unavailable"
+            && gap.reason == SkippedRegionReason::ResourceLimit
+    }));
     let references: Vec<_> = result
         .document()
         .occurrences
         .iter()
         .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
         .collect();
-    assert_eq!(references.len(), 32);
+    assert_eq!(references.len(), 34);
     for occurrence in references {
         assert!(matches!(
             occurrence.target,
@@ -416,6 +429,40 @@ fn markdown_bounded_plans_do_not_guess_reference_targets() {
                 && gap.source.span() == occurrence.source.span()
         }));
     }
+}
+
+#[test]
+fn markdown_named_references_after_many_paragraphs_keep_exact_targets() {
+    let source = format!("{}\n[ref]: target.md\n", "[ref]\n\n".repeat(257));
+    let result = output(&source);
+    let definition = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::LinkDefinition)
+        .unwrap();
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "markdown.shortcut_link.reference")
+        .collect();
+    assert_eq!(references.len(), 257);
+    for occurrence in references {
+        assert_eq!(
+            occurrence.target,
+            OccurrenceTarget::Resolved {
+                symbol: definition.id
+            }
+        );
+        assert_eq!(occurrence.syntactic_text_hash, content_hash(b"[ref]"));
+    }
+    assert!(!result.document().skipped_regions.iter().any(|gap| {
+        matches!(
+            gap.detail.as_str(),
+            "markdown-inline-budget-unavailable" | "markdown-reference-target-unavailable"
+        )
+    }));
 }
 
 #[test]
@@ -549,8 +596,8 @@ fn markdown_inline_embedded_syntax_remains_an_exact_scoped_gap() {
 }
 
 #[test]
-fn markdown_inline_range_budget_reports_each_unparsed_block() {
-    let source = "[direct](guide.md)\n\n".repeat(34);
+fn markdown_native_paragraphs_do_not_consume_foreign_language_ranges() {
+    let source = "[direct](guide.md)\n\n".repeat(257);
     let result = output(&source);
     assert_eq!(
         result
@@ -561,7 +608,7 @@ fn markdown_inline_range_budget_reports_each_unparsed_block() {
                 occurrence.syntax_kind == "markdown.link_destination.reference"
             })
             .count(),
-        32
+        257
     );
     let gaps: Vec<_> = result
         .document()
@@ -569,18 +616,78 @@ fn markdown_inline_range_budget_reports_each_unparsed_block() {
         .iter()
         .filter(|gap| gap.detail == "markdown-inline-budget-unavailable")
         .collect();
-    assert_eq!(gaps.len(), 2);
-    for gap in gaps {
-        let span = gap.source.span();
+    assert!(gaps.is_empty());
+    assert_eq!(
+        result.report().coverage().status(),
+        output("[direct](guide.md)\n\n")
+            .report()
+            .coverage()
+            .status()
+    );
+}
+
+#[test]
+fn markdown_many_quoted_paragraphs_keep_exact_unicode_source_ranges() {
+    let source = "> é [direct](guide.md)\r\n> continued 🚀\r\n\r\n".repeat(257);
+    let result = output(&source);
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "markdown.link_destination.reference")
+        .collect();
+    assert_eq!(references.len(), 257);
+    for reference in references {
+        let span = reference.source.span();
         assert_eq!(
             &source[usize::try_from(span.start_byte()).unwrap()
                 ..usize::try_from(span.end_byte()).unwrap()],
-            "[direct](guide.md)"
+            "guide.md"
         );
+        assert_eq!(
+            reference.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(reference.syntactic_text_hash, content_hash(b"guide.md"));
     }
-    assert_ne!(
-        result.report().coverage().status(),
-        CoverageStatus::Complete
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "markdown-inline-budget-unavailable")
+    );
+}
+
+#[test]
+fn markdown_single_block_fragment_limit_keeps_other_paragraphs_available() {
+    let source = format!(
+        "> [blocked](blocked.md)\n{}\n[healthy](healthy.md)\n",
+        "> continued\n".repeat(33)
+    );
+    let result = output(&source);
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "markdown.link_destination.reference")
+        .collect();
+    assert_eq!(references.len(), 1);
+    assert_eq!(
+        references[0].syntactic_text_hash,
+        content_hash(b"healthy.md")
+    );
+    let gaps: Vec<_> = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-inline-budget-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].reason, SkippedRegionReason::ResourceLimit);
+    assert!(
+        gaps[0].source.span().end_byte()
+            < u64::try_from(source.find("[healthy]").unwrap()).unwrap()
     );
 }
 

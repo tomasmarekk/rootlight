@@ -17,7 +17,7 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
-        let (inline_limited, used_ranges) =
+        let inline_limited =
             self.extract_markdown_inline(tree, request, traversal, candidates, cancellation)?;
         self.extract_markdown_code(
             tree,
@@ -25,7 +25,7 @@ impl TreeSitterProvider {
             traversal,
             candidates,
             max_facts,
-            used_ranges,
+            0,
             cancellation,
         )
         .map(|code_limited| inline_limited || code_limited)
@@ -38,7 +38,7 @@ impl TreeSitterProvider {
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         cancellation: &Cancellation,
-    ) -> Result<(bool, usize), AdapterError> {
+    ) -> Result<bool, AdapterError> {
         sort_cancellable_by(candidates, cancellation, |left, right| {
             left.retention_rank().cmp(&right.retention_rank())
         })?;
@@ -48,7 +48,17 @@ impl TreeSitterProvider {
             .limits()
             .max_embedded_ranges()
             .min(self.config.max_included_ranges());
-        let mut used_ranges = 0usize;
+        // Inline blocks are the second phase of the host grammar, not foreign
+        // language injections. Each parse retains its fragment cap, while all
+        // blocks share syntax-node and native-work budgets for the document.
+        let mut context = NativeParseContext {
+            range_origin: (0, Point { row: 0, column: 0 }),
+            remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
+                request.limits().max_syntax_nodes(),
+                request.limits().max_syntax_depth(),
+            )
+            .max_progress_checks,
+        };
         let mut limited = false;
         for index in 0..host_count {
             cancellation.check()?;
@@ -71,25 +81,16 @@ impl TreeSitterProvider {
                     node.kind() == "inline" && node.byte_range() == (candidate.start..candidate.end)
                 })
                 .ok_or_else(|| provider_failure("markdown-inline-host-span"))?;
-            let Some(ranges) = inline_ranges(
-                body,
-                request,
-                maximum_ranges.saturating_sub(used_ranges),
-                cancellation,
-            )?
-            else {
+            let Some(ranges) = inline_ranges(body, request, maximum_ranges, cancellation)? else {
                 candidates[index].syntax = "markdown.inline_limit";
                 limited = true;
                 continue;
             };
-            if remaining_nodes == 0 {
+            if remaining_nodes == 0 || context.remaining_progress_checks == 0 {
                 candidates[index].syntax = "markdown.inline_limit";
                 limited = true;
                 continue;
             }
-            used_ranges = used_ranges
-                .checked_add(ranges.len())
-                .ok_or_else(|| provider_failure("markdown-range-accounting"))?;
             let limits = super::embedded::embedded_limits(request.limits(), remaining_nodes)?;
             let child_request = ParseRequest::new(
                 request.source().clone(),
@@ -98,13 +99,32 @@ impl TreeSitterProvider {
                 ranges,
                 &limits,
             )?;
-            let child = self.parse_native_tree(
+            // The native host node already has an exact original-source point;
+            // rescanning the prefix for every paragraph would be quadratic.
+            context.range_origin = (body.start_byte(), body.start_position());
+            let child = match self.parse_native_tree(
                 &child_request,
                 &tree_sitter_md::INLINE_LANGUAGE.into(),
                 None,
                 self.config.default_settings(),
+                Some(&mut context),
                 cancellation,
-            )?;
+            ) {
+                Ok(child) => child,
+                Err(AdapterError::ProviderFailed { code })
+                    if matches!(
+                        code.as_str(),
+                        "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"
+                    ) =>
+                {
+                    cancellation.check()?;
+                    context.remaining_progress_checks = 0;
+                    candidates[index].syntax = "markdown.inline_limit";
+                    limited = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let report = inspect_tree(
                 &child,
                 &child_request,
@@ -139,7 +159,7 @@ impl TreeSitterProvider {
             candidates[index].syntax = "markdown.inline_parsed";
             capture_inline(&child, request.source().bytes(), candidates, cancellation)?;
         }
-        Ok((limited, used_ranges))
+        Ok(limited)
     }
 }
 

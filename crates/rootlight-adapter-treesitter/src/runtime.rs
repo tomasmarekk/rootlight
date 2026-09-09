@@ -8,6 +8,9 @@
 mod embedded;
 mod markdown;
 
+#[cfg(test)]
+mod native_context_tests;
+
 use std::{
     collections::VecDeque,
     ops::ControlFlow,
@@ -389,6 +392,7 @@ impl TreeSitterProvider {
             &language_for(native_family),
             old_tree.as_ref(),
             settings,
+            None,
             cancellation,
         )?;
 
@@ -424,30 +428,49 @@ impl TreeSitterProvider {
         language: &tree_sitter::Language,
         old_tree: Option<&Tree>,
         settings: ParserSettings,
+        mut context: Option<&mut NativeParseContext>,
         cancellation: &Cancellation,
     ) -> Result<Tree, AdapterError> {
+        cancellation.check()?;
+        let parse_work_limit = ParseWorkLimit::from_syntax_limits(
+            request.limits().max_syntax_nodes(),
+            request.limits().max_syntax_depth(),
+        );
+        // Short inputs may finish before the first native progress callback.
+        if context
+            .as_ref()
+            .is_some_and(|context| context.remaining_progress_checks == 0)
+        {
+            return Err(provider_failure(parse_work_limit.failure_code));
+        }
         let source_bytes = request.source().bytes();
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
             .set_language(language)
             .map_err(|_| provider_failure("grammar-abi"))?;
-        let included_ranges = tree_sitter_ranges(request, source_bytes, cancellation)?;
+        let included_ranges = tree_sitter_ranges(
+            request,
+            source_bytes,
+            context.as_ref().map(|context| context.range_origin),
+            cancellation,
+        )?;
         parser
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
 
-        let parse_work_limit = ParseWorkLimit::from_syntax_limits(
-            request.limits().max_syntax_nodes(),
-            request.limits().max_syntax_depth(),
-        );
         let mut callback_cancelled = false;
         let mut callback_limited = false;
         let mut progress_checks = 0usize;
         let mut progress = |_: &tree_sitter::ParseState| match cancellation.check() {
             Ok(()) => {
                 progress_checks = progress_checks.saturating_add(1);
-                if progress_checks >= parse_work_limit.max_progress_checks {
+                let shared_exhausted = context.as_mut().is_some_and(|context| {
+                    context.remaining_progress_checks =
+                        context.remaining_progress_checks.saturating_sub(1);
+                    context.remaining_progress_checks == 0
+                });
+                if progress_checks >= parse_work_limit.max_progress_checks || shared_exhausted {
                     callback_limited = true;
                     ControlFlow::Break(())
                 } else {
@@ -1252,6 +1275,7 @@ fn copy_source_for_cache(
 fn tree_sitter_ranges(
     request: &ParseRequest<'_>,
     source: &[u8],
+    origin: Option<(usize, Point)>,
     cancellation: &Cancellation,
 ) -> Result<Vec<Range>, AdapterError> {
     cancellation.check()?;
@@ -1262,8 +1286,7 @@ fn tree_sitter_ranges(
         cancellation,
         "range-allocation",
     )?;
-    let mut cursor = 0usize;
-    let mut point = Point { row: 0, column: 0 };
+    let (mut cursor, mut point) = origin.unwrap_or((0, Point { row: 0, column: 0 }));
     for included in request.included_ranges() {
         cancellation.check()?;
         let span = included.span();
@@ -2295,6 +2318,12 @@ fn pre_extraction_fact_limit(budget: RemainingBudget) -> Result<usize, AdapterEr
         .min(remaining.records())
         .min(remaining.output_bytes() / MIN_SYNTAX_FACT_OUTPUT_BYTES)
         .min(remaining.string_bytes() / MIN_SYNTAX_KIND_BYTES))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeParseContext {
+    range_origin: (usize, Point),
+    remaining_progress_checks: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
