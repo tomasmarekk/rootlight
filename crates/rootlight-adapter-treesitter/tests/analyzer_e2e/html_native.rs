@@ -1,6 +1,6 @@
 //! Source markup contracts through the real parser, lowering and validated IR.
 //! Repeated occurrences must retain ownership without claiming browser DOM or
-//! embedded-language semantics from successful HTML syntax extraction.
+//! browser semantics from successful host or embedded syntax extraction.
 
 use super::*;
 
@@ -25,6 +25,341 @@ fn output(source: &str) -> AnalysisOutput {
     );
     validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
     result
+}
+
+#[test]
+fn html_embedded_languages_keep_host_source_and_distinct_owners() {
+    let source = "<main>é\r\n<script>function greet(name) { return name; } greet('a');</script><style>.card { color: red }</style><script>function greet(name) { return name + '!'; }</script></main>";
+    let result = output(source);
+    let document = result.document();
+    let functions: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "greet")
+        .collect();
+    assert_eq!(functions.len(), 2, "{:#?}", document.entities);
+    assert_ne!(functions[0].id, functions[1].id);
+    assert!(
+        functions
+            .iter()
+            .all(|entity| entity.language == "javascript")
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.language == "css" && entity.canonical_name == ".card")
+    );
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "html-embedded-analysis-unavailable")
+    );
+    assert_eq!(document.files.len(), 1);
+    assert_eq!(document.files[0].language, "html");
+    for entity in functions {
+        let span = entity.evidence.source.as_ref().unwrap().span();
+        let text = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert!(text.starts_with("function greet("), "{text}");
+        assert_eq!(
+            entity.evidence.source.as_ref().unwrap().content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn html_embedded_routing_uses_host_attributes_not_body_heuristics() {
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, HTML);
+    let budget = limits();
+    for (attributes, supported) in [
+        ("", true),
+        (" type", true),
+        (" TYPE='MoDuLe'", true),
+        (" type=text/javascript", true),
+        (" type='APPLICATION/ECMASCRIPT'", true),
+        (" language=JavaScript", true),
+        (" type='' language=vbscript", true),
+        (" language=vbscript", false),
+        (" src=external.js", false),
+        (" type=application/json", false),
+        (" type=importmap", false),
+        (" type=text/typescript", false),
+        (" type='text/javascript; charset=utf-8'", false),
+        (" type='module ' ", true),
+        (" type='\ttext/javascript\r\n'", true),
+        (" type=' ' ", false),
+        (" type='\u{000b}module'", false),
+        (" language=javascript1.3", true),
+        (" type='text/java&#115;cript'", false),
+        (" type='text/javascript' type='application/json'", false),
+    ] {
+        let source = format!(
+            "<!-- <script>function hidden() {{}}</script> --><script{attributes}>function visible() {{}}</script>"
+        );
+        let fixture = Fixture::new(HTML, source.as_bytes());
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, HTML, &budget),
+            &ExtensionSupport::default(),
+        );
+        assert_eq!(result.document().entities.iter().any(|entity| entity.language == "javascript" && entity.canonical_name == "visible"), supported, "{attributes}");
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "hidden")
+        );
+        assert_eq!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "html-embedded-analysis-unavailable"),
+            !supported,
+            "{attributes}"
+        );
+    }
+    for source in [
+        "<svg><script>function hidden() {}</script></svg>",
+        "<noscript><script>function hidden() {}</script></noscript>",
+        "<style type='text/scss'>.hidden { color: red; }</style>",
+    ] {
+        let fixture = Fixture::new(HTML, source.as_bytes());
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, HTML, &budget),
+            &ExtensionSupport::default(),
+        );
+        assert!(
+            result
+                .document()
+                .entities
+                .iter()
+                .all(|entity| entity.language == "html")
+        );
+    }
+}
+
+#[test]
+fn html_embedded_preflight_and_replay_retain_complete_declarations() {
+    let source = "<script>function first(value) { return value; }</script><style>.item { color: red; }</style><script>function last(value) { return value; }</script>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, HTML);
+    let fixture = Fixture::new(HTML, source.as_bytes());
+    let budget = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, HTML, &budget);
+    let demand = provider
+        .required_syntax_fact_count(&initial_request.to_parse_request(), &deadline())
+        .unwrap();
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        demand,
+        artifact.required_syntax_fact_count(&deadline()).unwrap()
+    );
+    let bounded = limits_with_syntax_records(demand);
+    let changed = fixture.next_generation();
+    let next_request = request(&changed.snapshot, &changed.source, HTML, &bounded);
+    let (fresh, artifact) = analyzer
+        .analyze_and_capture(
+            &next_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    let identities = |document: &rootlight_ir::NormalizedIrDocument| {
+        document
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(identities(first.document()), identities(replay.document()));
+    assert!(
+        replay
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "last")
+    );
+    for entity in &replay.document().entities {
+        assert_eq!(
+            entity.evidence.source.as_ref().unwrap().generation(),
+            changed.source.generation()
+        );
+    }
+    let edited_source = format!(
+        "é\r\n{}",
+        source
+            .replace("return value;", "return value + '!';")
+            .replace("color: red", "color: blue")
+    );
+    let edited = fixture.rewrite(edited_source.as_bytes());
+    let next = analyze(
+        &analyzer,
+        &request(&edited.snapshot, &edited.source, HTML, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(identities(first.document()), identities(next.document()));
+    for entity in &next.document().entities {
+        let reference = entity.evidence.source.as_ref().unwrap();
+        assert_eq!(reference.generation(), edited.source.generation());
+        assert_eq!(
+            reference.content_hash(),
+            content_hash(edited_source.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn html_embedded_limits_are_shared_and_leave_source_scoped_gaps() {
+    let source = "<script>function first() {}</script><script>function last() {}</script><style>.item { color:red; }</style>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, HTML);
+    let fixture = Fixture::new(HTML, source.as_bytes());
+    let base = limits();
+    for ranges in [0, 1, 2] {
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            ranges,
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            base.ir().clone(),
+        )
+        .unwrap();
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, HTML, &budget),
+            &ExtensionSupport::default(),
+        );
+        let gaps: Vec<_> = result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "html-embedded-resource-limit")
+            .collect();
+        assert_eq!(gaps.len(), 3 - ranges);
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Function)
+                .count(),
+            ranges
+        );
+        assert!(result.report().resources().syntax_nodes() <= budget.max_syntax_nodes());
+        for gap in gaps {
+            let span = gap.source.span();
+            let text = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert!(!text.contains("<script>"));
+        }
+    }
+    let host_only = AnalysisLimits::new(
+        base.max_source_bytes(),
+        base.max_syntax_nodes(),
+        base.max_syntax_depth(),
+        0,
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        base.ir().clone(),
+    )
+    .unwrap();
+    let host = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, HTML, &host_only),
+        &ExtensionSupport::default(),
+    );
+    let budget = AnalysisLimits::new(
+        base.max_source_bytes(),
+        host.report().resources().syntax_nodes(),
+        base.max_syntax_depth(),
+        32,
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        base.ir().clone(),
+    )
+    .unwrap();
+    let exhausted = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, HTML, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(
+        exhausted.report().resources().syntax_nodes(),
+        budget.max_syntax_nodes()
+    );
+    assert_eq!(
+        exhausted
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "html-embedded-resource-limit")
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn html_embedded_parse_errors_do_not_join_bodies_or_hide_later_valid_code() {
+    let source = "<script>function split(</script><script>) {}</script><script>function complete() {}</script>";
+    let result = output(source);
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "split")
+    );
+    assert!(
+        result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "complete")
+    );
+    assert_eq!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "html-embedded-parse-error")
+            .count(),
+        2
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
 }
 
 #[test]
@@ -199,8 +534,8 @@ fn html_native_source_spelling_void_and_implicit_elements_are_not_dom_bindings()
 }
 
 #[test]
-fn html_native_embedded_gaps_survive_required_only_capture_and_generation_replay() {
-    let source = "<main><script>const value = '<item>'; </script><style>.item { color: red }</style><item /></main>";
+fn html_native_unsupported_embedded_gaps_survive_required_capture_and_replay() {
+    let source = "<main><script type='application/x-template'>const value = '<item>'; </script><style type='text/scss'>.item { color: red }</style><item /></main>";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, HTML);
     let fixture = Fixture::new(HTML, source.as_bytes());
@@ -276,7 +611,12 @@ fn html_native_embedded_gaps_survive_required_only_capture_and_generation_replay
 }
 
 fn markup_ids(document: &rootlight_ir::NormalizedIrDocument) -> BTreeSet<SymbolId> {
-    document.entities.iter().map(|entity| entity.id).collect()
+    document
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "html")
+        .map(|entity| entity.id)
+        .collect()
 }
 
 #[test]
@@ -286,11 +626,12 @@ fn html_native_script_escapes_keep_exact_embedded_coverage() {
     let result = output(&source);
     let document = result.document();
     assert!(
-        document.diagnostics.is_empty(),
-        "{:?}",
-        document.diagnostics
+        document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
     );
-    assert_eq!(document.entities.len(), 4);
+    assert_eq!(markup_ids(document).len(), 4);
     assert_eq!(
         document
             .entities
@@ -303,7 +644,7 @@ fn html_native_script_escapes_keep_exact_embedded_coverage() {
     let gaps: Vec<_> = document
         .skipped_regions
         .iter()
-        .filter(|gap| gap.detail == "html-embedded-analysis-unavailable")
+        .filter(|gap| gap.detail == "html-embedded-parse-error")
         .collect();
     assert_eq!(gaps.len(), 1);
     let span = gaps[0].source.span();

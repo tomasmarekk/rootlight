@@ -257,6 +257,27 @@ fn markup_entities_cross_real_process_boundaries() {
 }
 
 #[test]
+fn embedded_javascript_crosses_process_boundaries_with_host_sources() {
+    source_entities_with_signatures_cross_process_boundaries(
+        "javascript",
+        "view.html",
+        "<main>é\r\n<script>function welcome(name) { return name; } welcome('a');</script><script type='module'>function welcome(name) { return name + '!'; }</script></main>",
+        &[("welcome", "function", 2)],
+        &[("welcome", "(name)")],
+    );
+}
+
+#[test]
+fn embedded_css_crosses_process_boundaries_with_host_sources() {
+    source_entities_cross_process_boundaries(
+        "css",
+        "view.html",
+        "<main>é\r\n<style>.card { color: red; }</style><style>.card { color: blue; }</style></main>",
+        &[(".card", "style_rule", 2)],
+    );
+}
+
+#[test]
 fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
     let source = "<main><script>const embedded = '<fake />';</script><noscript><b>conditional</b></noscript><svg><title>foreign</title></svg></main>\n";
     let mut fixture =
@@ -620,7 +641,10 @@ fn source_entities_with_signatures_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if matches!(language, "r" | "scala" | "dart" | "powershell") {
+        if matches!(
+            language,
+            "r" | "scala" | "dart" | "powershell" | "javascript"
+        ) {
             // These fixtures use existing IR kinds, unlike the newer data
             // kinds that correctly require the updated retrieval schema.
             assert_success(&retained, "code.locate");

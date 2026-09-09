@@ -7,7 +7,6 @@ mod toml;
 mod yaml;
 
 use std::{
-    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::Arc,
@@ -113,8 +112,8 @@ impl TreeSitterStructuralArtifact {
     ///
     /// # Errors
     ///
-    /// Returns [`AdapterError`] for cancellation, invalid retained parent
-    /// identity, accounting overflow, or bounded allocation failure.
+    /// Returns [`AdapterError`] for cancellation, accounting overflow, or
+    /// bounded allocation failure.
     pub fn required_syntax_fact_count(
         &self,
         cancellation: &Cancellation,
@@ -470,52 +469,34 @@ fn required_syntax_fact_count_from_output(
 ) -> Result<usize, AdapterError> {
     cancellation.check()?;
     let facts = output.facts();
-    let mut contains_declaration = Vec::new();
-    contains_declaration
+    let mut declarations = Vec::new();
+    declarations
         .try_reserve_exact(facts.len())
         .map_err(|_| SinkError::AllocationFailed)?;
-    contains_declaration.resize(facts.len(), false);
     for (index, fact) in facts.iter().enumerate() {
         check_periodically(index, cancellation)?;
-        contains_declaration[index] = fact.kind() == SyntaxFactKind::Declaration;
-    }
-    let mut propagation_order = Vec::new();
-    propagation_order
-        .try_reserve_exact(facts.len())
-        .map_err(|_| SinkError::AllocationFailed)?;
-    propagation_order.extend(0..facts.len());
-    cancellation.check()?;
-    // Parent-local IDs are canonical but not ordered before their children in
-    // every grammar. Descending depth makes one propagation pass sufficient;
-    // the atomic sort is bounded by the retained syntax-fact ceiling.
-    propagation_order
-        .sort_unstable_by_key(|index| Reverse((facts[*index].depth(), facts[*index].local_id())));
-    cancellation.check()?;
-    for (visit, index) in propagation_order.into_iter().enumerate() {
-        check_periodically(visit, cancellation)?;
-        if !contains_declaration[index] {
-            continue;
+        if fact.kind() == SyntaxFactKind::Declaration {
+            declarations.push((fact.span().start_byte(), fact.span().end_byte()));
         }
-        let Some(parent_local_id) = facts[index].parent() else {
-            continue;
-        };
-        let parent = usize::try_from(parent_local_id)
-            .ok()
-            .and_then(|parent| parent.checked_sub(1))
-            .ok_or_else(|| provider_failure("treesitter-structural-artifact-parent"))?;
-        facts
-            .get(parent)
-            .filter(|parent_fact| {
-                parent_fact.local_id() == parent_local_id
-                    && parent_fact.depth() < facts[index].depth()
-            })
-            .ok_or_else(|| provider_failure("treesitter-structural-artifact-parent"))?;
-        contains_declaration[parent] = true;
+    }
+    crate::runtime::sort_cancellable_by(&mut declarations, cancellation, Ord::cmp)?;
+    // Required closure uses source containment, not the selected parent edge:
+    // a CSS scope and declaration can have identical spans. The suffix minimum
+    // matches runtime preflight without depending on which tied parent won.
+    let mut minimum_end = u64::MAX;
+    for (visit, (_, end)) in declarations.iter_mut().rev().enumerate() {
+        check_periodically(visit, cancellation)?;
+        minimum_end = minimum_end.min(*end);
+        *end = minimum_end;
     }
 
     let mut required = 0usize;
     for (index, fact) in facts.iter().enumerate() {
         check_periodically(index, cancellation)?;
+        let first = declarations.partition_point(|(start, _)| *start < fact.span().start_byte());
+        let contains_declaration = declarations
+            .get(first)
+            .is_some_and(|(_, end)| *end <= fact.span().end_byte());
         let identity_fact = matches!(
             fact.kind(),
             SyntaxFactKind::Root
@@ -523,7 +504,7 @@ fn required_syntax_fact_count_from_output(
                 | SyntaxFactKind::Declaration
                 | SyntaxFactKind::Signature
         ) || (fact.kind() == SyntaxFactKind::Scope
-            && (contains_declaration[index]
+            && (contains_declaration
                 || fact.syntax_kind().as_str().starts_with("json.")
                 || fact.syntax_kind().as_str().starts_with("toml.")
                 || fact.syntax_kind().as_str().starts_with("yaml.")))
@@ -1280,11 +1261,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
             if let Some((domain, detail)) = source_coverage_gap(fact) {
+                let reason = match fact.syntax_kind().as_str() {
+                    "html.embedded_limit.signature" => SkippedRegionReason::ResourceLimit,
+                    "html.embedded_parse_error.signature" => SkippedRegionReason::ParseError,
+                    _ => SkippedRegionReason::UnsupportedConstruct,
+                };
                 let region = skipped_region(
                     self.full_source,
                     fact.span(),
                     domain,
-                    SkippedRegionReason::UnsupportedConstruct,
+                    reason,
                     detail,
                     provenance_id,
                 )?;
@@ -2019,7 +2005,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map(|key| std::borrow::Cow::Borrowed(key.name.as_str()))
                 } else {
                     rootlight_adapter_sdk::structural_captured_name_for_fact(
-                        language_for_fact(self.request, definition).as_str(),
+                        language_for_fact(self.request, definition),
                         definition,
                         text,
                         self.request.limits().ir().max_string_bytes,
@@ -2173,7 +2159,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else {
                 (String::new(), None, None)
             };
-            let language = language_for_fact(self.request, fact).as_str().to_owned();
+            let language = language_for_fact(self.request, fact).to_owned();
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
@@ -2924,6 +2910,12 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "html.embedded_text.signature" => {
             Some((FactDomain::Entities, "html-embedded-analysis-unavailable"))
         }
+        "html.embedded_limit.signature" => {
+            Some((FactDomain::Entities, "html-embedded-resource-limit"))
+        }
+        "html.embedded_parse_error.signature" => {
+            Some((FactDomain::Entities, "html-embedded-parse-error"))
+        }
         "html.unmatched_end_tag.signature" => {
             Some((FactDomain::Relations, "html-unmatched-end-tag"))
         }
@@ -3589,14 +3581,21 @@ fn validate_fact_graph(
     Ok(())
 }
 
-fn language_for_fact<'a>(
-    request: &'a AnalysisRequest<'_>,
-    fact: &SyntaxFact,
-) -> &'a rootlight_adapter_sdk::LanguageId {
-    containing_range(request.included_ranges(), fact.span()).map_or(
-        request.language(),
-        rootlight_adapter_sdk::IncludedRange::language,
-    )
+fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &SyntaxFact) -> &'a str {
+    if request.language().as_str() == "html" {
+        if fact.syntax_kind().as_str().starts_with("javascript.") {
+            return "javascript";
+        }
+        if fact.syntax_kind().as_str().starts_with("css.") {
+            return "css";
+        }
+    }
+    containing_range(request.included_ranges(), fact.span())
+        .map_or(
+            request.language(),
+            rootlight_adapter_sdk::IncludedRange::language,
+        )
+        .as_str()
 }
 
 fn containing_range(
@@ -3730,9 +3729,12 @@ fn span_contains(container: SourceSpan, child: SourceSpan) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    // Host context spans can equal a whole embedded function, but are not its
+    // callable header. Associating them would make the real signature ambiguous.
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
         && fact.syntax_kind().as_str() != "sql.body.signature"
+        && !fact.syntax_kind().as_str().starts_with("html.embedded_")
 }
 
 fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {

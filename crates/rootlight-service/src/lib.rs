@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/45";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/46";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -26379,7 +26379,6 @@ mod tests {
         assert!(!identities.values().any(|(_, name)| name == "fake"));
         for detail in [
             "html-dom-semantics-unavailable",
-            "html-embedded-analysis-unavailable",
             "html-foreign-context-unavailable",
             "html-scripting-mode-unavailable",
         ] {
@@ -26391,11 +26390,25 @@ mod tests {
                     .any(|gap| gap.detail == detail)
             );
         }
+        assert!(
+            original.document().entities.iter().any(
+                |entity| entity.language == "javascript" && entity.canonical_name == "embedded"
+            )
+        );
+        assert!(
+            !original
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "html-embedded-analysis-unavailable")
+        );
         let no_op = service
             .index_repository(fixture.path(), &deadline())
             .unwrap();
         assert_eq!(no_op.generation, initial.generation);
-        let changed = source.replace("second", "updated source text");
+        let changed = source
+            .replace("second", "updated source text")
+            .replace("<fake />", "<updated />");
         fs::write(fixture.path().join("view.html"), &changed).unwrap();
         let updated = service
             .index_repository(fixture.path(), &deadline())
@@ -26437,6 +26450,7 @@ mod tests {
             for (name, kind, count) in [
                 ("item", EntityKind::MarkupElement, 2),
                 ("key", EntityKind::MarkupAttribute, 3),
+                ("embedded", EntityKind::Variable, 1),
             ] {
                 let located = restored
                     .code_locate(

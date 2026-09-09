@@ -726,6 +726,45 @@ fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
     }
 }
 
+#[test]
+fn locate_checks_symbol_language_independently_from_its_host_file() {
+    let original = fixture_snapshot();
+    let mut document = original.document().clone();
+    document.files[0].language = "markdown".to_owned();
+    let snapshot = GenerationSnapshot::new(
+        original.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    for (language, valid) in [
+        (snapshot.document().entities[0].language.as_str(), true),
+        ("markdown", false),
+        ("unknown", false),
+    ] {
+        let mut search = fixture_search(&snapshot);
+        search.hits[0].language = language.to_owned();
+        let service = QueryService::new(&snapshot, &search).unwrap();
+        let plan = service
+            .plan_code_locate(
+                "fixture".to_owned(),
+                LocateMode::Exact,
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let result = service.execute_code_locate(&plan, &Cancellation::new());
+        if valid {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(QueryError::IndexDrift)), "{result:?}");
+        }
+    }
+}
+
 fn serialized_label(value: &impl serde::Serialize) -> String {
     serde_json::to_string(value)
         .expect("fixture label serializes")

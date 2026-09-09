@@ -286,48 +286,62 @@ where
                 .generation
                 .find_file(hit.file_id)
                 .ok_or(QueryError::IndexDrift)?;
-            let (source, expected_identifier, expected_qualified, expected_kind, expected_tier) =
-                if let Some(symbol) = hit.symbol_id {
-                    let entity = find_entity(self.generation.document(), symbol)
-                        .ok_or(QueryError::IndexDrift)?;
-                    (
-                        entity
-                            .evidence
-                            .source
-                            .as_ref()
-                            .ok_or(QueryError::IndexDrift)?,
-                        entity.display_name.as_str(),
-                        entity.qualified_name.as_str(),
-                        serialized_label(&entity.kind)?,
-                        serialized_label(&entity.tier)?,
-                    )
-                } else {
-                    let source = file
+            let (
+                source,
+                expected_identifier,
+                expected_qualified,
+                expected_kind,
+                expected_tier,
+                expected_language,
+            ) = if let Some(symbol) = hit.symbol_id {
+                let entity = find_entity(self.generation.document(), symbol)
+                    .ok_or(QueryError::IndexDrift)?;
+                (
+                    entity
                         .evidence
                         .source
                         .as_ref()
-                        .ok_or(QueryError::IndexDrift)?;
-                    let identifier = file
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .filter(|name| !name.is_empty())
-                        .ok_or(QueryError::IndexDrift)?;
-                    let tier = self
-                        .generation
-                        .document()
-                        .provenance
-                        .binary_search_by_key(&file.provenance, |candidate| candidate.id)
-                        .ok()
-                        .and_then(|index| self.generation.document().provenance.get(index))
-                        .map(|provenance| serialized_label(&provenance.tier))
-                        .transpose()?
-                        .ok_or(QueryError::IndexDrift)?;
-                    (source, identifier, identifier, "file".to_owned(), tier)
-                };
+                        .ok_or(QueryError::IndexDrift)?,
+                    entity.display_name.as_str(),
+                    entity.qualified_name.as_str(),
+                    serialized_label(&entity.kind)?,
+                    serialized_label(&entity.tier)?,
+                    entity.language.as_str(),
+                )
+            } else {
+                let source = file
+                    .evidence
+                    .source
+                    .as_ref()
+                    .ok_or(QueryError::IndexDrift)?;
+                let identifier = file
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .ok_or(QueryError::IndexDrift)?;
+                let tier = self
+                    .generation
+                    .document()
+                    .provenance
+                    .binary_search_by_key(&file.provenance, |candidate| candidate.id)
+                    .ok()
+                    .and_then(|index| self.generation.document().provenance.get(index))
+                    .map(|provenance| serialized_label(&provenance.tier))
+                    .transpose()?
+                    .ok_or(QueryError::IndexDrift)?;
+                (
+                    source,
+                    identifier,
+                    identifier,
+                    "file".to_owned(),
+                    tier,
+                    file.language.as_str(),
+                )
+            };
             if expected_qualified != hit.qualified_name
                 || expected_identifier != hit.identifier
-                || file.language != hit.language
+                || expected_language != hit.language
                 || file.path != hit.path
                 || file.generated != hit.generated
                 || source.repository() != self.generation.metadata().repository()

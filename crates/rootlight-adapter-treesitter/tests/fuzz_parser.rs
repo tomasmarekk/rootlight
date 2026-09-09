@@ -49,6 +49,97 @@ const FUZZ_ROUTES: [(&str, &str); 20] = [
 ];
 
 #[test]
+fn html_embedded_hostile_sources_share_bounds_and_release_the_parser() {
+    let provider = provider();
+    let nested = format!(
+        "<script>let value = {}1{};</script>",
+        "(".repeat(128),
+        ")".repeat(128)
+    );
+    let storm = "<script>function entry() { return 1; }</script>".repeat(30);
+    for source in [
+        nested.as_bytes(),
+        storm.as_bytes(),
+        b"<script>function broken(</script><style>.ok{color:red}</style>",
+        b"<style>\0\xff</style>",
+        "<script>const text = '雪';\r\n</script>".as_bytes(),
+    ] {
+        for (nodes, depth) in [(1, 1), (16, 4), (64, 16), (256, 32)] {
+            let fixture = Fixture::new("input.html", source);
+            let budget = limits(nodes, depth);
+            let input = request(&fixture, &budget, "html");
+            match execute_parse(
+                &provider,
+                &input,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            ) {
+                Ok(output) => {
+                    assert!(output.report().resources().syntax_nodes() <= nodes);
+                    assert!(output.report().resources().max_syntax_depth() <= depth);
+                    assert!(output.facts().len() <= 8);
+                    assert!(output.facts().iter().all(|fact| {
+                        usize::try_from(fact.span().end_byte()).is_ok_and(|end| end <= source.len())
+                    }));
+                }
+                Err(AdapterError::ProviderFailed { code }) => {
+                    if code.as_str() == "invalid-utf8" {
+                        assert!(std::str::from_utf8(source).is_err());
+                    } else {
+                        assert!(
+                            matches!(
+                                code.as_str(),
+                                "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"
+                            ),
+                            "{code:?}"
+                        );
+                    }
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed,
+                    limit,
+                })) => {
+                    assert_eq!(limit, 8);
+                    assert!(observed > limit);
+                    assert_eq!(
+                        provider.required_syntax_fact_count(&input, &deadline()),
+                        Ok(observed)
+                    );
+                }
+                other => panic!("unexpected bounded HTML parse: {other:?}"),
+            }
+            let cancellation = deadline();
+            assert!(cancellation.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &input,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+        }
+    }
+    let cleanup = Fixture::new("cleanup.html", b"<p>safe</p>");
+    let budget = limits(256, 32);
+    assert!(
+        execute_parse(
+            &provider,
+            &request(&cleanup, &budget, "html"),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline()
+        )
+        .is_ok()
+    );
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
 fn cleanup_fixtures_fit_the_bounded_parser_budget() {
     let provider = provider();
     let limits = limits(256, 32);

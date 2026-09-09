@@ -5,6 +5,8 @@
 //! `changed_ranges` performs eager native work before Rust iterator checkpoints;
 //! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
+mod embedded;
+
 use std::{
     collections::VecDeque,
     ops::ControlFlow,
@@ -51,6 +53,9 @@ const PARSE_PROGRESS_CHECKS_PER_SYNTAX_DEPTH: usize = 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded first-party Tree-sitter parser provider.
+///
+/// HTML script and style bodies use the JavaScript and CSS grammars under
+/// the host file's shared node, range and output budgets.
 pub struct TreeSitterProvider {
     provider_id: u64,
     registry: GrammarRegistry,
@@ -128,7 +133,7 @@ impl TreeSitterProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
-        let prepared = self.prepare_tree(
+        let mut prepared = self.prepare_tree(
             request,
             None,
             &[],
@@ -143,11 +148,19 @@ impl TreeSitterProvider {
             .query_packs
             .get_for_source(prepared.family, request.source().path().as_str())
             .ok_or_else(|| provider_failure("query-pack-missing"))?;
-        let candidates = pack.extract_identity(
+        let mut candidates = pack.extract_identity(
             prepared.family,
             &prepared.tree,
             request.source().bytes(),
             request.limits().max_syntax_nodes(),
+            cancellation,
+        )?;
+        self.extract_embedded(
+            &prepared.tree,
+            request,
+            &mut prepared.traversal,
+            &mut candidates,
+            None,
             cancellation,
         )?;
         normalize_query_candidates(candidates, request, usize::MAX, cancellation)
@@ -218,15 +231,15 @@ impl TreeSitterProvider {
             family,
             identity,
             tree,
-            traversal,
+            mut traversal,
             reuse_status,
             reuse_key,
         } = self.prepare_tree(request, previous, edits, settings, cancellation)?;
         let source_bytes = request.source().bytes();
-        emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
         let extraction = if traversal.fully_traversed {
-            self.extract_syntax_facts(family, &tree, request, sink, cancellation)?
+            self.extract_syntax_facts(family, &tree, request, &mut traversal, sink, cancellation)?
         } else {
+            emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
             ExtractionReport { limited: false }
         };
         let usage = sink.staged_usage();
@@ -443,11 +456,13 @@ impl TreeSitterProvider {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_syntax_facts(
         &self,
         family: GrammarFamily,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        traversal: &mut TraversalReport,
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<ExtractionReport, AdapterError> {
@@ -458,7 +473,7 @@ impl TreeSitterProvider {
             .query_packs
             .get_for_source(family, request.source().path().as_str())
             .ok_or_else(|| provider_failure("query-pack-missing"))?;
-        let extraction = pack.extract(
+        let mut extraction = pack.extract(
             family,
             tree,
             request.source().bytes(),
@@ -466,15 +481,22 @@ impl TreeSitterProvider {
             max_facts,
             cancellation,
         )?;
-        let extraction_limited = extraction.limit.is_some();
+        let embedded_limited = self.extract_embedded(
+            tree,
+            request,
+            traversal,
+            &mut extraction.candidates,
+            Some(max_facts),
+            cancellation,
+        )?;
+        emit_primary_diagnostic(traversal, request, sink, cancellation)?;
+        let extraction_limited = extraction.limit.is_some() || embedded_limited;
         if extraction_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
         }
-        let normalization_fact_limit = if extraction_limited {
-            pre_extraction_fact_limit(sink.remaining_budget())?
-        } else {
-            extraction.fact_limit
-        };
+        let normalization_fact_limit = extraction
+            .fact_limit
+            .min(pre_extraction_fact_limit(sink.remaining_budget())?);
         let normalized = normalize_query_candidates(
             extraction.candidates,
             request,
