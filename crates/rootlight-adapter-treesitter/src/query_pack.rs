@@ -636,8 +636,13 @@ impl QueryPack {
                     };
                     capture.node = name;
                 }
-                let mut candidate =
-                    candidate_for_capture(input.family, capture, role, input.source)?;
+                let mut candidate = candidate_for_capture(
+                    input.family,
+                    capture,
+                    role,
+                    input.source,
+                    input.cancellation,
+                )?;
                 if input.family == GrammarFamily::Markdown
                     && role == StructuralRole::Declaration
                     && matches!(capture.node.kind(), "atx_heading" | "setext_heading")
@@ -746,6 +751,7 @@ fn candidate_for_capture(
     capture: QueryCapture<'_>,
     role: StructuralRole,
     source: &[u8],
+    cancellation: &Cancellation,
 ) -> Result<QueryCandidate, AdapterError> {
     if family == GrammarFamily::Yaml {
         return yaml::candidate(capture.node, role);
@@ -803,10 +809,13 @@ fn candidate_for_capture(
                 "identifier" | "shorthand_property_identifier_pattern"
             ) =>
         {
-            if family == GrammarFamily::TypeScript {
-                "typescript.parameter"
-            } else {
-                "javascript.parameter"
+            let binding = ecmascript::binding_kind(capture.node, cancellation)?
+                .ok_or_else(|| query_failure("query-ecmascript-binding-kind"))?;
+            match (family == GrammarFamily::TypeScript, binding) {
+                (true, ecmascript::BindingKind::Parameter) => "typescript.parameter",
+                (false, ecmascript::BindingKind::Parameter) => "javascript.parameter",
+                (true, ecmascript::BindingKind::Variable) => "typescript.variable",
+                (false, ecmascript::BindingKind::Variable) => "javascript.variable",
             }
         }
         StructuralRole::Declaration
@@ -1479,6 +1488,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "import_statement") => Some("javascript.import"),
         (GrammarFamily::JavaScript, "formal_parameters") => Some("javascript.parameters"),
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
+        (GrammarFamily::JavaScript, "for_statement" | "for_in_statement") => Some("javascript.for"),
+        (GrammarFamily::JavaScript, "catch_clause") => Some("javascript.catch"),
         (GrammarFamily::JavaScript, "identifier" | "shorthand_property_identifier_pattern") => {
             Some("javascript.identifier")
         }
@@ -1566,6 +1577,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::TypeScript, "import_statement") => Some("typescript.import"),
         (GrammarFamily::TypeScript, "formal_parameters") => Some("typescript.parameters"),
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
+        (GrammarFamily::TypeScript, "for_statement" | "for_in_statement") => Some("typescript.for"),
+        (GrammarFamily::TypeScript, "catch_clause") => Some("typescript.catch"),
         (GrammarFamily::TypeScript, "identifier" | "shorthand_property_identifier_pattern") => {
             Some("typescript.identifier")
         }

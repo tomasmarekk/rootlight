@@ -2887,7 +2887,7 @@ fn real_analyzer_keeps_unique_symbol_identity_after_anonymous_scope_insertion() 
 }
 
 #[test]
-fn real_analyzer_bounds_ambiguous_anonymous_scope_identity_without_source_material() {
+fn real_analyzer_bounds_only_unresolved_anonymous_scope_identities() {
     const SECRET: &str = "scope-secret-marker";
     let provider = Arc::new(provider());
     let limits = limits();
@@ -2924,7 +2924,44 @@ fn real_analyzer_bounds_ambiguous_anonymous_scope_identity_without_source_materi
             MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
-        .expect("ambiguous anonymous scope identity must degrade to bounded coverage");
+        .expect("anonymous scope identity analysis completes");
+        if matches!(case.name, "javascript" | "typescript") {
+            let variables: Vec<_> = output
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Variable && entity.canonical_name == "same"
+                })
+                .collect();
+            assert_eq!(variables.len(), 2);
+            assert_ne!(variables[0].id, variables[1].id);
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            for variable in variables {
+                let definition = output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: variable.id,
+                                }
+                    })
+                    .unwrap();
+                let span = definition.source.span();
+                assert_eq!(
+                    &source[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()],
+                    "same"
+                );
+            }
+            continue;
+        }
         assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
         assert!(output.document().skipped_regions.iter().any(|region| {
             region.domain == FactDomain::Entities

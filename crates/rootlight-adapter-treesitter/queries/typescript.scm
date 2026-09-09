@@ -37,7 +37,7 @@
 (generator_function_declaration name: (identifier) @definition) @declaration
 (function_expression name: (identifier) @definition) @declaration
 (generator_function name: (identifier) @definition) @declaration
-; Pattern edges identify bindings without treating default values or computed keys as declarations.
+; Binding ancestry distinguishes declarations from assignments and excludes keys/default values.
 (required_parameter pattern: (identifier) @declaration @definition)
 (required_parameter name: (identifier) @declaration @definition)
 (optional_parameter pattern: (identifier) @declaration @definition)
@@ -49,6 +49,9 @@
 (assignment_pattern left: (identifier) @declaration @definition)
 (object_assignment_pattern left: (shorthand_property_identifier_pattern) @declaration @definition)
 (rest_pattern (identifier) @declaration @definition)
+(catch_clause parameter: (identifier) @declaration @definition)
+(for_in_statement left: (identifier) @declaration @definition)
+[(for_statement) (for_in_statement) (catch_clause)] @scope
 
 [(function_declaration) (function_expression) (generator_function_declaration)
  (generator_function) (arrow_function) (method_definition) (function_signature)

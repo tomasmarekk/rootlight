@@ -562,6 +562,50 @@ fn astro_template_parameters_keep_distinct_written_owners() {
 }
 
 #[test]
+fn astro_destructured_variables_keep_server_template_and_client_owners() {
+    let source = "---\r\nconst {label} = props;\r\n---\r\n{items.map(item => { const {label} = item; return <span>{label}</span>; })}<script>const {label} = clientProps;</script>";
+    let result = output(source);
+    let document = result.document();
+    let variables: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "label")
+        .collect();
+    assert_eq!(variables.len(), 3, "{:#?}", document.skipped_regions);
+    assert_eq!(
+        variables
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+    for variable in variables {
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: variable.id,
+                        }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            "label"
+        );
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+}
+
+#[test]
 fn astro_expressions_share_the_existing_host_range_budget() {
     let source = "<main>{first()}<span {...second()}></span>{third()}</main>";
     let provider = Arc::new(provider());

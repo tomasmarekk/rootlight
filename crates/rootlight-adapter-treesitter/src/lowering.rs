@@ -1836,6 +1836,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
         let mut sql_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
+        let mut ecmascript_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_scopes = HashMap::<Option<u64>, u64>::new();
         let mut anonymous_scopes = HashMap::<Option<u64>, u64>::new();
@@ -2173,6 +2174,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
+            } else if matches!(
+                language_for_fact(self.request, fact),
+                "javascript" | "typescript"
+            ) && kind == EntityKind::Variable
+            {
+                // Written variables can share a name in disjoint unnamed blocks.
+                // Count only same-name declarations under their named owner so an
+                // unrelated inserted block cannot change an existing symbol ID.
+                let label = fact.syntax_kind().as_str();
+                let next = ecmascript_declarations
+                    .entry((parent_entity, label.to_owned(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(source_occurrence_identity(
+                    "rootlight.ecmascript-source-declaration/1",
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    label,
+                    position,
+                ))
             } else if matches!(language_for_fact(self.request, fact), "r" | "powershell")
                 && kind != EntityKind::Module
             {
