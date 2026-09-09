@@ -3,7 +3,7 @@
 
 use super::*;
 
-const POWERSHELL: LanguageCase = LanguageCase {
+pub(super) const POWERSHELL: LanguageCase = LanguageCase {
     name: "powershell",
     path: "src/catalog.psm1",
     frontend: "tree-sitter-powershell-0.26.4",

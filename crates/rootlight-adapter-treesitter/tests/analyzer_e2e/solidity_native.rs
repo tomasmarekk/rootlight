@@ -3,7 +3,7 @@
 
 use super::*;
 
-const SOLIDITY: LanguageCase = LanguageCase {
+pub(super) const SOLIDITY: LanguageCase = LanguageCase {
     name: "solidity",
     path: "src/vault.sol",
     frontend: "tree-sitter-solidity-1.2.13",

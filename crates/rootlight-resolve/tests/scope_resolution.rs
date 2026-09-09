@@ -26,6 +26,85 @@ use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 const SOURCE_BYTES: u64 = 64;
 
 #[test]
+fn embedded_code_uses_its_language_and_does_not_bind_other_markdown_examples() {
+    for language in ["rust", "python", "javascript"] {
+        let mut fixture = Fixture::new();
+        let file = fixture.primary_file;
+        fixture.document.files[0].language = "markdown".to_owned();
+        let root = fixture.add_entity(10, "document", file, EntityKind::Module, None);
+        let first = fixture.add_entity(11, "example", file, EntityKind::Module, Some(root));
+        let second = fixture.add_entity(12, "example", file, EntityKind::Module, Some(root));
+        let host = fixture.add_entity(13, "value", file, EntityKind::Module, Some(root));
+        for entity in &mut fixture.document.entities {
+            entity.language = "markdown".to_owned();
+            entity.flags.push(EntityFlag::Synthetic);
+        }
+        let caller = fixture.add_entity(14, "caller", file, EntityKind::Function, Some(first));
+        let local = fixture.add_entity(15, "value", file, EntityKind::Variable, Some(first));
+        let sibling = fixture.add_entity(16, "value", file, EntityKind::Variable, Some(second));
+        let foreign_file = fixture.add_file(2, "src/other");
+        fixture.document.files[1].language = language.to_owned();
+        let foreign = fixture.add_entity(17, "value", foreign_file, EntityKind::Variable, None);
+        for entity in &mut fixture.document.entities {
+            if ![root, first, second, host].contains(&entity.id) {
+                entity.language = language.to_owned();
+            }
+        }
+        for (id, owner) in [(20, Some(caller)), (21, Some(second)), (22, None)] {
+            fixture.add_occurrence(id, "value", file, OccurrenceRole::Reference, owner);
+        }
+        for occurrence in &mut fixture.document.occurrences {
+            occurrence.syntax_kind = format!("{language}.identifier.reference");
+        }
+        fixture.validate();
+        let engine = ResolutionEngine::default();
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap()
+                .required,
+            15
+        );
+        let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+        assert_eq!(batch.decisions.len(), 3);
+        for (decision, expected) in batch
+            .decisions
+            .iter()
+            .zip([Some(local), Some(sibling), None])
+        {
+            if let Some(symbol) = expected {
+                assert!(
+                    matches!(decision.outcome, ResolutionOutcome::Resolved { symbol: actual, .. } if actual == symbol),
+                    "{decision:?}"
+                );
+            } else {
+                assert!(
+                    matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }),
+                    "{decision:?}"
+                );
+            }
+            assert!(
+                decision
+                    .explanation
+                    .rejected_candidates
+                    .iter()
+                    .any(|candidate| candidate.symbol == host
+                        && candidate.reason == RejectionReason::LanguageMismatch)
+            );
+            assert!(
+                decision
+                    .explanation
+                    .rejected_candidates
+                    .iter()
+                    .any(|candidate| candidate.symbol == foreign
+                        && candidate.reason == RejectionReason::OutsideLexicalScope)
+            );
+        }
+    }
+}
+
+#[test]
 fn r_parameter_references_exclude_unrelated_function_scopes() {
     assert_r_parameter_candidates(OccurrenceRole::Reference);
 }

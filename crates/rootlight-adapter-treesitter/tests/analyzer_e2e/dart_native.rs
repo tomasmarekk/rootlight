@@ -3,7 +3,7 @@
 
 use super::*;
 
-const DART: LanguageCase = LanguageCase {
+pub(super) const DART: LanguageCase = LanguageCase {
     name: "dart",
     path: "src/catalog.dart",
     frontend: "tree-sitter-dart-0.2.0",

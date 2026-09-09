@@ -3,6 +3,7 @@
 //! The analyzer injects a `ParseProvider` and never observes native Tree-sitter
 //! types, so extraction can evolve independently from stable IR construction.
 
+mod embedded;
 mod toml;
 mod yaml;
 
@@ -843,7 +844,7 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, detail.len(), limits)?;
         }
-        if request.language().as_str() == "yaml"
+        if language_for_fact(request, fact) == "yaml"
             && fact.syntax_kind().as_str() == "yaml.tag.signature"
         {
             // Tag construction can be unavailable even when lexical signature
@@ -855,7 +856,7 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
-        if request.language().as_str() == "yaml"
+        if language_for_fact(request, fact) == "yaml"
             && matches!(
                 fact.syntax_kind().as_str(),
                 "yaml.document.scope" | "yaml.node_key.definition"
@@ -910,7 +911,7 @@ fn preflight_lowering_limits(
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
-            if request.language().as_str() == "yaml"
+            if language_for_fact(request, fact) == "yaml"
                 && fact.syntax_kind().as_str() == "yaml.alias.reference"
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
@@ -1295,8 +1296,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let source = source_for_span(self.full_source, fact.span());
             if let Some((domain, detail)) = source_coverage_gap(fact) {
                 let reason = match fact.syntax_kind().as_str() {
-                    "html.embedded_limit.signature" => SkippedRegionReason::ResourceLimit,
-                    "html.embedded_parse_error.signature" => SkippedRegionReason::ParseError,
+                    "html.embedded_limit.signature"
+                    | "markdown.code_limit.signature"
+                    | "markdown.inline_limit.signature" => SkippedRegionReason::ResourceLimit,
+                    "html.embedded_parse_error.signature"
+                    | "markdown.code_error.signature"
+                    | "markdown.inline_error.signature" => SkippedRegionReason::ParseError,
                     _ => SkippedRegionReason::UnsupportedConstruct,
                 };
                 let region = skipped_region(
@@ -1432,7 +1437,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|terminal| self.text_for_span(terminal.span()))
                     .transpose()?;
                 let resolution_text = structural_resolution_text(
-                    self.request.language().as_str(),
+                    language_for_fact(self.request, fact),
                     fact,
                     text,
                     terminal_call_name,
@@ -1484,7 +1489,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
-                if self.request.language().as_str() == "yaml"
+                if language_for_fact(self.request, fact) == "yaml"
                     && fact.syntax_kind().as_str() == "yaml.alias.reference"
                 {
                     let target = (self.parse_output.report().coverage().status()
@@ -1733,7 +1738,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
     ) -> Result<EntityPlan, AdapterError> {
         let mut ordered_facts: Vec<_> = self.parse_output.facts().iter().collect();
         ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
-        let yaml_names = if self.request.language().as_str() == "yaml" {
+        let mut yaml_names = if self.request.language().as_str() == "yaml" {
             yaml::names::Names::new(
                 self.parse_output.facts(),
                 self.source_text,
@@ -1744,6 +1749,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             yaml::names::Names::default()
         };
+        let mut embedded_yaml = Vec::new();
+        if self.request.language().as_str() == "markdown" {
+            for facts in embedded::partitions(self.parse_output.facts(), "yaml", cancellation)? {
+                let names = yaml::names::Names::new(
+                    &facts,
+                    self.source_text,
+                    self.request.limits().ir().max_string_bytes,
+                    self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+                    cancellation,
+                )?;
+                yaml_names.keys.extend(names.keys);
+                yaml_names.owners.extend(names.owners);
+                yaml_names.warnings.extend(names.warnings);
+                embedded_yaml.push((facts, names.bindings));
+            }
+        }
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
         let file_is_test = test_source_path(self.request.source().path().as_str());
         let mut nearest_declaration = HashMap::new();
@@ -1752,7 +1773,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut signature_comments = Vec::new();
         for (index, fact) in ordered_facts.iter().enumerate() {
             check_periodically(index, cancellation)?;
-            if self.request.language().as_str() == "powershell"
+            if language_for_fact(self.request, fact) == "powershell"
                 && fact.kind() == SyntaxFactKind::Comment
             {
                 signature_comments.push(fact.span());
@@ -1865,7 +1886,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .as_ref()
                         .map(|header| header.digest)
                         .or_else(|| {
-                            (self.request.language().as_str() == "lua"
+                            (language_for_fact(self.request, fact) == "lua"
                                 && matches!(
                                     fact.syntax_kind().as_str(),
                                     "lua.file.scope"
@@ -1883,12 +1904,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
                 let written_scope_identity =
-                    if matches!(self.request.language().as_str(), "r" | "powershell") {
+                    if matches!(language_for_fact(self.request, fact), "r" | "powershell") {
                         let next = written_scopes.entry(fact.parent()).or_default();
                         let position = *next;
                         *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                         Some(written_source_identity(
-                            self.request.language().as_str(),
+                            language_for_fact(self.request, fact),
                             parent_scope
                                 .as_ref()
                                 .and_then(|scope| scope.stable_identity),
@@ -1922,9 +1943,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        if self.request.language().as_str() == "dart" {
+                        if language_for_fact(self.request, fact) == "dart" {
                             "rootlight.dart-lexical-scope/1"
-                        } else if self.request.language().as_str() == "scala" {
+                        } else if language_for_fact(self.request, fact) == "scala" {
                             "rootlight.scala-lexical-scope/1"
                         } else {
                             "rootlight.solidity-lexical-scope/1"
@@ -1973,7 +1994,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings in other languages need a span-local ambiguity
                 // guard without making position part of their durable SymbolId.
                 let collision_guard = if fact.syntax_kind().as_str().starts_with("css.")
-                    || self.request.language().as_str() == "json"
+                    || language_for_fact(self.request, fact) == "json"
                 {
                     None
                 } else {
@@ -2097,6 +2118,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if fact.syntax_kind().as_str() == "markdown.section.declaration" {
                 // Empty written headings still own a section; this is not a fragment ID.
                 (std::borrow::Cow::Borrowed("<untitled>"), None)
+            } else if fact.syntax_kind().as_str() == "markdown.code_block.module" {
+                // Separate examples own separate declarations, not one shared program.
+                (std::borrow::Cow::Borrowed("<code-block>"), None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -2120,7 +2144,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "json.property",
                     position,
                 ))
-            } else if self.request.language().as_str() == "sql" && kind != EntityKind::Module {
+            } else if language_for_fact(self.request, fact) == "sql" && kind != EntityKind::Module {
                 // Source DDL is not a final live catalog. Separate repeated
                 // declarations and object categories without body/offset hashes.
                 let label = fact.syntax_kind().as_str();
@@ -2133,7 +2157,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
-            } else if matches!(self.request.language().as_str(), "r" | "powershell")
+            } else if matches!(language_for_fact(self.request, fact), "r" | "powershell")
                 && kind != EntityKind::Module
             {
                 // Reassignment can replace a binding at runtime. Preserve each written
@@ -2145,20 +2169,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                 Some(written_source_identity(
-                    self.request.language().as_str(),
+                    language_for_fact(self.request, fact),
                     parent_scope
                         .as_ref()
                         .and_then(|scope| scope.stable_identity),
                     label,
                     position,
                 ))
-            } else if matches!(
-                kind,
-                EntityKind::MarkupElement
-                    | EntityKind::MarkupAttribute
-                    | EntityKind::DocumentSection
-                    | EntityKind::LinkDefinition
-            ) {
+            } else if fact.syntax_kind().as_str() == "markdown.code_block.module"
+                || matches!(
+                    kind,
+                    EntityKind::MarkupElement
+                        | EntityKind::MarkupAttribute
+                        | EntityKind::DocumentSection
+                        | EntityKind::LinkDefinition
+                )
+            {
                 // Repeated markup and document declarations are distinct
                 // occurrences. Only same-name sibling order affects identity;
                 // text bodies, attribute values and byte offsets do not.
@@ -2168,10 +2194,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                 Some(blake3::derive_key(
-                    if matches!(
-                        kind,
-                        EntityKind::DocumentSection | EntityKind::LinkDefinition
-                    ) {
+                    if fact.syntax_kind().as_str() == "markdown.code_block.module"
+                        || matches!(
+                            kind,
+                            EntityKind::DocumentSection | EntityKind::LinkDefinition
+                        )
+                    {
                         "rootlight.document-source-occurrence/1"
                     } else {
                         "rootlight.html-source-occurrence/1"
@@ -2206,7 +2234,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let canonical = if needs_projection && projection.is_none() {
                     None
                 } else if kind == EntityKind::Constructor
-                    && self.request.language().as_str() == "dart"
+                    && language_for_fact(self.request, fact) == "dart"
                     && let Some(definition) = definition
                 {
                     rootlight_adapter_sdk::canonical_dart_constructor_signature(
@@ -2237,28 +2265,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
-            let qualified_length = if matches!(language.as_str(), "toml" | "yaml") {
-                // Data lowering replaces lexical nesting with its bounded address
-                // below; charging a filename/lexical prefix here can reject an
-                // otherwise representable data path.
-                name.len()
-            } else {
-                match parent_entity.and_then(|parent| drafts.get(&parent)) {
-                    Some(parent) => parent
-                        .qualified_length
-                        .checked_add(2)
-                        .and_then(|length| length.checked_add(name.len()))
-                        .ok_or(SinkError::AccountingOverflow)?,
-                    None => match qualified_prefix {
-                        Some(prefix) => prefix
-                            .len()
+            let qualified_length =
+                if matches!(language.as_str(), "toml" | "yaml") && kind != EntityKind::Module {
+                    // Data lowering replaces lexical nesting with its bounded address
+                    // below; charging a filename/lexical prefix here can reject an
+                    // otherwise representable data path.
+                    name.len()
+                } else {
+                    match parent_entity.and_then(|parent| drafts.get(&parent)) {
+                        Some(parent) => parent
+                            .qualified_length
                             .checked_add(2)
                             .and_then(|length| length.checked_add(name.len()))
                             .ok_or(SinkError::AccountingOverflow)?,
-                        None => name.len(),
-                    },
-                }
-            };
+                        None => match qualified_prefix {
+                            Some(prefix) => prefix
+                                .len()
+                                .checked_add(2)
+                                .and_then(|length| length.checked_add(name.len()))
+                                .ok_or(SinkError::AccountingOverflow)?,
+                            None => name.len(),
+                        },
+                    }
+                };
             require_resource_limit(
                 ResourceKind::StringBytes,
                 qualified_length,
@@ -2274,6 +2303,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     parent_entity,
                     scope_identity: member_scope_identity,
                     data_identity: None,
+                    data_root_entity: None,
                     data_qualified_name: None,
                     scope_collision_guard: parent_scope
                         .as_ref()
@@ -2306,20 +2336,58 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation,
             )?;
         }
-        let (duplicate_data_keys, yaml_aliases) = if self.request.language().as_str() == "yaml" {
+        if self.request.language().as_str() == "markdown" {
+            for facts in embedded::partitions(self.parse_output.facts(), "toml", cancellation)? {
+                let base = facts
+                    .iter()
+                    .find(|fact| fact.parent().is_none())
+                    .and_then(|fact| drafts.get(&fact.local_id()))
+                    .map_or(0, |draft| draft.depth);
+                toml::resolve(
+                    &facts,
+                    &mut drafts,
+                    &mut unsupported_scope_entities,
+                    total_string_bytes,
+                    self.request.limits().ir(),
+                    cancellation,
+                )?;
+                embedded::restore_host_depths(&facts, &mut drafts, base, cancellation)?;
+            }
+        }
+        let (mut duplicate_data_keys, mut yaml_aliases) =
+            if self.request.language().as_str() == "yaml" {
+                let plan = yaml::resolve(
+                    self.parse_output.facts(),
+                    yaml_names.bindings,
+                    &mut drafts,
+                    &mut unsupported_scope_entities,
+                    total_string_bytes,
+                    self.request.limits().ir(),
+                    cancellation,
+                )?;
+                (plan.duplicates, plan.aliases)
+            } else {
+                (BTreeSet::new(), HashMap::new())
+            };
+        for (facts, bindings) in embedded_yaml {
+            let base = facts
+                .iter()
+                .find(|fact| fact.parent().is_none())
+                .and_then(|fact| drafts.get(&fact.local_id()))
+                .map_or(0, |draft| draft.depth);
             let plan = yaml::resolve(
-                self.parse_output.facts(),
-                yaml_names.bindings,
+                &facts,
+                bindings,
                 &mut drafts,
                 &mut unsupported_scope_entities,
                 total_string_bytes,
                 self.request.limits().ir(),
                 cancellation,
             )?;
-            (plan.duplicates, plan.aliases)
-        } else {
-            (BTreeSet::new(), HashMap::new())
-        };
+            duplicate_data_keys.extend(plan.duplicates);
+            yaml_aliases.extend(plan.aliases);
+            embedded::restore_host_depths(&facts, &mut drafts, base, cancellation)?;
+        }
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -2565,6 +2633,7 @@ struct EntityDraft {
     parent_entity: Option<u64>,
     scope_identity: Option<[u8; 32]>,
     data_identity: Option<[u8; 32]>,
+    data_root_entity: Option<u64>,
     data_qualified_name: Option<String>,
     scope_collision_guard: Option<[u8; 32]>,
     qualified_prefix: Option<String>,
@@ -2656,6 +2725,15 @@ fn materialize_entity(
             identity.push(4);
             identity.extend_from_slice(file.as_bytes());
             identity.extend_from_slice(&address);
+            if let Some(root) = draft.data_root_entity {
+                // A data address is file-local for standalone sources, but each
+                // embedded example owns an independent address space in its host.
+                let root = materialized
+                    .get(&root)
+                    .ok_or_else(|| provider_failure("embedded-data-root-missing"))?;
+                identity.push(5);
+                identity.extend_from_slice(root.record.id.as_bytes());
+            }
             (
                 container,
                 identity,
@@ -2999,10 +3077,19 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "markdown.inline_embedded.signature" => {
             Some((FactDomain::Entities, "markdown-inline-embedded-unavailable"))
         }
-        "markdown.embedded_text.signature" => Some((
+        "markdown.embedded_text.signature" | "markdown.code_block.signature" => Some((
             FactDomain::Entities,
             "markdown-embedded-analysis-unavailable",
         )),
+        "markdown.code_limit.signature" => {
+            Some((FactDomain::Entities, "markdown-code-budget-unavailable"))
+        }
+        "markdown.code_error.signature" => {
+            Some((FactDomain::Entities, "markdown-code-parse-unavailable"))
+        }
+        "markdown.code_parsed.signature" => {
+            Some((FactDomain::Relations, "markdown-code-semantics-unavailable"))
+        }
         "html.embedded_text.signature" => {
             Some((FactDomain::Entities, "html-embedded-analysis-unavailable"))
         }
@@ -3677,7 +3764,41 @@ fn validate_fact_graph(
     Ok(())
 }
 
-fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &SyntaxFact) -> &'a str {
+fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact) -> &'a str {
+    if request.language().as_str() == "markdown"
+        && let Some((language, _)) = fact.syntax_kind().as_str().split_once('.')
+        && matches!(
+            language,
+            "rust"
+                | "javascript"
+                | "typescript"
+                | "python"
+                | "c"
+                | "cpp"
+                | "csharp"
+                | "go"
+                | "java"
+                | "kotlin"
+                | "lua"
+                | "php"
+                | "ruby"
+                | "swift"
+                | "css"
+                | "bash"
+                | "json"
+                | "toml"
+                | "yaml"
+                | "html"
+                | "sql"
+                | "r"
+                | "solidity"
+                | "scala"
+                | "dart"
+                | "powershell"
+        )
+    {
+        return language;
+    }
     if request.language().as_str() == "html" {
         if fact.syntax_kind().as_str().starts_with("javascript.") {
             return "javascript";
@@ -3833,6 +3954,13 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str().ends_with(".signature")
         && fact.syntax_kind().as_str() != "sql.body.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
+        && !matches!(
+            fact.syntax_kind().as_str(),
+            "markdown.code_block.signature"
+                | "markdown.code_parsed.signature"
+                | "markdown.code_limit.signature"
+                | "markdown.code_error.signature"
+        )
 }
 
 fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {

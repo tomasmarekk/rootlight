@@ -167,11 +167,23 @@ impl ResolutionEngine {
         work: &mut ResolutionWorkBudget,
         cancellation: &Cancellation,
     ) -> Result<ResolutionDecision, ResolutionError> {
-        let language = index
+        let file_language = index
             .files
             .get(&occurrence.file)
             .map(|file| file.language.as_str())
             .ok_or(ResolutionError::InvalidScore)?;
+        let language = if matches!(file_language, "markdown" | "html") {
+            // Host provenance cannot label embedded native syntax. Missing
+            // namespace evidence must not fall back to a host-language match.
+            occurrence
+                .syntax_kind
+                .split_once('.')
+                .map_or("", |(language, _)| language)
+        } else {
+            file_language
+        };
+        let example =
+            (file_language == "markdown").then(|| markdown_example(occurrence.enclosing, index));
         let rule = if occurrence.role == OccurrenceRole::ImportUse {
             ResolutionRule::Import
         } else {
@@ -202,7 +214,12 @@ impl ResolutionEngine {
                 Some(RejectionReason::LanguageMismatch)
             } else if !parameter_call && !kind_supports_role(entity.kind, occurrence.role) {
                 Some(RejectionReason::TargetKindMismatch)
-            } else if parameter_outside_r_scope(occurrence, entity, index) {
+            } else if example.is_some_and(|example| {
+                example.is_none()
+                    || entity_source_file(entity) != Some(occurrence.file)
+                    || markdown_example(Some(entity.id), index) != example
+            }) || parameter_outside_r_scope(occurrence, entity, index)
+            {
                 Some(RejectionReason::OutsideLexicalScope)
             } else {
                 None
@@ -625,6 +642,26 @@ fn declaring_scope_depth(
                 None
             }
         });
+    }
+    None
+}
+
+fn markdown_example(mut current: Option<SymbolId>, index: &CandidateIndex<'_>) -> Option<SymbolId> {
+    for _ in 0..MAX_SCOPE_DEPTH {
+        let entity = index.entities.get(&current?)?;
+        let parent = match entity.container {
+            Some(ContainerRef::Entity(parent)) => parent,
+            _ => return None,
+        };
+        // A synthetic nested host module owns an authored code example. The
+        // file module itself is not a shared lexical scope between examples.
+        if entity.language == "markdown"
+            && entity.kind == EntityKind::Module
+            && entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+        {
+            return Some(entity.id);
+        }
+        current = Some(parent);
     }
     None
 }

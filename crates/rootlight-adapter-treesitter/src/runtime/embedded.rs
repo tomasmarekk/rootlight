@@ -18,11 +18,12 @@ impl TreeSitterProvider {
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
         if request.language().as_str() == "markdown" {
-            return self.extract_markdown_inline(
+            return self.extract_markdown(
                 tree,
                 request,
                 traversal,
                 candidates,
+                max_facts,
                 cancellation,
             );
         }

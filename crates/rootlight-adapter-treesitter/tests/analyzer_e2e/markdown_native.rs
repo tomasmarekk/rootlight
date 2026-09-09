@@ -27,6 +27,281 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_code_labels_require_declared_languages_without_content_inference() {
+    for (label, supported) in [
+        ("rust", true),
+        ("rs", true),
+        ("", false),
+        ("text", false),
+        ("rusty", false),
+        ("rust&#32;", false),
+    ] {
+        let source = format!("~~~{label}\nfn example() {{}}\n~~~\n");
+        let result = output(&source);
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Function
+                    && entity.canonical_name == "example"),
+            supported,
+            "{label}"
+        );
+        assert_eq!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "markdown-embedded-analysis-unavailable"),
+            !supported,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn markdown_inline_and_fenced_code_share_the_existing_range_budget() {
+    let source = format!(
+        "{}~~~rust\nfn admitted() {{}}\n~~~\n\n~~~rust\nfn exhausted() {{}}\n~~~\n",
+        "Paragraph.\n\n".repeat(31)
+    );
+    let result = output(&source);
+    let names: BTreeSet<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .map(|entity| entity.canonical_name.as_str())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["admitted"]));
+    let gaps: Vec<_> = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-code-budget-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].reason, SkippedRegionReason::ResourceLimit);
+    let span = gaps[0].source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "~~~rust\nfn exhausted() {}\n~~~\n"
+    );
+}
+
+#[test]
+fn markdown_code_parse_errors_preserve_healthy_neighboring_examples() {
+    let source = "~~~rust\nfn broken( {\n~~~\n\n~~~rust\nfn healthy() {}\n~~~\n";
+    let result = output(source);
+    assert!(result.document().entities.iter().any(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "healthy"));
+    let gap = result
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "markdown-code-parse-unavailable")
+        .unwrap();
+    assert_eq!(gap.reason, SkippedRegionReason::ParseError);
+    let span = gap.source.span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "~~~rust\nfn broken( {\n~~~\n"
+    );
+}
+
+#[test]
+fn markdown_fenced_definitions_match_standalone_language_evidence() {
+    let provider = Arc::new(provider());
+    let budget = limits();
+    let cases: Vec<_> = CASES
+        .into_iter()
+        .chain([
+            CSS_CASE,
+            JSON_CASE,
+            TOML_CASE,
+            yaml_native::YAML,
+            html_native::HTML,
+            sql_native::SQL,
+            r_native::R,
+            solidity_native::SOLIDITY,
+            scala_native::SCALA,
+            dart_native::DART,
+            powershell_native::POWERSHELL,
+        ])
+        .collect();
+    let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
+        .unwrap()
+        .descriptors()
+        .iter()
+        .filter(|descriptor| descriptor.language().as_str() != "markdown")
+        .map(|descriptor| descriptor.language().as_str().to_owned())
+        .collect();
+    assert_eq!(
+        cases
+            .iter()
+            .map(|case| case.name.to_owned())
+            .collect::<BTreeSet<_>>(),
+        expected_languages
+    );
+    for case in cases {
+        let fixture = Fixture::new(case, case.source.as_bytes());
+        let standalone = analyze(
+            &analyzer(&provider, case),
+            &request(&fixture.snapshot, &fixture.source, case, &budget),
+            &ExtensionSupport::default(),
+        );
+        let source = format!(
+            "# Example\n\n~~~~~~~~{}\n{}\n~~~~~~~~\n",
+            case.name, case.source
+        );
+        let embedded = output(&source);
+        let definitions = |result: &AnalysisOutput, source: &str| {
+            let mut values: Vec<_> = result
+                .document()
+                .occurrences
+                .iter()
+                .filter_map(|occurrence| {
+                    if occurrence.role != OccurrenceRole::Definition {
+                        return None;
+                    }
+                    let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                        return None;
+                    };
+                    let entity = result
+                        .document()
+                        .entities
+                        .iter()
+                        .find(|entity| entity.id == symbol)
+                        .unwrap();
+                    if entity.language != case.name {
+                        return None;
+                    }
+                    let span = occurrence.source.span();
+                    let text = &source[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()];
+                    assert_eq!(
+                        occurrence.syntactic_text_hash,
+                        content_hash(text.as_bytes())
+                    );
+                    Some((entity.kind, entity.canonical_name.clone(), text.to_owned()))
+                })
+                .collect();
+            values.sort();
+            values
+        };
+        let expected = definitions(&standalone, case.source);
+        assert!(!expected.is_empty(), "{}", case.name);
+        assert_eq!(definitions(&embedded, &source), expected, "{}", case.name);
+    }
+}
+
+#[test]
+fn markdown_data_examples_keep_addresses_and_alias_bindings_local() {
+    let source = concat!(
+        "~~~yaml\nname: &entry first\ncopy: *entry\n~~~\n\n",
+        "~~~yaml\nname: &entry second\ncopy: *entry\n~~~\n\n",
+        "~~~yaml\ncopy: *entry\n~~~\n\n",
+        "~~~toml\n[config]\nname = 'first'\n~~~\n\n",
+        "~~~toml\n[config]\nname = 'second'\n~~~\n",
+    );
+    let result = output(source);
+    let document = result.document();
+    let aliases: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "yaml.alias.reference")
+        .collect();
+    assert_eq!(aliases.len(), 3);
+    let mut targets = BTreeSet::new();
+    for alias in aliases {
+        let start = usize::try_from(alias.source.span().start_byte()).unwrap();
+        let fence_start = source[..start].rfind("~~~yaml").unwrap();
+        if fence_start == source.rfind("~~~yaml").unwrap() {
+            assert!(matches!(alias.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "yaml-alias-target-unavailable"
+                    && gap.source.span() == alias.source.span()
+            }));
+            continue;
+        }
+        let OccurrenceTarget::Resolved { symbol } = alias.target else {
+            panic!("declared alias must bind within its code example");
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        let span = entity.evidence.source.as_ref().unwrap().span();
+        assert!(span.start_byte() >= u64::try_from(fence_start).unwrap());
+        assert!(span.end_byte() < alias.source.span().start_byte());
+        targets.insert(symbol);
+    }
+    assert_eq!(targets.len(), 2);
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.detail == "yaml-duplicate-mapping-key" || gap.detail.contains("toml-duplicate")
+    }));
+    let properties: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "toml" && entity.kind == EntityKind::Property)
+        .collect();
+    assert_eq!(properties.len(), 2);
+    assert_ne!(properties[0].id, properties[1].id);
+    assert_eq!(properties[0].canonical_name, properties[1].canonical_name);
+    let edited = output(&source.replace("first", "a longer replacement value"));
+    let data_identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.language.as_str(), "yaml" | "toml"))
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(data_identities(&result), data_identities(&edited));
+}
+
+#[test]
+fn markdown_fenced_examples_keep_distinct_owners_and_original_coordinates() {
+    let source = "# Examples\r\n\r\n> ~~~rust\r\n> fn greet() {}\r\n> ~~~\r\n\r\n~~~rust\r\nfn greet() {}\r\n~~~\r\n";
+    let result = output(source);
+    let functions: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "greet")
+        .collect();
+    assert_eq!(functions.len(), 2);
+    assert_ne!(functions[0].id, functions[1].id);
+    let mut owners = BTreeSet::new();
+    for entity in functions {
+        assert_eq!(entity.language, "rust");
+        let source_ref = entity.evidence.source.as_ref().unwrap();
+        assert_eq!(source_ref.content_hash(), content_hash(source.as_bytes()));
+        let span = source_ref.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            "fn greet() {}"
+        );
+        let relation = result
+            .document()
+            .relations
+            .iter()
+            .find(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.object == rootlight_ir::RelationEndpoint::Entity(entity.id)
+            })
+            .unwrap();
+        owners.insert(relation.subject);
+    }
+    assert_eq!(owners.len(), 2);
+}
+
+#[test]
 fn markdown_named_links_and_images_bind_the_first_document_definition() {
     let source = "[text][Guide] [GUIDE][] [guide] ![alt][Guide] ![guide][] ![GUIDE]\n\n> [Guide]: first.md\n\n[guide]: second.md\n";
     let result = output(source);
@@ -479,7 +754,10 @@ fn markdown_opaque_blocks_do_not_invent_document_headings_or_code_symbols() {
         .iter()
         .map(|entity| entity.canonical_name.as_str())
         .collect();
-    assert_eq!(names, BTreeSet::from([MARKDOWN.path, "Written"]));
+    assert_eq!(
+        names,
+        BTreeSet::from([MARKDOWN.path, "Written", "<code-block>"])
+    );
     assert_eq!(
         result
             .document()
@@ -587,8 +865,8 @@ fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis(
             source,
         ),
         (
-            "markdown-embedded-analysis-unavailable",
-            FactDomain::Entities,
+            "markdown-code-semantics-unavailable",
+            FactDomain::Relations,
             "```rust\nfn embedded() {}\n```\n",
         ),
     ] {
@@ -613,11 +891,13 @@ fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis(
             || gap.detail == "markdown-inline-parse-unavailable"
     }));
     assert!(
-        !replay
+        replay
             .document()
             .entities
             .iter()
-            .any(|entity| entity.canonical_name == "embedded")
+            .any(|entity| entity.canonical_name == "embedded"
+                && entity.language == "rust"
+                && entity.kind == EntityKind::Function)
     );
     assert!(
         replay

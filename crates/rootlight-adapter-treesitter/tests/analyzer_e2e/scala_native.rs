@@ -3,7 +3,7 @@
 
 use super::*;
 
-const SCALA: LanguageCase = LanguageCase {
+pub(super) const SCALA: LanguageCase = LanguageCase {
     name: "scala",
     path: "src/catalog.scala",
     frontend: "tree-sitter-scala-0.26.2",

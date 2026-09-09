@@ -3,7 +3,7 @@
 
 use super::*;
 
-const SQL: LanguageCase = LanguageCase {
+pub(super) const SQL: LanguageCase = LanguageCase {
     name: "sql",
     path: "src/schema.sql",
     frontend: "tree-sitter-sequel-0.3.11",

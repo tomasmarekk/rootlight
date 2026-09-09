@@ -3,7 +3,7 @@
 
 use super::*;
 
-const R: LanguageCase = LanguageCase {
+pub(super) const R: LanguageCase = LanguageCase {
     name: "r",
     path: "src/example.R",
     frontend: "tree-sitter-r-1.3.0",

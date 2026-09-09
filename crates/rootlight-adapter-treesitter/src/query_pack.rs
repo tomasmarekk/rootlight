@@ -1206,15 +1206,12 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Markdown, "inline") => Some("markdown.inline"),
         (GrammarFamily::Markdown, "link_label") => Some("markdown.link_label"),
         (GrammarFamily::Markdown, "block_continuation") => Some("markdown.continuation"),
+        (GrammarFamily::Markdown, "fenced_code_block") => Some("markdown.code_block"),
         (GrammarFamily::Markdown, "paragraph") => Some("markdown.paragraph"),
         (GrammarFamily::Markdown, "atx_heading" | "setext_heading") => Some("markdown.heading"),
         (
             GrammarFamily::Markdown,
-            "fenced_code_block"
-            | "indented_code_block"
-            | "html_block"
-            | "minus_metadata"
-            | "plus_metadata",
+            "indented_code_block" | "html_block" | "minus_metadata" | "plus_metadata",
         ) => Some("markdown.embedded_text"),
         (GrammarFamily::Dart, native) => dart::canonical_syntax(native),
         (GrammarFamily::PowerShell, native) => powershell::canonical_syntax(native),

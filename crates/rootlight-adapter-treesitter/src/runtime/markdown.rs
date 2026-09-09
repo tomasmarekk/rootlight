@@ -4,15 +4,41 @@
 
 use super::*;
 
+mod code;
+
 impl TreeSitterProvider {
-    pub(super) fn extract_markdown_inline(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn extract_markdown(
+        &self,
+        tree: &Tree,
+        request: &ParseRequest<'_>,
+        traversal: &mut TraversalReport,
+        candidates: &mut Vec<QueryCandidate>,
+        max_facts: Option<usize>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let (inline_limited, used_ranges) =
+            self.extract_markdown_inline(tree, request, traversal, candidates, cancellation)?;
+        self.extract_markdown_code(
+            tree,
+            request,
+            traversal,
+            candidates,
+            max_facts,
+            used_ranges,
+            cancellation,
+        )
+        .map(|code_limited| inline_limited || code_limited)
+    }
+
+    fn extract_markdown_inline(
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         cancellation: &Cancellation,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<(bool, usize), AdapterError> {
         sort_cancellable_by(candidates, cancellation, |left, right| {
             left.retention_rank().cmp(&right.retention_rank())
         })?;
@@ -113,7 +139,7 @@ impl TreeSitterProvider {
             candidates[index].syntax = "markdown.inline_parsed";
             capture_inline(&child, request.source().bytes(), candidates, cancellation)?;
         }
-        Ok(limited)
+        Ok((limited, used_ranges))
     }
 }
 
@@ -130,6 +156,11 @@ fn inline_ranges(
         cancellation.check()?;
         if child.kind() != "block_continuation" {
             return Err(provider_failure("markdown-inline-exclusion-kind"));
+        }
+        // Native empty continuation tokens exclude no bytes. Splitting at them
+        // would spend the range budget on ordinary unprefixed source lines.
+        if child.start_byte() == child.end_byte() {
+            continue;
         }
         if !append_range(
             &mut ranges,

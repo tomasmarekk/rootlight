@@ -4,7 +4,7 @@
 
 use super::*;
 
-const HTML: LanguageCase = LanguageCase {
+pub(super) const HTML: LanguageCase = LanguageCase {
     name: "html",
     path: "src/view.html",
     frontend: "tree-sitter-html-0.23.2",

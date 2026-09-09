@@ -372,7 +372,7 @@ fn yaml_native_document_schema_and_unknown_key_tags_leave_scoped_gaps() {
 
 use super::*;
 
-const YAML: LanguageCase = LanguageCase {
+pub(super) const YAML: LanguageCase = LanguageCase {
     name: "yaml",
     path: "src/settings.yaml",
     frontend: "tree-sitter-yaml-0.7.2",
