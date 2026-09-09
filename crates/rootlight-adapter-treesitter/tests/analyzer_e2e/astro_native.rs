@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn astro_embedded_preflight_and_replay_retain_complete_declarations() {
-    let source = "---\r\nfunction first(value: string) { return value; }\r\n---\r\n<style>.item { color: red; }</style><script>function last(value) { return value; }</script>{(() => { const local = 1; consume(local); return local; })()}";
+    let source = "---\r\nfunction first(value: string) { return value; }\r\n---\r\n<style>.item { color: red; }</style><script>function last(value) { return value; }</script><Card {...props} {label} />{(() => { const local = 1; consume(local); return local; })()}";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, ASTRO);
     let fixture = Fixture::new(ASTRO, source.as_bytes());
@@ -412,6 +412,11 @@ fn astro_expression_bodies_retain_written_definitions_and_reject_invalid_syntax(
         "<main>{/* comment */ const value = 1}</main>",
         "<main title={/* no attribute value */}></main>",
         "<main>{/* comment */ , ,}</main>",
+        "<Card {...props,} />",
+        "<Card {...props, ...other} />",
+        "<Card {...} />",
+        "<Card value={...props} />",
+        "<Card {/* lead */ ...props} />",
     ] {
         let result = output(source);
         assert!(
@@ -464,8 +469,68 @@ fn astro_comment_interpolations_do_not_invent_code_or_parse_errors() {
 }
 
 #[test]
+fn astro_spread_and_shorthand_attributes_keep_native_source_references() {
+    for attribute in [
+        "{...props}",
+        "{ ...props}",
+        "{\u{a0}...props}",
+        "{... /* lead */ compose(props) /* tail */ }",
+        "{...{title: format(label), value: /}/}}",
+        "{...items.map(item => <Card {...item} />)}",
+        "{label}",
+        "{props.value}",
+        "{...props, other}",
+    ] {
+        let source = format!("<main>é\r\n<Card {attribute} /></main>");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.reason == SkippedRegionReason::ParseError
+                    || gap.detail == "astro-expression-analysis-unavailable"),
+            "{source}: {:#?}",
+            document.skipped_regions
+        );
+        let expected = attribute.matches("compose(").count()
+            + attribute.matches("format(").count()
+            + attribute.matches(".map(").count();
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+                .count(),
+            expected,
+            "{source}"
+        );
+        let needle = if attribute.contains("props") {
+            "props"
+        } else if attribute.contains("items") {
+            "items"
+        } else {
+            "label"
+        };
+        assert!(
+            document.occurrences.iter().any(|occurrence| {
+                let span = occurrence.source.span();
+                let text = &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()];
+                text == needle
+                    && occurrence.role != OccurrenceRole::Definition
+                    && occurrence.syntactic_text_hash == content_hash(text.as_bytes())
+                    && occurrence.source.content_hash() == content_hash(source.as_bytes())
+            }),
+            "{source}: {:#?}",
+            document.occurrences
+        );
+    }
+}
+
+#[test]
 fn astro_expressions_share_the_existing_host_range_budget() {
-    let source = "<main>{first()}<span>{second()}</span>{third()}</main>";
+    let source = "<main>{first()}<span {...second()}></span>{third()}</main>";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, ASTRO);
     let fixture = Fixture::new(ASTRO, source.as_bytes());
@@ -506,7 +571,7 @@ fn astro_expressions_share_the_existing_host_range_budget() {
             let span = gap.source.span();
             let text = &source[usize::try_from(span.start_byte()).unwrap()
                 ..usize::try_from(span.end_byte()).unwrap()];
-            assert!(matches!(text, "{first()}" | "{second()}" | "{third()}"));
+            assert!(matches!(text, "{first()}" | "{...second()}" | "{third()}"));
             assert_eq!(gap.reason, SkippedRegionReason::ResourceLimit);
         }
     }

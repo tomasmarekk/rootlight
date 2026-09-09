@@ -93,22 +93,6 @@ impl TreeSitterProvider {
                 return Err(provider_failure("embedded-host-span"));
             }
             let language = if expression {
-                let bytes = request
-                    .source()
-                    .bytes()
-                    .get(candidate.start..candidate.end)
-                    .ok_or_else(|| provider_failure("expression-source-range"))?;
-                let text = std::str::from_utf8(bytes)
-                    .map_err(|_| provider_failure("expression-source-encoding"))?;
-                // Spread attributes are host binding operations, not valid
-                // standalone spread expressions; a TSX error would mislabel them.
-                if body.kind() == "attribute_interpolation"
-                    && text
-                        .strip_prefix('{')
-                        .is_some_and(|text| text.trim_start().starts_with("..."))
-                {
-                    continue;
-                }
                 Some("typescript")
             } else if astro {
                 astro_body_language(body, request.source().bytes(), cancellation)?
@@ -164,7 +148,16 @@ impl TreeSitterProvider {
                         candidate.end,
                     )
                     .ok_or_else(|| provider_failure("expression-host-delimiters"))?;
-                    if body.kind() == "html_interpolation"
+                    if body.kind() == "attribute_interpolation"
+                        && body.parent().is_some_and(|parent| {
+                            parent.kind() == "attribute" && parent.named_child(0) == Some(body)
+                        })
+                    {
+                        Some(
+                            envelope
+                                .with_attribute_spread(request.source().bytes(), cancellation)?,
+                        )
+                    } else if body.kind() == "html_interpolation"
                         && envelope
                             .contains_only_comments(request.source().bytes(), cancellation)?
                     {

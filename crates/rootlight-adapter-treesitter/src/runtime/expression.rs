@@ -1,6 +1,6 @@
 //! Coordinate-preserving native expression envelopes for authored host braces.
-//! Only the two outer delimiters change in the parser callback; source evidence,
-//! UTF-8 bytes, line coordinates and all interior tokens remain original.
+//! Outer delimiters and an optional host spread operator are projected only for
+//! native parsing; source evidence and UTF-8/line coordinates remain original.
 
 use super::{AdapterError, CANCELLATION_CHECK_INTERVAL, Cancellation, provider_failure};
 
@@ -8,13 +8,55 @@ use super::{AdapterError, CANCELLATION_CHECK_INTERVAL, Cancellation, provider_fa
 pub(super) struct ExpressionEnvelope {
     open: usize,
     close: usize,
+    spread_start: Option<usize>,
 }
 
 impl ExpressionEnvelope {
     pub(super) fn new(source: &[u8], start: usize, end: usize) -> Option<Self> {
         let close = end.checked_sub(1)?;
         (start < close && source.get(start) == Some(&b'{') && source.get(close) == Some(&b'}'))
-            .then_some(Self { open: start, close })
+            .then_some(Self {
+                open: start,
+                close,
+                spread_start: None,
+            })
+    }
+
+    pub(super) fn with_attribute_spread(
+        mut self,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<Self, AdapterError> {
+        cancellation.check()?;
+        let start = self
+            .open
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("expression-spread-range"))?;
+        let bytes = source
+            .get(start..self.close)
+            .ok_or_else(|| provider_failure("expression-spread-range"))?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| provider_failure("expression-spread-encoding"))?;
+        for (index, (offset, character)) in text.char_indices().enumerate() {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            if javascript_space(character) {
+                continue;
+            }
+            if bytes
+                .get(offset..)
+                .is_some_and(|tail| tail.starts_with(b"..."))
+            {
+                self.spread_start = Some(
+                    start
+                        .checked_add(offset)
+                        .ok_or_else(|| provider_failure("expression-spread-range"))?,
+                );
+            }
+            break;
+        }
+        Ok(self)
     }
 
     pub(super) fn contains_only_comments(
@@ -72,8 +114,19 @@ impl ExpressionEnvelope {
         if offset == self.close {
             return b")";
         }
+        // Astro spreads evaluate their operand as an expression (including a
+        // comma expression). Keeping an array spread instead would change syntax.
+        if let Some(start) = self.spread_start
+            && let Some(index) = offset.checked_sub(start).filter(|index| *index < 3)
+        {
+            return b"   "
+                .get(..(3 - index).min(end - offset))
+                .unwrap_or_default();
+        }
         let boundary = if offset < self.open {
             self.open
+        } else if let Some(start) = self.spread_start.filter(|start| offset < *start) {
+            start
         } else if offset < self.close {
             self.close
         } else {
@@ -166,6 +219,62 @@ mod tests {
         assert!(
             envelope
                 .contains_only_comments(source, &cancellation)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn spread_projection_preserves_every_chunk_boundary_and_nonoperator_byte() {
+        let cancellation = Cancellation::new();
+        let source = "é\r\n{\u{a0}...compose({text: '雪'}, /}/), rest}\r\nend".as_bytes();
+        let start = source.iter().position(|byte| *byte == b'{').unwrap();
+        let end = source.iter().rposition(|byte| *byte == b'}').unwrap() + 1;
+        let envelope = ExpressionEnvelope::new(source, start, end)
+            .unwrap()
+            .with_attribute_spread(source, &cancellation)
+            .unwrap();
+        let spread = envelope.spread_start.unwrap();
+        let mut expected = source.to_vec();
+        expected[start] = b'(';
+        expected[end - 1] = b')';
+        expected[spread..spread + 3].fill(b' ');
+        for size in 1..=source.len() + 1 {
+            let mut actual = Vec::new();
+            while actual.len() < source.len() {
+                let offset = actual.len();
+                let chunk = envelope.chunk(source, offset, (offset + size).min(source.len()));
+                assert!(!chunk.is_empty());
+                actual.extend_from_slice(chunk);
+            }
+            assert_eq!(actual, expected);
+        }
+        for offset in 0..=source.len() {
+            for end in offset..=source.len() {
+                let chunk = envelope.chunk(source, offset, end);
+                assert_eq!(chunk, &expected[offset..offset + chunk.len()]);
+                assert!(chunk.len() <= end - offset);
+            }
+        }
+        for source in [
+            "{props}",
+            "{props.value}",
+            "{'...'}",
+            "{/* lead */ ...props}",
+        ] {
+            let bytes = source.as_bytes();
+            assert!(
+                ExpressionEnvelope::new(bytes, 0, bytes.len())
+                    .unwrap()
+                    .with_attribute_spread(bytes, &cancellation)
+                    .unwrap()
+                    .spread_start
+                    .is_none()
+            );
+        }
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(
+            envelope
+                .with_attribute_spread(source, &cancellation)
                 .is_err()
         );
     }

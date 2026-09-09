@@ -37,7 +37,7 @@ test_corpus = "35 native grammar tests and source-backed host/server/client/CSS 
 msrv = "native grammar verified with Rootlight MSRV 1.90"
 offline_behavior = "compiles pinned vendored C parser and scanner with cached Cargo dependencies; no runtime downloads"
 capabilities = ["authored-markup", "server-typescript", "client-script", "css", "source-ranges"]
-semantic_depth = "separate server/client/style modules and native TSX expression source facts; spread attributes, server/template binding, component resolution and framework execution remain explicit gaps"
+semantic_depth = "separate server/client/style modules and native TSX expression/attribute operand source facts; runtime spread-property evaluation, server/template binding, component resolution and framework execution remain explicit gaps"
 audit_notes = ["published crate VCS revision pinned; no matching Git tag claimed", "grammar generator DSL was not published: no DSL-to-C regeneration claim", "original MIT and fork Apache notices are both retained", "automatic indexing and MCP support require separate integration"]
 [grammars.vendored]
 manifest_path = "third_party/tree-sitter-astro-next-0.1.1/Cargo.toml"
