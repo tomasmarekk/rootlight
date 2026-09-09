@@ -5,6 +5,202 @@
 use super::*;
 
 #[test]
+fn namespace_imports_respect_local_binding_scopes() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (body, imported) in [
+            ("function run(Local) { Local.Actual(); }", false),
+            ("const run = Local => Local.Actual();", false),
+            ("function run({space: Local}) { Local.Actual(); }", false),
+            (
+                "function run() { const Local = {}; Local.Actual(); }",
+                false,
+            ),
+            ("function run() { Local.Actual(); let Local; }", false),
+            ("function run() { { let Local; } Local.Actual(); }", true),
+            (
+                "function other(Local) {} function run() { Local.Actual(); }",
+                true,
+            ),
+            ("function run() { Local.Actual(); { var Local; } }", false),
+            ("function run() { { var Local; } } Local.Actual();", true),
+            ("try {} catch (Local) { Local.Actual(); }", false),
+            ("try {} catch (Local) {} Local.Actual();", true),
+            ("for (let Local of []) { Local.Actual(); }", false),
+            ("for (let Local of []) {} Local.Actual();", true),
+            (
+                "function run() { for (var Local of []) {} Local.Actual(); }",
+                false,
+            ),
+            (
+                "function run() { for (var Local in {}) {} } Local.Actual();",
+                true,
+            ),
+            ("const value = function Local() { Local.Actual(); };", false),
+            ("const value = function Local() {}; Local.Actual();", true),
+            ("var value = function(Local) { Local.Actual(); };", false),
+            (
+                "var value = function() { { let Local; } Local.Actual(); };",
+                true,
+            ),
+            (
+                "function run(value = Local.Actual()) { function Local() {} }",
+                true,
+            ),
+            ("function run(Local = Local.Actual()) {}", false),
+            (
+                "function run(Local) { function nested() { Local.Actual(); } }",
+                false,
+            ),
+            ("const value = () => { let Local; }; Local.Actual();", true),
+            ("switch (0) { case 0: let Local; } Local.Actual();", true),
+            ("switch (0) { case 0: let Local; Local.Actual(); }", false),
+            (
+                "class Holder { static { var Local; } } Local.Actual();",
+                true,
+            ),
+            (
+                "class Holder { static { { var Local; } Local.Actual(); } }",
+                false,
+            ),
+            (
+                "function run() { { function Local() {} } Local.Actual(); }",
+                true,
+            ),
+            (
+                "function run() { Local.Actual(); function Local() {} }",
+                false,
+            ),
+            ("function run(value = Local.Actual()) { var Local; }", true),
+        ] {
+            let source = format!("import * as Local from './provider'; {body}");
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source.as_str(), "export function Actual() {}"],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let call = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.role == OccurrenceRole::CallSite
+                })
+                .unwrap();
+            if imported {
+                let target = output
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "Actual"
+                            && entity.evidence.source.as_ref().unwrap().span().file()
+                                == fixture.snapshots[1].file()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    call.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{language:?}: {body}"
+                );
+            } else {
+                assert!(
+                    matches!(call.target, OccurrenceTarget::Unresolved { .. }),
+                    "{language:?}: {body}: {:?}",
+                    call.target
+                );
+                assert!(
+                    output
+                        .document()
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source.span() == call.source.span()),
+                    "{language:?}: {body}: missing scoped gap"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shadowed_import_references_retain_the_exact_local_definition() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (import, body, expected_definition) in [
+            (
+                "import * as Local from './provider';",
+                "function run(Local) { return Local; }",
+                "Local)",
+            ),
+            (
+                "import {Actual as Local} from './provider';",
+                "function run(Local) { return Local; }",
+                "Local)",
+            ),
+            (
+                "import * as Local from './provider';",
+                "function run() { let Local; { const Local = 1; return Local; } }",
+                "Local =",
+            ),
+            (
+                "import {Actual as Local} from './provider';",
+                "function run() { function Local() {} return Local; }",
+                "Local()",
+            ),
+        ] {
+            let source = format!("{import} {body}");
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source.as_str(), "export function Actual() {}"],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let position = u64::try_from(source.rfind("Local;").unwrap()).unwrap();
+            let definition_position =
+                u64::try_from(source.find(expected_definition).unwrap()).unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.role == OccurrenceRole::Reference
+                        && occurrence.source.span().start_byte() == position
+                })
+                .unwrap();
+            let definition = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.role == OccurrenceRole::Definition
+                        && occurrence.source.span().start_byte() == definition_position
+                })
+                .unwrap();
+            assert!(matches!(
+                definition.target,
+                OccurrenceTarget::Resolved { .. }
+            ));
+            assert_eq!(
+                reference.target, definition.target,
+                "{language:?}: {source}"
+            );
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
 fn namespace_export_members_resolve_through_authored_module_chains() {
     for language in [
         SemanticProjectLanguage::JavaScript,

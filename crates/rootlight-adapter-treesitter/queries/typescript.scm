@@ -56,6 +56,8 @@
 (import_specifier name: (identifier) @declaration @definition)
 (import_specifier alias: (identifier) @declaration @definition)
 (formal_parameters) @signature
+(variable_declaration (variable_declarator) @signature)
+(for_in_statement kind: "var") @signature
 (statement_block) @scope
 (generator_function_declaration name: (identifier) @definition) @declaration
 (function_expression name: (identifier) @definition) @declaration
@@ -74,7 +76,7 @@
 (rest_pattern (identifier) @declaration @definition)
 (catch_clause parameter: (identifier) @declaration @definition)
 (for_in_statement left: (identifier) @declaration @definition)
-[(for_statement) (for_in_statement) (catch_clause)] @scope
+[(for_statement) (for_in_statement) (catch_clause) (switch_body) (class_static_block)] @scope
 
 [(function_declaration) (function_expression) (generator_function_declaration)
  (generator_function) (arrow_function) (method_definition) (function_signature)

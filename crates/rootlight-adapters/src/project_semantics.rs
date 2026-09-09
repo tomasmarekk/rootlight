@@ -1308,6 +1308,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
             || ecmascript::is_export_metadata(fact)
+            || ecmascript::lexical::is_binding_metadata(fact)
             || is_identity_capture_fact(fact)
     }) {
         select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
@@ -1632,6 +1633,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     exports: BTreeMap<FileId, BTreeMap<String, Vec<ecmascript::exports::ExportTarget>>>,
     export_reference_names: BTreeMap<SourceSpan, String>,
     namespace_occurrence_targets: BTreeMap<SourceSpan, Vec<ecmascript::exports::ExportTarget>>,
+    ecmascript_bindings: ecmascript::lexical::LocalBindings,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1659,6 +1661,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             exports: BTreeMap::new(),
             export_reference_names: BTreeMap::new(),
             namespace_occurrence_targets: BTreeMap::new(),
+            ecmascript_bindings: ecmascript::lexical::LocalBindings::default(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1882,6 +1885,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let input = self.parsed[file_index].input;
             let facts = self.parsed[file_index].facts.clone();
             let bytes = input.source().bytes();
+            let hoisted_bindings: BTreeMap<_, _> = facts
+                .iter()
+                .filter(|fact| ecmascript::lexical::is_binding_metadata(fact))
+                .map(|fact| (fact.span().start_byte(), fact.span()))
+                .collect();
             let facts_by_id = facts
                 .iter()
                 .map(|fact| (fact.local_id(), fact))
@@ -2004,6 +2012,18 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 let symbol = claim.symbol;
                 let provenance = self.provenance_for(input)?;
                 scope_symbols.insert(scope.local_id(), symbol);
+                if matches!(
+                    self.analyzer.language,
+                    SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+                ) {
+                    self.ecmascript_bindings.register_scope(
+                        scope,
+                        symbol,
+                        module,
+                        &facts_by_id,
+                        self.cancellation,
+                    )?;
+                }
                 self.records.push(IrRecord::Entity(EntityRecord {
                     id: symbol,
                     repository: source.repository(),
@@ -2257,6 +2277,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     ));
                 };
                 if let Some((definition_span, draft)) = draft {
+                    if is_ecmascript {
+                        self.ecmascript_bindings.insert(
+                            &draft,
+                            declaration,
+                            &facts_by_id,
+                            &hoisted_bindings,
+                            self.cancellation,
+                        )?;
+                    }
                     let callable_declaration =
                         is_callable_entity_kind(draft.kind).then_some(declaration.local_id());
                     selected_definition_spans.insert(definition_span);
@@ -5057,6 +5086,7 @@ fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
         && !ecmascript::is_export_metadata(fact)
+        && !ecmascript::lexical::is_binding_metadata(fact)
 }
 
 const fn supports_symbol_signature(kind: EntityKind) -> bool {

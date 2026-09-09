@@ -795,7 +795,8 @@ fn candidate_for_capture(
                 GrammarFamily::JavaScript | GrammarFamily::TypeScript
             ) =>
         {
-            ecmascript::import_signature_syntax(family, capture.node)
+            ecmascript::binding_signature_syntax(family, capture.node)
+                .or(ecmascript::import_signature_syntax(family, capture.node))
                 .or(ecmascript::export_signature_syntax(
                     family,
                     capture.node,
@@ -1545,6 +1546,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
         (GrammarFamily::JavaScript, "for_statement" | "for_in_statement") => Some("javascript.for"),
         (GrammarFamily::JavaScript, "catch_clause") => Some("javascript.catch"),
+        (GrammarFamily::JavaScript, "switch_body") => Some("javascript.switch"),
+        (GrammarFamily::JavaScript, "class_static_block") => Some("javascript.static_block"),
         (
             GrammarFamily::JavaScript,
             "identifier"
@@ -1638,6 +1641,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
         (GrammarFamily::TypeScript, "for_statement" | "for_in_statement") => Some("typescript.for"),
         (GrammarFamily::TypeScript, "catch_clause") => Some("typescript.catch"),
+        (GrammarFamily::TypeScript, "switch_body") => Some("typescript.switch"),
+        (GrammarFamily::TypeScript, "class_static_block") => Some("typescript.static_block"),
         (
             GrammarFamily::TypeScript,
             "identifier"

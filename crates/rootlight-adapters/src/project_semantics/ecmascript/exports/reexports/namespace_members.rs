@@ -20,6 +20,11 @@ impl ProjectFactsBuilder<'_, '_, '_> {
             .collect();
         let mut bindings_by_local = BTreeMap::<_, Vec<_>>::new();
         let mut member_cache = BTreeMap::new();
+        let entities_by_symbol: BTreeMap<_, _> = self
+            .entities
+            .iter()
+            .map(|entity| (entity.symbol, entity))
+            .collect();
         for import in &self.imports {
             for binding in &import.bindings {
                 self.cancellation.check()?;
@@ -46,6 +51,35 @@ impl ProjectFactsBuilder<'_, '_, '_> {
             let Some(root) = qualifier.split('.').next() else {
                 continue;
             };
+            if !bindings_by_local.contains_key(&(occurrence.file, root)) {
+                continue;
+            }
+            let local = self
+                .ecmascript_bindings
+                .visible(occurrence, root, self.cancellation)?;
+            if !local.is_empty() {
+                let targets = if occurrence.qualifier.is_none() {
+                    local
+                        .iter()
+                        .filter_map(|id| self.symbol_by_declaration.get(&(occurrence.file, *id)))
+                        .filter_map(|symbol| entities_by_symbol.get(symbol))
+                        .map(|entity| ExportTarget {
+                            entity: (*entity).clone(),
+                            type_only: false,
+                            module_namespace: false,
+                        })
+                        .collect()
+                } else {
+                    gaps.push((
+                        occurrence.source.span(),
+                        "ecmascript-local-member-resolution-unavailable",
+                    ));
+                    Vec::new()
+                };
+                self.namespace_occurrence_targets
+                    .insert(occurrence.source.span(), targets);
+                continue;
+            }
             let mut handled = false;
             let mut selected = BTreeMap::<SymbolId, ExportTarget>::new();
             for (import, imported) in bindings_by_local

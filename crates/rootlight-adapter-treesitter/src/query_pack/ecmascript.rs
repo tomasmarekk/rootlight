@@ -12,6 +12,25 @@ pub(super) enum BindingKind {
     Import { type_only: bool },
 }
 
+pub(super) fn binding_signature_syntax(
+    family: GrammarFamily,
+    node: Node<'_>,
+) -> Option<&'static str> {
+    let hoisted = (node.kind() == "variable_declarator"
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "variable_declaration"))
+        || (node.kind() == "for_in_statement"
+            && node
+                .child_by_field_name("kind")
+                .is_some_and(|kind| kind.kind() == "var"));
+    hoisted.then_some(if family == GrammarFamily::TypeScript {
+        "typescript.hoisted_binding"
+    } else {
+        "javascript.hoisted_binding"
+    })
+}
+
 pub(super) fn is_foreign_import_name(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| {
         parent.kind() == "import_specifier"
