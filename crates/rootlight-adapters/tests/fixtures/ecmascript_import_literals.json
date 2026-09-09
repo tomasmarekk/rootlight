@@ -1,0 +1,257 @@
+{
+  "purpose": "Strict ECMAScript import literal values, shared by Rust regression tests and an independent parse-only V8 oracle.",
+  "cases": [
+    {
+      "name": "empty",
+      "literal": "''",
+      "value": "",
+      "module_valid": true
+    },
+    {
+      "name": "plain",
+      "literal": "'./provider'",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "double",
+      "literal": "\"./provider\"",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "hex",
+      "literal": "'./pro\\x76ider'",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "unicode",
+      "literal": "'./pro\\u0076ider'",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "codepoint",
+      "literal": "'./pro\\u{76}ider'",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "leading-zero",
+      "literal": "'\\u{000000000000000000000061}'",
+      "value": "a",
+      "module_valid": true
+    },
+    {
+      "name": "identity",
+      "literal": "'./\\provider'",
+      "value": "./provider",
+      "module_valid": true
+    },
+    {
+      "name": "quotes",
+      "literal": "'\\\"\\'\\\\'",
+      "value": "\"'\\",
+      "module_valid": true
+    },
+    {
+      "name": "controls",
+      "literal": "'\\b\\t\\n\\v\\f\\r\\0'",
+      "value": "\b\t\n\u000b\f\r\u0000",
+      "module_valid": true
+    },
+    {
+      "name": "lf",
+      "literal": "'a\\\nb'",
+      "value": "ab",
+      "module_valid": true
+    },
+    {
+      "name": "cr",
+      "literal": "'a\\\rb'",
+      "value": "ab",
+      "module_valid": true
+    },
+    {
+      "name": "crlf",
+      "literal": "'a\\\r\nb'",
+      "value": "ab",
+      "module_valid": true
+    },
+    {
+      "name": "ls-cont",
+      "literal": "'a\\ b'",
+      "value": "ab",
+      "module_valid": true
+    },
+    {
+      "name": "ps-cont",
+      "literal": "'a\\ b'",
+      "value": "ab",
+      "module_valid": true
+    },
+    {
+      "name": "raw-separators",
+      "literal": "'a  b'",
+      "value": "a  b",
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-pair",
+      "literal": "'\\uD83D\\uDE80'",
+      "value": "🚀",
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-braces",
+      "literal": "'\\u{D83D}\\u{DE80}'",
+      "value": "🚀",
+      "module_valid": true
+    },
+    {
+      "name": "pair-with-continuation",
+      "literal": "'\\uD83D\\\r\n\\uDE80'",
+      "value": "🚀",
+      "module_valid": true
+    },
+    {
+      "name": "non-bmp",
+      "literal": "'\\u{1f680}'",
+      "value": "🚀",
+      "module_valid": true
+    },
+    {
+      "name": "max",
+      "literal": "'\\u{10ffff}'",
+      "value": "􏿿",
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-high",
+      "literal": "'\\uD800'",
+      "value": null,
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-low",
+      "literal": "'\\uDC00'",
+      "value": null,
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-mismatch",
+      "literal": "'\\uD800x'",
+      "value": null,
+      "module_valid": true
+    },
+    {
+      "name": "surrogate-repeat",
+      "literal": "'\\uD800\\uD801'",
+      "value": null,
+      "module_valid": true
+    },
+    {
+      "name": "legacy-octal",
+      "literal": "'\\141'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "legacy-zero",
+      "literal": "'\\00'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "decimal-eight",
+      "literal": "'\\8'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "decimal-nine",
+      "literal": "'\\9'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "zero-digit",
+      "literal": "'\\09'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "short-hex",
+      "literal": "'\\x1'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "bad-hex",
+      "literal": "'\\xGG'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "short-unicode",
+      "literal": "'\\u123'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "bad-unicode",
+      "literal": "'\\u12ZZ'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "empty-codepoint",
+      "literal": "'\\u{}'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "too-large",
+      "literal": "'\\u{110000}'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "unterminated-codepoint",
+      "literal": "'\\u{76'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "raw-lf",
+      "literal": "'a\nb'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "raw-cr",
+      "literal": "'a\rb'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "inner-quote",
+      "literal": "'a'b'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "trailing-escape",
+      "literal": "'a\\'",
+      "value": null,
+      "module_valid": false
+    },
+    {
+      "name": "template",
+      "literal": "`name`",
+      "value": null,
+      "module_valid": false
+    }
+  ]
+}

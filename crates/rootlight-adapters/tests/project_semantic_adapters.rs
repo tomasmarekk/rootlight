@@ -42,8 +42,8 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 
 #[test]
-fn native_ecmascript_import_paths_do_not_guess_escaped_specifiers() {
-    let source = "import {Item} from './pro\\u0076ider'; const value = Item;\n";
+fn native_ecmascript_import_paths_do_not_replace_unpaired_surrogates() {
+    let source = "import {Item} from './pro\\uD800ider'; const value = Item;\n";
     let fixture = ProjectFixture::new(
         ["src/main.ts", "src/provider.ts"],
         [source, "export class Item {}"],
@@ -80,6 +80,80 @@ fn native_ecmascript_import_paths_do_not_guess_escaped_specifiers() {
         output.report().work().coverage().status(),
         CoverageStatus::Bounded
     );
+}
+
+#[test]
+fn native_ecmascript_import_literals_resolve_decoded_names_with_original_source() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (module, path) in [
+            ("'./pro\\u0076ider'", "src/provider.ts"),
+            ("'./pro\\x76ider'", "src/provider.ts"),
+            ("'./pro\\u{76}ider'", "src/provider.ts"),
+            ("'./\\provider'", "src/provider.ts"),
+            ("'./pro\\\r\nvider'", "src/provider.ts"),
+            ("'./p\\uD83D\\uDE80'", "src/p🚀.ts"),
+            ("'./p\\u{1F680}'", "src/p🚀.ts"),
+        ] {
+            let source =
+                format!("import {{'It\\u0065m' as Local}} from {module}; const value = Local;\r\n");
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", path],
+                [&source, "export class Item {}"],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let item = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Item")
+                .unwrap();
+            let start = u64::try_from(source.find("= Local;").unwrap() + 2).unwrap();
+            let reference = output
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.file == fixture.snapshots[0].file()
+                        && occurrence.source.span().start_byte() == start
+                })
+                .unwrap();
+            assert_eq!(
+                reference.target,
+                OccurrenceTarget::Resolved { symbol: item.id },
+                "{language:?}: {module}"
+            );
+            assert_eq!(
+                reference.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+            assert!(
+                !output
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "ecmascript-import-evidence-unavailable"),
+                "{module}"
+            );
+            assert!(
+                output
+                    .document()
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Imports
+                        && relation
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|evidence| evidence.content_hash()
+                                == content_hash(source.as_bytes()))),
+                "{module}"
+            );
+        }
+    }
 }
 
 #[test]

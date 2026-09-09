@@ -4,6 +4,8 @@
 
 use super::*;
 
+mod string_literal;
+
 struct NativeImports<'a> {
     facts: BTreeMap<u64, Vec<&'a SyntaxFact>>,
 }
@@ -100,10 +102,13 @@ impl<'a> NativeImports<'a> {
                 };
                 type_only.insert(name.to_owned());
             } else if label.ends_with(".import_source.signature") {
-                let Some(value) = source_text(source, fact.span()).and_then(quoted_literal) else {
+                let Some(text) = source_text(source, fact.span()) else {
                     return Ok(None);
                 };
-                if module.replace(value.to_owned()).is_some() {
+                let Some(value) = string_literal::decode(text, cancellation)? else {
+                    return Ok(None);
+                };
+                if module.replace(value).is_some() {
                     return Ok(None);
                 }
             } else if label.ends_with(".import_default.signature")
@@ -143,14 +148,16 @@ impl<'a> NativeImports<'a> {
                         .as_str()
                         .ends_with(".import_name.signature")
                     {
-                        let Some(name) = source_text(source, child.span()).and_then(|name| {
-                            if is_identifier(name) {
-                                Some(name)
-                            } else {
-                                quoted_literal(name)
-                            }
-                        }) else {
+                        let Some(text) = source_text(source, child.span()) else {
                             return Ok(None);
+                        };
+                        let name = if is_identifier(text) {
+                            text.to_owned()
+                        } else {
+                            let Some(name) = string_literal::decode(text, cancellation)? else {
+                                return Ok(None);
+                            };
+                            name
                         };
                         if imported.replace(name).is_some() {
                             return Ok(None);
@@ -162,7 +169,7 @@ impl<'a> NativeImports<'a> {
                 };
                 bindings.push(ImportBinding::Named {
                     local: local.to_owned(),
-                    imported: imported.to_owned(),
+                    imported,
                 });
             }
         }
@@ -178,20 +185,6 @@ impl<'a> NativeImports<'a> {
             type_only,
         }))
     }
-}
-
-fn quoted_literal(source: &str) -> Option<&str> {
-    let inner = source
-        .strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
-        .or_else(|| {
-            source
-                .strip_prefix('\'')
-                .and_then(|text| text.strip_suffix('\''))
-        })?;
-    // Escaped specifiers require ECMAScript string-value decoding. Keeping
-    // their bytes as a module path would invent a different dependency.
-    (!inner.contains(['\\', '\r', '\n'])).then_some(inner)
 }
 
 #[cfg(test)]
