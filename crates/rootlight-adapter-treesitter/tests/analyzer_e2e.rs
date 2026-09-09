@@ -53,6 +53,8 @@ mod ecmascript_references;
 mod html_native;
 #[path = "analyzer_e2e/markdown_native.rs"]
 mod markdown_native;
+#[path = "analyzer_e2e/objective_c_native.rs"]
+mod objective_c_native;
 #[path = "analyzer_e2e/powershell_native.rs"]
 mod powershell_native;
 #[path = "analyzer_e2e/r_native.rs"]

@@ -1830,7 +1830,10 @@ fn remove_shadowed_candidates(
             if group_end.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
                 cancellation.check()?;
             }
-            has_definition |= candidate.role == StructuralRole::Definition;
+            has_definition |= matches!(
+                candidate.role,
+                StructuralRole::Definition | StructuralRole::DefinitionPart
+            );
             has_documentation |= candidate.role == StructuralRole::Documentation;
             group_end += 1;
         }

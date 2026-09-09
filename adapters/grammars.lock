@@ -18,6 +18,55 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "objective-c"
+crate_name = "tree-sitter-objc"
+crate_version = "3.0.2"
+crates_io_checksum = "9ca8bb556423fc176f0535e79d525f783a6684d3c9da81bf9d905303c129e1d2"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-objc"
+tag = "v3.0.2"
+commit = "18802acf31d0b5c1c1d50bdbc9eb0e1636cab9ed"
+parser_sha256 = "cde998db18ae1a4b6bc3a67739b25dd6705a1f7d7288e128b390e1ffa05f1b40"
+scanner_sha256 = "none"
+abi = 14
+analysis_tier = "D"
+license = "MIT"
+license_source = "adapters/licenses/tree-sitter-objc-3.0.2-LICENSE"
+license_sha256 = "099c44248f8cf353123211318680e93465587c005a4b3730ce8cb5334de043d6"
+modifications = "source-backed empty message selector components; restored pinned grammar DSL and MIT notices; regenerated with CLI 0.26.8, ABI 14; see PATCHES.md"
+test_corpus = "native declaration, selector, malformed source and incremental contracts plus public analyzer source-identity tests"
+msrv = "native grammar verified with Rootlight MSRV 1.90"
+offline_behavior = "compiles the pinned vendored C parser with cached Cargo dependencies; no external scanner or runtime downloads"
+capabilities = ["written-declarations", "multipart-selectors", "source-ranges"]
+semantic_depth = "written source structure only; runtime message dispatch, preprocessing, cross-file binding and Objective-C++ require separate analysis"
+audit_notes = ["original crate and upstream tag revision pinned", "inherited C 0.23.4 DSL and MIT notice retained for offline regeneration", "automatic indexing and full MCP language coverage require separate integration"]
+[grammars.vendored]
+manifest_path = "third_party/tree-sitter-objc-3.0.2/Cargo.toml"
+parser_path = "src/parser.c"
+[grammars.vendored.files]
+".cargo_vcs_info.json" = "33e82c2cad259dfb1667c6f319864ae7e6140b9578e1e67c7c62e28f89dfb2bb"
+"bindings/rust/build.rs" = "f9e34feb3d8f418619503bd94f556851f303bc9b62d7da00e957d9e4a5c87f2c"
+"bindings/rust/lib.rs" = "98f7bdf820659fc694b750a461b48ab15a609e50a39006e23097128c452b3ac6"
+"Cargo.toml" = "f58294e04c2e3a17159b70399f49c4122144db860f2826638ce6422cc5299182"
+"Cargo.toml.orig" = "ec4efb471f02a355ebfc3994d1d827a9436cf04bbae3ee5f6b75cd879dfd96bd"
+"grammar.js" = "bbdba57741b615c8ac04f355ffe55955f84013e6440a11f4803f0bb6b9a3bc1f"
+"grammar/c/grammar.js" = "cdec2d67fc898700eb80056ee9a84f54f8771488f249e884dadfa757c8020d7e"
+"grammar/c/LICENSE" = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+"LICENSE" = "099c44248f8cf353123211318680e93465587c005a4b3730ce8cb5334de043d6"
+"PATCHES.md" = "ac59f522ab90269166f9b7bbd553e0a5c4b9ac6bf8998361789634e4a06bd763"
+"queries/folds.scm" = "ab98525c9291c1d2bfc1047ef321cd34c754f965526b7f1c4dc00c2e1f643ebf"
+"queries/highlights.scm" = "ce7e30b5aab3d659a096812d8c227e83cd9bbb60470eb44def45bd5cb7737386"
+"queries/indents.scm" = "e721d3ecb16a6bb63c84329693d5756b63e1aa3d3732f03631921bfa0d13d536"
+"queries/injections.scm" = "567f5dabcabdf8287bd92a073397aa0646aef97770fa57c0b357f0e64ddee16d"
+"queries/locals.scm" = "e721d3ecb16a6bb63c84329693d5756b63e1aa3d3732f03631921bfa0d13d536"
+"README.md" = "5213606f6965e8c83e1079e5c21ece292363a8f347d6bdc4f65375206f258e3a"
+"src/grammar.json" = "63d45d96d9a5924d7045255166bac2a7c33598091dc502d96bf456a1b975b22d"
+"src/node-types.json" = "0abe04ae781b4d6f1425e50224d5760fe571b81c363d03955adb525773b2bf59"
+"src/parser.c" = "cde998db18ae1a4b6bc3a67739b25dd6705a1f7d7288e128b390e1ffa05f1b40"
+"src/tree_sitter/alloc.h" = "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+"src/tree_sitter/array.h" = "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+"src/tree_sitter/parser.h" = "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+
+[[grammars]]
 language = "astro"
 crate_name = "tree-sitter-astro-next"
 crate_version = "0.1.1"

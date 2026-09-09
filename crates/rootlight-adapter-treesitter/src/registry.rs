@@ -69,6 +69,8 @@ pub enum GrammarFamily {
     Markdown,
     /// Astro source host with distinct server, client and template regions.
     Astro,
+    /// Objective-C source syntax; Objective-C++ requires a separate grammar.
+    ObjectiveC,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -148,7 +150,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(28);
+        let mut descriptors = Vec::with_capacity(29);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -178,6 +180,7 @@ impl GrammarRegistry {
             GrammarFamily::PowerShell,
             GrammarFamily::Markdown,
             GrammarFamily::Astro,
+            GrammarFamily::ObjectiveC,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -302,6 +305,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::PowerShell => tree_sitter_powershell::LANGUAGE.into(),
         GrammarFamily::Markdown => tree_sitter_md::LANGUAGE.into(),
         GrammarFamily::Astro => tree_sitter_astro_next::LANGUAGE.into(),
+        GrammarFamily::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
     }
 }
 
@@ -316,6 +320,13 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::ObjectiveC => GrammarIdentity {
+            language_id: "objective-c",
+            grammar_version: "3.0.2",
+            source_package_sha256: "9ca8bb556423fc176f0535e79d525f783a6684d3c9da81bf9d905303c129e1d2",
+            parser_sha256: "cde998db18ae1a4b6bc3a67739b25dd6705a1f7d7288e128b390e1ffa05f1b40",
+            scanner_sha256: None,
+        },
         GrammarFamily::Astro => GrammarIdentity {
             language_id: "astro",
             grammar_version: "0.1.1",
@@ -606,7 +617,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 28);
+        assert_eq!(registry.descriptors().len(), 29);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -636,6 +647,7 @@ mod tests {
             GrammarFamily::PowerShell,
             GrammarFamily::Markdown,
             GrammarFamily::Astro,
+            GrammarFamily::ObjectiveC,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -712,6 +724,7 @@ mod tests {
             (GrammarFamily::Dart, "dart", "tree-sitter-dart"),
             (GrammarFamily::Markdown, "markdown", "tree-sitter-md"),
             (GrammarFamily::Astro, "astro", "tree-sitter-astro-next"),
+            (GrammarFamily::ObjectiveC, "objective-c", "tree-sitter-objc"),
             (
                 GrammarFamily::PowerShell,
                 "powershell",

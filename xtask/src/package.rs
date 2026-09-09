@@ -60,7 +60,9 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 15] = [
+const DISTRIBUTION_LICENSES: [&str; 17] = [
+    "tree-sitter-objc-3.0.2-LICENSE",
+    "tree-sitter-objc-3.0.2-LICENSE-C",
     "tree-sitter-astro-next-0.1.1-LICENSE",
     "tree-sitter-astro-next-0.1.1-LICENSE-MIT",
     "tree-sitter-html-0.23.2-LICENSE",

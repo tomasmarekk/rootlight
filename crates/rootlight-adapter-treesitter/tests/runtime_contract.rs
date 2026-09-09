@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 28] = [
+    let cases: [(&str, &str, &[u8]); 29] = [
+        (
+            "sample.m",
+            "objective-c",
+            b"@interface Sample\n- (int)read:(int)value;\n@end\n",
+        ),
         (
             "view.astro",
             "astro",

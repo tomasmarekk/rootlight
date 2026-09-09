@@ -1354,7 +1354,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .get(&definition_local_id)
                         .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?;
                     // The entity retains the full declaration for source.read;
-                    // its definition occurrence identifies the original name token.
+                    // its definition occurrence retains the original name extent,
+                    // including intervening source in a multipart selector.
                     let definition_span = entity_plan
                         .yaml_key_sources
                         .get(&definition_local_id)
@@ -1815,6 +1816,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 {
                     if is_definition_capture(fact) {
                         captures.entry(owner).or_default().definitions.push(*fact);
+                    } else if fact.syntax_kind().as_str() == "objective_c.selector.definition_part"
+                    {
+                        captures
+                            .entry(owner)
+                            .or_default()
+                            .definition_parts
+                            .push(*fact);
                     } else if is_signature_capture(fact) {
                         captures.entry(owner).or_default().signatures.push(*fact);
                     }
@@ -1827,6 +1835,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "rust.impl_type.scope_type" => identity.insert_type(fact),
                     "swift.extension_target.scope_trait" => identity.insert_trait(fact),
                     "swift.extension_header.scope_type" => identity.insert_type(fact),
+                    "objective_c.owner.scope_trait" => identity.insert_trait(fact),
+                    "objective_c.owner_header.scope_type" => identity.insert_type(fact),
                     "css.context_header.scope_type" => identity.insert_type(fact),
                     _ => {}
                 }
@@ -1875,13 +1885,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .cloned()
                     .flatten();
             }
-            if parent_scope.as_ref().and_then(|scope| scope.kind)
-                == Some(StableScopeKind::SwiftExtension)
-                && parent_entity
-                    .and_then(|parent| drafts.get(&parent))
-                    .is_some_and(|parent| parent.kind == EntityKind::Module)
+            if matches!(
+                parent_scope.as_ref().and_then(|scope| scope.kind),
+                Some(StableScopeKind::SwiftExtension | StableScopeKind::ObjectiveCOwner)
+            ) && parent_entity
+                .and_then(|parent| drafts.get(&parent))
+                .is_some_and(|parent| parent.kind == EntityKind::Module)
             {
-                // An extension names a target type without defining it. Keep its
+                // An extension or implementation names a type without defining it. Keep its
                 // members file-contained with the reviewed target prefix; a file
                 // module must not override that prefix or invent type ownership.
                 parent_entity = None;
@@ -1907,6 +1918,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         fact.syntax_kind().as_str(),
                         "rust.impl.scope"
                             | "swift.extension.scope"
+                            | "objective_c.implementation.scope"
+                            | "objective_c.category.scope"
                             | "css.media.scope"
                             | "css.supports.scope"
                             | "css.scope.scope"
@@ -2128,6 +2141,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .get(&definition.local_id())
                         .and_then(Option::as_ref)
                         .map(|key| std::borrow::Cow::Borrowed(key.name.as_str()))
+                } else if definition.syntax_kind().as_str() == "objective_c.method.definition" {
+                    rootlight_adapter_sdk::canonical_objective_c_selector(
+                        definition,
+                        &capture.definition_parts,
+                        self.source_text,
+                        self.request.limits().ir().max_string_bytes,
+                    )
+                    .map(std::borrow::Cow::Owned)
                 } else {
                     rootlight_adapter_sdk::structural_captured_name_for_fact(
                         language_for_fact(self.request, definition),
@@ -2531,7 +2552,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
         if !matches!(
             scope.syntax_kind().as_str(),
-            "rust.impl.scope" | "swift.extension.scope"
+            "rust.impl.scope"
+                | "swift.extension.scope"
+                | "objective_c.implementation.scope"
+                | "objective_c.category.scope"
         ) {
             return Ok(None);
         }
@@ -2546,7 +2570,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .trait_type
             .map(|fact| self.text_for_span(fact.span()))
             .transpose()?;
-        if scope.syntax_kind().as_str() == "swift.extension.scope" {
+        if matches!(
+            scope.syntax_kind().as_str(),
+            "swift.extension.scope"
+                | "objective_c.implementation.scope"
+                | "objective_c.category.scope"
+        ) {
             let maximum = self.request.limits().ir().max_string_bytes;
             let Some(target) = trait_type
                 .and_then(|text| rootlight_adapter_sdk::structural_captured_name(text, maximum))
@@ -2556,16 +2585,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
             if self_type.len() > maximum {
                 return Ok(None);
             }
-            // Conformance and where-clauses distinguish extension scopes; their
-            // bounded header is retained while body edits leave identity stable.
+            // Authored extension/category headers distinguish owners without
+            // creating another type entity; body edits leave identity stable.
             let header = self_type.split_whitespace().collect::<Vec<_>>().join(" ");
             let mut digest = blake3::Hasher::new();
-            digest.update(b"rootlight.swift-extension-scope/1\0");
+            let swift = scope.syntax_kind().as_str() == "swift.extension.scope";
+            digest.update(if swift {
+                b"rootlight.swift-extension-scope/1\0"
+            } else {
+                b"rootlight.objective-c-owner-scope/1\0"
+            });
             digest.update(header.as_bytes());
             return Ok(Some(StableScopeHeader {
                 digest: *digest.finalize().as_bytes(),
                 qualified_prefix: target.to_owned(),
-                kind: StableScopeKind::SwiftExtension,
+                kind: if swift {
+                    StableScopeKind::SwiftExtension
+                } else {
+                    StableScopeKind::ObjectiveCOwner
+                },
             }));
         }
         let identity = canonical_rust_impl_scope(
@@ -2592,6 +2630,7 @@ struct LoweredOutput {
 #[derive(Clone, Default)]
 struct AssociatedCaptures<'a> {
     definitions: Vec<&'a SyntaxFact>,
+    definition_parts: Vec<&'a SyntaxFact>,
     signatures: Vec<&'a SyntaxFact>,
 }
 
@@ -2763,6 +2802,7 @@ struct StableScopeHeader {
 enum StableScopeKind {
     RustImpl,
     SwiftExtension,
+    ObjectiveCOwner,
     CssContext,
 }
 
@@ -3048,6 +3088,14 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "objective_c.file.root" => Some((
+            FactDomain::Entities,
+            "objective-c-ivar-parameter-forward-and-preprocessed-declarations-unavailable",
+        )),
+        "objective_c.file.module" => Some((
+            FactDomain::Relations,
+            "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
+        )),
         "scala.unbraced_package_unavailable.scope" => Some((
             FactDomain::Relations,
             "scala-nonleading-unbraced-package-scope-unavailable",
@@ -3240,6 +3288,8 @@ fn scope_identity(
             | "lua.for.scope"
             | "lua.repeat.scope"
             | "swift.extension.scope"
+            | "objective_c.implementation.scope"
+            | "objective_c.category.scope"
             | "css.media.scope"
             | "css.supports.scope"
             | "css.scope.scope"
@@ -3248,6 +3298,8 @@ fn scope_identity(
     ) {
         let context = if syntax_kind == "swift.extension.scope" {
             "rootlight.swift-extension-scope-identity/1"
+        } else if syntax_kind.starts_with("objective_c.") {
+            "rootlight.objective-c-owner-scope-identity/1"
         } else if syntax_kind.starts_with("css.") {
             "rootlight.css-context-scope-identity/1"
         } else {
@@ -3859,6 +3911,11 @@ fn validate_fact_graph(
 
 fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact) -> &'a str {
     if request.language().as_str() == "markdown"
+        && fact.syntax_kind().as_str().starts_with("objective_c.")
+    {
+        return "objective-c";
+    }
+    if request.language().as_str() == "markdown"
         && let Some((language, _)) = fact.syntax_kind().as_str().split_once('.')
         && matches!(
             language,
@@ -4001,6 +4058,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "powershell.file.module"
                 | "markdown.file.module"
                 | "astro.file.module"
+                | "objective_c.file.module"
         )
         && matches!(
             language,
@@ -4024,6 +4082,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "powershell"
                 | "markdown"
                 | "astro"
+                | "objective-c"
         )
 }
 
@@ -4062,13 +4121,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str() != "sql.body.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
         && !fact.syntax_kind().as_str().starts_with("astro.")
-        && !matches!(
-            fact.syntax_kind().as_str(),
-            "markdown.code_block.signature"
-                | "markdown.code_parsed.signature"
-                | "markdown.code_limit.signature"
-                | "markdown.code_error.signature"
-        )
+        && !fact.syntax_kind().as_str().starts_with("markdown.")
 }
 
 fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {
@@ -4117,6 +4170,11 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "objective_c.selector.definition_part" =>
+        {
+            None
+        }
         SyntaxFactKind::Occurrence if is_call_name_capture(fact) => None,
         SyntaxFactKind::Occurrence
             if matches!(

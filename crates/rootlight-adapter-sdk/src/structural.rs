@@ -131,6 +131,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "json.property.declaration"
+                    | "objective_c.property.declaration"
                     | "powershell.property.declaration"
                     | "powershell.dynamic_property.declaration"
                     | "toml.property.declaration"
@@ -139,7 +140,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         {
             Some(EntityKind::Property)
         }
-        SyntaxFactKind::Declaration if label == "swift.protocol.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "swift.protocol.declaration" | "objective_c.protocol.declaration"
+            ) =>
+        {
             Some(EntityKind::Protocol)
         }
         // Actors are reference types; the syntax label retains their concurrency distinction.

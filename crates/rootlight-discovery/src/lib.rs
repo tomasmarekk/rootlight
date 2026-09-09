@@ -1656,7 +1656,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &["objc"],
         detectors: &["content", "extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "objective-cpp",
@@ -2616,6 +2616,22 @@ max_source_file_bytes = 2097152
             .expect("native document analysis is advertised");
         assert_eq!(capability.analyzers, &["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn objc_native_capability_does_not_advertise_cpp_or_project_semantics() {
+        for (language, analyzers) in [
+            ("objective-c", &["treesitter"][..]),
+            ("objective-cpp", &["source-fallback"][..]),
+            ("matlab", &["source-fallback"][..]),
+        ] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .expect("source capability is declared");
+            assert_eq!(capability.analyzers, analyzers);
+            assert_eq!(capability.maximum_tier, "tier_d");
+        }
     }
 
     #[test]

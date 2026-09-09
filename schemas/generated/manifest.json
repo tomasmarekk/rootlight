@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "878aaa41205ac57c95c66e20ea6806d15aaf794a96556a391674ea242d271bfa"
+      "blake3": "ed1ca35c24b96314cad26cd53353c3acc278a7eb9e8b73c0231f1281c636cacf"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",

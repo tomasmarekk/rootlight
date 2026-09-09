@@ -21,6 +21,7 @@ use crate::{
 mod dart;
 mod ecmascript;
 mod markdown;
+mod objective_c;
 mod powershell;
 mod r;
 mod scala;
@@ -65,6 +66,7 @@ pub(crate) enum StructuralRole {
     ScopeTrait,
     ScopeType,
     Definition,
+    DefinitionPart,
     Call,
     CallName,
     ScopedCall,
@@ -87,6 +89,7 @@ impl StructuralRole {
             "scope_trait" => Some(Self::ScopeTrait),
             "scope_type" => Some(Self::ScopeType),
             "definition" => Some(Self::Definition),
+            "definition_part" => Some(Self::DefinitionPart),
             "call" => Some(Self::Call),
             "call_name" => Some(Self::CallName),
             "scoped_call" => Some(Self::ScopedCall),
@@ -109,9 +112,12 @@ impl StructuralRole {
             }
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
-            Self::Definition | Self::Call | Self::CallName | Self::ScopedCall | Self::Reference => {
-                SyntaxFactKind::Occurrence
-            }
+            Self::Definition
+            | Self::DefinitionPart
+            | Self::Call
+            | Self::CallName
+            | Self::ScopedCall
+            | Self::Reference => SyntaxFactKind::Occurrence,
             Self::Comment | Self::Documentation => SyntaxFactKind::Comment,
             Self::StringLiteral => SyntaxFactKind::StringLiteral,
         }
@@ -128,6 +134,7 @@ impl StructuralRole {
             Self::ScopeTrait => "scope_trait",
             Self::ScopeType => "scope_type",
             Self::Definition => "definition",
+            Self::DefinitionPart => "definition_part",
             Self::Call => "call",
             Self::CallName => "call_name",
             Self::ScopedCall => "scoped_call",
@@ -153,7 +160,7 @@ impl StructuralRole {
         match self {
             Self::Root => 0,
             Self::Module => 1,
-            Self::Declaration | Self::Definition => 2,
+            Self::Declaration | Self::Definition | Self::DefinitionPart => 2,
             Self::Signature | Self::Scope | Self::ScopeTrait | Self::ScopeType => 3,
             Self::TestAttribute => 4,
             Self::Import => 5,
@@ -178,6 +185,7 @@ impl StructuralRole {
                 | Self::ScopeTrait
                 | Self::ScopeType
                 | Self::Definition
+                | Self::DefinitionPart
                 | Self::TestAttribute
         )
     }
@@ -343,6 +351,9 @@ impl QueryPack {
         } else {
             if family == GrammarFamily::Swift {
                 expected.extend(["scope_trait", "scope_type"]);
+            }
+            if family == GrammarFamily::ObjectiveC {
+                expected.extend(["definition_part", "scope_trait", "scope_type"]);
             }
             if supports_terminal_call_name(family) {
                 expected.push(TERMINAL_CALL_NAME_CAPTURE);
@@ -578,6 +589,11 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::ObjectiveC
+                    && !objective_c::retain_capture(capture.node, role)
+                {
+                    continue;
+                }
                 if matches!(
                     input.family,
                     GrammarFamily::JavaScript | GrammarFamily::TypeScript
@@ -893,6 +909,8 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
+        _ if family == GrammarFamily::ObjectiveC => objective_c::capture_syntax(capture.node, role)
+            .ok_or_else(|| query_failure("query-objective-c-kind"))?,
         StructuralRole::Declaration if family == GrammarFamily::Dart => {
             dart::declaration_syntax(capture.node)
                 .ok_or_else(|| query_failure("query-dart-declaration-kind"))?
@@ -1074,12 +1092,19 @@ fn candidate_for_capture(
             GrammarFamily::Sql => return Err(query_failure("query-sql-call-kind")),
             GrammarFamily::Markdown => return Err(query_failure("query-markdown-call-kind")),
             GrammarFamily::Astro => return Err(query_failure("query-astro-call-kind")),
+            GrammarFamily::ObjectiveC => "objective_c.call",
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::ObjectiveC {
+        let range = objective_c::capture_range(capture.node, role)
+            .ok_or_else(|| query_failure("query-objective-c-range"))?;
+        start = range.start;
+        end = range.end;
+    }
     if family == GrammarFamily::Dart && role == StructuralRole::Definition {
         let range = dart::definition_range(capture.node);
         start = range.start;
@@ -1798,7 +1823,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(28);
+        let mut packs = Vec::with_capacity(29);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1827,6 +1852,10 @@ impl QueryPackRegistry {
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
             (GrammarFamily::Astro, include_str!("../queries/astro.scm")),
+            (
+                GrammarFamily::ObjectiveC,
+                include_str!("../queries/objective_c.scm"),
+            ),
             (
                 GrammarFamily::Markdown,
                 include_str!("../queries/markdown.scm"),
@@ -1934,6 +1963,7 @@ mod tests {
             GrammarFamily::PowerShell,
             GrammarFamily::Markdown,
             GrammarFamily::Astro,
+            GrammarFamily::ObjectiveC,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1980,6 +2010,9 @@ mod tests {
             } else {
                 if family == GrammarFamily::Swift {
                     expected.extend(["scope_trait", "scope_type"]);
+                }
+                if family == GrammarFamily::ObjectiveC {
+                    expected.extend(["definition_part", "scope_trait", "scope_type"]);
                 }
                 if supports_terminal_call_name(family) {
                     expected.push(TERMINAL_CALL_NAME_CAPTURE);

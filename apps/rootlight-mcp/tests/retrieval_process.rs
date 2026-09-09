@@ -526,6 +526,26 @@ fn sql_return_headers_reach_mcp_explanations_without_body_text() {
 }
 
 #[test]
+fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "objective-c",
+        "selectors.m",
+        include_str!("../../../tests/fixtures/objective-c/selectors.m"),
+        &[
+            ("::", "method", 1),
+            ("perform::", "method", 1),
+            ("value", "method", 2),
+        ],
+    );
+    source_entities_cross_process_boundaries(
+        "objective-c",
+        "declarations.m",
+        include_str!("../../../tests/fixtures/objective-c/declarations.m"),
+        &[("value", "field", 1), ("add:to:", "method", 2)],
+    );
+}
+
+#[test]
 fn imported_bindings_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "javascript",
@@ -603,7 +623,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         assert_eq!(output["schema_version"], "1.5");
         if matches!(
             language,
-            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell" | "markdown"
+            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell" | "markdown" | "objective-c"
         ) {
             assert!(
                 output["warnings"]
@@ -678,7 +698,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
             // kind independently asserted by these source-backed fixtures.
             let row_kind = match (language, kind) {
                 ("r", "variable") => "parameter",
-                ("powershell", "field") => "property",
+                ("powershell" | "objective-c", "field") => "property",
                 ("scala" | "dart" | "powershell", "type") => "class",
                 ("scala", "module") => "namespace",
                 ("dart", "method") if name == "Store.named" => "constructor",
@@ -700,7 +720,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         if !matches!(kind, "import" | "export")
             && matches!(
                 language,
-                "r" | "scala" | "dart" | "powershell" | "javascript"
+                "r" | "scala" | "dart" | "powershell" | "javascript" | "objective-c"
             )
         {
             // These fixtures use existing IR kinds, unlike the newer data

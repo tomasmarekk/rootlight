@@ -266,6 +266,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             scala_native::SCALA,
             dart_native::DART,
             powershell_native::POWERSHELL,
+            objective_c_native::OBJECTIVE_C,
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
@@ -332,6 +333,79 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         assert!(!expected.is_empty(), "{}", case.name);
         assert_eq!(definitions(&embedded, &source), expected, "{}", case.name);
     }
+}
+
+#[test]
+fn markdown_objective_c_preserves_unary_dispatch_signatures() {
+    let source = "~~~objective-c\n@interface Sample\n- (int)value;\n+ (int)value;\n@end\n~~~\n";
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let request = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &provider(),
+        &request.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let signatures: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "objective_c.method.signature")
+        .collect();
+    assert_eq!(signatures.len(), 2, "{signatures:?}");
+    for signature in &signatures {
+        let parent = parsed
+            .facts()
+            .iter()
+            .find(|fact| Some(fact.local_id()) == signature.parent())
+            .unwrap();
+        assert_eq!(
+            parent.syntax_kind().as_str(),
+            "objective_c.method.declaration",
+            "{signature:?}; {parent:?}"
+        );
+    }
+    let definitions: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "objective_c.method.definition")
+        .collect();
+    for definition in definitions {
+        let parts: Vec<_> = parsed
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == "objective_c.selector.definition_part"
+                    && fact.parent() == definition.parent()
+            })
+            .collect();
+        assert_eq!(
+            rootlight_adapter_sdk::canonical_objective_c_selector(definition, &parts, source, 1024)
+                .as_deref(),
+            Some("value"),
+            "{definition:?}; {parts:?}"
+        );
+    }
+    let result = output(source);
+    let methods: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "objective-c" && entity.kind == EntityKind::Method)
+        .collect();
+    assert_eq!(
+        methods.len(),
+        2,
+        "gaps: {:?}; {signatures:?}",
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .map(|gap| &gap.detail)
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(methods[0].id, methods[1].id);
 }
 
 #[test]

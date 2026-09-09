@@ -14,6 +14,7 @@ mod ir_accounting;
 mod json_names;
 mod limits;
 mod lua_names;
+mod objective_c_names;
 mod powershell_names;
 mod r_names;
 mod report;
@@ -41,6 +42,7 @@ pub use limits::{
     AnalysisLimits, BatchThresholds, ProjectAnalysisLimits, RemainingBudget, StreamLimits,
     StreamUsage,
 };
+pub use objective_c_names::canonical_objective_c_selector;
 pub use report::{
     AnalysisReport, CoverageReport, DomainCoverage, ParseReport, ProjectAnalysisReport,
     ResourceUsage, StreamEnd, WorkReport,

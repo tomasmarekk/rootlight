@@ -210,10 +210,10 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/75";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/76";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/3";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -15106,8 +15106,14 @@ fn supported_source_language<'a>(
         return analyzers.contains_key(language).then_some(language);
     }
     // A header's C-family evidence can override its C extension default.
-    // Unsupported Objective-C must retain file-only evidence, not enter the C parser.
+    // An unsupported C-family language must retain source evidence, not enter the C parser.
     if let Some(language) = c_header_content_language(input) {
+        return analyzers.contains_key(language).then_some(language);
+    }
+    // `.m` also denotes MATLAB. Parser admission must honor the same content
+    // evidence as source provenance, even when the detected parser is absent.
+    if extension_language(&input.path) == Some("objective-c") {
+        let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
     for evidence in [LanguageEvidence::Extension, LanguageEvidence::Shebang] {
@@ -23295,7 +23301,7 @@ mod tests {
     }
 
     #[test]
-    fn objc_headers_keep_file_only_source_provenance() {
+    fn objc_headers_publish_structural_symbols_and_source_provenance() {
         let fixture = TempDir::new().expect("fixture root exists");
         let content = "@interface Signal : NSObject\n@end\n";
         write_language_fixture(fixture.path(), &[("Signal.h", content)]);
@@ -23315,10 +23321,8 @@ mod tests {
         let coverage = service
             .source_file_coverage_until(receipt.generation, file.id, &deadline())
             .expect("header coverage resolves");
-        assert_eq!(
-            coverage.reason,
-            Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
-        );
+        assert_eq!(coverage.reason, None);
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
         let reference = file
             .evidence
             .source
@@ -23345,8 +23349,74 @@ mod tests {
                 .data
                 .hits
                 .iter()
-                .all(|hit| hit.symbol.is_none() && hit.language == "objective-c")
+                .any(|hit| hit.symbol.is_some() && hit.language == "objective-c")
         );
+        let repeated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Objective-C no-op indexing succeeds");
+        assert_eq!(repeated, receipt);
+    }
+
+    #[test]
+    fn shared_m_suffix_preserves_objc_symbols_and_matlab_source_fallback() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let objc = "@interface Meter\n- (int)read:(int)value;\n@end\n";
+        let matlab = "function result = measure(value)\nresult = value;\nend\n";
+        write_language_fixture(fixture.path(), &[("meter.m", objc), ("measure.m", matlab)]);
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("shared-suffix sources publish");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        for (path, content, language, reason) in [
+            ("meter.m", objc, "objective-c", None),
+            (
+                "measure.m",
+                matlab,
+                "matlab",
+                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage),
+            ),
+        ] {
+            let file = generation
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .expect("source is retained");
+            assert_eq!(file.language, language);
+            let coverage = service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .expect("source coverage resolves");
+            assert_eq!(coverage.reason, reason);
+            let reference = file.evidence.source.clone().expect("source is bound");
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .expect("exact source reads");
+            assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
+        }
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "read:".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("Objective-C selector locates");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.identifier == "read:"
+                && hit.path == "meter.m"
+                && hit.language == "objective-c"
+                && hit.symbol.is_some()
+        }));
+        let repeated = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("mixed-language no-op succeeds");
+        assert_eq!(repeated, receipt);
     }
 
     #[test]
@@ -25466,9 +25536,9 @@ mod tests {
     }
 
     #[test]
-    fn every_audited_grammar_has_a_fail_closed_source_suffix() {
+    fn every_audited_grammar_has_a_declared_source_route() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
-        let mapped = [
+        let mut mapped = [
             "sample.astro",
             "sample.c",
             "sample.cpp",
@@ -25501,6 +25571,10 @@ mod tests {
         .into_iter()
         .filter_map(source_language_from_path)
         .collect::<BTreeSet<_>>();
+        // The shared suffix is admitted only through manifest evidence, never
+        // the unconditional path route used for unambiguous source languages.
+        assert_eq!(source_language_from_path("sample.m"), None);
+        mapped.insert(extension_language("sample.m").expect("shared suffix is declared"));
         let registered = registry
             .descriptors()
             .iter()
@@ -25581,9 +25655,9 @@ mod tests {
         let fixture = TempDir::new().expect("fixture root exists");
         let sources = [
             (
-                "Session.m",
+                "Session.mm",
                 "@interface Session : NSObject\n@end\n",
-                "objective-c",
+                "objective-cpp",
             ),
             (
                 "classify.m",
@@ -25672,7 +25746,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["objective-c", "matlab", "perl"] {
+        for language in ["objective-cpp", "matlab", "perl"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
