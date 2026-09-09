@@ -760,6 +760,10 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "typescript.type_namespace_member.reference"
             | "typescript.type_query_member_name.reference"
             | "typescript.type_namespace_root.reference"
+            | "javascript.unavailable_name.reference"
+            | "javascript.unavailable_name.call"
+            | "typescript.unavailable_name.reference"
+            | "typescript.unavailable_name.call"
     ) {
         return false;
     }

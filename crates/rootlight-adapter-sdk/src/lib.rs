@@ -8,6 +8,7 @@
 
 mod dart_names;
 mod descriptor;
+mod ecmascript_names;
 mod error;
 mod ir_accounting;
 mod json_names;
@@ -31,6 +32,7 @@ pub use descriptor::{
     EncodingId, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
     ParseCapabilities, ProducerDescriptor,
 };
+pub use ecmascript_names::canonical_ecmascript_identifier;
 pub use error::{
     AdapterError, DescriptorError, LabelError, LabelField, LabelViolation, LimitError, ReportError,
     RequestError, ResourceKind, SinkError, SnapshotError,

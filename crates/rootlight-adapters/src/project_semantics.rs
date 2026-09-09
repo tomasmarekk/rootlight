@@ -17,8 +17,8 @@ use rootlight_adapter_sdk::{
     ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
-    derive_structural_occurrence_identity, execute_parse, structural_entity_kind,
-    structural_entity_kind_from_source, structural_syntax_fact_order,
+    canonical_ecmascript_identifier, derive_structural_occurrence_identity, execute_parse,
+    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -283,6 +283,7 @@ impl SemanticProjectAnalyzer {
                 native_imports: ecmascript::collect_imports(
                     output.facts(),
                     input.source().bytes(),
+                    request.limits().ir().max_string_bytes,
                     cancellation,
                 )?,
                 facts: output.facts().to_vec(),
@@ -2393,7 +2394,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             fact.syntax_kind().as_str(),
                             "typescript.export_name.reference" | "javascript.export_name.reference"
                         ) {
-                            ecmascript::exports::export_name(bytes, fact.span(), self.cancellation)?
+                            ecmascript::exports::export_name(
+                                bytes,
+                                fact.span(),
+                                self.request.limits().ir().max_string_bytes,
+                                self.cancellation,
+                            )?
                         } else {
                             None
                         };
@@ -2418,6 +2424,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else {
                             None
                         };
+                        let ecmascript_name = matches!(
+                            self.analyzer.language,
+                            SemanticProjectLanguage::JavaScript
+                                | SemanticProjectLanguage::TypeScript
+                        )
+                        .then(|| {
+                            canonical_ecmascript_identifier(
+                                if call {
+                                    terminal_name.unwrap_or(observed_text)
+                                } else {
+                                    observed_text
+                                },
+                                self.request.limits().ir().max_string_bytes,
+                            )
+                        })
+                        .flatten();
                         let parsed_name = if let Some(name) = public_name.as_deref() {
                             Some(ParsedOccurrenceName {
                                 name,
@@ -2428,6 +2450,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 name,
                                 qualifier: Some(qualifier),
                             })
+                        } else if let Some(name) = ecmascript_name.as_deref() {
+                            Some(ParsedOccurrenceName {
+                                name,
+                                qualifier: if call {
+                                    terminal_name
+                                        .and_then(|terminal| call_receiver(observed_text, terminal))
+                                } else {
+                                    None
+                                },
+                            })
+                        } else if matches!(
+                            self.analyzer.language,
+                            SemanticProjectLanguage::JavaScript
+                                | SemanticProjectLanguage::TypeScript
+                        ) {
+                            None
                         } else if call {
                             terminal_name
                                 .and_then(|name| {

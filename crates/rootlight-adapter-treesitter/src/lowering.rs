@@ -1473,12 +1473,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 if resolution_text.is_none() {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
-                    occurrence.syntax_kind = if role == OccurrenceRole::CallSite {
-                        "r.unavailable_name.call"
-                    } else {
-                        "r.unavailable_name.reference"
-                    }
-                    .to_owned();
+                    occurrence.syntax_kind = format!(
+                        "{}.unavailable_name.{}",
+                        language_for_fact(self.request, fact),
+                        if role == OccurrenceRole::CallSite {
+                            "call"
+                        } else {
+                            "reference"
+                        }
+                    );
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let region = skipped_region(
@@ -1486,7 +1489,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         fact.span(),
                         FactDomain::Occurrences,
                         SkippedRegionReason::UnsupportedConstruct,
-                        "r-reference-name-unavailable",
+                        &format!(
+                            "{}-reference-name-unavailable",
+                            language_for_fact(self.request, fact)
+                        ),
                         provenance_id,
                     )?;
                     skipped.insert(region.id, region);
@@ -3365,6 +3371,35 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    // Strings, documentation and full member-path metadata are not identifiers.
+    // Only native identifier fields may acquire identifier decoding failures.
+    let identifier_reference =
+        fact.syntax_kind()
+            .as_str()
+            .split_once('.')
+            .is_some_and(|(_, role)| {
+                matches!(
+                    role,
+                    "identifier.reference"
+                        | "type_identifier.reference"
+                        | "property_identifier.reference"
+                        | "member_name.reference"
+                        | "type_member_name.reference"
+                        | "type_namespace_member.reference"
+                        | "type_query_member_name.reference"
+                        | "type_namespace_root.reference"
+                        | "type_query_value.reference"
+                        | "type_export_local.reference"
+                )
+            });
+    if matches!(language, "javascript" | "typescript")
+        && (terminal_call_name.is_some() || identifier_reference)
+    {
+        return rootlight_adapter_sdk::canonical_ecmascript_identifier(
+            terminal_call_name.unwrap_or(text),
+            maximum_name_bytes,
+        );
+    }
     if language == "r"
         && matches!(
             fact.syntax_kind().as_str(),

@@ -369,6 +369,10 @@ fn language_owned_targets_bypass_name_scoring_in_all_apply_paths() {
         "typescript.type_namespace_member.reference",
         "typescript.type_query_member_name.reference",
         "typescript.type_namespace_root.reference",
+        "javascript.unavailable_name.reference",
+        "javascript.unavailable_name.call",
+        "typescript.unavailable_name.reference",
+        "typescript.unavailable_name.call",
     ] {
         let language = syntax.split('.').next().unwrap();
         let mut fixture = Fixture::new();

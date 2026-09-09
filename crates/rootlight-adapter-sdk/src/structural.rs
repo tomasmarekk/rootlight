@@ -272,6 +272,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// scope expansion, escape evaluation or case-insensitive binding equivalence.
 /// Markdown preserves authored heading and label text; rendered text, reference
 /// case folding and generated fragment identifiers require separate interpretation.
+/// ECMAScript identifiers decode Unicode escapes without Unicode normalization;
+/// other grammar-reviewed names keep the shared borrowed-name contract.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -281,7 +283,10 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "scala" {
+    if matches!(language, "javascript" | "typescript") {
+        crate::canonical_ecmascript_identifier(text, maximum_bytes)
+            .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
+    } else if language == "scala" {
         let candidate = text.trim();
         if candidate.is_empty() || candidate.len() > maximum_bytes {
             return None;

@@ -77,7 +77,10 @@ pub(in crate::project_semantics) fn parse_member_path(
         let end = rest
             .find(|ch: char| ch == '.' || ch == '?' || ch == '/' || is_trivia_space(ch))
             .unwrap_or(rest.len());
-        let Some(name) = rest.get(..end).filter(|name| is_identifier(name)) else {
+        let Some(name) = rest
+            .get(..end)
+            .and_then(|name| canonical_ecmascript_identifier(name, maximum))
+        else {
             return Ok(None);
         };
         parts.push(name);
@@ -100,7 +103,7 @@ pub(in crate::project_semantics) fn parse_member_path(
     let Some(name) = parts.pop().filter(|_| !parts.is_empty()) else {
         return Ok(None);
     };
-    Ok(Some((parts.join("."), name.to_owned())))
+    Ok(Some((parts.join("."), name.into_owned())))
 }
 
 fn skip_trivia<'a>(
@@ -162,6 +165,13 @@ mod tests {
                 Some(("Space.Nested", "Public")),
             ),
             ("名.値", Some(("名", "値"))),
+            (
+                r"\u0053pace.N\u0065sted.\u{50}ublic",
+                Some(("Space.Nested", "Public")),
+            ),
+            (r"Space.a\u0301", Some(("Space", "a\u{301}"))),
+            (r"Space.\u002e", None),
+            (r"Space.\uD835\uDC9C", None),
             ("Space().Public", None),
             ("Space['Public']", None),
             ("Space..Public", None),

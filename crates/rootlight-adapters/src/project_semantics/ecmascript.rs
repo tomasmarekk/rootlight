@@ -35,6 +35,7 @@ pub(super) struct ParsedImport {
 pub(super) fn collect_imports(
     facts: &[SyntaxFact],
     source: &[u8],
+    maximum: usize,
     cancellation: &Cancellation,
 ) -> Result<BTreeMap<u64, ParsedImport>, AdapterError> {
     cancellation.check()?;
@@ -46,7 +47,7 @@ pub(super) fn collect_imports(
     for (index, fact) in facts.iter().enumerate() {
         check_periodically(index, cancellation)?;
         if is_native_import(fact)
-            && let Some(import) = metadata.parse(fact.span(), source, cancellation)?
+            && let Some(import) = metadata.parse(fact.span(), source, maximum, cancellation)?
         {
             imports.insert(fact.local_id(), import);
         }
@@ -113,6 +114,7 @@ impl<'a> NativeImports<'a> {
         &self,
         span: SourceSpan,
         source: &[u8],
+        maximum: usize,
         cancellation: &Cancellation,
     ) -> Result<Option<ParsedImport>, AdapterError> {
         let mut module = None;
@@ -122,12 +124,12 @@ impl<'a> NativeImports<'a> {
             check_periodically(index, cancellation)?;
             let label = fact.syntax_kind().as_str();
             if label.ends_with(".type_import_binding.declaration") {
-                let Some(name) =
-                    source_text(source, fact.span()).filter(|name| is_identifier(name))
+                let Some(name) = source_text(source, fact.span())
+                    .and_then(|name| canonical_ecmascript_identifier(name, maximum))
                 else {
                     return Ok(None);
                 };
-                type_only.insert(name.to_owned());
+                type_only.insert(name.into_owned());
             } else if label.ends_with(".import_source.signature") {
                 let Some(text) = source_text(source, fact.span()) else {
                     return Ok(None);
@@ -141,19 +143,19 @@ impl<'a> NativeImports<'a> {
             } else if label.ends_with(".import_default.signature")
                 || label.ends_with(".import_namespace.signature")
             {
-                let Some(local) =
-                    source_text(source, fact.span()).filter(|name| is_identifier(name))
+                let Some(local) = source_text(source, fact.span())
+                    .and_then(|name| canonical_ecmascript_identifier(name, maximum))
                 else {
                     return Ok(None);
                 };
                 bindings.push(if label.ends_with(".import_default.signature") {
                     ImportBinding::Named {
-                        local: local.to_owned(),
+                        local: local.into_owned(),
                         imported: "default".to_owned(),
                     }
                 } else {
                     ImportBinding::Namespace {
-                        local: local.to_owned(),
+                        local: local.into_owned(),
                     }
                 });
             } else if label.ends_with(".import_specifier.signature") {
@@ -162,8 +164,8 @@ impl<'a> NativeImports<'a> {
                 for (child_index, child) in self.within(fact.span()).enumerate() {
                     check_periodically(child_index, cancellation)?;
                     if structural_entity_kind(child) == Some(EntityKind::Import) {
-                        let Some(name) =
-                            source_text(source, child.span()).filter(|name| is_identifier(name))
+                        let Some(name) = source_text(source, child.span())
+                            .and_then(|name| canonical_ecmascript_identifier(name, maximum))
                         else {
                             return Ok(None);
                         };
@@ -178,14 +180,15 @@ impl<'a> NativeImports<'a> {
                         let Some(text) = source_text(source, child.span()) else {
                             return Ok(None);
                         };
-                        let name = if is_identifier(text) {
-                            text.to_owned()
-                        } else {
-                            let Some(name) = string_literal::decode(text, cancellation)? else {
-                                return Ok(None);
+                        let name =
+                            if let Some(name) = canonical_ecmascript_identifier(text, maximum) {
+                                name.into_owned()
+                            } else {
+                                let Some(name) = string_literal::decode(text, cancellation)? else {
+                                    return Ok(None);
+                                };
+                                name
                             };
-                            name
-                        };
                         if imported.replace(name).is_some() {
                             return Ok(None);
                         }
@@ -195,7 +198,7 @@ impl<'a> NativeImports<'a> {
                     return Ok(None);
                 };
                 bindings.push(ImportBinding::Named {
-                    local: local.to_owned(),
+                    local: local.into_owned(),
                     imported,
                 });
             }

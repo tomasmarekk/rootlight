@@ -119,7 +119,12 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                             .as_str()
                             .ends_with(".export_namespace_name.signature")
                     }) {
-                        if let Some(public) = export_name(source, name.span(), self.cancellation)? {
+                        if let Some(public) = export_name(
+                            source,
+                            name.span(),
+                            self.request.limits().ir().max_string_bytes,
+                            self.cancellation,
+                        )? {
                             // Unsupported namespace objects still reserve their
                             // explicit name ahead of unrelated star exports.
                             self.exports
@@ -139,7 +144,12 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                             .as_str()
                             .ends_with(".export_namespace_name.signature")
                     }) {
-                        if let Some(public) = export_name(source, name.span(), self.cancellation)? {
+                        if let Some(public) = export_name(
+                            source,
+                            name.span(),
+                            self.request.limits().ir().max_string_bytes,
+                            self.cancellation,
+                        )? {
                             self.export_reference_names
                                 .insert(name.span(), public.clone());
                             let namespace_targets: Vec<_> = targets
@@ -191,10 +201,20 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                         .ends_with(".export_binding_alias.signature")
                 });
                 let imported = match name_fact {
-                    Some(child) if remote => export_name(source, child.span(), self.cancellation)?,
+                    Some(child) if remote => export_name(
+                        source,
+                        child.span(),
+                        self.request.limits().ir().max_string_bytes,
+                        self.cancellation,
+                    )?,
                     Some(child) => source_text(source, child.span())
-                        .filter(|name| is_identifier(name))
-                        .map(str::to_owned),
+                        .and_then(|name| {
+                            canonical_ecmascript_identifier(
+                                name,
+                                self.request.limits().ir().max_string_bytes,
+                            )
+                        })
+                        .map(|name| name.into_owned()),
                     None => None,
                 };
                 let Some(imported) = imported else {
@@ -204,7 +224,12 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                     continue;
                 };
                 let public = match alias_fact {
-                    Some(child) => export_name(source, child.span(), self.cancellation)?,
+                    Some(child) => export_name(
+                        source,
+                        child.span(),
+                        self.request.limits().ir().max_string_bytes,
+                        self.cancellation,
+                    )?,
                     None => Some(imported.clone()),
                 };
                 let Some(public) = public else {

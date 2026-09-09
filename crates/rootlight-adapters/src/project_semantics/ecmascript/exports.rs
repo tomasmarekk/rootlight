@@ -109,12 +109,18 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                             // Local export references must be identifiers even
                             // though public names may be string literals.
                             local = source_text(input.input.source().bytes(), child.span())
-                                .filter(|name| is_identifier(name))
-                                .map(str::to_owned);
+                                .and_then(|name| {
+                                    canonical_ecmascript_identifier(
+                                        name,
+                                        self.request.limits().ir().max_string_bytes,
+                                    )
+                                })
+                                .map(|name| name.into_owned());
                         } else if child_label.ends_with(".export_binding_alias.signature") {
                             alias = Some(export_name(
                                 input.input.source().bytes(),
                                 child.span(),
+                                self.request.limits().ir().max_string_bytes,
                                 self.cancellation,
                             )?);
                         }
@@ -206,13 +212,14 @@ fn module_declaration(
 pub(in crate::project_semantics) fn export_name(
     source: &[u8],
     span: SourceSpan,
+    maximum: usize,
     cancellation: &Cancellation,
 ) -> Result<Option<String>, AdapterError> {
     let Some(text) = source_text(source, span) else {
         return Ok(None);
     };
-    if is_identifier(text) {
-        Ok(Some(text.to_owned()))
+    if let Some(name) = canonical_ecmascript_identifier(text, maximum) {
+        Ok(Some(name.into_owned()))
     } else {
         string_literal::decode(text, cancellation)
     }

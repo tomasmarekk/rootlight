@@ -5,6 +5,73 @@
 use super::*;
 
 #[test]
+fn ecmascript_escaped_definitions_preserve_authored_spans_and_replay() {
+    let source = "function \\u004cocal(value) { return value; }\r\n\\u004cocal(1);";
+    for language in ["javascript", "typescript"] {
+        let case = CASES
+            .iter()
+            .copied()
+            .find(|case| case.name == language)
+            .unwrap();
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, case);
+        let fixture = Fixture::new(case, source.as_bytes());
+        let budget = limits();
+        let initial = request(&fixture.snapshot, &fixture.source, case, &budget);
+        let (first, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let entity = first
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Local")
+            .unwrap();
+        let definition = first
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .unwrap();
+        assert_eq!(definition.source.span().start_byte(), 9);
+        assert_eq!(definition.source.span().end_byte(), 19);
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        let next = fixture.next_generation();
+        let next_request = request(&next.snapshot, &next.source, case, &budget);
+        let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(fresh.document(), replay.document());
+        assert_eq!(fresh.report(), replay.report());
+        assert!(
+            replay
+                .document()
+                .occurrences
+                .iter()
+                .all(|occurrence| occurrence.source.generation() == next.source.generation())
+        );
+    }
+}
+
+#[test]
 fn typescript_type_parameter_definitions_keep_exact_identity_and_replay() {
     for source in [
         "function first<名>(value: 名) {}\r\ntype Box<名> = 名;\r\nclass Holder<名> { value!: 名; }",
