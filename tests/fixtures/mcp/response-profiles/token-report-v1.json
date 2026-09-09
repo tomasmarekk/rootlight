@@ -77,7 +77,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1488,
       "o200k_tokens": 490,
-      "sha256": "157d61c241806dee561fb99ee2509c086de7ca24126451131e5b216351c7a773",
+      "sha256": "24f83b773e3548363bdfa7f7fcffa45992de2320a3f389470534f303e9a636e7",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -88,7 +88,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1555,
       "o200k_tokens": 505,
-      "sha256": "a34360f91e9d386e86441d08b6c2860980308a12e319f4b8b5f4928e10761119",
+      "sha256": "b56ef6faebd9e541c9936cce78f8ef38835abc983a6fb7262ff84a880974bfeb",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -99,7 +99,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1616,
       "o200k_tokens": 522,
-      "sha256": "c95c4e4c5a4f7e00c74a643af3ce63de17bb98c983652cf7e155a4082d758b70",
+      "sha256": "f64fb36865adb69bd27702a22facd45aa8975539cd5a8420293ee35e21f4d02a",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -110,7 +110,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1525,
       "o200k_tokens": 489,
-      "sha256": "2c96e0fc606c0b6aa8ff28eb08f00abbca6b80f62b114a2b5ba8c6ab4ec46082",
+      "sha256": "e6d663b4a15b55f616f236dcef08ed63dbadf170060e6855d8ade816e0108aab",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -121,7 +121,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1751,
       "o200k_tokens": 548,
-      "sha256": "a5531c30344de1ae508fcd3a97643ae8fe7ab6d260086fcba1d0edc467e46065",
+      "sha256": "970c90ff06164e4abd304d91eb69fcdeae4842968b90ee0ed6535c48dd3ec37c",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -132,7 +132,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1927,
       "o200k_tokens": 597,
-      "sha256": "dab9ec68286fbed37f03e7976b63acbfb356064be9e6bf622453aa3c30242a17",
+      "sha256": "762d5d9a05adaa96c7ecf469246f88894b80042f8a7ee99ed7229cb6526e8006",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -209,7 +209,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1342,
       "o200k_tokens": 412,
-      "sha256": "c41e9dd8371362f9b61fba3e3ed76eb5f48c3b4e0245a9a885e4b7f9d8066d5c",
+      "sha256": "403c1122f60c2051be8ad1debc6d467301d384ad924c98083a7c2cd384f8f59c",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -220,7 +220,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1417,
       "o200k_tokens": 434,
-      "sha256": "7ba4ff3ef8d6ca11af85968c2af8cb0470d7d8606b13cbb75ad507e05972d978",
+      "sha256": "62ada198485407c9a960c7b2b336f3bb4f0cbfc00d31c227499674d971f4fc32",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -231,7 +231,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1439,
       "o200k_tokens": 442,
-      "sha256": "e7af30a6d7a5948febb85ea2094eadc0e6d0d37083e9c015f720c9a3e9d8161f",
+      "sha256": "a1bfffdb13d8d9dc28e92c8a48bf1c56035e7ac702ee33ec5385b75215de5211",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -374,7 +374,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1519,
       "o200k_tokens": 491,
-      "sha256": "4a6576dd3e461fe0a29b4d1b3dc4504d6434323347632e41058c26b8ab37278e",
+      "sha256": "74c37d3a4d01b6bdb02187a51861d1f6986b64aea32b59aba6a1895d3b981d6a",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -385,7 +385,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 2409,
       "o200k_tokens": 848,
-      "sha256": "c0c15c484c7a7f2172528451bc6e77f8146c3a6486c81b168ffd54fc524bb926",
+      "sha256": "f87c71d930550e57d5a2d0faa59300b0b9bd9547eae3ef24f0aed33bfc406428",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -396,7 +396,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 3002,
       "o200k_tokens": 1086,
-      "sha256": "d2424583567cb12721649d2baf4df2132d64e6d94967d15f56f06c860eaa2593",
+      "sha256": "ce001ed5d4a9a168858f1dc4057ac9b2980990843819133e2f71503e5ca6e7d0",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -506,7 +506,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 822,
       "o200k_tokens": 236,
-      "sha256": "322e3e43e20aea45c54fb79945ad1c5bd8b44c8ffb7a7d95a9d6a9d070197ec5",
+      "sha256": "1336174f4203a0d381242085de33ca2e1a60b6dfae2190644d663167f21b3f57",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true

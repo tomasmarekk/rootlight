@@ -101,7 +101,13 @@ use super::*;
 
 #[test]
 fn source_declaration_kinds_preserve_their_exact_public_labels() {
-    for label in ["event", "error_declaration", "modifier"] {
+    for label in [
+        "event",
+        "error_declaration",
+        "modifier",
+        "document_section",
+        "link_definition",
+    ] {
         let kind = entity_kind(label).expect("source declaration maps without coercion");
         assert_eq!(serde_json::to_value(kind).unwrap(), label);
     }
@@ -4095,6 +4101,8 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
         "event",
         "error_declaration",
         "modifier",
+        "document_section",
+        "link_definition",
     ] {
         for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
             let mut locate = locate_response();
@@ -4122,6 +4130,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 tool.legacy_contract_version(),
                 tool.second_legacy_contract_version(),
                 tool.third_legacy_contract_version(),
+                tool.fourth_legacy_contract_version(),
             ]
             .into_iter()
             .flatten()
@@ -4138,23 +4147,14 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 let HandlerResponse::Success(result) = response else {
                     panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
                 };
-                let supported = version == tool.contract_version()
-                    || (!matches!(kind, "event" | "error_declaration" | "modifier")
-                        && version
-                            == if tool == VerticalTool::CodeLocate {
-                                "1.2"
-                            } else {
-                                "1.3"
-                            })
-                    || (!matches!(
-                        kind,
-                        "database_object" | "event" | "error_declaration" | "modifier"
-                    ) && version
-                        == if tool == VerticalTool::CodeLocate {
-                            "1.1"
-                        } else {
-                            "1.2"
-                        });
+                let minimum = match kind {
+                    "document_section" | "link_definition" => 4,
+                    "event" | "error_declaration" | "modifier" => 3,
+                    "database_object" => 2,
+                    _ => 1,
+                } + u32::from(tool == VerticalTool::SymbolExplain);
+                let minor: u32 = version.strip_prefix("1.").unwrap().parse().unwrap();
+                let supported = minor >= minimum;
                 assert_eq!(result["isError"], !supported, "{tool:?} {kind} {version}");
                 let content = &result["structuredContent"];
                 assert_eq!(content["schema_version"], version);

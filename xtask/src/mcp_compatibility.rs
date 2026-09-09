@@ -331,11 +331,11 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         resources.insert("retained_durable_bytes".to_owned(), json!(0));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "code.locate", "1.3", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "query.advanced", "1.3", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.4", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "code.locate", "1.4", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "query.advanced", "1.4", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "change.impact", "1.4", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "change.impact", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
         data.get_mut("coverage_strategy")
             .and_then(Value::as_object_mut)
@@ -373,7 +373,7 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             .insert("entry_symbols".to_owned(), json!([]));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "history.compare", "1.4", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "history.compare", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "plan.change", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "context.pack", "1.1", |_| Ok(()))?;
     validate_examples(&tools)?;
@@ -423,6 +423,8 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
             tool.second_legacy_output_schema_json()
         } else if tool.third_legacy_contract_version() == Some(output_version) {
             tool.third_legacy_output_schema_json()
+        } else if tool.fourth_legacy_contract_version() == Some(output_version) {
+            tool.fourth_legacy_output_schema_json()
         } else if tool.initial_contract_version() == Some(output_version) {
             tool.initial_output_schema_json()
         } else {
@@ -1409,12 +1411,12 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.3",
+                    "current_version": "1.4",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "symbol.explain",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
                 {
@@ -1424,7 +1426,7 @@ mod tests {
                 },
                 {
                     "tool": "change.impact",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
                 {
@@ -1449,7 +1451,7 @@ mod tests {
                 },
                 {
                     "tool": "history.compare",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
                 {
@@ -1464,7 +1466,7 @@ mod tests {
                 },
                 {
                     "tool": "query.advanced",
-                    "current_version": "1.3",
+                    "current_version": "1.4",
                     "projected_version": "1.0",
                 },
             ])

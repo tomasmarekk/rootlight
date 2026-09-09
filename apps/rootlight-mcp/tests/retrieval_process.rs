@@ -544,7 +544,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.3");
+        assert_eq!(output["schema_version"], "1.4");
         if matches!(
             language,
             "sql" | "r" | "solidity" | "scala" | "dart" | "powershell"
@@ -585,7 +585,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.4");
+            assert_eq!(explanation["schema_version"], "1.5");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
@@ -1248,7 +1248,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.4");
+    assert_eq!(output["schema_version"], "1.5");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -2069,7 +2069,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4")
+            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5")
         ),
         "read response uses a supported additive schema version"
     );

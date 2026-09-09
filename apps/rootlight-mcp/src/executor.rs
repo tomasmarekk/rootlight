@@ -8790,6 +8790,8 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "event" => EntityKind::Event,
         "error_declaration" => EntityKind::ErrorDeclaration,
         "modifier" => EntityKind::Modifier,
+        "document_section" => EntityKind::DocumentSection,
+        "link_definition" => EntityKind::LinkDefinition,
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)
