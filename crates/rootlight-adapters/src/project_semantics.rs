@@ -1730,6 +1730,23 @@ struct ResolutionCandidates {
     kind: ResolutionKind,
 }
 
+fn dynamic_dispatch_candidates(
+    occurrence: &OccurrenceDraft,
+    definitions: &BTreeMap<String, Vec<SemanticEntity>>,
+) -> ResolutionCandidates {
+    let symbols = definitions
+        .get(&occurrence.name)
+        .into_iter()
+        .flatten()
+        .filter(|entity| entity.kind == EntityKind::Method)
+        .map(|entity| entity.symbol)
+        .collect::<BTreeSet<_>>();
+    ResolutionCandidates {
+        symbols: symbols.into_iter().collect(),
+        kind: ResolutionKind::DynamicDispatch,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BoundedResolutionCandidates {
     symbols: Vec<SymbolId>,
@@ -1782,6 +1799,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     exports: BTreeMap<FileId, BTreeMap<String, Vec<ecmascript::exports::ExportTarget>>>,
     export_reference_names: BTreeMap<SourceSpan, String>,
     namespace_occurrence_targets: BTreeMap<SourceSpan, Vec<ecmascript::exports::ExportTarget>>,
+    ecmascript_receiver_calls: BTreeSet<SourceSpan>,
     ecmascript_bindings: ecmascript::lexical::LocalBindings,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
@@ -1810,6 +1828,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             exports: BTreeMap::new(),
             export_reference_names: BTreeMap::new(),
             namespace_occurrence_targets: BTreeMap::new(),
+            ecmascript_receiver_calls: BTreeSet::new(),
             ecmascript_bindings: ecmascript::lexical::LocalBindings::default(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
@@ -3884,6 +3903,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if let Some(resolution) = self.resolve_reviewed_static_call(occurrence, definitions) {
             return resolution;
         }
+        if self
+            .ecmascript_receiver_calls
+            .contains(&occurrence.source.span())
+        {
+            return dynamic_dispatch_candidates(occurrence, definitions);
+        }
         if let Some(targets) = self
             .namespace_occurrence_targets
             .get(&occurrence.source.span())
@@ -4042,17 +4067,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 }
             }
 
-            let dispatch_candidates = definitions
-                .get(&occurrence.name)
-                .into_iter()
-                .flatten()
-                .filter(|entity| entity.kind == EntityKind::Method)
-                .map(|entity| entity.symbol)
-                .collect::<BTreeSet<_>>();
-            return ResolutionCandidates {
-                symbols: dispatch_candidates.into_iter().collect(),
-                kind: ResolutionKind::DynamicDispatch,
-            };
+            return dynamic_dispatch_candidates(occurrence, definitions);
         }
         let mut symbols = definitions
             .get(&occurrence.name)

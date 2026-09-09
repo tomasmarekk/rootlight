@@ -76,6 +76,15 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                         occurrence.source.span(),
                         "ecmascript-local-member-resolution-unavailable",
                     ));
+                    // A local receiver shadows module lookup, not method dispatch.
+                    // Mark that route explicitly so a same-named import cannot rebind it.
+                    if occurrence.role == OccurrenceRole::CallSite
+                        && occurrence.qualifier.as_deref() == Some(root)
+                    {
+                        self.ecmascript_receiver_calls
+                            .insert(occurrence.source.span());
+                        continue;
+                    }
                     Vec::new()
                 };
                 self.namespace_occurrence_targets

@@ -46,6 +46,8 @@ mod escaped_names;
 mod infer_bindings;
 #[path = "project_semantic_adapters/inner_type_bindings.rs"]
 mod inner_type_bindings;
+#[path = "project_semantic_adapters/receiver_dispatch.rs"]
+mod receiver_dispatch;
 #[path = "project_semantic_adapters/reexports.rs"]
 mod reexports;
 #[path = "project_semantic_adapters/type_parameters.rs"]
