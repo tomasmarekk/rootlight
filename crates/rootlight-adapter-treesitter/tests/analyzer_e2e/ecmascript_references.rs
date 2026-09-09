@@ -5,6 +5,120 @@
 use super::*;
 
 #[test]
+fn typescript_type_parameter_definitions_keep_exact_identity_and_replay() {
+    let case = CASES
+        .iter()
+        .copied()
+        .find(|case| case.name == "typescript")
+        .unwrap();
+    let source = "function first<名>(value: 名) {}\r\ntype Box<名> = 名;\r\nclass Holder<名> { value!: 名; }";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, case);
+    let fixture = Fixture::new(case, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, case, &budget);
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let parameters: Vec<_> = first
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .collect();
+    assert_eq!(parameters.len(), 3);
+    let identities: BTreeSet<_> = parameters.iter().map(|entity| entity.id).collect();
+    assert_eq!(identities.len(), 3);
+    for (offset, _) in source.match_indices("<名>") {
+        let start = u64::try_from(offset + 1).unwrap();
+        let definition = first
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("missing generic binder")
+        };
+        assert!(identities.contains(&symbol));
+        assert_eq!(definition.source.span().end_byte(), start + 3);
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+    let next = fixture.next_generation();
+    let next_request = request(&next.snapshot, &next.source, case, &budget);
+    let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    for occurrence in &replay.document().occurrences {
+        assert_eq!(occurrence.source.generation(), next.source.generation());
+    }
+    let required = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let required_budget = limits_with_syntax_records(required);
+    let required_request = request(&fixture.snapshot, &fixture.source, case, &required_budget);
+    let (bounded, bounded_artifact) = analyzer
+        .analyze_and_capture(
+            &required_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        bounded
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::TypeParameter)
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>(),
+        identities
+    );
+    let next_bounded_request = request(&next.snapshot, &next.source, case, &required_budget);
+    let fresh_bounded = analyze(
+        &analyzer,
+        &next_bounded_request,
+        &ExtensionSupport::default(),
+    );
+    let replay_bounded = analyzer
+        .analyze_from_artifact(
+            &next_bounded_request,
+            &bounded_artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh_bounded.document(), replay_bounded.document());
+    assert_eq!(fresh_bounded.report(), replay_bounded.report());
+}
+
+#[test]
 fn qualified_reference_fields_keep_leaf_roles_and_generation_bound_replay() {
     for case in CASES
         .iter()

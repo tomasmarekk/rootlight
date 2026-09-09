@@ -15,6 +15,7 @@
   (method_signature)
   (abstract_method_signature)
   (variable_declarator)
+  (type_parameter)
 ] @declaration
 
 [
@@ -29,6 +30,7 @@
   (method_signature name: [(property_identifier) (identifier)] @definition)
   (abstract_method_signature name: [(property_identifier) (identifier)] @definition)
   (variable_declarator name: (identifier) @definition)
+  (type_parameter name: (type_identifier) @definition)
 ]
 
 (import_statement) @import
@@ -59,6 +61,10 @@
 (variable_declaration (variable_declarator) @signature)
 (for_in_statement kind: "var") @signature
 (statement_block) @scope
+[(class_declaration type_parameters: (type_parameters))
+ (abstract_class_declaration type_parameters: (type_parameters))
+ (interface_declaration type_parameters: (type_parameters))
+ (type_alias_declaration type_parameters: (type_parameters))] @scope
 (generator_function_declaration name: (identifier) @definition) @declaration
 (function_expression name: (identifier) @definition) @declaration
 (generator_function name: (identifier) @definition) @declaration

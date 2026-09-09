@@ -310,6 +310,8 @@ pub enum RejectionReason {
     TargetKindMismatch,
     /// A lexically owned parameter belongs to an unrelated function scope.
     OutsideLexicalScope,
+    /// The language adapter has not established the required lexical binding.
+    MissingLexicalEvidence,
 }
 
 /// One bounded rejected-candidate explanation.

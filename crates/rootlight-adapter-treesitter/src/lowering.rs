@@ -4404,6 +4404,10 @@ mod tests {
             ("go.constant.declaration", EntityKind::Constant),
             ("typescript.interface.declaration", EntityKind::Interface),
             ("typescript.type_alias.declaration", EntityKind::TypeAlias),
+            (
+                "typescript.type_parameter.declaration",
+                EntityKind::TypeParameter,
+            ),
             ("typescript.variable.declaration", EntityKind::Variable),
             ("javascript.variable.declaration", EntityKind::Variable),
         ] {

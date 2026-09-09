@@ -42,6 +42,8 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 #[path = "project_semantic_adapters/reexports.rs"]
 mod reexports;
+#[path = "project_semantic_adapters/type_parameters.rs"]
+mod type_parameters;
 
 #[test]
 fn native_local_export_names_cannot_be_string_literals() {

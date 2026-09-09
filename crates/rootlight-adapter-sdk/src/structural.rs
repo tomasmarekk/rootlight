@@ -30,6 +30,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "markdown.section.declaration" => {
             Some(EntityKind::DocumentSection)
         }
+        SyntaxFactKind::Declaration if label == "typescript.type_parameter.declaration" => {
+            Some(EntityKind::TypeParameter)
+        }
         SyntaxFactKind::Declaration if label == "markdown.link_definition.declaration" => {
             Some(EntityKind::LinkDefinition)
         }

@@ -3668,6 +3668,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         | EntityKind::Enum
                         | EntityKind::Interface
                         | EntityKind::TypeAlias
+                        | EntityKind::TypeParameter
                 ),
                 OccurrenceRole::Reference
                     if matches!(
@@ -3677,9 +3678,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 {
                     true
                 }
-                OccurrenceRole::Reference | OccurrenceRole::CallSite => {
-                    !matches!(entity.kind, EntityKind::Interface | EntityKind::TypeAlias)
-                }
+                OccurrenceRole::Reference | OccurrenceRole::CallSite => !matches!(
+                    entity.kind,
+                    EntityKind::Interface | EntityKind::TypeAlias | EntityKind::TypeParameter
+                ),
                 _ => true,
             }
         };
@@ -3861,6 +3863,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .into_iter()
             .flatten()
             .filter(admits_namespace)
+            .filter(|entity| entity.kind != EntityKind::TypeParameter)
             .filter(|entity| entity.file == occurrence.file)
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
@@ -3955,6 +3958,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 candidates
                     .iter()
                     .filter(admits_namespace)
+                    .filter(|entity| entity.kind != EntityKind::TypeParameter)
                     .map(|entity| entity.symbol),
             );
         }

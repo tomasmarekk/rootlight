@@ -1632,6 +1632,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         }
         (GrammarFamily::TypeScript, "interface_declaration") => Some("typescript.interface"),
         (GrammarFamily::TypeScript, "type_alias_declaration") => Some("typescript.type_alias"),
+        (GrammarFamily::TypeScript, "type_parameter") => Some("typescript.type_parameter"),
         (GrammarFamily::TypeScript, "enum_declaration") => Some("typescript.enum"),
         (GrammarFamily::TypeScript, "method_definition") => Some("typescript.method"),
         (GrammarFamily::TypeScript, "method_signature") => Some("typescript.method_signature"),

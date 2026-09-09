@@ -214,6 +214,10 @@ impl ResolutionEngine {
                 Some(RejectionReason::LanguageMismatch)
             } else if !parameter_call && !kind_supports_role(entity.kind, occurrence.role) {
                 Some(RejectionReason::TargetKindMismatch)
+            } else if entity.language == "typescript" && entity.kind == EntityKind::TypeParameter {
+                // Native generic scopes, including anonymous type signatures,
+                // must establish these bindings before language-neutral scoring.
+                Some(RejectionReason::MissingLexicalEvidence)
             } else if example.is_some_and(|example| {
                 example.is_none()
                     || entity_source_file(entity) != Some(occurrence.file)

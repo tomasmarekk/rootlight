@@ -56,9 +56,6 @@ impl ProjectFactsBuilder<'_, '_, '_> {
             let Some(root) = qualifier.split('.').next() else {
                 continue;
             };
-            if !bindings_by_local.contains_key(&(occurrence.file, root)) {
-                continue;
-            }
             let local = self
                 .ecmascript_bindings
                 .visible(occurrence, root, self.cancellation)?;
@@ -83,6 +80,9 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                 };
                 self.namespace_occurrence_targets
                     .insert(occurrence.source.span(), targets);
+                continue;
+            }
+            if !bindings_by_local.contains_key(&(occurrence.file, root)) {
                 continue;
             }
             let mut handled = false;

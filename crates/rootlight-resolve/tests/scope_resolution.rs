@@ -456,6 +456,66 @@ fn language_owned_targets_bypass_name_scoring_in_all_apply_paths() {
 }
 
 #[test]
+fn typescript_type_parameters_require_native_binding_evidence() {
+    let mut fixture = Fixture::new();
+    fixture.document.files[0].language = "typescript".to_owned();
+    fixture.document.provenance[0].language = "typescript".to_owned();
+    let symbol = fixture.add_entity(
+        10,
+        "Local",
+        fixture.primary_file,
+        EntityKind::TypeParameter,
+        None,
+    );
+    fixture.document.entities[0].language = "typescript".to_owned();
+    fixture.add_occurrence(
+        20,
+        "Local",
+        fixture.primary_file,
+        OccurrenceRole::TypeUse,
+        None,
+    );
+    fixture.document.occurrences[0].syntax_kind = "typescript.type_identifier.reference".to_owned();
+    fixture.add_occurrence(
+        21,
+        "Local",
+        fixture.primary_file,
+        OccurrenceRole::TypeUse,
+        None,
+    );
+    fixture.document.occurrences[1].syntax_kind = "typescript.type_identifier.reference".to_owned();
+    fixture.document.occurrences[1].target = OccurrenceTarget::Resolved { symbol };
+    fixture.validate();
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    let output = engine.resolve(&fixture.document, &cancellation).unwrap();
+    assert_eq!(output.decisions.len(), 1);
+    assert!(matches!(
+        output.decisions[0].outcome,
+        ResolutionOutcome::Unresolved { .. }
+    ));
+    assert_eq!(
+        output.decisions[0].explanation.rejected_candidates[0].reason,
+        RejectionReason::MissingLexicalEvidence
+    );
+    let applied = engine
+        .apply_document(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &cancellation,
+        )
+        .unwrap();
+    assert!(matches!(
+        applied.occurrences[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(
+        applied.occurrences[1].target,
+        OccurrenceTarget::Resolved { symbol }
+    );
+}
+
+#[test]
 fn markdown_references_are_not_promoted_by_code_symbol_scoring() {
     for syntax in [
         "markdown.reference_label.reference",

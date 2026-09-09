@@ -160,21 +160,34 @@ impl LocalBindings {
                 .flatten()
             {
                 cancellation.check()?;
-                let admitted = if occurrence.role == OccurrenceRole::TypeUse
+                let namespace_position = occurrence.role == OccurrenceRole::TypeUse
+                    && occurrence.qualifier.is_some()
                     || matches!(
                         occurrence.syntax_kind.as_str(),
                         "typescript.type_namespace_root.reference"
                             | "typescript.type_namespace_member.reference"
-                    ) {
+                    );
+                // A qualified type root is a namespace lookup. A type parameter
+                // or local class can shadow a type without shadowing that namespace.
+                let admitted = if namespace_position {
+                    matches!(
+                        binding.kind,
+                        EntityKind::Namespace | EntityKind::Module | EntityKind::Enum
+                    )
+                } else if occurrence.role == OccurrenceRole::TypeUse {
                     matches!(
                         binding.kind,
                         EntityKind::Class
                             | EntityKind::Enum
                             | EntityKind::Interface
                             | EntityKind::TypeAlias
+                            | EntityKind::TypeParameter
                     )
                 } else {
-                    !matches!(binding.kind, EntityKind::Interface | EntityKind::TypeAlias)
+                    !matches!(
+                        binding.kind,
+                        EntityKind::Interface | EntityKind::TypeAlias | EntityKind::TypeParameter
+                    )
                 };
                 if admitted {
                     selected.push(binding.declaration);
