@@ -2526,6 +2526,10 @@ pub enum AdvancedEntityKind {
     Constant,
     /// Variable declaration.
     Variable,
+    /// Authored import binding or clause.
+    Import,
+    /// Authored export binding or clause.
+    Export,
     /// Configuration record.
     Configuration,
     /// Symbol whose definition is outside the indexed repository.
@@ -2565,6 +2569,8 @@ impl AdvancedEntityKind {
             Self::Field => "field",
             Self::Constant => "constant",
             Self::Variable => "variable",
+            Self::Import => "import",
+            Self::Export => "export",
             Self::Configuration => "configuration",
             Self::ExternalSymbol => "external_symbol",
             Self::StyleRule => "style_rule",
@@ -2592,6 +2598,8 @@ impl AdvancedEntityKind {
             "field" => Some(Self::Field),
             "constant" => Some(Self::Constant),
             "variable" => Some(Self::Variable),
+            "import" => Some(Self::Import),
+            "export" => Some(Self::Export),
             "configuration" => Some(Self::Configuration),
             "external_symbol" => Some(Self::ExternalSymbol),
             "style_rule" => Some(Self::StyleRule),
@@ -2640,6 +2648,8 @@ impl AdvancedEntityKind {
             Self::Field => matches!(kind, IrEntityKind::Field | IrEntityKind::Property),
             Self::Constant => matches!(kind, IrEntityKind::Constant),
             Self::Variable => matches!(kind, IrEntityKind::Variable | IrEntityKind::Parameter),
+            Self::Import => matches!(kind, IrEntityKind::Import),
+            Self::Export => matches!(kind, IrEntityKind::Export),
             Self::Configuration => matches!(kind, IrEntityKind::ConfigurationKey),
             Self::ExternalSymbol => matches!(kind, IrEntityKind::ExternalSymbol),
             Self::StyleRule => matches!(kind, IrEntityKind::StyleRule),
@@ -3368,8 +3378,10 @@ mod tests {
     }
 
     #[test]
-    fn document_scan_kinds_preserve_labels_without_matching_code() {
+    fn source_scan_kinds_preserve_labels_without_matching_unrelated_code() {
         let cases = [
+            (AdvancedEntityKind::Import, EntityKind::Import, "import"),
+            (AdvancedEntityKind::Export, EntityKind::Export, "export"),
             (
                 AdvancedEntityKind::DocumentSection,
                 EntityKind::DocumentSection,

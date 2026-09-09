@@ -525,6 +525,22 @@ fn sql_return_headers_reach_mcp_explanations_without_body_text() {
     fixture.finish();
 }
 
+#[test]
+fn imported_bindings_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "javascript",
+        "bindings.js",
+        "import { externalValue as importedValue } from './dependency.js';\nexport const consume = () => importedValue;\n",
+        &[("importedValue", "import", 1)],
+    );
+    source_entities_cross_process_boundaries(
+        "typescript",
+        "view.astro",
+        "---\nimport { externalValue as importedValue } from './dependency.js';\n---\n<main>{importedValue}</main>\n",
+        &[("importedValue", "import", 1)],
+    );
+}
+
 fn source_entities_cross_process_boundaries(
     language: &str,
     path: &str,
@@ -544,6 +560,30 @@ fn source_entities_with_signatures_cross_process_boundaries(
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, count) in queries {
+        if matches!(kind, "import" | "export") {
+            let located = fixture.standalone(
+                &format!("binding-path-{kind}"),
+                "code.locate",
+                json!({"query": path, "search_modes": ["path"], "scope": {"paths": [path]},
+                    "max_results": 200, "response_profile": "evidence"}),
+            );
+            assert_success(&located, "code.locate");
+            let output = &located["result"]["structuredContent"];
+            assert_common_read_contract(output, &fixture.repository_id);
+            assert!(
+                output["data"]["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| {
+                        item["kind"] == kind
+                            && item["display_name"] == name
+                            && item["path"] == path
+                            && item["source_ref"].is_object()
+                    }),
+                "path lookup preserves the authored binding: {output:#}"
+            );
+        }
         let arguments = json!({"query": name, "search_modes": ["exact"], "max_results": 200,
             "languages": [language], "scope": {"paths": [path]}, "response_profile": "evidence"});
         let located = fixture.standalone(
@@ -560,7 +600,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.4");
+        assert_eq!(output["schema_version"], "1.5");
         if matches!(
             language,
             "sql" | "r" | "solidity" | "scala" | "dart" | "powershell" | "markdown"
@@ -601,7 +641,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.5");
+            assert_eq!(explanation["schema_version"], "1.6");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
@@ -657,10 +697,12 @@ fn source_entities_with_signatures_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if matches!(
-            language,
-            "r" | "scala" | "dart" | "powershell" | "javascript"
-        ) {
+        if !matches!(kind, "import" | "export")
+            && matches!(
+                language,
+                "r" | "scala" | "dart" | "powershell" | "javascript"
+            )
+        {
             // These fixtures use existing IR kinds, unlike the newer data
             // kinds that correctly require the updated retrieval schema.
             assert_success(&retained, "code.locate");
@@ -1264,7 +1306,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.5");
+    assert_eq!(output["schema_version"], "1.6");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -2085,7 +2127,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5")
+            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6")
         ),
         "read response uses a supported additive schema version"
     );

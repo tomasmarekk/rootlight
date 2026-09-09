@@ -6634,11 +6634,11 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.4",
+            "contractVersion": "1.5",
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "72d04a380d1680f37ead3dbca3e8a72c34cabcd3cd2a25cfbac11e694a4ec072",
+            "inputShapeHash": "3e629072c59165973515bd2c6ce9fdc6bcabe0a981ca7508c460727f38741200",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -6814,6 +6814,16 @@
                 {
                   "const": "variable",
                   "description": "Variable declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "import",
+                  "description": "Authored import binding or clause, not its external target.",
+                  "type": "string"
+                },
+                {
+                  "const": "export",
+                  "description": "Authored export binding or clause, not its referenced declaration.",
                   "type": "string"
                 },
                 {
@@ -7156,7 +7166,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.4",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7299,6 +7309,16 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
+                  "type": "string"
+                }
+              ]
+            },
+            "BindingQueryVersion": {
+              "description": "Exact version of import- and export-aware locate and advanced queries.",
+              "oneOf": [
+                {
+                  "const": "1.5",
+                  "description": "Query contract 1.5.",
                   "type": "string"
                 }
               ]
@@ -7534,16 +7554,6 @@
               "pattern": "^[a-z0-9_]+$",
               "type": "string"
             },
-            "DocumentQueryVersion": {
-              "description": "Exact version of document-aware locate and advanced-query responses.",
-              "oneOf": [
-                {
-                  "const": "1.4",
-                  "description": "Query contract 1.4.",
-                  "type": "string"
-                }
-              ]
-            },
             "EntityErrorResponse": {
               "additionalProperties": false,
               "description": "Checked domain error under one exact source-entity contract revision.",
@@ -7553,7 +7563,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentQueryVersion",
+                  "$ref": "#/$defs/BindingQueryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7604,6 +7614,16 @@
                 {
                   "const": "variable",
                   "description": "Variable declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "import",
+                  "description": "Authored import binding or clause, not its external target.",
+                  "type": "string"
+                },
+                {
+                  "const": "export",
+                  "description": "Authored export binding or clause, not its referenced declaration.",
                   "type": "string"
                 },
                 {
@@ -7702,7 +7722,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentQueryVersion",
+                  "$ref": "#/$defs/BindingQueryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8954,7 +8974,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.4",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -8979,7 +8999,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.5",
+            "contractVersion": "1.6",
             "explainSupported": true,
             "fallbackSummary": "bounded sectioned explanations with typed evidence, source preview, and provenance",
             "generation": "selects_generation",
@@ -9234,7 +9254,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.5",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.explain`.",
@@ -9344,6 +9364,16 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
+                  "type": "string"
+                }
+              ]
+            },
+            "BindingVersion": {
+              "description": "Exact version of import- and export-aware explanations.",
+              "oneOf": [
+                {
+                  "const": "1.6",
+                  "description": "Explanation contract 1.6.",
                   "type": "string"
                 }
               ]
@@ -9559,16 +9589,6 @@
               "pattern": "^[a-z0-9_]+$",
               "type": "string"
             },
-            "DocumentVersion": {
-              "description": "Exact version of document-aware explanations and change results.",
-              "oneOf": [
-                {
-                  "const": "1.5",
-                  "description": "Explanation and change contract 1.5.",
-                  "type": "string"
-                }
-              ]
-            },
             "EntityErrorResponse": {
               "additionalProperties": false,
               "description": "Checked domain error under one exact source-entity contract revision.",
@@ -9578,7 +9598,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentVersion",
+                  "$ref": "#/$defs/BindingVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -9629,6 +9649,16 @@
                 {
                   "const": "variable",
                   "description": "Variable declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "import",
+                  "description": "Authored import binding or clause, not its external target.",
+                  "type": "string"
+                },
+                {
+                  "const": "export",
+                  "description": "Authored export binding or clause, not its referenced declaration.",
                   "type": "string"
                 },
                 {
@@ -9727,7 +9757,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentVersion",
+                  "$ref": "#/$defs/BindingVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -11048,7 +11078,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.5",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -34709,11 +34739,11 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.4",
+            "contractVersion": "1.5",
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "ef029ff7042e029d90848eab64c2c2f713fbc41c9581c508dc4815a29e868673",
+            "inputShapeHash": "426d376141f41231f0bc7df1c9cb621f4363f18adac659581ea687bb699c3b0c",
             "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
@@ -34877,6 +34907,16 @@
                 {
                   "const": "variable",
                   "description": "Variable declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "import",
+                  "description": "Authored import binding or clause, not its external target.",
+                  "type": "string"
+                },
+                {
+                  "const": "export",
+                  "description": "Authored export binding or clause, not its referenced declaration.",
                   "type": "string"
                 },
                 {
@@ -35589,7 +35629,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.4",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `query.advanced`.",
@@ -35682,6 +35722,16 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
+                  "type": "string"
+                }
+              ]
+            },
+            "BindingQueryVersion": {
+              "description": "Exact version of import- and export-aware locate and advanced queries.",
+              "oneOf": [
+                {
+                  "const": "1.5",
+                  "description": "Query contract 1.5.",
                   "type": "string"
                 }
               ]
@@ -35926,16 +35976,6 @@
               "pattern": "^[a-z0-9_]+$",
               "type": "string"
             },
-            "DocumentQueryVersion": {
-              "description": "Exact version of document-aware locate and advanced-query responses.",
-              "oneOf": [
-                {
-                  "const": "1.4",
-                  "description": "Query contract 1.4.",
-                  "type": "string"
-                }
-              ]
-            },
             "EntityErrorResponse": {
               "additionalProperties": false,
               "description": "Checked domain error under one exact source-entity contract revision.",
@@ -35945,7 +35985,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentQueryVersion",
+                  "$ref": "#/$defs/BindingQueryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -35984,7 +36024,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/DocumentQueryVersion",
+                  "$ref": "#/$defs/BindingQueryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -36970,7 +37010,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.4",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.5",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

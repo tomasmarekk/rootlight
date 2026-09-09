@@ -70,11 +70,11 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/source_entity.rs",
-      "blake3": "b4a6bd3ade7ab662e8f4d4012dacdb281c93ccd06695ecc9ab963b776512fc2a"
+      "blake3": "870619c1d804298bc0f679320ee8b64857c65dc246bf79a37afb933fe8d9e880"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "d7da4793f02620809047deeae362f7cfddbb33cb0ae3eadd3798f78c6a0cea9f"
+      "blake3": "0b8b06cce5494d107cf48f74dc077193b59458a305e61755c8bc1af8287a6e25"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -250,7 +250,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "c24737b781e3abd2dccef0747985b8b411a4bdebc8730948d9c044792cfee909"
+      "blake3": "15f333de0ada9757ef3cc0e543f62f682811b63c2b528ce3c5fad69f134e0f1c"
     }
   ],
   "artifacts": [
@@ -439,6 +439,10 @@
       "blake3": "495c85e1a1a745c9bcbdcbd7b5d5e5975ae8a86287090aa79870ffdfae13de49"
     },
     {
+      "path": "schemas/generated/json/mcp-code-locate-input-1.5.schema.json",
+      "blake3": "1d806f366d68b913984dcdece6be7f58f1242d09fc81225721b77e099890ef5d"
+    },
+    {
       "path": "schemas/generated/json/mcp-code-locate-output-1.0.schema.json",
       "blake3": "afea86f046092a9f6eec5b0da6c35531eb0e33b8378b2f10ceff22833f37da74"
     },
@@ -457,6 +461,10 @@
     {
       "path": "schemas/generated/json/mcp-code-locate-output-1.4.schema.json",
       "blake3": "00d9825c3cafc3f741a26701d2b25598a0628dfeecbae64d7d2a8d6205c8cfae"
+    },
+    {
+      "path": "schemas/generated/json/mcp-code-locate-output-1.5.schema.json",
+      "blake3": "e75dfe424a04a381c7fefe2d7fc70cf521ad91431199e6d6851c9918e20cfdfa"
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-input-1.0.schema.json",
@@ -627,6 +635,10 @@
       "blake3": "23fb6dfb6b793ff596e54af7b939810c697f6d8ccd2c85cf6c26063643893951"
     },
     {
+      "path": "schemas/generated/json/mcp-query-advanced-input-1.5.schema.json",
+      "blake3": "58440b50be259d6013f99f41b36d98440dbd9b3f24cd7ee5f83de883c92fea37"
+    },
+    {
       "path": "schemas/generated/json/mcp-query-advanced-output-1.0.schema.json",
       "blake3": "10a7f0cf8f271caec8f98f683ed2af12f86aa4be7500aeaadd3f2f087c1f0585"
     },
@@ -645,6 +657,10 @@
     {
       "path": "schemas/generated/json/mcp-query-advanced-output-1.4.schema.json",
       "blake3": "6c1d0c268d0d9011fd0c0cd4259197f2fec574fc3f07e3fc5f31e65991f00a8e"
+    },
+    {
+      "path": "schemas/generated/json/mcp-query-advanced-output-1.5.schema.json",
+      "blake3": "2ed909b69df347af10d08ec7d5ebc5aba75697c10e40cfe3b4c3b85e49d4b58d"
     },
     {
       "path": "schemas/generated/json/mcp-query-batch-input-1.0.schema.json",
@@ -763,6 +779,10 @@
       "blake3": "9adaaab87bb1937e8e322b9260f9b3f51759f8cdd299a5d705f2caf23a6e9efd"
     },
     {
+      "path": "schemas/generated/json/mcp-symbol-explain-input-1.6.schema.json",
+      "blake3": "8f727445976f9615864010416b796453b07ef6221f8157a0f9c284a83149b881"
+    },
+    {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json",
       "blake3": "46dcf76f53c32bbee9bf153c036799a96c440822d8fef8701bdd2c8809cd3418"
     },
@@ -785,6 +805,10 @@
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.5.schema.json",
       "blake3": "0cfba900593e18022ece07af847464b9f79b878e2aa8310c915b7c4ca7816dea"
+    },
+    {
+      "path": "schemas/generated/json/mcp-symbol-explain-output-1.6.schema.json",
+      "blake3": "e6ffab6061dd884de3a776a6a83a5eda489cc4d61cc15fc852b16a7506dc12c1"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json",

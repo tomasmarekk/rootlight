@@ -35,10 +35,11 @@ use rootlight_mcp_contract::{
     source_entity::{
         ChangeImpactOutputV1_3, ChangeImpactOutputV1_4, ChangeImpactOutputV1_5,
         CodeLocateOutputV1_1, CodeLocateOutputV1_2, CodeLocateOutputV1_3, CodeLocateOutputV1_4,
-        HistoryCompareOutputV1_3, HistoryCompareOutputV1_4, HistoryCompareOutputV1_5,
-        QueryAdvancedOutputV1_1, QueryAdvancedOutputV1_2, QueryAdvancedOutputV1_3,
-        QueryAdvancedOutputV1_4, SymbolExplainOutputV1_2, SymbolExplainOutputV1_3,
-        SymbolExplainOutputV1_4, SymbolExplainOutputV1_5,
+        CodeLocateOutputV1_5, HistoryCompareOutputV1_3, HistoryCompareOutputV1_4,
+        HistoryCompareOutputV1_5, QueryAdvancedOutputV1_1, QueryAdvancedOutputV1_2,
+        QueryAdvancedOutputV1_3, QueryAdvancedOutputV1_4, QueryAdvancedOutputV1_5,
+        SymbolExplainOutputV1_2, SymbolExplainOutputV1_3, SymbolExplainOutputV1_4,
+        SymbolExplainOutputV1_5, SymbolExplainOutputV1_6,
     },
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
@@ -1979,10 +1980,10 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
         VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
-        VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
+        VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_5::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
-        VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::SymbolExplain => SymbolExplainOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
         }
@@ -2019,9 +2020,9 @@ fn typed_selected_output_is_valid(
     match selection {
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
@@ -2043,9 +2044,9 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
@@ -2054,9 +2055,9 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_2::deserialize(output).is_ok(),
 
@@ -2064,24 +2065,27 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::ThirdLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => {
-                rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
-            }
-            VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::FourthLegacy => match tool {
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => {
+                rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
+            }
+            VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
@@ -2283,6 +2287,12 @@ fn requires_entity_contract(
     output: &Value,
 ) -> bool {
     let is_new_kind = |value: Option<&Value>| match value.and_then(Value::as_str) {
+        Some("import" | "export") => match tool {
+            VerticalTool::CodeLocate
+            | VerticalTool::QueryAdvanced
+            | VerticalTool::SymbolExplain => selection != ContractSelection::Current,
+            _ => false,
+        },
         Some("document_section" | "link_definition") => match tool {
             VerticalTool::CodeLocate | VerticalTool::QueryAdvanced => {
                 matches!(
@@ -2385,10 +2395,10 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
         VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
-        VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
+        VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_5::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
-        VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::SymbolExplain => SymbolExplainOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
         }
@@ -2416,9 +2426,9 @@ fn typed_selected_error_output_is_valid(
     match selection {
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_2::deserialize(output).is_ok(),
@@ -2440,9 +2450,9 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_1::deserialize(output).is_ok(),
@@ -2451,9 +2461,9 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_2::deserialize(output).is_ok(),
 
@@ -2461,24 +2471,27 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::ThirdLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
-            VerticalTool::QueryAdvanced => {
-                rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
-            }
-            VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_2::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::FourthLegacy => match tool {
-            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
+            VerticalTool::QueryAdvanced => {
+                rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
+            }
+            VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
@@ -4243,16 +4256,16 @@ mod tests {
             observed,
             [
                 (
-                    230_562,
-                    "c219c4ad24e8203bb0d70392284e297f30ab2cc43ee19effb72020434e88abd6".to_owned(),
+                    231_225,
+                    "288d1f0ab3df61184bfb89003a7ba4b4df7be5f3a42ba747367c764b11a7406c".to_owned(),
                 ),
                 (
-                    500_159,
-                    "da4b0ec3227538d19da7512a7dfdc85a745926a53e87e1c1ee8c08296b3a3bc3".to_owned(),
+                    500_822,
+                    "e3a3698e048ce9504b9de5b4d00b80c9e58f80dc18f6c267520f5ecd801e9f66".to_owned(),
                 ),
                 (
-                    703_290,
-                    "9fff104ed926f092a6c093d3d80d3dd24bc19b7eb2690c0512590ba3005927fd".to_owned(),
+                    704_181,
+                    "75dbb9f1e472549067de36697919b34ec357ab62ccb210bb0d911869d371cbc5".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -6520,11 +6533,12 @@ mod tests {
     fn source_kind_scan_admission_is_versioned() {
         let tool = VerticalTool::QueryAdvanced;
         for (minor, schema) in [
-            (0, tool.third_legacy_input_schema_json().unwrap()),
-            (1, tool.second_legacy_input_schema_json().unwrap()),
-            (2, tool.legacy_input_schema_json().unwrap()),
-            (3, tool.previous_input_schema_json().unwrap()),
-            (4, tool.input_schema_json()),
+            (0, tool.fourth_legacy_input_schema_json().unwrap()),
+            (1, tool.third_legacy_input_schema_json().unwrap()),
+            (2, tool.second_legacy_input_schema_json().unwrap()),
+            (3, tool.legacy_input_schema_json().unwrap()),
+            (4, tool.previous_input_schema_json().unwrap()),
+            (5, tool.input_schema_json()),
         ] {
             let schema: Value = serde_json::from_str(schema).expect("valid schema");
             let validator = jsonschema::draft202012::new(&schema).expect("schema compiles");
@@ -6540,6 +6554,8 @@ mod tests {
                 ("modifier", 3),
                 ("document_section", 4),
                 ("link_definition", 4),
+                ("import", 5),
+                ("export", 5),
             ] {
                 let mut input = Value::Object(retained_input(tool.name()));
                 input["query"] = json!({"op": "scan", "entity": kind});

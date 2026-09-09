@@ -8779,6 +8779,8 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "field" | "property" => EntityKind::Field,
         "constant" => EntityKind::Constant,
         "variable" | "parameter" => EntityKind::Variable,
+        "import" => EntityKind::Import,
+        "export" => EntityKind::Export,
         "configuration_key" => EntityKind::Configuration,
         "route" => EntityKind::Route,
         "external_symbol" => EntityKind::ExternalSymbol,

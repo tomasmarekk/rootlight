@@ -11,9 +11,9 @@ use crate::vertical::{
 };
 
 /// Contract revision for source-kind locate and expert queries.
-pub const QUERY_VERSION: &str = "1.4";
+pub const QUERY_VERSION: &str = "1.5";
 /// Contract revision for source-kind explanations.
-pub const EXPLAIN_VERSION: &str = "1.5";
+pub const EXPLAIN_VERSION: &str = "1.6";
 /// Contract revision for change results containing source entities.
 pub const CHANGE_VERSION: &str = "1.5";
 
@@ -219,3 +219,33 @@ pub type HistoryCompareOutputV1_5 = EntityToolResponse<
     EntityReadEnvelope<crate::change::HistoryCompareData, DocumentVersion>,
     DocumentVersion,
 >;
+
+/// Exact version of import- and export-aware locate and advanced queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BindingQueryVersion {
+    /// Query contract 1.5.
+    #[serde(rename = "1.5")]
+    V1_5,
+}
+
+/// Exact version of import- and export-aware explanations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BindingVersion {
+    /// Explanation contract 1.6.
+    #[serde(rename = "1.6")]
+    V1_6,
+}
+
+/// Binding-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_5 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, BindingQueryVersion>,
+    BindingQueryVersion,
+>;
+/// Binding-aware `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_5 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, BindingQueryVersion>,
+    BindingQueryVersion,
+>;
+/// Binding-aware `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_6 =
+    EntityToolResponse<EntityReadEnvelope<SymbolExplainData, BindingVersion>, BindingVersion>;

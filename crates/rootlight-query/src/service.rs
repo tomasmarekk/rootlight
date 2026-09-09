@@ -14982,6 +14982,8 @@ mod tests {
     fn advanced_scan_preserves_source_entity_kinds_and_identity() {
         let mut document = advanced_document();
         let kinds = [
+            EntityKind::Import,
+            EntityKind::Export,
             EntityKind::StyleRule,
             EntityKind::Keyframes,
             EntityKind::MarkupElement,

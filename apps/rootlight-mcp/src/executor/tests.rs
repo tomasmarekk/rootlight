@@ -102,6 +102,8 @@ use super::*;
 #[test]
 fn source_declaration_kinds_preserve_their_exact_public_labels() {
     for label in [
+        "import",
+        "export",
         "event",
         "error_declaration",
         "modifier",
@@ -4046,6 +4048,8 @@ async fn maps_external_symbols_returned_by_semantic_locate() {
 #[tokio::test]
 async fn maps_source_structure_kinds_without_relabeling() {
     for kind in [
+        "import",
+        "export",
         "style_rule",
         "keyframes",
         "markup_element",
@@ -4093,6 +4097,8 @@ async fn maps_routes_returned_by_structural_locate() {
 #[tokio::test]
 async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades() {
     for kind in [
+        "import",
+        "export",
         "style_rule",
         "keyframes",
         "markup_element",
@@ -4131,6 +4137,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 tool.second_legacy_contract_version(),
                 tool.third_legacy_contract_version(),
                 tool.fourth_legacy_contract_version(),
+                tool.initial_contract_version(),
             ]
             .into_iter()
             .flatten()
@@ -4148,6 +4155,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                     panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
                 };
                 let minimum = match kind {
+                    "import" | "export" => 5,
                     "document_section" | "link_definition" => 4,
                     "event" | "error_declaration" | "modifier" => 3,
                     "database_object" => 2,

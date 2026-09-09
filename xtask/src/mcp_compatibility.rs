@@ -331,9 +331,9 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         resources.insert("retained_durable_bytes".to_owned(), json!(0));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "code.locate", "1.4", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "query.advanced", "1.4", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "code.locate", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "query.advanced", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.6", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "change.impact", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
@@ -1411,12 +1411,12 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "symbol.explain",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
                 {
@@ -1466,7 +1466,7 @@ mod tests {
                 },
                 {
                     "tool": "query.advanced",
-                    "current_version": "1.4",
+                    "current_version": "1.5",
                     "projected_version": "1.0",
                 },
             ])

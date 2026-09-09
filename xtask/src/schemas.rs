@@ -994,6 +994,37 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "output",
         "1.5",
     )?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.5")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_5>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.5",
+    )?;
+    write_mcp_tool_schema_version::<QueryAdvancedInput>(
+        &schema_root,
+        "query.advanced",
+        "input",
+        "1.5",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::QueryAdvancedOutputV1_5>(
+        &schema_root,
+        "query.advanced",
+        "output",
+        "1.5",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.6",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SymbolExplainOutputV1_6>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.6",
+    )?;
     write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.3")?;
     write_mcp_tool_schema_version::<CodeLocateOutputV1_3>(
         &schema_root,
@@ -1418,19 +1449,29 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("");
-        let document_kinds = matches!(
+        let binding_kinds = matches!(
             name,
-            "mcp-code-locate-input-1.4.schema.json"
-                | "mcp-code-locate-output-1.4.schema.json"
-                | "mcp-query-advanced-input-1.4.schema.json"
-                | "mcp-query-advanced-output-1.4.schema.json"
-                | "mcp-symbol-explain-input-1.5.schema.json"
-                | "mcp-symbol-explain-output-1.5.schema.json"
-                | "mcp-change-impact-input-1.5.schema.json"
-                | "mcp-change-impact-output-1.5.schema.json"
-                | "mcp-history-compare-input-1.5.schema.json"
-                | "mcp-history-compare-output-1.5.schema.json"
+            "mcp-code-locate-input-1.5.schema.json"
+                | "mcp-code-locate-output-1.5.schema.json"
+                | "mcp-query-advanced-input-1.5.schema.json"
+                | "mcp-query-advanced-output-1.5.schema.json"
+                | "mcp-symbol-explain-input-1.6.schema.json"
+                | "mcp-symbol-explain-output-1.6.schema.json"
         );
+        let document_kinds = binding_kinds
+            || matches!(
+                name,
+                "mcp-code-locate-input-1.4.schema.json"
+                    | "mcp-code-locate-output-1.4.schema.json"
+                    | "mcp-query-advanced-input-1.4.schema.json"
+                    | "mcp-query-advanced-output-1.4.schema.json"
+                    | "mcp-symbol-explain-input-1.5.schema.json"
+                    | "mcp-symbol-explain-output-1.5.schema.json"
+                    | "mcp-change-impact-input-1.5.schema.json"
+                    | "mcp-change-impact-output-1.5.schema.json"
+                    | "mcp-history-compare-input-1.5.schema.json"
+                    | "mcp-history-compare-output-1.5.schema.json"
+            );
         let declaration_kinds = document_kinds
             || matches!(
                 name,
@@ -1480,6 +1521,12 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             );
         variants.retain(
             |variant| match variant.get("const").and_then(serde_json::Value::as_str) {
+                // Change/history expose the IR enum, which already includes bindings.
+                Some("import" | "export") => {
+                    binding_kinds
+                        || name.starts_with("mcp-change-impact-output-")
+                        || name.starts_with("mcp-history-compare-output-")
+                }
                 Some("document_section" | "link_definition") => document_kinds,
                 Some("event" | "error_declaration" | "modifier") => declaration_kinds,
                 Some("markup_element" | "markup_attribute") => source_kinds,
@@ -2842,6 +2889,12 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.4.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.5.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.4.schema.json"),

@@ -33,12 +33,12 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.4",
+        "current_version": "1.5",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
       {
-        "current_version": "1.5",
+        "current_version": "1.6",
         "projected_version": "1.0",
         "tool": "symbol.explain"
       },
@@ -88,7 +88,7 @@
         "tool": "context.pack"
       },
       {
-        "current_version": "1.4",
+        "current_version": "1.5",
         "projected_version": "1.0",
         "tool": "query.advanced"
       }
@@ -190,11 +190,11 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.4"
+      "version": "1.5"
     },
     {
       "tool": "symbol.explain",
-      "version": "1.5"
+      "version": "1.6"
     },
     {
       "tool": "symbol.relationships",
@@ -242,7 +242,7 @@
     },
     {
       "tool": "query.advanced",
-      "version": "1.4"
+      "version": "1.5"
     },
     {
       "tool": "query.batch",
