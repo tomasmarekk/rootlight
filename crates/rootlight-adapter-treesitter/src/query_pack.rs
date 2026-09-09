@@ -789,6 +789,18 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Reference
+            if matches!(
+                family,
+                GrammarFamily::JavaScript | GrammarFamily::TypeScript
+            ) && ecmascript::is_foreign_import_name(capture.node) =>
+        {
+            if family == GrammarFamily::TypeScript {
+                "typescript.import_name"
+            } else {
+                "javascript.import_name"
+            }
+        }
         StructuralRole::Scope
             if family == GrammarFamily::PowerShell
                 && capture.node.kind() == "key_expression"
@@ -816,6 +828,18 @@ fn candidate_for_capture(
                 (false, ecmascript::BindingKind::Parameter) => "javascript.parameter",
                 (true, ecmascript::BindingKind::Variable) => "typescript.variable",
                 (false, ecmascript::BindingKind::Variable) => "javascript.variable",
+                (true, ecmascript::BindingKind::Import { type_only: false }) => {
+                    "typescript.import_binding"
+                }
+                (false, ecmascript::BindingKind::Import { type_only: false }) => {
+                    "javascript.import_binding"
+                }
+                (true, ecmascript::BindingKind::Import { type_only: true }) => {
+                    "typescript.type_import_binding"
+                }
+                (false, ecmascript::BindingKind::Import { type_only: true }) => {
+                    "javascript.type_import_binding"
+                }
             }
         }
         StructuralRole::Declaration
@@ -1574,7 +1598,9 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
             Some("typescript.abstract_method")
         }
         (GrammarFamily::TypeScript, "variable_declarator") => Some("typescript.variable"),
-        (GrammarFamily::TypeScript, "import_statement") => Some("typescript.import"),
+        (GrammarFamily::TypeScript, "import_statement" | "import_alias") => {
+            Some("typescript.import")
+        }
         (GrammarFamily::TypeScript, "formal_parameters") => Some("typescript.parameters"),
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
         (GrammarFamily::TypeScript, "for_statement" | "for_in_statement") => Some("typescript.for"),

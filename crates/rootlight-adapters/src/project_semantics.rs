@@ -15,8 +15,9 @@ use rootlight_adapter_sdk::{
     IrBatchSink, IrRecord, LanguageId, MemoryAdmissionPolicy, MemoryEnforcement, ParseProvider,
     ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
-    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport, execute_parse,
-    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
+    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
+    derive_structural_occurrence_identity, execute_parse, structural_entity_kind,
+    structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -891,24 +892,10 @@ fn preferred_local_call_syntax_fact_group(
         .iter()
         .filter(|fact| is_definition_fact(fact))
         .filter_map(|definition| {
-            let mut parent = definition.parent();
-            let mut remaining = facts_by_id.len();
-            while let Some(parent_id) = parent {
-                if remaining == 0 {
-                    return None;
-                }
-                remaining -= 1;
-                let declaration = facts_by_id.get(&parent_id).copied()?;
-                if declaration_kinds
-                    .get(&parent_id)
-                    .is_some_and(|kind| is_callable_entity_kind(*kind))
-                {
-                    return source_text(source, definition.span())
-                        .map(|name| (declaration.local_id(), name));
-                }
-                parent = declaration.parent();
-            }
-            None
+            let (owner, kind) = definition_owner(definition, facts_by_id)?;
+            is_callable_entity_kind(kind)
+                .then(|| source_text(source, definition.span()).map(|name| (owner, name)))
+                .flatten()
         })
         .collect::<BTreeMap<_, _>>();
     let call = calls.into_iter().min_by(|left, right| {
@@ -990,6 +977,9 @@ fn declared_call_ids(
     let declared_names = facts
         .iter()
         .filter(|fact| is_definition_fact(fact))
+        .filter(|fact| {
+            definition_owner(fact, facts_by_id).is_none_or(|(_, kind)| kind != EntityKind::Import)
+        })
         .filter_map(|fact| source_text(source, fact.span()))
         .collect::<BTreeSet<_>>();
     facts
@@ -1001,6 +991,21 @@ fn declared_call_ids(
                 .map(|_| call.local_id())
         })
         .collect()
+}
+
+fn definition_owner(
+    definition: &SyntaxFact,
+    facts_by_id: &BTreeMap<u64, &SyntaxFact>,
+) -> Option<(u64, EntityKind)> {
+    let mut parent = definition.parent();
+    for _ in 0..facts_by_id.len() {
+        let owner = facts_by_id.get(&parent?).copied()?;
+        if let Some(kind) = structural_entity_kind(owner) {
+            return Some((owner.local_id(), kind));
+        }
+        parent = owner.parent();
+    }
+    None
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -1921,9 +1926,40 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let mut materialized_declarations = BTreeSet::new();
             let mut nearest_materialized_declaration = BTreeMap::<u64, Option<u64>>::new();
             let mut nearest_callable_declaration = BTreeMap::<u64, Option<u64>>::new();
+            let is_ecmascript = matches!(
+                self.analyzer.language,
+                SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+            );
+            let mut ecmascript_scopes = BTreeMap::<u64, Option<[u8; 32]>>::new();
+            let mut ecmascript_scope_positions = BTreeMap::<Option<u64>, u64>::new();
+            let mut ecmascript_variables = BTreeMap::<(Option<u64>, String, String), u64>::new();
             for (fact_index, declaration) in ordered_facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
                 let declaration = *declaration;
+                let mut ecmascript_scope = declaration
+                    .parent()
+                    .and_then(|parent| ecmascript_scopes.get(&parent).copied().flatten());
+                if is_ecmascript {
+                    if declaration.kind() == SyntaxFactKind::Scope
+                        && matches!(
+                            declaration.syntax_kind().as_str(),
+                            "javascript.lambda.scope" | "typescript.lambda.scope"
+                        )
+                    {
+                        let next = ecmascript_scope_positions
+                            .entry(declaration.parent())
+                            .or_default();
+                        let position = *next;
+                        *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                        ecmascript_scope = Some(derive_structural_occurrence_identity(
+                            "rootlight.ecmascript-lexical-scope/1",
+                            ecmascript_scope,
+                            declaration.syntax_kind().as_str(),
+                            position,
+                        ));
+                    }
+                    ecmascript_scopes.insert(declaration.local_id(), ecmascript_scope);
+                }
                 let parent_declaration = declaration.parent().and_then(|parent| {
                     materialized_declarations
                         .contains(&parent)
@@ -2017,6 +2053,26 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     if kind == EntityKind::Function && is_type_member {
                         kind = EntityKind::Method;
                     }
+                    let scope_identity = if is_ecmascript && kind == EntityKind::Variable {
+                        // Mirror single-file lowering: declaration identities count
+                        // only same-name occurrences under the retained named owner.
+                        let label = declaration.syntax_kind().as_str();
+                        let next = ecmascript_variables
+                            .entry((parent_declaration, label.to_owned(), name.to_owned()))
+                            .or_default();
+                        let position = *next;
+                        *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                        Some(derive_structural_occurrence_identity(
+                            "rootlight.ecmascript-source-declaration/1",
+                            ecmascript_scope,
+                            label,
+                            position,
+                        ))
+                    } else if is_ecmascript {
+                        ecmascript_scope
+                    } else {
+                        scope_identity
+                    };
                     let signature = if supports_symbol_signature(kind) {
                         signature_captures
                             .get(&declaration.local_id())
@@ -3164,7 +3220,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
     fn definition_index(&self) -> BTreeMap<String, Vec<SemanticEntity>> {
         let mut index = BTreeMap::<String, Vec<SemanticEntity>>::new();
         for entity in &self.entities {
-            if !matches!(entity.kind, EntityKind::Module | EntityKind::Namespace) {
+            // Import declarations identify the local alias, not the callable or
+            // value behind it. Their definitions bind directly; references follow
+            // the reviewed import-target path instead of adding the alias as a candidate.
+            if !matches!(
+                entity.kind,
+                EntityKind::Module | EntityKind::Namespace | EntityKind::Import
+            ) {
                 index
                     .entry(entity.name.clone())
                     .or_default()

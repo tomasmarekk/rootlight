@@ -20,6 +20,7 @@ mod request;
 mod sink;
 mod sql_names;
 mod structural;
+mod structural_identity;
 pub mod testkit;
 mod toml_names;
 mod yaml_names;
@@ -58,6 +59,7 @@ pub use structural::{
     structural_captured_name_for_language, structural_display_name_for_language,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
+pub use structural_identity::derive_structural_occurrence_identity;
 pub use yaml_names::{
     YamlBlockScalar, YamlCollectionKind, YamlCollectionTag, YamlDocumentContext, YamlScalarIdentity,
 };

@@ -2145,6 +2145,7 @@ dependencies = [
 name = "rootlight-adapter-sdk"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",

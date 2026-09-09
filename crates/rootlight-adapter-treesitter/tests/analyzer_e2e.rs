@@ -41,6 +41,8 @@ const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
 mod astro_native;
 #[path = "analyzer_e2e/dart_native.rs"]
 mod dart_native;
+#[path = "analyzer_e2e/ecmascript_imports.rs"]
+mod ecmascript_imports;
 #[path = "analyzer_e2e/ecmascript_native.rs"]
 mod ecmascript_native;
 #[path = "analyzer_e2e/html_native.rs"]

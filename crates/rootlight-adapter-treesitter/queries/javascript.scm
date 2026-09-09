@@ -18,6 +18,10 @@
 ]
 
 (import_statement) @import
+(import_clause (identifier) @declaration @definition)
+(namespace_import (identifier) @declaration @definition)
+(import_specifier name: (identifier) @declaration @definition)
+(import_specifier alias: (identifier) @declaration @definition)
 (formal_parameters) @signature
 (statement_block) @scope
 (generator_function_declaration name: (identifier) @definition) @declaration

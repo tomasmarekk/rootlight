@@ -18,8 +18,10 @@ use rootlight_adapter_sdk::{
     AnalysisRequest, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink,
     IrRecord, LanguageAnalyzer, MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput,
     ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError,
-    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, execute_analysis, execute_parse,
-    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
+    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
+    derive_structural_occurrence_identity as source_occurrence_identity, execute_analysis,
+    execute_parse, structural_entity_kind, structural_entity_kind_from_source,
+    structural_syntax_fact_order,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -3201,27 +3203,6 @@ fn written_source_identity(
     source_occurrence_identity(context, parent, kind, position)
 }
 
-fn source_occurrence_identity(
-    context: &'static str,
-    parent: Option<[u8; 32]>,
-    kind: &str,
-    position: u64,
-) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_derive_key(context);
-    match parent {
-        Some(parent) => {
-            hasher.update(&[1]);
-            hasher.update(&parent);
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    hasher.update(&position.to_be_bytes());
-    hasher.update(kind.as_bytes());
-    *hasher.finalize().as_bytes()
-}
-
 fn scope_identity(
     parent: Option<[u8; 32]>,
     syntax_kind: &str,
@@ -4378,6 +4359,16 @@ mod tests {
     #[test]
     fn language_specific_declarations_map_conservatively() {
         for (label, expected) in [
+            ("javascript.import_binding.declaration", EntityKind::Import),
+            ("typescript.import_binding.declaration", EntityKind::Import),
+            (
+                "javascript.type_import_binding.declaration",
+                EntityKind::Import,
+            ),
+            (
+                "typescript.type_import_binding.declaration",
+                EntityKind::Import,
+            ),
             ("java.constructor.declaration", EntityKind::Constructor),
             ("java.field.declaration", EntityKind::Field),
             ("java.local_variable.declaration", EntityKind::Variable),

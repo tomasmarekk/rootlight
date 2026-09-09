@@ -16,6 +16,17 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "javascript.import_binding.declaration"
+                    | "typescript.import_binding.declaration"
+                    | "javascript.type_import_binding.declaration"
+                    | "typescript.type_import_binding.declaration"
+            ) =>
+        {
+            Some(EntityKind::Import)
+        }
         SyntaxFactKind::Declaration if label == "markdown.section.declaration" => {
             Some(EntityKind::DocumentSection)
         }

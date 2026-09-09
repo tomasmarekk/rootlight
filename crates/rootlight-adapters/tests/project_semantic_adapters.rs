@@ -251,12 +251,19 @@ fn tsx_nested_import_calls_preserve_project_targets_and_source_evidence() {
             .iter()
             .find(|entity| entity.canonical_name == "View")
             .expect("TSX component is materialized");
-        let target = output
-            .document()
-            .entities
-            .iter()
-            .find(|entity| entity.canonical_name == "provide")
-            .expect("TypeScript import target is materialized");
+        let target =
+            output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Function
+                        && entity.canonical_name == "provide"
+                        && entity.evidence.source.as_ref().is_some_and(|source| {
+                            source.span().file() == fixture.snapshots[1].file()
+                        })
+                })
+                .expect("TypeScript import target is materialized");
         let target_module =
             output
                 .document()
@@ -2685,6 +2692,51 @@ fn assert_bounded_project_preserves_structural_declarations(
         .into_keys()
         .map(|(_source, kind, name)| (kind, name))
         .collect()
+}
+
+#[test]
+fn bounded_ecmascript_imports_and_nested_bindings_keep_structural_identity() {
+    let mut source = String::from(
+        "import {provide} from './provider'; const [top] = values; export function run([argument]) { { const {local} = argument; } { const {local} = argument; } use(value => { const {nested} = value; return nested; }, value => { const {nested} = value; return nested; }); return provide(argument); }\n",
+    );
+    for _ in 0..500 {
+        source.push_str("run(values);\n");
+    }
+    for (language, consumer, provider) in [
+        (
+            SemanticProjectLanguage::JavaScript,
+            "src/consumer.js",
+            "src/provider.js",
+        ),
+        (
+            SemanticProjectLanguage::TypeScript,
+            "src/consumer.ts",
+            "src/provider.ts",
+        ),
+    ] {
+        let fixture = ProjectFixture::new(
+            [consumer, provider],
+            [
+                source.as_str(),
+                "export function provide(value) { return value; }\n",
+            ],
+            language,
+        );
+        let declarations = assert_bounded_project_preserves_structural_declarations(&fixture);
+        for expected in [
+            (EntityKind::Import, "provide"),
+            (EntityKind::Variable, "top"),
+            (EntityKind::Variable, "local"),
+            (EntityKind::Variable, "nested"),
+            (EntityKind::Parameter, "argument"),
+            (EntityKind::Parameter, "value"),
+        ] {
+            assert!(
+                declarations.contains(&(expected.0, expected.1.to_owned())),
+                "{expected:?}"
+            );
+        }
+    }
 }
 
 #[test]

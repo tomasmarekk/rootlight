@@ -653,3 +653,43 @@ fn astro_expressions_share_the_existing_host_range_budget() {
         }
     }
 }
+
+#[test]
+fn astro_server_and_client_imports_keep_distinct_written_definitions() {
+    let source = "---\r\nimport {Widget as Component} from './server';\r\n---\r\n<Component /><script>import {Widget as Component} from './client';</script>";
+    let result = output(source);
+    let document = result.document();
+    let imports: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Import && entity.canonical_name == "Component")
+        .collect();
+    assert_eq!(imports.len(), 2, "{:#?}", document.skipped_regions);
+    assert_ne!(imports[0].id, imports[1].id);
+    for import in imports {
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: import.id }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            "Component"
+        );
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::Imports)
+    );
+}

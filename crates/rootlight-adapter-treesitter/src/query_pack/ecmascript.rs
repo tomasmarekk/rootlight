@@ -9,6 +9,15 @@ use tree_sitter::Node;
 pub(super) enum BindingKind {
     Parameter,
     Variable,
+    Import { type_only: bool },
+}
+
+pub(super) fn is_foreign_import_name(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "import_specifier"
+            && parent.child_by_field_name("alias").is_some()
+            && parent.child_by_field_name("name") == Some(node)
+    })
 }
 
 pub(super) fn retain_capture(
@@ -44,6 +53,11 @@ pub(super) fn retain_capture(
                 | "variable_declarator"
                 | "for_in_statement"
                 | "catch_clause"
+                | "import_clause"
+                | "namespace_import"
+                | "import_specifier"
+                | "import_require_clause"
+                | "import_alias"
         )
     }) {
         return Ok(true);
@@ -59,6 +73,26 @@ pub(super) fn binding_kind(
     while let Some(parent) = current.parent() {
         cancellation.check()?;
         match parent.kind() {
+            "import_clause" | "namespace_import" | "import_require_clause" => {
+                return import_kind(parent, cancellation);
+            }
+            "import_specifier" => {
+                let local = parent
+                    .child_by_field_name("alias")
+                    .or_else(|| parent.child_by_field_name("name"));
+                return if local == Some(current) {
+                    import_kind(parent, cancellation)
+                } else {
+                    Ok(None)
+                };
+            }
+            "import_alias" => {
+                return if parent.named_child(0) == Some(current) {
+                    import_kind(parent, cancellation)
+                } else {
+                    Ok(None)
+                };
+            }
             "required_parameter" | "optional_parameter" => {
                 return Ok((parent.child_by_field_name("pattern") == Some(current)
                     || parent.child_by_field_name("name") == Some(current))
@@ -88,6 +122,33 @@ pub(super) fn binding_kind(
             _ => return Ok(None),
         }
         current = parent;
+    }
+    Ok(None)
+}
+
+fn import_kind(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<BindingKind>, AdapterError> {
+    let mut current = Some(node);
+    let mut type_only = false;
+    while let Some(owner) = current {
+        cancellation.check()?;
+        if matches!(
+            owner.kind(),
+            "import_statement" | "import_specifier" | "import_alias"
+        ) {
+            let mut cursor = owner.walk();
+            for child in owner.children(&mut cursor) {
+                cancellation.check()?;
+                // A local/exported identifier spelled type is not a type-only token.
+                type_only |= !child.is_named() && matches!(child.kind(), "type" | "typeof");
+            }
+        }
+        if matches!(owner.kind(), "import_statement" | "import_alias") {
+            return Ok(Some(BindingKind::Import { type_only }));
+        }
+        current = owner.parent();
     }
     Ok(None)
 }
