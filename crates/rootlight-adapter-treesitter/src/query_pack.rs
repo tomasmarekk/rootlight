@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod dart;
+mod ecmascript;
 mod markdown;
 mod powershell;
 mod r;
@@ -577,6 +578,13 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if matches!(
+                    input.family,
+                    GrammarFamily::JavaScript | GrammarFamily::TypeScript
+                ) && !ecmascript::retain_capture(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::PowerShell
                     && !powershell::retain_capture(capture.node, role)
                 {
@@ -785,6 +793,36 @@ fn candidate_for_capture(
         StructuralRole::Declaration if family == GrammarFamily::PowerShell => {
             powershell::declaration_syntax(capture.node, source)
                 .ok_or_else(|| query_failure("query-powershell-declaration-kind"))?
+        }
+        StructuralRole::Declaration
+            if matches!(
+                family,
+                GrammarFamily::JavaScript | GrammarFamily::TypeScript
+            ) && matches!(
+                capture.node.kind(),
+                "identifier" | "shorthand_property_identifier_pattern"
+            ) =>
+        {
+            if family == GrammarFamily::TypeScript {
+                "typescript.parameter"
+            } else {
+                "javascript.parameter"
+            }
+        }
+        StructuralRole::Declaration
+            if matches!(
+                family,
+                GrammarFamily::JavaScript | GrammarFamily::TypeScript
+            ) && matches!(
+                capture.node.kind(),
+                "function_expression" | "generator_function"
+            ) =>
+        {
+            if family == GrammarFamily::TypeScript {
+                "typescript.function"
+            } else {
+                "javascript.function"
+            }
         }
         StructuralRole::Declaration if family == GrammarFamily::Dart => {
             dart::declaration_syntax(capture.node)
@@ -1441,7 +1479,25 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "import_statement") => Some("javascript.import"),
         (GrammarFamily::JavaScript, "formal_parameters") => Some("javascript.parameters"),
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
-        (GrammarFamily::JavaScript, "identifier") => Some("javascript.identifier"),
+        (GrammarFamily::JavaScript, "identifier" | "shorthand_property_identifier_pattern") => {
+            Some("javascript.identifier")
+        }
+        (
+            GrammarFamily::JavaScript,
+            "function_expression"
+            | "generator_function"
+            | "arrow_function"
+            | "function_type"
+            | "constructor_type"
+            | "call_signature"
+            | "construct_signature",
+        ) => Some("javascript.lambda"),
+        (GrammarFamily::JavaScript, "generator_function_declaration" | "function_signature") => {
+            Some("javascript.function")
+        }
+        (GrammarFamily::JavaScript, "method_signature" | "abstract_method_signature") => {
+            Some("javascript.method")
+        }
         (GrammarFamily::JavaScript, "type_identifier") => Some("javascript.identifier"),
         (GrammarFamily::JavaScript, "property_identifier") => {
             Some("javascript.property_identifier")
@@ -1510,7 +1566,22 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::TypeScript, "import_statement") => Some("typescript.import"),
         (GrammarFamily::TypeScript, "formal_parameters") => Some("typescript.parameters"),
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
-        (GrammarFamily::TypeScript, "identifier") => Some("typescript.identifier"),
+        (GrammarFamily::TypeScript, "identifier" | "shorthand_property_identifier_pattern") => {
+            Some("typescript.identifier")
+        }
+        (
+            GrammarFamily::TypeScript,
+            "function_expression"
+            | "generator_function"
+            | "arrow_function"
+            | "function_type"
+            | "constructor_type"
+            | "call_signature"
+            | "construct_signature",
+        ) => Some("typescript.lambda"),
+        (GrammarFamily::TypeScript, "generator_function_declaration") => {
+            Some("typescript.function")
+        }
         (GrammarFamily::TypeScript, "type_identifier") => Some("typescript.type_identifier"),
         (GrammarFamily::TypeScript, "property_identifier") => {
             Some("typescript.property_identifier")

@@ -1947,6 +1947,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "dart.catch.scope"
                         | "dart.lambda.scope"
                         | "dart.extension.scope"
+                        | "javascript.lambda.scope"
+                        | "typescript.lambda.scope"
                 ) {
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
@@ -1956,6 +1958,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "rootlight.dart-lexical-scope/1"
                         } else if language_for_fact(self.request, fact) == "scala" {
                             "rootlight.scala-lexical-scope/1"
+                        } else if matches!(
+                            language_for_fact(self.request, fact),
+                            "javascript" | "typescript"
+                        ) {
+                            "rootlight.ecmascript-lexical-scope/1"
                         } else {
                             "rootlight.solidity-lexical-scope/1"
                         },

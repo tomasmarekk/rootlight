@@ -529,6 +529,39 @@ fn astro_spread_and_shorthand_attributes_keep_native_source_references() {
 }
 
 #[test]
+fn astro_template_parameters_keep_distinct_written_owners() {
+    let source = "---\r\nconst label = 'server';\r\n---\r\n{items.map((label: string) => <span>{label}</span>)}<script>function client(label: string) { return label; }</script>";
+    let result = output(source);
+    let document = result.document();
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "label")
+        .collect();
+    assert_eq!(parameters.len(), 2, "{:#?}", document.entities);
+    assert_ne!(parameters[0].id, parameters[1].id);
+    for parameter in parameters {
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: parameter.id,
+                        }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            "label"
+        );
+    }
+}
+
+#[test]
 fn astro_expressions_share_the_existing_host_range_budget() {
     let source = "<main>{first()}<span {...second()}></span>{third()}</main>";
     let provider = Arc::new(provider());
