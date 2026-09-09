@@ -15,3 +15,5 @@ third_party/tree-sitter-swift-0.7.3/queries/*.scm whitespace=-blank-at-eof
 third_party/tree-sitter-scala-0.26.2/queries/locals.scm whitespace=-blank-at-eof
 third_party/tree-sitter-scala-0.26.2/queries/tags.scm whitespace=-blank-at-eof,-blank-at-eol
 third_party/tree-sitter-scala-0.26.2/src/scanner.c whitespace=-blank-at-eol
+# Preserve the published Markdown character-reference table byte-for-byte.
+third_party/tree-sitter-md-0.5.3/common/html_entities.json whitespace=-blank-at-eof
