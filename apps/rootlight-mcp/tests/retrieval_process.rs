@@ -353,6 +353,22 @@ fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
 }
 
 #[test]
+fn markdown_document_entities_cross_real_process_boundaries() {
+    for path in ["guide.md", "guide.markdown"] {
+        source_entities_cross_process_boundaries(
+            "markdown",
+            path,
+            "# Overview\r\n\r\nRead [the reference][manual].\r\n\r\n[manual]: https://example.test/guide\r\n\r\n## Details\r\n\r\nSource-backed documentation.\r\n",
+            &[
+                ("Overview", "document_section", 1),
+                ("Details", "document_section", 1),
+                ("[manual]", "link_definition", 1),
+            ],
+        );
+    }
+}
+
+#[test]
 fn sql_database_objects_cross_process_boundaries_with_exact_source_entities() {
     source_entities_cross_process_boundaries(
         "sql",
@@ -547,7 +563,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         assert_eq!(output["schema_version"], "1.4");
         if matches!(
             language,
-            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell"
+            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell" | "markdown"
         ) {
             assert!(
                 output["warnings"]

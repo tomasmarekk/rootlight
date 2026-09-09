@@ -25419,6 +25419,7 @@ mod tests {
             "sample.json",
             "sample.kt",
             "sample.lua",
+            "sample.md",
             "sample.php",
             "sample.py",
             "sample.R",
@@ -26334,6 +26335,123 @@ mod tests {
             }
             previous = Some(symbols);
         }
+    }
+
+    #[test]
+    fn markdown_sources_and_links_survive_incremental_publication_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "# Overview\r\n\r\nRead [the reference][manual].\r\n\r\n[manual]: https://example.test/guide\r\n";
+        fs::write(fixture.path().join("guide.md"), source).unwrap();
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 2);
+        let status = service.repository_status(initial.repository, None).unwrap();
+        let coverage = status
+            .coverage
+            .iter()
+            .find(|row| row.language == "markdown")
+            .unwrap();
+        assert_eq!((coverage.discovered_files, coverage.indexed_files), (1, 1));
+        assert_eq!(coverage.tier, "tier_d");
+        assert_ne!(coverage.status, "complete");
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(no_op.generation, initial.generation);
+        let changed = source.replace("Read", "Consult");
+        fs::write(fixture.path().join("guide.md"), &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let evidence = service.incremental_evidence(updated.generation).unwrap();
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 1);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            initial.generation,
+            &updated,
+            &deadline(),
+        );
+        drop(service);
+        let mut restored =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected) in [(&initial, source), (&updated, changed.as_str())] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.version, NormalizedIrVersion::V1_5);
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "guide.md")
+                .unwrap();
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
+            assert_eq!(read.data.chunks[0].language, "markdown");
+            for (name, kind) in [
+                ("Overview", EntityKind::DocumentSection),
+                ("[manual]", EntityKind::LinkDefinition),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        8,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), 1);
+                let symbol = *symbols.first().unwrap();
+                let explained = restored
+                    .symbol_explain(receipt.generation, symbol, &deadline())
+                    .unwrap();
+                assert_eq!(explained.data.entity.kind, kind);
+                assert_eq!(
+                    explained.data.entity.evidence.source.unwrap().generation(),
+                    receipt.generation
+                );
+                if kind == EntityKind::LinkDefinition {
+                    assert!(
+                        document
+                            .relations
+                            .iter()
+                            .any(|relation| relation.predicate == RelationPredicate::RefersTo
+                                && relation.object == RelationEndpoint::Entity(symbol))
+                    );
+                }
+            }
+        }
+        let retained = restored
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(retained.generation, updated.generation);
     }
 
     #[test]
@@ -35476,7 +35594,7 @@ mod tests {
             "pub fn stable() -> u32 { 1 }\n",
         )
         .expect("Rust source writes");
-        let readme = fixture.path().join("README.md");
+        let readme = fixture.path().join("notes.unrecognized");
         fs::write(&readme, "first\n").expect("non-Rust input writes");
         let cancellation = deadline();
         let mut service = FirstSliceService::new(3).expect("service initializes");
@@ -35794,7 +35912,7 @@ mod tests {
             "pub fn stable() -> u32 { 1 }\n",
         )
         .expect("Rust source writes");
-        let readme = fixture.path().join("README.md");
+        let readme = fixture.path().join("notes.unrecognized");
         fs::write(&readme, "first\n").expect("unsupported source writes");
         let cancellation = deadline();
         let mut service = FirstSliceService::new(3).expect("service initializes");
@@ -36890,7 +37008,16 @@ mod tests {
         assert!(evidence.lowered_files() <= structural_inputs);
         assert!(evidence.structural_cache_retained());
 
-        let mut fresh = FirstSliceService::new(2).expect("fresh comparison service initializes");
+        // Durable and ephemeral defaults can differ; logical equivalence must
+        // compare identical configuration inputs with empty analysis caches.
+        let mut fresh = FirstSliceService::new_with_storage_policy(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            None,
+            incremental.storage_policy.clone(),
+        )
+        .expect("fresh comparison service initializes");
         fresh.repositories = incremental.repositories.clone();
         fresh
             .active_by_repository

@@ -34,7 +34,7 @@ pub use incremental::{
 };
 
 /// Current deterministic discovery-manifest version.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.3";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.4";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1626,6 +1626,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "markdown",
+        suffixes: &[".markdown", ".md"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "matlab",
         suffixes: &[".mlx"],
         aliases: &[],
@@ -2483,6 +2491,35 @@ max_source_file_bytes = 2097152
                 Some("json" | "yaml" | "toml")
             ));
         }
+    }
+
+    #[test]
+    fn markdown_detection_preserves_host_language_boundaries() {
+        for path in ["guide.md", "guide.markdown", "docs/GUIDE.MD"] {
+            assert_eq!(extension_language(path), Some("markdown"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"# Guide\n\n```rust\nfn example() {}\n```\n",
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == "markdown" && signal.evidence == LanguageEvidence::Extension
+            }));
+        }
+        for path in [
+            "view.mdx",
+            "view.astro",
+            "guide.md.bak",
+            "guide.markdown.rs",
+        ] {
+            assert_ne!(extension_language(path), Some("markdown"), "{path}");
+        }
+        assert_eq!(canonical_language("markdown"), Some("markdown"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "markdown")
+            .expect("native document analysis is advertised");
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
     }
 
     #[test]

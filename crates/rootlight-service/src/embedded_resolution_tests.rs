@@ -7,6 +7,42 @@ use rootlight_resolve::ResolutionOutcome;
 use std::fs;
 
 #[test]
+fn markdown_discovery_publishes_document_entities() {
+    let fixture = tempfile::tempdir().unwrap();
+    fs::write(
+        fixture.path().join("guide.md"),
+        "# Overview\r\n\r\nRead [the reference][manual].\r\n\r\n[manual]: https://example.test/guide\r\n",
+    ).unwrap();
+    let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+    let mut service = FirstSliceService::new(3).unwrap();
+    let receipt = service
+        .index_repository(fixture.path(), &cancellation)
+        .unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.kind == rootlight_ir::EntityKind::DocumentSection),
+        "{document:#?}"
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.kind == rootlight_ir::EntityKind::LinkDefinition),
+        "{document:#?}"
+    );
+    let second = service
+        .index_repository(fixture.path(), &cancellation)
+        .unwrap();
+    assert_eq!(second.generation, receipt.generation);
+}
+
+#[test]
 fn embedded_native_resolution_and_replay_preserve_source_scopes() {
     for (host, source, expected_calls) in [
         (
