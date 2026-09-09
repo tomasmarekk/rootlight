@@ -14,6 +14,7 @@ pub(in crate::project_semantics) struct LocalBindings {
 struct LocalBinding {
     declaration: u64,
     kind: EntityKind,
+    visible_in: Option<[SourceSpan; 2]>,
 }
 
 pub(in crate::project_semantics) fn is_binding_metadata(fact: &SyntaxFact) -> bool {
@@ -66,6 +67,7 @@ impl LocalBindings {
         fact: &SyntaxFact,
         facts: &BTreeMap<u64, &SyntaxFact>,
         hoisted_bindings: &BTreeMap<u64, SourceSpan>,
+        inference: Option<rootlight_adapter_sdk::TypeScriptInferBinding>,
         cancellation: &Cancellation,
     ) -> Result<(), AdapterError> {
         if matches!(draft.kind, EntityKind::Method | EntityKind::Field)
@@ -105,7 +107,9 @@ impl LocalBindings {
             root = Some(ancestor.span());
             parent = ancestor.parent();
         }
-        let scope = if hoisted {
+        let scope = if fact.syntax_kind().as_str() == "typescript.infer_parameter.declaration" {
+            inference.and_then(|binding| facts.get(&binding.scope()).map(|scope| scope.span()))
+        } else if hoisted {
             let boundary = scopes.iter().position(|scope| is_var_scope(scope));
             if let Some(index) = boundary {
                 // Body vars are not visible while parameter defaults execute.
@@ -134,6 +138,7 @@ impl LocalBindings {
                 .push(LocalBinding {
                     declaration: draft.local_id,
                     kind: draft.kind,
+                    visible_in: inference.map(|binding| [binding.consequence(), fact.span()]),
                 });
         }
         Ok(())
@@ -160,6 +165,18 @@ impl LocalBindings {
                 .flatten()
             {
                 cancellation.check()?;
+                if binding.visible_in.is_some_and(|regions| {
+                    let span = occurrence.source.span();
+                    // Infer binds in its own constraint, but not in a sibling
+                    // infer's constraint or the rest of the extends operand.
+                    !regions.into_iter().any(|visible| {
+                        visible.file() == span.file()
+                            && visible.start_byte() <= span.start_byte()
+                            && visible.end_byte() >= span.end_byte()
+                    })
+                }) {
+                    continue;
+                }
                 let namespace_position = occurrence.role == OccurrenceRole::TypeUse
                     && occurrence.qualifier.is_some()
                     || matches!(

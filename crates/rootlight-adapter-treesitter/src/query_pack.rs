@@ -1671,6 +1671,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
             Some("typescript.mapped_type_parameter")
         }
         (GrammarFamily::TypeScript, "index_signature") => Some("typescript.mapped_type"),
+        (GrammarFamily::TypeScript, "infer_type") => Some("typescript.infer_parameter"),
+        (GrammarFamily::TypeScript, "conditional_type") => Some("typescript.conditional"),
         (GrammarFamily::TypeScript, "type_identifier") => Some("typescript.type_identifier"),
         (GrammarFamily::TypeScript, "property_identifier") => {
             Some("typescript.property_identifier")

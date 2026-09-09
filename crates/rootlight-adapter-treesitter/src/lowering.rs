@@ -1777,6 +1777,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
+        let infer_bindings = rootlight_adapter_sdk::typescript_infer_bindings(
+            self.parse_output.facts(),
+            cancellation,
+        )?;
         let file_is_test = test_source_path(self.request.source().path().as_str());
         let mut nearest_declaration = HashMap::new();
         let mut captures = HashMap::<u64, AssociatedCaptures>::new();
@@ -1850,9 +1854,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .then_some(parent)
                     .or_else(|| nearest_entity_ancestor.get(&parent).copied().flatten())
             });
-            let parent_scope = fact
+            let mut parent_scope = fact
                 .parent()
                 .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
+            if let Some(binding) = infer_bindings.get(&fact.local_id()) {
+                // Nested signatures contribute to the conditional's binding, not
+                // an independent parameter in the signature where infer is written.
+                parent_entity = nearest_entity_ancestor
+                    .get(&binding.scope())
+                    .copied()
+                    .flatten();
+                parent_scope = nearest_scope_ancestor
+                    .get(&binding.scope())
+                    .cloned()
+                    .flatten();
+            }
             if parent_scope.as_ref().and_then(|scope| scope.kind)
                 == Some(StableScopeKind::SwiftExtension)
                 && parent_entity
@@ -1953,6 +1969,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "javascript.lambda.scope"
                         | "typescript.lambda.scope"
                         | "typescript.mapped_type.scope"
+                        | "typescript.conditional.scope"
                 ) {
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
@@ -4002,6 +4019,11 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         && !fact.syntax_kind().as_str().contains(".default_export_")
         && !fact.syntax_kind().as_str().contains(".export_")
         && !fact.syntax_kind().as_str().contains(".hoisted_binding.")
+        && !matches!(
+            fact.syntax_kind().as_str(),
+            "typescript.conditional_right.signature"
+                | "typescript.conditional_consequence.signature"
+        )
         && fact.syntax_kind().as_str() != "sql.body.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
         && !fact.syntax_kind().as_str().starts_with("astro.")
@@ -4411,6 +4433,10 @@ mod tests {
             ),
             (
                 "typescript.mapped_type_parameter.declaration",
+                EntityKind::TypeParameter,
+            ),
+            (
+                "typescript.infer_parameter.declaration",
                 EntityKind::TypeParameter,
             ),
             ("typescript.variable.declaration", EntityKind::Variable),

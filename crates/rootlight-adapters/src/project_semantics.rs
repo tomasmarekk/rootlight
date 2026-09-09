@@ -1892,6 +1892,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let facts = self.parsed[file_index].facts.clone();
             let bytes = input.source().bytes();
             let member_paths = ecmascript::references::member_paths(&facts, self.cancellation)?;
+            let infer_bindings =
+                rootlight_adapter_sdk::typescript_infer_bindings(&facts, self.cancellation)?;
             let hoisted_bindings: BTreeMap<_, _> = facts
                 .iter()
                 .filter(|fact| ecmascript::lexical::is_binding_metadata(fact))
@@ -2102,6 +2104,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             "javascript.lambda.scope"
                                 | "typescript.lambda.scope"
                                 | "typescript.mapped_type.scope"
+                                | "typescript.conditional.scope"
                         )
                     {
                         let next = ecmascript_scope_positions
@@ -2118,7 +2121,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                     ecmascript_scopes.insert(declaration.local_id(), ecmascript_scope);
                 }
-                let parent_declaration = declaration.parent().and_then(|parent| {
+                if let Some(binding) = infer_bindings.get(&declaration.local_id()) {
+                    ecmascript_scope = ecmascript_scopes.get(&binding.scope()).copied().flatten();
+                    ecmascript_scopes.insert(declaration.local_id(), ecmascript_scope);
+                }
+                let mut parent_declaration = declaration.parent().and_then(|parent| {
                     materialized_declarations
                         .contains(&parent)
                         .then_some(parent)
@@ -2129,6 +2136,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 .flatten()
                         })
                 });
+                if let Some(binding) = infer_bindings.get(&declaration.local_id()) {
+                    parent_declaration = nearest_materialized_declaration
+                        .get(&binding.scope())
+                        .copied()
+                        .flatten();
+                }
                 let parent_callable = declaration.parent().and_then(|parent| {
                     nearest_callable_declaration.get(&parent).copied().flatten()
                 });
@@ -2292,6 +2305,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             declaration,
                             &facts_by_id,
                             &hoisted_bindings,
+                            infer_bindings.get(&declaration.local_id()).copied(),
                             self.cancellation,
                         )?;
                     }
@@ -5139,6 +5153,11 @@ fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str().ends_with(".signature")
         && !ecmascript::is_export_metadata(fact)
         && !ecmascript::lexical::is_binding_metadata(fact)
+        && !matches!(
+            fact.syntax_kind().as_str(),
+            "typescript.conditional_right.signature"
+                | "typescript.conditional_consequence.signature"
+        )
 }
 
 const fn supports_symbol_signature(kind: EntityKind) -> bool {

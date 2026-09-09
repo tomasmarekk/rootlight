@@ -35,6 +35,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                 label,
                 "typescript.type_parameter.declaration"
                     | "typescript.mapped_type_parameter.declaration"
+                    | "typescript.infer_parameter.declaration"
             ) =>
         {
             Some(EntityKind::TypeParameter)

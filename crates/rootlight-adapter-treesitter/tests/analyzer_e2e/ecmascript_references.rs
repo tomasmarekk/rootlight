@@ -9,6 +9,7 @@ fn typescript_type_parameter_definitions_keep_exact_identity_and_replay() {
     for source in [
         "function first<名>(value: 名) {}\r\ntype Box<名> = 名;\r\nclass Holder<名> { value!: 名; }",
         "type Box = { [名 in 'a']: 名 } |\r\n{ [名 in 'b']: { [名 in 'c']: 名 } };",
+        "type Box = string extends { method(value: infer /* bind */ 名): infer 名 } ? 名 : never;\r\ntype Other = string extends infer 名 ? 名 : never;\r\ntype Third = string extends infer 名 extends string ? 名 : never;",
     ] {
         assert_type_parameter_identity_and_replay(source);
     }
@@ -42,10 +43,13 @@ fn assert_type_parameter_identity_and_replay(source: &str) {
     assert_eq!(parameters.len(), 3);
     let identities: BTreeSet<_> = parameters.iter().map(|entity| entity.id).collect();
     assert_eq!(identities.len(), 3);
-    for (offset, _) in source
-        .match_indices('名')
-        .filter(|(offset, _)| source[..*offset].ends_with('<') || source[..*offset].ends_with('['))
-    {
+    for (offset, _) in source.match_indices('名').filter(|(offset, _)| {
+        let prefix = &source[..*offset];
+        prefix.ends_with('<')
+            || prefix.ends_with('[')
+            || prefix.ends_with("infer ")
+            || prefix.ends_with("/* bind */ ")
+    }) {
         let start = u64::try_from(offset).unwrap();
         let definition = first
             .document()

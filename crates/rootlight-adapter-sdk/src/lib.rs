@@ -23,6 +23,7 @@ mod structural;
 mod structural_identity;
 pub mod testkit;
 mod toml_names;
+mod typescript_bindings;
 mod yaml_names;
 
 pub use dart_names::canonical_dart_constructor_signature;
@@ -60,6 +61,7 @@ pub use structural::{
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 pub use structural_identity::derive_structural_occurrence_identity;
+pub use typescript_bindings::{TypeScriptInferBinding, typescript_infer_bindings};
 pub use yaml_names::{
     YamlBlockScalar, YamlCollectionKind, YamlCollectionTag, YamlDocumentContext, YamlScalarIdentity,
 };

@@ -16,6 +16,17 @@ pub(super) fn binding_signature_syntax(
     family: GrammarFamily,
     node: Node<'_>,
 ) -> Option<&'static str> {
+    if family == GrammarFamily::TypeScript
+        && let Some(parent) = node.parent()
+        && parent.kind() == "conditional_type"
+    {
+        if parent.child_by_field_name("right") == Some(node) {
+            return Some("typescript.conditional_right");
+        }
+        if parent.child_by_field_name("consequence") == Some(node) {
+            return Some("typescript.conditional_consequence");
+        }
+    }
     let hoisted = (node.kind() == "variable_declarator"
         && node
             .parent()
@@ -357,6 +368,22 @@ pub(super) fn retain_capture(
     role: StructuralRole,
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    if role == StructuralRole::Definition
+        && node.kind() == "type_identifier"
+        && let Some(parent) = node.parent()
+        && parent.kind() == "infer_type"
+    {
+        // The grammar has no name field here. The first non-comment named child
+        // is the binder; a later type identifier may instead be its constraint.
+        let mut cursor = parent.walk();
+        for child in parent.named_children(&mut cursor) {
+            cancellation.check()?;
+            if child.kind() != "comment" {
+                return Ok(child == node);
+            }
+        }
+        return Ok(false);
+    }
     if role == StructuralRole::Declaration && node.kind() == "variable_declarator" {
         // Destructuring has one declaration per binding, not one unnamed
         // declaration for the entire pattern. Simple declarators keep their span.

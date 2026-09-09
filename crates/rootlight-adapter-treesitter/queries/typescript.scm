@@ -17,6 +17,7 @@
   (variable_declarator)
   (type_parameter)
   (mapped_type_clause)
+  (infer_type)
 ] @declaration
 
 [
@@ -33,6 +34,7 @@
   (variable_declarator name: (identifier) @definition)
   (type_parameter name: (type_identifier) @definition)
   (mapped_type_clause name: (type_identifier) @definition)
+  (infer_type (type_identifier) @definition)
 ]
 
 (import_statement) @import
@@ -65,6 +67,8 @@
 (statement_block) @scope
 ; The key binder belongs to this mapped member, never a sibling type expression.
 (index_signature (mapped_type_clause)) @scope
+(conditional_type) @scope
+(conditional_type right: (_) @signature consequence: (_) @signature)
 [(class_declaration type_parameters: (type_parameters))
  (abstract_class_declaration type_parameters: (type_parameters))
  (interface_declaration type_parameters: (type_parameters))
