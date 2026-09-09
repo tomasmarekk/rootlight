@@ -796,6 +796,11 @@ fn candidate_for_capture(
             ) =>
         {
             ecmascript::import_signature_syntax(family, capture.node)
+                .or(ecmascript::default_export_signature_syntax(
+                    family,
+                    capture.node,
+                    cancellation,
+                )?)
                 .or_else(|| canonical_syntax(family, capture.node.kind()))
                 .ok_or_else(|| query_failure("query-node-kind"))?
         }

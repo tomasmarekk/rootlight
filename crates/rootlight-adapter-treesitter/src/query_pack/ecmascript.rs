@@ -57,6 +57,39 @@ pub(super) fn import_signature_syntax(
     }
 }
 
+pub(super) fn default_export_signature_syntax(
+    family: GrammarFamily,
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    let Some(parent) = node
+        .parent()
+        .filter(|parent| parent.kind() == "export_statement")
+    else {
+        return Ok(None);
+    };
+    let mut cursor = parent.walk();
+    for child in parent.children(&mut cursor) {
+        cancellation.check()?;
+        if child.kind() != "default" || child.is_named() {
+            continue;
+        }
+        let declaration = parent.child_by_field_name("declaration") == Some(node);
+        if !declaration && parent.child_by_field_name("value") != Some(node) {
+            return Ok(None);
+        }
+        return Ok(Some(
+            match (family == GrammarFamily::TypeScript, declaration) {
+                (true, true) => "typescript.default_export_declaration",
+                (false, true) => "javascript.default_export_declaration",
+                (true, false) => "typescript.default_export_value",
+                (false, false) => "javascript.default_export_value",
+            },
+        ));
+    }
+    Ok(None)
+}
+
 pub(super) fn export_reference_syntax(
     family: GrammarFamily,
     node: Node<'_>,

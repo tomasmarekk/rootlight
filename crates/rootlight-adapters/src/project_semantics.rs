@@ -1307,6 +1307,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
         structural_entity_kind(fact).is_some()
             || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
+            || ecmascript::is_default_export(fact)
             || is_identity_capture_fact(fact)
     }) {
         select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
@@ -1628,6 +1629,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     entities: Vec<SemanticEntity>,
     declarations: Vec<DeclarationDraft>,
     imports: Vec<ImportDraft>,
+    default_exports: BTreeMap<FileId, Vec<SemanticEntity>>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1652,6 +1654,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             entities: Vec::new(),
             declarations: Vec::new(),
             imports: Vec::new(),
+            default_exports: BTreeMap::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1664,11 +1667,74 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.materialize_files_and_provenance()?;
         self.collect_syntax()?;
         self.materialize_entities()?;
+        self.materialize_default_exports()?;
         self.materialize_imports_and_occurrences()?;
         self.materialize_inheritance()?;
         self.materialize_generated_mappings()?;
         self.materialize_parser_diagnostics()?;
         self.materialize_coverage()
+    }
+
+    fn materialize_default_exports(&mut self) -> Result<(), AdapterError> {
+        let mut targets = BTreeMap::<FileId, Vec<SourceSpan>>::new();
+        for input in &self.parsed {
+            for (index, fact) in input.facts.iter().enumerate() {
+                check_periodically(index, self.cancellation)?;
+                if ecmascript::is_default_export(fact) {
+                    targets
+                        .entry(fact.span().file())
+                        .or_default()
+                        .push(fact.span());
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let key = |span: SourceSpan| (span.file(), span.start_byte(), span.end_byte());
+        let spans = targets
+            .values()
+            .flatten()
+            .copied()
+            .map(key)
+            .collect::<BTreeSet<_>>();
+        let mut candidates = BTreeMap::<_, Vec<SemanticEntity>>::new();
+        // A callable scope can have the declaration's exact span, but only
+        // the authored declaration identity is a valid export target.
+        let authored_symbols = self
+            .symbol_by_declaration
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for (index, entity) in self.entities.iter().enumerate() {
+            check_periodically(index, self.cancellation)?;
+            if spans.contains(&key(entity.span)) && authored_symbols.contains(&entity.symbol) {
+                candidates
+                    .entry(key(entity.span))
+                    .or_default()
+                    .push(entity.clone());
+            }
+        }
+        for (file, spans) in targets {
+            if let [span] = spans.as_slice()
+                && let Some(entities) = candidates.remove(&key(*span))
+                && entities.len() == 1
+            {
+                self.default_exports.insert(file, entities);
+                continue;
+            }
+            // Expression exports and duplicate defaults need their own binding
+            // evidence; neither a nested declaration nor a name match is enough.
+            let input = self.input_for_file(file)?;
+            for span in spans {
+                self.push_relation_gap(
+                    input,
+                    span,
+                    "ecmascript-default-export-target-unavailable",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn materialize_files_and_provenance(&mut self) -> Result<(), AdapterError> {
@@ -3513,6 +3579,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         }
         if let Some(qualifier) = occurrence.qualifier.as_deref() {
             let mut namespace_symbols = BTreeSet::new();
+            let mut default_namespace = false;
             for import in self
                 .imports
                 .iter()
@@ -3531,7 +3598,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .get(&(import.file, import.module.clone()))
                     .cloned()
                     .unwrap_or_default();
-                if let Some(candidates) = definitions.get(&occurrence.name) {
+                if occurrence.name == "default"
+                    && matches!(
+                        self.analyzer.language,
+                        SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+                    )
+                {
+                    default_namespace = true;
+                    namespace_symbols.extend(
+                        target_files
+                            .iter()
+                            .filter_map(|file| self.default_exports.get(file))
+                            .flatten()
+                            .filter(admits_namespace)
+                            .map(|entity| entity.symbol),
+                    );
+                } else if let Some(candidates) = definitions.get(&occurrence.name) {
                     namespace_symbols.extend(
                         candidates
                             .iter()
@@ -3541,7 +3623,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     );
                 }
             }
-            if !namespace_symbols.is_empty() {
+            if default_namespace || !namespace_symbols.is_empty() {
                 return ResolutionCandidates {
                     symbols: namespace_symbols.into_iter().collect(),
                     kind: ResolutionKind::Binding,
@@ -3643,6 +3725,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .filter(|entity| entity.file == occurrence.file)
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
+        let mut default_import = false;
         for import in self
             .imports
             .iter()
@@ -3668,6 +3751,23 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .cloned()
                 .unwrap_or_default();
             for lookup_name in lookup_names {
+                if lookup_name == "default"
+                    && matches!(
+                        self.analyzer.language,
+                        SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
+                    )
+                {
+                    default_import = true;
+                    symbols.extend(
+                        target_files
+                            .iter()
+                            .filter_map(|file| self.default_exports.get(file))
+                            .flatten()
+                            .filter(admits_namespace)
+                            .map(|entity| entity.symbol),
+                    );
+                    continue;
+                }
                 if let Some(candidates) = definitions.get(lookup_name) {
                     symbols.extend(
                         candidates
@@ -3703,6 +3803,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         }
         if symbols.is_empty()
             && permit_global_fallback
+            && !default_import
             && let Some(candidates) = definitions.get(&occurrence.name)
         {
             symbols.extend(
@@ -4883,7 +4984,9 @@ fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxF
 }
 
 fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
-    fact.kind() == SyntaxFactKind::Signature && fact.syntax_kind().as_str().ends_with(".signature")
+    fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str().ends_with(".signature")
+        && !ecmascript::is_default_export(fact)
 }
 
 const fn supports_symbol_signature(kind: EntityKind) -> bool {

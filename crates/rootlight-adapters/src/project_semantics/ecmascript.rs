@@ -46,6 +46,17 @@ pub(super) fn is_native_import(fact: &SyntaxFact) -> bool {
             .ends_with(".native_import.import")
 }
 
+pub(super) fn is_default_export(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Signature
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "javascript.default_export_declaration.signature"
+                | "typescript.default_export_declaration.signature"
+                | "javascript.default_export_value.signature"
+                | "typescript.default_export_value.signature"
+        )
+}
+
 impl ParsedImport {
     pub(super) fn runtime_bindings(&self) -> impl Iterator<Item = &ImportBinding> {
         self.bindings.iter().filter(|binding| match binding {

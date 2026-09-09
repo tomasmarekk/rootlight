@@ -42,6 +42,204 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 
 #[test]
+fn native_default_exports_resolve_the_exact_declared_symbol() {
+    for language in [
+        SemanticProjectLanguage::JavaScript,
+        SemanticProjectLanguage::TypeScript,
+    ] {
+        for (provider, kind) in [
+            (
+                "export default function Actual(value) { return value; }",
+                EntityKind::Function,
+            ),
+            (
+                "export /* default decoy */ default class Actual {}",
+                EntityKind::Class,
+            ),
+            (
+                "export default async function Actual(value) { return value; }",
+                EntityKind::Function,
+            ),
+            (
+                "export default function* Actual(value) { yield value; }",
+                EntityKind::Function,
+            ),
+        ] {
+            let source = "import Local from './provider'; import {default as Named} from './provider'; const a = Local; const b = Named;";
+            let fixture = ProjectFixture::new(
+                ["src/main.ts", "src/provider.ts"],
+                [source, provider],
+                language,
+            );
+            let output = analyze_with_real_parser(&fixture);
+            let actual = output
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Actual" && entity.kind == kind)
+                .unwrap();
+            for name in ["Local", "Named"] {
+                let start = u64::try_from(source.find(&format!("= {name};")).unwrap() + 2).unwrap();
+                let reference = output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.file == fixture.snapshots[0].file()
+                            && occurrence.source.span().start_byte() == start
+                    })
+                    .unwrap();
+                assert_eq!(
+                    reference.target,
+                    OccurrenceTarget::Resolved { symbol: actual.id },
+                    "{language:?}: {provider}"
+                );
+                assert_eq!(
+                    reference.source.content_hash(),
+                    content_hash(source.as_bytes())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_default_namespace_calls_require_an_actual_default_export() {
+    for (provider, resolved) in [
+        (
+            "export default function Actual(value) { return value; }",
+            true,
+        ),
+        ("export function Actual(value) { return value; }", false),
+    ] {
+        let source = "import * as Space from './provider'; export function run() { return Space.default(2); }";
+        let fixture = ProjectFixture::new(
+            ["src/main.ts", "src/provider.ts"],
+            [source, provider],
+            SemanticProjectLanguage::TypeScript,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let actual = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Actual" && entity.kind == EntityKind::Function)
+            .unwrap();
+        let call = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.role == OccurrenceRole::CallSite
+            })
+            .unwrap();
+        if resolved {
+            assert_eq!(
+                call.target,
+                OccurrenceTarget::Resolved { symbol: actual.id }
+            );
+            assert!(
+                output
+                    .document()
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Calls
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(actual.id))
+            );
+        } else {
+            assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+        }
+    }
+}
+
+#[test]
+fn native_default_export_expressions_and_duplicates_do_not_guess_targets() {
+    for (provider, gaps) in [
+        ("const Actual = 1; export default Actual;", 1),
+        (
+            "export default function First() {} export default function Second() {}",
+            2,
+        ),
+    ] {
+        let source = "import Local from './provider'; const item = Local;";
+        let fixture = ProjectFixture::new(
+            ["src/main.ts", "src/provider.ts"],
+            [source, provider],
+            SemanticProjectLanguage::TypeScript,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let start = u64::try_from(source.find("= Local;").unwrap() + 2).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        let skipped: Vec<_> = output
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "ecmascript-default-export-target-unavailable")
+            .collect();
+        assert_eq!(skipped.len(), gaps);
+        assert!(skipped.iter().all(|gap| gap.domain == FactDomain::Relations
+            && gap.source.content_hash() == content_hash(provider.as_bytes())));
+        assert_eq!(
+            output.report().work().coverage().status(),
+            CoverageStatus::Bounded
+        );
+    }
+}
+
+#[test]
+fn typescript_default_interface_imports_resolve_only_in_the_type_namespace() {
+    let source = "import Local from './provider'; let item: Local; const invalid = Local;";
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/provider.ts"],
+        [source, "export default interface Actual { value: string; }"],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let actual = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Actual" && entity.kind == EntityKind::Interface)
+        .unwrap();
+    for (needle, offset, resolved) in [(": Local;", 2, true), ("= Local;", 2, false)] {
+        let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        if resolved {
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol: actual.id }
+            );
+        } else {
+            assert!(matches!(
+                occurrence.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+        }
+    }
+}
+
+#[test]
 fn native_ecmascript_import_paths_do_not_replace_unpaired_surrogates() {
     let source = "import {Item} from './pro\\uD800ider'; const value = Item;\n";
     let fixture = ProjectFixture::new(
