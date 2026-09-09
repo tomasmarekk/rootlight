@@ -20,3 +20,5 @@ third_party/tree-sitter-md-0.5.3/common/html_entities.json whitespace=-blank-at-
 # Preserve the original Astro MIT notice byte-for-byte for license provenance.
 third_party/tree-sitter-astro-next-0.1.1/LICENSE-MIT whitespace=-blank-at-eol
 adapters/licenses/tree-sitter-astro-next-0.1.1-LICENSE-MIT whitespace=-blank-at-eol
+# Preserve the published Objective-C highlight query byte-for-byte.
+third_party/tree-sitter-objc-3.0.2/queries/highlights.scm whitespace=-blank-at-eol
