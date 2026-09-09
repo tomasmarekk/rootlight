@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 26] = [
+    let cases: [(&str, &str, &[u8]); 27] = [
+        (
+            "sample.md",
+            "markdown",
+            b"# Guide\n\n[entry]: module.rs\n\n## Usage\nRead [entry].\n",
+        ),
         (
             "sample.psm1",
             "powershell",
