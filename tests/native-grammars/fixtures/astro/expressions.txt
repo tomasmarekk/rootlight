@@ -1,0 +1,41 @@
+# Shared JavaScript expressions for native range checks and independent syntax validation.
+/}/.test(text)
+/[/*}]/.test(text)
+/[\/}]/.test(text)
+/\}/u.test(text)
+(/}/).test(text)
+total / count
+total / count / scale
+total /= count
+total++ / count
+++total / count
+total-- / count
+--total / count
+obj.return / count
+obj?.return / count
+obj["return"] / count
+call(value) / count
+(total + other) / count
+({ value: total }).value / count
+({ matcher: /}/, ratio: total / count })
+ready ? /}/.test(text) : total / count
+(value) => /}/.test(value)
+(() => { return /}/.test(text); })()
+(() => { if (ready) /}/.test(text); return total / count; })()
+(() => { while (ready) /}/.test(text); return total / count; })()
+(() => { for (; ready;) /}/.test(text); return total / count; })()
+/}/.source.length / count
+typeof /}/
+void /}/
+value /* } */ / count
+/* } */ /}/.test(text)
+`outer ${/}/.test(text)} tail`
+`outer ${total / count} tail`
+`outer ${{matcher: /[/*}]/}.matcher.test(text)} tail`
+of / count
+[.../}/.source]
+(() => { if (ready) {} /}/.test(text); return total / count; })()
+(() => { function work() {} /}/.test(text); return total / count; })()
+(() => { return /}/.test(text); })()
+(() => { // comment return /}/.test(text); })()
+(() => { // comment return /}/.test(text); })()
