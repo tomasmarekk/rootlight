@@ -2504,8 +2504,8 @@ impl AdvancedOperator {
 
 /// Closed entity kind understood by the advanced query scan operator.
 ///
-/// This is the query-layer mirror of the public contract entity kind. Each
-/// variant maps to a closed set of normalized IR entity kinds.
+/// Each variant maps to a closed set of normalized IR entity kinds. MCP
+/// revisions independently restrict which kinds callers may request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -2546,6 +2546,10 @@ pub enum AdvancedEntityKind {
     ErrorDeclaration,
     /// Declared callable modifier.
     Modifier,
+    /// Authored document heading or section.
+    DocumentSection,
+    /// Authored named document link definition.
+    LinkDefinition,
 }
 
 impl AdvancedEntityKind {
@@ -2571,6 +2575,8 @@ impl AdvancedEntityKind {
             Self::Event => "event",
             Self::ErrorDeclaration => "error_declaration",
             Self::Modifier => "modifier",
+            Self::DocumentSection => "document_section",
+            Self::LinkDefinition => "link_definition",
         }
     }
 
@@ -2596,6 +2602,8 @@ impl AdvancedEntityKind {
             "event" => Some(Self::Event),
             "error_declaration" => Some(Self::ErrorDeclaration),
             "modifier" => Some(Self::Modifier),
+            "document_section" => Some(Self::DocumentSection),
+            "link_definition" => Some(Self::LinkDefinition),
             _ => None,
         }
     }
@@ -2642,6 +2650,8 @@ impl AdvancedEntityKind {
             Self::Event => matches!(kind, IrEntityKind::Event),
             Self::ErrorDeclaration => matches!(kind, IrEntityKind::ErrorDeclaration),
             Self::Modifier => matches!(kind, IrEntityKind::Modifier),
+            Self::DocumentSection => matches!(kind, IrEntityKind::DocumentSection),
+            Self::LinkDefinition => matches!(kind, IrEntityKind::LinkDefinition),
         }
     }
 }
@@ -3355,6 +3365,62 @@ mod tests {
         assert!(AdvancedEntityKind::Method.matches_ir(EntityKind::Method));
         assert!(!AdvancedEntityKind::Method.matches_ir(EntityKind::Function));
         assert!(!AdvancedEntityKind::Function.matches_ir(EntityKind::Method));
+    }
+
+    #[test]
+    fn document_scan_kinds_preserve_labels_without_matching_code() {
+        let cases = [
+            (
+                AdvancedEntityKind::DocumentSection,
+                EntityKind::DocumentSection,
+                "document_section",
+            ),
+            (
+                AdvancedEntityKind::LinkDefinition,
+                EntityKind::LinkDefinition,
+                "link_definition",
+            ),
+        ];
+        for (kind, ir_kind, label) in cases {
+            assert_eq!(kind.as_str(), label);
+            assert_eq!(AdvancedEntityKind::from_label(label), Some(kind));
+            let serialized = serde_json::to_value(kind).expect("kind serializes");
+            assert_eq!(serialized, serde_json::json!(label));
+            assert_eq!(
+                serde_json::from_value::<AdvancedEntityKind>(serialized).expect("kind round trips"),
+                kind
+            );
+            assert!(kind.matches_ir(ir_kind));
+            for (_, other_ir_kind, _) in cases {
+                assert_eq!(kind.matches_ir(other_ir_kind), ir_kind == other_ir_kind);
+            }
+            for (code_kind, code_ir_kind) in [
+                (AdvancedEntityKind::Module, EntityKind::Module),
+                (AdvancedEntityKind::Type, EntityKind::Class),
+                (AdvancedEntityKind::Function, EntityKind::Function),
+                (AdvancedEntityKind::Variable, EntityKind::Variable),
+                (AdvancedEntityKind::MarkupElement, EntityKind::MarkupElement),
+                (
+                    AdvancedEntityKind::ExternalSymbol,
+                    EntityKind::ExternalSymbol,
+                ),
+            ] {
+                assert!(!kind.matches_ir(code_ir_kind));
+                assert!(!code_kind.matches_ir(ir_kind));
+            }
+        }
+        for unknown in [
+            "document",
+            "heading",
+            "link",
+            "DocumentSection",
+            "LinkDefinition",
+        ] {
+            assert_eq!(AdvancedEntityKind::from_label(unknown), None);
+            assert!(
+                serde_json::from_value::<AdvancedEntityKind>(serde_json::json!(unknown)).is_err()
+            );
+        }
     }
 
     const RESOURCES: [QueryResource; 10] = [

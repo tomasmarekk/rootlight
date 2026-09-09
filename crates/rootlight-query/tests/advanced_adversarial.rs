@@ -141,6 +141,8 @@ fn entity_kind() -> impl Strategy<Value = AdvancedEntityKind> {
         AdvancedEntityKind::Event,
         AdvancedEntityKind::ErrorDeclaration,
         AdvancedEntityKind::Modifier,
+        AdvancedEntityKind::DocumentSection,
+        AdvancedEntityKind::LinkDefinition,
     ])
 }
 

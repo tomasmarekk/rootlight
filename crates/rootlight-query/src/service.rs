@@ -14990,6 +14990,8 @@ mod tests {
             EntityKind::Event,
             EntityKind::ErrorDeclaration,
             EntityKind::Modifier,
+            EntityKind::DocumentSection,
+            EntityKind::LinkDefinition,
         ];
         for (index, kind) in kinds.into_iter().enumerate() {
             add_entity(
