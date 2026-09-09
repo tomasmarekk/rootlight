@@ -1514,6 +1514,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "astro",
+        suffixes: &[".astro"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "bash",
         suffixes: &[".bash", ".sh"],
         aliases: &["shell", "sh"],
@@ -2491,6 +2499,36 @@ max_source_file_bytes = 2097152
                 Some("json" | "yaml" | "toml")
             ));
         }
+    }
+
+    #[test]
+    fn astro_detection_preserves_host_language_boundaries() {
+        for path in ["view.astro", "pages/VIEW.ASTRO"] {
+            assert_eq!(extension_language(path), Some("astro"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"---\nconst title: string = 'Guide';\n---\n<main>{title}</main>",
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == "astro" && signal.evidence == LanguageEvidence::Extension
+            }));
+        }
+        for path in [
+            "view.astro.bak",
+            "view.astro.ts",
+            "view.mdx",
+            "view.vue",
+            "view.svelte",
+        ] {
+            assert_ne!(extension_language(path), Some("astro"), "{path}");
+        }
+        assert_eq!(canonical_language("astro"), Some("astro"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "astro")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
     }
 
     #[test]

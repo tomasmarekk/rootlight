@@ -210,7 +210,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/73";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/74";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -20180,6 +20180,8 @@ fn elapsed_micros(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod astro_discovery;
+
     use std::{
         collections::BTreeSet,
         ffi::OsStr,
@@ -25408,6 +25410,7 @@ mod tests {
     fn every_audited_grammar_has_a_fail_closed_source_suffix() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
         let mapped = [
+            "sample.astro",
             "sample.c",
             "sample.cpp",
             "sample.cs",
