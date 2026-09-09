@@ -10,6 +10,7 @@ mod reexports;
 pub(in crate::project_semantics) struct ExportTarget {
     pub(in crate::project_semantics) entity: SemanticEntity,
     pub(in crate::project_semantics) type_only: bool,
+    pub(in crate::project_semantics) module_namespace: bool,
 }
 
 impl ProjectFactsBuilder<'_, '_, '_> {
@@ -133,7 +134,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                                         .map(|entity| (public.clone(), *entity, type_only)),
                                 );
                             } else {
-                                deferred = self.imports.iter().filter(|import| import.file == file).any(|import| import.bindings.iter().any(|binding| matches!(binding, ImportBinding::Named { local: name, .. } if name == &local)));
+                                deferred = self.imports.iter().filter(|import| import.file == file).any(|import| import.bindings.iter().any(|binding| matches!(binding, ImportBinding::Named { local: name, .. } | ImportBinding::Namespace { local: name } if name == &local)));
                             }
                         }
                     }
@@ -150,6 +151,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                         ExportTarget {
                             entity: entity.clone(),
                             type_only,
+                            module_namespace: false,
                         },
                     )
                 }));
@@ -200,7 +202,8 @@ fn module_declaration(
     Ok(true)
 }
 
-fn export_name(
+/// Decodes a public export name from its exact native identifier or string field.
+pub(in crate::project_semantics) fn export_name(
     source: &[u8],
     span: SourceSpan,
     cancellation: &Cancellation,

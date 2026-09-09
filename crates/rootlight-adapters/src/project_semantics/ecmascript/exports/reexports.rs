@@ -4,6 +4,8 @@
 
 use super::*;
 
+mod namespace_members;
+
 type ExportKey = (FileId, String);
 
 enum ExportResolution {
@@ -35,6 +37,12 @@ impl ProjectFactsBuilder<'_, '_, '_> {
             return Ok(());
         }
         let mut graph = ExportGraph::default();
+        let module_entities: BTreeMap<_, _> = self
+            .entities
+            .iter()
+            .filter(|entity| self.module_by_file.get(&entity.file) == Some(&entity.symbol))
+            .map(|entity| (entity.file, entity.clone()))
+            .collect();
         let mut modules = self.import_target_index();
         let mut gaps = Vec::new();
         for input in &self.parsed {
@@ -122,6 +130,39 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                         }
                     }
                     gaps.push((fact.span(), "ecmascript-reexport-evidence-unavailable"));
+                } else if label.ends_with(".export_namespace_statement.signature")
+                    || label.ends_with(".export_type_namespace_statement.signature")
+                {
+                    for name in within(&metadata, fact.span()).filter(|child| {
+                        child
+                            .syntax_kind()
+                            .as_str()
+                            .ends_with(".export_namespace_name.signature")
+                    }) {
+                        if let Some(public) = export_name(source, name.span(), self.cancellation)? {
+                            self.export_reference_names
+                                .insert(name.span(), public.clone());
+                            let namespace_targets: Vec<_> = targets
+                                .iter()
+                                .filter_map(|target| {
+                                    let entity = module_entities.get(target)?;
+                                    Some(ExportTarget {
+                                        entity: entity.clone(),
+                                        type_only: label.ends_with(
+                                            ".export_type_namespace_statement.signature",
+                                        ),
+                                        module_namespace: true,
+                                    })
+                                })
+                                .collect();
+                            self.exports
+                                .entry(file)
+                                .or_default()
+                                .entry(public)
+                                .or_default()
+                                .extend(namespace_targets);
+                        }
+                    }
                 }
             }
             for fact in metadata.values().flatten() {
@@ -213,6 +254,27 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                 {
                     for import in self.imports.iter().filter(|import| import.file == file) {
                         for binding in &import.bindings {
+                            if let ImportBinding::Namespace { local } = binding
+                                && local == &imported
+                            {
+                                let targets: Vec<_> = modules
+                                    .get(&(file, import.module.clone()))
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|target| module_entities.get(target))
+                                    .map(|entity| ExportTarget {
+                                        entity: entity.clone(),
+                                        type_only: type_only || import.type_only.contains(local),
+                                        module_namespace: true,
+                                    })
+                                    .collect();
+                                self.exports
+                                    .entry(file)
+                                    .or_default()
+                                    .entry(key.1.clone())
+                                    .or_default()
+                                    .extend(targets);
+                            }
                             if let ImportBinding::Named {
                                 local,
                                 imported: target_name,
@@ -289,6 +351,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
         for ((file, name), targets) in resolved {
             self.exports.entry(file).or_default().insert(name, targets);
         }
+        self.materialize_namespace_members(&graph, &modules, &mut remaining, &mut gaps)?;
         gaps.sort_unstable();
         gaps.dedup();
         for (span, detail) in gaps {
@@ -339,6 +402,7 @@ impl ExportGraph {
                         .or_insert_with(|| ExportTarget {
                             entity: target.entity.clone(),
                             type_only: only,
+                            module_namespace: target.module_namespace,
                         });
                 }
                 continue;

@@ -5,6 +5,82 @@
 use super::*;
 
 #[test]
+fn namespace_export_fields_retain_type_intent_and_exact_public_name_references() {
+    for case in CASES
+        .iter()
+        .copied()
+        .filter(|case| matches!(case.name, "javascript" | "typescript"))
+    {
+        for public in ["Space", "'naïve-space'"] {
+            let modifier = if case.name == "typescript" {
+                "type "
+            } else {
+                ""
+            };
+            let source =
+                format!("// café\r\nexport {modifier}* as {public} from './provider';\r\n");
+            let provider = Arc::new(provider());
+            let analyzer = analyzer(&provider, case);
+            let fixture = Fixture::new(case, source.as_bytes());
+            let budget = limits();
+            let initial = request(&fixture.snapshot, &fixture.source, case, &budget);
+            let parsed = rootlight_adapter_sdk::execute_parse(
+                provider.as_ref(),
+                &initial.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+            for (suffix, text) in [
+                ("export_namespace_name.signature", public.to_owned()),
+                ("export_name.reference", public.to_owned()),
+                (
+                    if modifier.is_empty() {
+                        "export_namespace_statement.signature"
+                    } else {
+                        "export_type_namespace_statement.signature"
+                    },
+                    format!("export {modifier}* as {public} from './provider';"),
+                ),
+            ] {
+                assert!(
+                    parsed
+                        .facts()
+                        .iter()
+                        .any(|fact| fact.syntax_kind().as_str().ends_with(suffix)
+                            && source[usize::try_from(fact.span().start_byte()).unwrap()
+                                ..usize::try_from(fact.span().end_byte()).unwrap()]
+                                == text),
+                    "{source}: {suffix}"
+                );
+            }
+            let (_, artifact) = analyzer
+                .analyze_and_capture(
+                    &initial,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            let next = fixture.next_generation();
+            let next_request = request(&next.snapshot, &next.source, case, &budget);
+            let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
+            let replay = analyzer
+                .analyze_from_artifact(
+                    &next_request,
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(fresh.document(), replay.document());
+            assert_eq!(fresh.report(), replay.report());
+        }
+    }
+}
+
+#[test]
 fn reexport_metadata_replays_with_exact_module_and_name_fields() {
     for case in CASES
         .iter()

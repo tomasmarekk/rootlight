@@ -27,6 +27,10 @@
 (export_statement "default" value: (_) @signature)
 (export_statement source: (string) @signature) @signature
 (namespace_export [(identifier) (string)] @signature)
+; Optional references need a separate pattern from the identity-only signature pass.
+(namespace_export [(identifier) (string)] @reference)
+(export_specifier name: (string) @reference)
+(export_specifier alias: (string) @reference)
 (export_specifier) @signature
 (export_specifier name: [(identifier) (string)] @signature)
 (export_specifier alias: [(identifier) (string)] @signature)

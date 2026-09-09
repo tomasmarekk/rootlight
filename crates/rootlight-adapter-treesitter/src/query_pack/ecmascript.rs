@@ -83,12 +83,21 @@ pub(super) fn export_signature_syntax(
             namespace |= child.kind() == "namespace_export";
             malformed |= child.has_error() || child.is_missing();
         }
-        let unsupported = namespace
-            || malformed
+        let unsupported = malformed
             || !node
                 .parent()
                 .is_some_and(|parent| parent.kind() == "program");
         let type_only = has_type_modifier(node, cancellation)?;
+        if namespace && !unsupported {
+            return Ok(Some(
+                match (family == GrammarFamily::TypeScript, type_only) {
+                    (true, true) => "typescript.export_type_namespace_statement",
+                    (true, false) => "typescript.export_namespace_statement",
+                    (false, true) => "javascript.export_type_namespace_statement",
+                    (false, false) => "javascript.export_namespace_statement",
+                },
+            ));
+        }
         return Ok(Some(
             match (
                 family == GrammarFamily::TypeScript,
@@ -210,6 +219,16 @@ pub(super) fn export_reference_syntax(
     node: Node<'_>,
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "namespace_export")
+    {
+        return Ok(Some(if family == GrammarFamily::TypeScript {
+            "typescript.export_name"
+        } else {
+            "javascript.export_name"
+        }));
+    }
     let Some(specifier) = node
         .parent()
         .filter(|parent| parent.kind() == "export_specifier")

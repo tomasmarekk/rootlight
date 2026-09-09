@@ -1631,6 +1631,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     imports: Vec<ImportDraft>,
     exports: BTreeMap<FileId, BTreeMap<String, Vec<ecmascript::exports::ExportTarget>>>,
     export_reference_names: BTreeMap<SourceSpan, String>,
+    namespace_occurrence_targets: BTreeMap<SourceSpan, Vec<ecmascript::exports::ExportTarget>>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1657,6 +1658,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             imports: Vec::new(),
             exports: BTreeMap::new(),
             export_reference_names: BTreeMap::new(),
+            namespace_occurrence_targets: BTreeMap::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1731,6 +1733,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         .map(|entity| ecmascript::exports::ExportTarget {
                             entity,
                             type_only: false,
+                            module_namespace: false,
                         })
                         .collect(),
                 );
@@ -2334,7 +2337,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             .get(&fact.local_id())
                             .and_then(|terminal| facts_by_id.get(terminal))
                             .and_then(|terminal| source_text(bytes, terminal.span()));
-                        let parsed_name = if call {
+                        let public_name = if matches!(
+                            fact.syntax_kind().as_str(),
+                            "typescript.export_name.reference" | "javascript.export_name.reference"
+                        ) {
+                            ecmascript::exports::export_name(bytes, fact.span(), self.cancellation)?
+                        } else {
+                            None
+                        };
+                        let parsed_name = if let Some(name) = public_name.as_deref() {
+                            Some(ParsedOccurrenceName {
+                                name,
+                                qualifier: None,
+                            })
+                        } else if call {
                             terminal_name
                                 .and_then(|name| {
                                     let parsed = if self.analyzer.language
@@ -3599,6 +3615,30 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if let Some(resolution) = self.resolve_reviewed_static_call(occurrence, definitions) {
             return resolution;
         }
+        if let Some(targets) = self
+            .namespace_occurrence_targets
+            .get(&occurrence.source.span())
+        {
+            return ResolutionCandidates {
+                symbols: targets
+                    .iter()
+                    .filter(|target| {
+                        !target.type_only
+                            || occurrence.role == OccurrenceRole::TypeUse
+                            || occurrence.syntax_kind == "typescript.type_query_value.reference"
+                    })
+                    .filter(|target| {
+                        !target.module_namespace || occurrence.role != OccurrenceRole::CallSite
+                    })
+                    .map(|target| &target.entity)
+                    .filter(admits_namespace)
+                    .map(|entity| entity.symbol)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
         if let Some(qualifier) = occurrence.qualifier.as_deref() {
             let mut namespace_symbols = BTreeSet::new();
             let mut native_namespace = false;
@@ -3785,6 +3825,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             .iter()
                             .filter_map(|file| self.exports.get(file)?.get(lookup_name))
                             .flatten()
+                            .filter(|target| {
+                                !target.module_namespace
+                                    || occurrence.role != OccurrenceRole::CallSite
+                            })
                             .filter(|target| {
                                 !target.type_only || occurrence.role == OccurrenceRole::TypeUse
                             })
