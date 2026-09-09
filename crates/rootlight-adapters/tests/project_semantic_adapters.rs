@@ -42,6 +42,121 @@ use tempfile::{TempDir, tempdir_in};
 mod dart;
 
 #[test]
+fn native_ecmascript_import_paths_do_not_guess_escaped_specifiers() {
+    let source = "import {Item} from './pro\\u0076ider'; const value = Item;\n";
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/provider.ts"],
+        [source, "export class Item {}"],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let gaps: Vec<_> = output
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "ecmascript-import-evidence-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].domain, FactDomain::Relations);
+    assert_eq!(
+        gaps[0].source.content_hash(),
+        content_hash(source.as_bytes())
+    );
+    let start = u64::try_from(source.find("= Item;").unwrap() + 2).unwrap();
+    let reference = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.file == fixture.snapshots[0].file()
+                && occurrence.source.span().start_byte() == start
+        })
+        .unwrap();
+    assert!(matches!(
+        reference.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+}
+
+#[test]
+fn native_typescript_imports_preserve_type_modifiers_and_trivia() {
+    let source = "import /* 'wrong-module' */ { type Item as Typed, Item as Value, type as ordinary }\nfrom './provider'; import type {Item as Whole} from './provider'; let first: Typed; let second: Whole; const valid = Value; const named = ordinary; const invalid = Typed; const alsoInvalid = Whole; type Constructor = typeof Typed;\n";
+    let fixture = ProjectFixture::new(
+        ["src/main.ts", "src/provider.ts"],
+        [source, "export class Item {} export const type = 1;"],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    assert_eq!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "ecmascript-type-only-value-use")
+            .count(),
+        2
+    );
+    let item = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Item")
+        .unwrap()
+        .id;
+    let ordinary = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "type")
+        .unwrap()
+        .id;
+    for (needle, offset, expected) in [
+        ("first: Typed", 7, Some(item)),
+        ("second: Whole", 8, Some(item)),
+        ("= Value;", 2, Some(item)),
+        ("= ordinary;", 2, Some(ordinary)),
+        ("= Typed;", 2, None),
+        ("= Whole;", 2, None),
+        ("typeof Typed;", 7, Some(item)),
+    ] {
+        let start = u64::try_from(source.find(needle).unwrap() + offset).unwrap();
+        let occurrence = output
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == start
+            })
+            .unwrap();
+        if let Some(symbol) = expected {
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol },
+                "{needle}"
+            );
+        } else {
+            assert!(
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+                "{needle}: {occurrence:?}"
+            );
+        }
+    }
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Imports
+            && relation
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| source.span().file() == fixture.snapshots[0].file())
+    }));
+}
+
+#[test]
 fn typescript_imported_references_preserve_both_declaration_namespaces() {
     let source = "import {Token as Local, Both} from './provider'; let typed: Local = Local; type Query = typeof Local; let instance: Both; const constructor = Both;\n";
     let provider =

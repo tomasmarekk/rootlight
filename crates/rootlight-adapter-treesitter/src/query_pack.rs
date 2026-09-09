@@ -789,13 +789,30 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Signature
+            if matches!(
+                family,
+                GrammarFamily::JavaScript | GrammarFamily::TypeScript
+            ) =>
+        {
+            ecmascript::import_signature_syntax(family, capture.node)
+                .or_else(|| canonical_syntax(family, capture.node.kind()))
+                .ok_or_else(|| query_failure("query-node-kind"))?
+        }
         StructuralRole::Reference
             if matches!(
                 family,
                 GrammarFamily::JavaScript | GrammarFamily::TypeScript
             ) =>
         {
-            if let Some(syntax) =
+            if family == GrammarFamily::TypeScript
+                && capture
+                    .node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "type_query")
+            {
+                "typescript.type_query_value"
+            } else if let Some(syntax) =
                 ecmascript::export_reference_syntax(family, capture.node, cancellation)?
             {
                 syntax
@@ -1518,7 +1535,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::JavaScript, "class_declaration") => Some("javascript.class"),
         (GrammarFamily::JavaScript, "method_definition") => Some("javascript.method"),
         (GrammarFamily::JavaScript, "variable_declarator") => Some("javascript.variable"),
-        (GrammarFamily::JavaScript, "import_statement") => Some("javascript.import"),
+        (GrammarFamily::JavaScript, "import_statement") => Some("javascript.native_import"),
         (GrammarFamily::JavaScript, "formal_parameters") => Some("javascript.parameters"),
         (GrammarFamily::JavaScript, "statement_block") => Some("javascript.block"),
         (GrammarFamily::JavaScript, "for_statement" | "for_in_statement") => Some("javascript.for"),
@@ -1610,9 +1627,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
             Some("typescript.abstract_method")
         }
         (GrammarFamily::TypeScript, "variable_declarator") => Some("typescript.variable"),
-        (GrammarFamily::TypeScript, "import_statement" | "import_alias") => {
-            Some("typescript.import")
-        }
+        (GrammarFamily::TypeScript, "import_statement") => Some("typescript.native_import"),
+        (GrammarFamily::TypeScript, "import_alias") => Some("typescript.import"),
         (GrammarFamily::TypeScript, "formal_parameters") => Some("typescript.parameters"),
         (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
         (GrammarFamily::TypeScript, "for_statement" | "for_in_statement") => Some("typescript.for"),

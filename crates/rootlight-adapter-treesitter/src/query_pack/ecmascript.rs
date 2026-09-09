@@ -20,6 +20,43 @@ pub(super) fn is_foreign_import_name(node: Node<'_>) -> bool {
     })
 }
 
+pub(super) fn import_signature_syntax(
+    family: GrammarFamily,
+    node: Node<'_>,
+) -> Option<&'static str> {
+    let parent = node.parent()?;
+    let role = if node.kind() == "import_specifier" {
+        "specifier"
+    } else if parent.kind() == "import_statement"
+        && parent.child_by_field_name("source") == Some(node)
+    {
+        "source"
+    } else if parent.kind() == "import_clause" && node.kind() == "identifier" {
+        "default"
+    } else if parent.kind() == "namespace_import" {
+        "namespace"
+    } else if parent.kind() == "import_specifier"
+        && parent.child_by_field_name("name") == Some(node)
+    {
+        "name"
+    } else {
+        return None;
+    };
+    match (family == GrammarFamily::TypeScript, role) {
+        (true, "specifier") => Some("typescript.import_specifier"),
+        (false, "specifier") => Some("javascript.import_specifier"),
+        (true, "source") => Some("typescript.import_source"),
+        (false, "source") => Some("javascript.import_source"),
+        (true, "default") => Some("typescript.import_default"),
+        (false, "default") => Some("javascript.import_default"),
+        (true, "namespace") => Some("typescript.import_namespace"),
+        (false, "namespace") => Some("javascript.import_namespace"),
+        (true, "name") => Some("typescript.import_name"),
+        (false, "name") => Some("javascript.import_name"),
+        _ => None,
+    }
+}
+
 pub(super) fn export_reference_syntax(
     family: GrammarFamily,
     node: Node<'_>,

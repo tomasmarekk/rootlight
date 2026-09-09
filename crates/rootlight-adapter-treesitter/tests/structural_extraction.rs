@@ -914,8 +914,10 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("javascript.file.module", 1),
             ("javascript.identifier.definition", 4),
             ("javascript.identifier.reference", 3),
-            ("javascript.import.import", 1),
+            ("javascript.native_import.import", 1),
             ("javascript.import_binding.declaration", 1),
+            ("javascript.import_default.signature", 1),
+            ("javascript.import_source.signature", 1),
             ("javascript.method.declaration", 1),
             ("javascript.method.scope", 1),
             ("javascript.parameter.declaration", 1),
@@ -974,8 +976,11 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("typescript.file.module", 1),
             ("typescript.identifier.definition", 4),
             ("typescript.identifier.reference", 4),
-            ("typescript.import.import", 1),
+            ("typescript.native_import.import", 1),
             ("typescript.import_binding.declaration", 1),
+            ("typescript.import_source.signature", 1),
+            ("typescript.import_specifier.signature", 1),
+            ("typescript.import_name.signature", 1),
             ("typescript.interface.declaration", 1),
             ("typescript.method.declaration", 1),
             ("typescript.method.scope", 1),
@@ -1244,6 +1249,23 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
             .get(&fact.parent().expect("name/signature has a parent"))
             .expect("name/signature parent resolves");
         if fact.kind() == SyntaxFactKind::Signature {
+            if matches!(
+                fact.syntax_kind().as_str().split_once('.'),
+                Some(("javascript" | "typescript", label)) if label.starts_with("import_")
+            ) {
+                // Module paths and foreign names belong to the import statement,
+                // not necessarily to a locally declared binding.
+                assert!(facts.iter().any(|import| {
+                    import.kind() == SyntaxFactKind::Import
+                        && import
+                            .syntax_kind()
+                            .as_str()
+                            .ends_with(".native_import.import")
+                        && import.span().start_byte() <= fact.span().start_byte()
+                        && import.span().end_byte() >= fact.span().end_byte()
+                }));
+                continue;
+            }
             let scope_kind = match fact.syntax_kind().as_str() {
                 "swift.extension_header.scope_type" | "swift.extension_target.scope_trait" => {
                     Some("swift.extension.scope")

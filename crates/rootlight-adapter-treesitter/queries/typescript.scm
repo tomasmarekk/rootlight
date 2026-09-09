@@ -32,6 +32,11 @@
 ]
 
 (import_statement) @import
+(import_statement source: (string) @signature)
+(import_clause (identifier) @signature)
+(namespace_import (identifier) @signature)
+(import_specifier) @signature
+(import_specifier name: [(identifier) (string)] @signature)
 (import_alias) @import
 (import_require_clause (identifier) @declaration @definition)
 (import_alias . (identifier) @declaration @definition)

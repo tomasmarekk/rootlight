@@ -9,6 +9,7 @@ use std::{
 };
 
 mod dart;
+mod ecmascript;
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch,
@@ -1495,6 +1496,23 @@ struct ImportDraft {
     source: SourceRef,
     module: String,
     bindings: Vec<ImportBinding>,
+    type_only: BTreeSet<String>,
+}
+
+impl ImportDraft {
+    fn admits(&self, occurrence: &OccurrenceDraft) -> bool {
+        !self
+            .type_only
+            .contains(occurrence.qualifier.as_deref().unwrap_or(&occurrence.name))
+            || matches!(
+                occurrence.role,
+                OccurrenceRole::TypeUse | OccurrenceRole::ImportUse | OccurrenceRole::Definition
+            )
+            || matches!(
+                occurrence.syntax_kind.as_str(),
+                "typescript.type_query_value.reference" | "typescript.export_local.reference"
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2146,10 +2164,36 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 }
             }
 
+            let native_imports = ecmascript::NativeImports::new(&facts, self.cancellation)?;
             for (fact_index, fact) in facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
                 match fact.kind() {
                     SyntaxFactKind::Import => {
+                        if fact
+                            .syntax_kind()
+                            .as_str()
+                            .ends_with(".native_import.import")
+                        {
+                            if let Some(import) =
+                                native_imports.parse(fact.span(), bytes, self.cancellation)?
+                            {
+                                self.imports.push(ImportDraft {
+                                    file: fact.span().file(),
+                                    span: fact.span(),
+                                    source: source_for_span(input, fact.span()),
+                                    module: import.module,
+                                    bindings: import.bindings,
+                                    type_only: import.type_only,
+                                });
+                            } else {
+                                self.push_relation_gap(
+                                    input,
+                                    fact.span(),
+                                    "ecmascript-import-evidence-unavailable",
+                                )?;
+                            }
+                            continue;
+                        }
                         let Some(text) = source_text(bytes, fact.span()) else {
                             continue;
                         };
@@ -2170,6 +2214,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 source: source_for_span(input, fact.span()),
                                 module: import.0,
                                 bindings: import.1,
+                                type_only: BTreeSet::new(),
                             });
                         }
                     }
@@ -2488,6 +2533,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 self.request.limits().ir().max_nested_items_per_record,
             )?;
             let candidates = &resolution.symbols;
+            if candidates.is_empty()
+                && self
+                    .imports
+                    .iter()
+                    .any(|import| import.file == draft.file && !import.admits(&draft))
+            {
+                let input = self.input_for_file(draft.file)?;
+                self.push_relation_gap(
+                    input,
+                    draft.source.span(),
+                    "ecmascript-type-only-value-use",
+                )?;
+            }
             if candidates.is_empty()
                 && matches!(
                     draft.syntax_kind.as_str(),
@@ -3434,6 +3492,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .imports
                 .iter()
                 .filter(|import| import.file == occurrence.file)
+                .filter(|import| import.admits(occurrence))
                 .filter(|import| {
                     import.bindings.iter().any(|binding| {
                         matches!(
@@ -3563,6 +3622,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .imports
             .iter()
             .filter(|import| import.file == occurrence.file)
+            .filter(|import| import.admits(occurrence))
         {
             let lookup_names = import
                 .bindings

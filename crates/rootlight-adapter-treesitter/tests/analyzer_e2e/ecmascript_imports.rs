@@ -5,6 +5,60 @@
 use super::*;
 
 #[test]
+fn ecmascript_import_metadata_preserves_native_fields_and_exact_text() {
+    let source = "import Default, {type Shape as Alias, type as ordinary, 'external-name' as quoted} /* 'decoy' */ from './mixed';\r\nimport type * as Space from './types'; import './side';\r\n";
+    for case in CASES
+        .iter()
+        .copied()
+        .filter(|case| matches!(case.name, "javascript" | "typescript"))
+    {
+        let provider = Arc::new(provider());
+        let fixture = Fixture::new(case, source.as_bytes());
+        let budget = limits();
+        let analysis = request(&fixture.snapshot, &fixture.source, case, &budget);
+        let parsed = rootlight_adapter_sdk::execute_parse(
+            provider.as_ref(),
+            &analysis.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        let metadata: BTreeSet<_> = parsed
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature
+                    && fact.syntax_kind().as_str().contains(".import_")
+            })
+            .map(|fact| {
+                let span = fact.span();
+                let text = &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()];
+                (fact.syntax_kind().as_str().split_once('.').unwrap().1, text)
+            })
+            .collect();
+        assert_eq!(
+            metadata,
+            BTreeSet::from([
+                ("import_default.signature", "Default"),
+                ("import_specifier.signature", "type Shape as Alias"),
+                ("import_name.signature", "Shape"),
+                ("import_specifier.signature", "type as ordinary"),
+                ("import_name.signature", "type"),
+                ("import_specifier.signature", "'external-name' as quoted"),
+                ("import_name.signature", "'external-name'"),
+                ("import_source.signature", "'./mixed'"),
+                ("import_namespace.signature", "Space"),
+                ("import_source.signature", "'./types'"),
+                ("import_source.signature", "'./side'"),
+            ]),
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
 fn ecmascript_imports_replay_with_exact_source_and_required_budget() {
     let source = "import {名 as value, type as ordinary} from './types';\r\nimport * as Space from './ns';\r\n";
     for case in CASES

@@ -18,6 +18,11 @@
 ]
 
 (import_statement) @import
+(import_statement source: (string) @signature)
+(import_clause (identifier) @signature)
+(namespace_import (identifier) @signature)
+(import_specifier) @signature
+(import_specifier name: [(identifier) (string)] @signature)
 (import_clause (identifier) @declaration @definition)
 (namespace_import (identifier) @declaration @definition)
 (import_specifier name: (identifier) @declaration @definition)
