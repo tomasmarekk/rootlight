@@ -70,10 +70,20 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             Some(EntityKind::Namespace)
         }
         SyntaxFactKind::Declaration if label == "sql.column.declaration" => Some(EntityKind::Field),
-        SyntaxFactKind::Declaration if label == "html.element.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "html.element.declaration" | "astro.element.declaration"
+            ) =>
+        {
             Some(EntityKind::MarkupElement)
         }
-        SyntaxFactKind::Declaration if label == "html.attribute.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "html.attribute.declaration" | "astro.attribute.declaration"
+            ) =>
+        {
             Some(EntityKind::MarkupAttribute)
         }
         SyntaxFactKind::Declaration

@@ -307,7 +307,7 @@ impl QueryPack {
         if family == GrammarFamily::Yaml {
             expected.retain(|name| !matches!(*name, "call" | "import"));
         }
-        if family == GrammarFamily::Html {
+        if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
         }
         if family == GrammarFamily::Markdown {
@@ -966,6 +966,7 @@ fn candidate_for_capture(
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
             GrammarFamily::Sql => return Err(query_failure("query-sql-call-kind")),
             GrammarFamily::Markdown => return Err(query_failure("query-markdown-call-kind")),
+            GrammarFamily::Astro => return Err(query_failure("query-astro-call-kind")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -1279,6 +1280,22 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Sql, "literal") => Some("sql.literal"),
         (GrammarFamily::Sql, "comment" | "marginalia") => Some("sql.comment"),
         (GrammarFamily::Html, "document") => Some("html.file"),
+        (GrammarFamily::Astro, "document") => Some("astro.file"),
+        (GrammarFamily::Astro, "element" | "script_element" | "style_element") => {
+            Some("astro.element")
+        }
+        (GrammarFamily::Astro, "tag_name") => Some("astro.tag_name"),
+        (GrammarFamily::Astro, "attribute") => Some("astro.attribute"),
+        (GrammarFamily::Astro, "attribute_name") => Some("astro.attribute_name"),
+        (GrammarFamily::Astro, "frontmatter_js_block") => Some("astro.frontmatter"),
+        (GrammarFamily::Astro, "raw_text") => Some("astro.embedded_text"),
+        (
+            GrammarFamily::Astro,
+            "html_interpolation" | "attribute_interpolation" | "attribute_backtick_string",
+        ) => Some("astro.expression"),
+        (GrammarFamily::Astro, "erroneous_end_tag") => Some("astro.unmatched_end_tag"),
+        (GrammarFamily::Astro, "attribute_value" | "text") => Some("astro.text"),
+        (GrammarFamily::Astro, "comment") => Some("astro.comment"),
         (GrammarFamily::Html, "element" | "script_element" | "style_element") => {
             Some("html.element")
         }
@@ -1619,7 +1636,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(27);
+        let mut packs = Vec::with_capacity(28);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1647,6 +1664,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
+            (GrammarFamily::Astro, include_str!("../queries/astro.scm")),
             (
                 GrammarFamily::Markdown,
                 include_str!("../queries/markdown.scm"),
@@ -1743,6 +1761,7 @@ mod tests {
             GrammarFamily::Dart,
             GrammarFamily::PowerShell,
             GrammarFamily::Markdown,
+            GrammarFamily::Astro,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -1759,7 +1778,7 @@ mod tests {
             if family == GrammarFamily::Yaml {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
             }
-            if family == GrammarFamily::Html {
+            if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
             }
             if family == GrammarFamily::Sql {

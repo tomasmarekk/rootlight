@@ -2170,6 +2170,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tree-sitter",
+ "tree-sitter-astro-next",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
@@ -3550,6 +3551,14 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-astro-next"
+version = "0.1.1"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

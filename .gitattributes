@@ -19,3 +19,4 @@ third_party/tree-sitter-scala-0.26.2/src/scanner.c whitespace=-blank-at-eol
 third_party/tree-sitter-md-0.5.3/common/html_entities.json whitespace=-blank-at-eof
 # Preserve the original Astro MIT notice byte-for-byte for license provenance.
 third_party/tree-sitter-astro-next-0.1.1/LICENSE-MIT whitespace=-blank-at-eol
+adapters/licenses/tree-sitter-astro-next-0.1.1-LICENSE-MIT whitespace=-blank-at-eol

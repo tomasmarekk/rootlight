@@ -1,4 +1,4 @@
-//! Host-bound parsing of HTML script and style bodies.
+//! Host-bound parsing of HTML/Astro script, style and server bodies.
 //! Child grammars read original bytes through included ranges. Their candidates
 //! join the host plan before identity closure, budgeting and parent assignment.
 
@@ -27,7 +27,8 @@ impl TreeSitterProvider {
                 cancellation,
             );
         }
-        if request.language().as_str() != "html" {
+        let astro = request.language().as_str() == "astro";
+        if !astro && request.language().as_str() != "html" {
             return Ok(false);
         }
         sort_cancellable_by(candidates, cancellation, |left, right| {
@@ -53,9 +54,11 @@ impl TreeSitterProvider {
         for index in 0..host_count {
             cancellation.check()?;
             let candidate = candidates[index];
-            if candidate.syntax != "html.embedded_text"
-                || (!request.included_ranges().is_empty()
-                    && !candidate_within_included_range(&candidate, request)?)
+            if !matches!(
+                candidate.syntax,
+                "html.embedded_text" | "astro.embedded_text" | "astro.frontmatter"
+            ) || (!request.included_ranges().is_empty()
+                && !candidate_within_included_range(&candidate, request)?)
             {
                 continue;
             }
@@ -65,11 +68,17 @@ impl TreeSitterProvider {
             else {
                 return Err(provider_failure("embedded-host-node"));
             };
-            if body.kind() != "raw_text" || body.byte_range() != (candidate.start..candidate.end) {
+            if !matches!(body.kind(), "raw_text" | "frontmatter_js_block")
+                || body.byte_range() != (candidate.start..candidate.end)
+            {
                 return Err(provider_failure("embedded-host-span"));
             }
-            let Some(language) = body_language(body, request.source().bytes(), cancellation)?
-            else {
+            let language = if astro {
+                astro_body_language(body, request.source().bytes(), cancellation)?
+            } else {
+                body_language(body, request.source().bytes(), cancellation)?
+            };
+            let Some(language) = language else {
                 continue;
             };
             let remaining_nodes = request
@@ -83,7 +92,11 @@ impl TreeSitterProvider {
                     .min(self.config.max_included_ranges())
                 || remaining_nodes == 0
             {
-                candidates[index].syntax = "html.embedded_limit";
+                candidates[index].syntax = if astro {
+                    "astro.embedded_limit"
+                } else {
+                    "html.embedded_limit"
+                };
                 limited = true;
                 continue;
             }
@@ -128,16 +141,28 @@ impl TreeSitterProvider {
                     _ => CoverageStatus::Bounded,
                 };
                 if !child.traversal.fully_traversed {
-                    candidates[index].syntax = "html.embedded_limit";
+                    candidates[index].syntax = if astro {
+                        "astro.embedded_limit"
+                    } else {
+                        "html.embedded_limit"
+                    };
                     limited = true;
                     continue;
                 }
-                candidates[index].syntax = "html.embedded_parse_error";
+                candidates[index].syntax = if astro {
+                    "astro.embedded_parse_error"
+                } else {
+                    "html.embedded_parse_error"
+                };
             } else {
-                candidates[index].syntax = match language {
-                    "javascript" => "html.embedded_javascript",
-                    "css" => "html.embedded_css",
-                    _ => return Err(provider_failure("embedded-language")),
+                candidates[index].syntax = if astro {
+                    "astro.embedded_parsed"
+                } else {
+                    match language {
+                        "javascript" => "html.embedded_javascript",
+                        "css" => "html.embedded_css",
+                        _ => return Err(provider_failure("embedded-language")),
+                    }
                 };
             }
             let pack = self
@@ -204,6 +229,65 @@ pub(super) fn embedded_limits(
         limits.ir().clone(),
     )
     .map_err(|_| provider_failure("embedded-limits"))
+}
+
+fn astro_body_language(
+    body: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    if body.kind() == "frontmatter_js_block" {
+        return Ok(Some("typescript"));
+    }
+    let Some(element) = body.parent().filter(|node| !node.has_error()) else {
+        return Ok(None);
+    };
+    let Some(tag) = start_tag(element) else {
+        return Ok(None);
+    };
+    let mut attributes = 0usize;
+    let mut cursor = tag.walk();
+    for attribute in tag.named_children(&mut cursor) {
+        cancellation.check()?;
+        if attribute.kind() == "tag_name" {
+            continue;
+        }
+        // Spread/shorthand attributes can supply a runtime type or src. They
+        // are not evidence that the body is an attribute-free processed script.
+        if attribute.kind() != "attribute" {
+            return Ok(None);
+        }
+        attributes = attributes.saturating_add(1);
+        let Some(name) = attribute
+            .named_child(0)
+            .filter(|node| node.kind() == "attribute_name")
+            .and_then(|node| source.get(node.byte_range()))
+        else {
+            return Ok(None);
+        };
+        // Preprocessor declarations and dynamic type attributes cannot be routed
+        // as CSS/JavaScript without evaluating an Astro build configuration.
+        if name.eq_ignore_ascii_case(b"lang") || name.eq_ignore_ascii_case(b"language") {
+            return Ok(None);
+        }
+        if name.eq_ignore_ascii_case(b"type")
+            && attribute.named_child(1).is_some_and(|node| {
+                matches!(
+                    node.kind(),
+                    "attribute_interpolation" | "attribute_backtick_string"
+                )
+            })
+        {
+            return Ok(None);
+        }
+    }
+    // Astro processes attribute-free client scripts as TypeScript. An attribute
+    // opts out of processing; src bodies and non-script data retain explicit gaps.
+    // https://docs.astro.build/en/guides/client-side-scripts/
+    if element.kind() == "script_element" && attributes == 0 {
+        return Ok(Some("typescript"));
+    }
+    body_language(body, source, cancellation)
 }
 
 fn body_language(

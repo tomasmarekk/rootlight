@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 27] = [
+    let cases: [(&str, &str, &[u8]); 28] = [
+        (
+            "view.astro",
+            "astro",
+            b"---\nconst heading: string = 'Guide';\n---\n<main>{heading}</main>",
+        ),
         (
             "sample.md",
             "markdown",

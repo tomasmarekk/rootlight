@@ -1,0 +1,337 @@
+//! Astro host and native child analysis against original source coordinates.
+//! Server/client ownership and visible template gaps prevent syntax-only passes
+//! from being mistaken for complete framework or template semantics.
+
+use super::*;
+
+#[test]
+fn astro_embedded_preflight_and_replay_retain_complete_declarations() {
+    let source = "---\r\nfunction first(value: string) { return value; }\r\n---\r\n<style>.item { color: red; }</style><script>function last(value) { return value; }</script>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, ASTRO);
+    let fixture = Fixture::new(ASTRO, source.as_bytes());
+    let budget = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, ASTRO, &budget);
+    let demand = provider
+        .required_syntax_fact_count(&initial_request.to_parse_request(), &deadline())
+        .unwrap();
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        demand,
+        artifact.required_syntax_fact_count(&deadline()).unwrap()
+    );
+    let bounded = limits_with_syntax_records(demand);
+    let changed = fixture.next_generation();
+    let next_request = request(&changed.snapshot, &changed.source, ASTRO, &bounded);
+    let (fresh, artifact) = analyzer
+        .analyze_and_capture(
+            &next_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    let identities = |document: &rootlight_ir::NormalizedIrDocument| {
+        document
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(identities(first.document()), identities(replay.document()));
+    assert!(
+        replay
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "last")
+    );
+    for entity in &replay.document().entities {
+        assert_eq!(
+            entity.evidence.source.as_ref().unwrap().generation(),
+            changed.source.generation()
+        );
+    }
+    let edited_source = source
+        .replace("return value;", "return value + '!';")
+        .replace("color: red", "color: blue");
+    let edited = fixture.rewrite(edited_source.as_bytes());
+    let next = analyze(
+        &analyzer,
+        &request(&edited.snapshot, &edited.source, ASTRO, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(identities(first.document()), identities(next.document()));
+    for entity in &next.document().entities {
+        let reference = entity.evidence.source.as_ref().unwrap();
+        assert_eq!(reference.generation(), edited.source.generation());
+        assert_eq!(
+            reference.content_hash(),
+            content_hash(edited_source.as_bytes())
+        );
+    }
+}
+
+pub(super) const ASTRO: LanguageCase = LanguageCase {
+    name: "astro",
+    path: "src/view.astro",
+    frontend: "tree-sitter-astro-next-0.1.1",
+    source: "<main>text</main>",
+    generated: false,
+    body_before: "text",
+    body_after: "changed text",
+};
+
+#[test]
+fn astro_child_limits_preserve_host_and_exact_skipped_ranges() {
+    let source = "---\nfunction server() {}\n---\n<script>function client() {}</script><style>.card { color: red; }</style>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, ASTRO);
+    let fixture = Fixture::new(ASTRO, source.as_bytes());
+    let base = limits();
+    for ranges in [0, 1, 2] {
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            ranges,
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            base.ir().clone(),
+        )
+        .unwrap();
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, ASTRO, &budget),
+            &ExtensionSupport::default(),
+        );
+        let gaps: Vec<_> = result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "astro-embedded-analysis-limit")
+            .collect();
+        assert_eq!(gaps.len(), 3 - ranges);
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Function)
+                .count(),
+            ranges
+        );
+        assert!(result.report().resources().syntax_nodes() <= budget.max_syntax_nodes());
+        for gap in gaps {
+            assert_eq!(gap.reason, SkippedRegionReason::ResourceLimit);
+            let span = gap.source.span();
+            let text = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert!(!text.contains("<script>") && !text.contains("---"));
+        }
+    }
+}
+
+fn output(source: &str) -> AnalysisOutput {
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(ASTRO, source.as_bytes());
+    let budget = limits();
+    let result = analyze(
+        &analyzer(&provider, ASTRO),
+        &request(&fixture.snapshot, &fixture.source, ASTRO, &budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+    result
+}
+
+#[test]
+fn astro_server_client_and_css_keep_original_identity() {
+    let source = "---\r\nfunction greet(name: string) { return name; }\r\n---\r\n<main title='é'><Card value={greet('a')} /><script>function greet(name: string) { return name + '!'; }</script><style>.card { color: red; }</style></main>";
+    let result = output(source);
+    let document = result.document();
+    let functions: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "greet")
+        .collect();
+    assert_eq!(functions.len(), 2, "{:#?}", document.entities);
+    assert_ne!(functions[0].id, functions[1].id);
+    assert_ne!(functions[0].container, functions[1].container);
+    assert!(
+        functions
+            .iter()
+            .all(|entity| entity.language == "typescript")
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.language == "css" && entity.canonical_name == ".card")
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.language == "astro"
+                && entity.kind == EntityKind::MarkupElement
+                && entity.canonical_name == "Card")
+    );
+    assert_eq!(document.files.len(), 1);
+    assert_eq!(document.files[0].language, "astro");
+    for entity in functions {
+        let reference = entity.evidence.source.as_ref().unwrap();
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        let span = reference.span();
+        assert!(
+            source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()]
+                .starts_with("function greet(")
+        );
+    }
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "astro-expression-analysis-unavailable")
+    );
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "astro-embedded-analysis-unavailable")
+    );
+}
+
+#[test]
+fn astro_unprocessed_data_and_preprocessors_are_not_code_successes() {
+    for (tag, language, name) in [
+        (
+            "<script>function typed(value: string) { return value; }</script>",
+            Some("typescript"),
+            "typed",
+        ),
+        (
+            "<script is:inline>function inline() {}</script>",
+            Some("javascript"),
+            "inline",
+        ),
+        (
+            "<script type='application/json'>function hidden() {}</script>",
+            None,
+            "hidden",
+        ),
+        (
+            "<script src='client.js'>function hidden() {}</script>",
+            None,
+            "hidden",
+        ),
+        (
+            "<script type={kind}>function hidden() {}</script>",
+            None,
+            "hidden",
+        ),
+        (
+            "<script {...props}>function hidden() {}</script>",
+            None,
+            "hidden",
+        ),
+        (
+            "<style {...props}>.hidden { color: red; }</style>",
+            None,
+            ".hidden",
+        ),
+        (
+            "<style lang='scss'>.hidden { color: red; }</style>",
+            None,
+            ".hidden",
+        ),
+        (
+            "<style is:global>.visible { color: red; }</style>",
+            Some("css"),
+            ".visible",
+        ),
+    ] {
+        let result = output(tag);
+        let document = result.document();
+        if language.is_none() {
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .all(|entity| entity.canonical_name != name),
+                "{tag}: {:#?}",
+                document.entities
+            );
+        }
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name
+                    && Some(entity.language.as_str()) == language),
+            language.is_some(),
+            "{tag}: {:#?}",
+            document.entities
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "astro-embedded-analysis-unavailable"),
+            language.is_none(),
+            "{tag}: {:#?}",
+            document.skipped_regions
+        );
+    }
+}
+
+#[test]
+fn astro_child_errors_do_not_hide_healthy_neighbors_or_template_gaps() {
+    let source = "---\nconst broken: = ;\n---\n<main title={name}>{name}<script>function healthy() {}</script></main>";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "healthy" && entity.language == "typescript")
+    );
+    let parse_gap = document
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "astro-embedded-parse-error")
+        .expect("invalid TypeScript is not a successful child parse");
+    assert_eq!(parse_gap.reason, SkippedRegionReason::ParseError);
+    let mut expressions: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "astro-expression-analysis-unavailable")
+        .map(|gap| {
+            let span = gap.source.span();
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()]
+        })
+        .collect();
+    expressions.sort_unstable();
+    assert_eq!(expressions, ["{name}", "{name}"]);
+}

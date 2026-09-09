@@ -1304,9 +1304,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             if let Some((domain, detail)) = source_coverage_gap(fact) {
                 let reason = match fact.syntax_kind().as_str() {
                     "html.embedded_limit.signature"
+                    | "astro.embedded_limit.signature"
                     | "markdown.code_limit.signature"
                     | "markdown.inline_limit.signature" => SkippedRegionReason::ResourceLimit,
                     "html.embedded_parse_error.signature"
+                    | "astro.embedded_parse_error.signature"
                     | "markdown.code_error.signature"
                     | "markdown.inline_error.signature" => SkippedRegionReason::ParseError,
                     _ => SkippedRegionReason::UnsupportedConstruct,
@@ -3066,6 +3068,26 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             "sql-function-body-semantics-unavailable",
         )),
         "html.file.module" => Some((FactDomain::Relations, "html-dom-semantics-unavailable")),
+        "astro.file.module" => Some((
+            FactDomain::Relations,
+            "astro-template-semantics-unavailable",
+        )),
+        "astro.expression.signature" => Some((
+            FactDomain::Entities,
+            "astro-expression-analysis-unavailable",
+        )),
+        "astro.frontmatter.signature" | "astro.embedded_text.signature" => {
+            Some((FactDomain::Entities, "astro-embedded-analysis-unavailable"))
+        }
+        "astro.embedded_limit.signature" => {
+            Some((FactDomain::Entities, "astro-embedded-analysis-limit"))
+        }
+        "astro.embedded_parse_error.signature" => {
+            Some((FactDomain::Entities, "astro-embedded-parse-error"))
+        }
+        "astro.unmatched_end_tag.signature" => {
+            Some((FactDomain::Entities, "astro-unmatched-end-tag"))
+        }
         "markdown.file.module" => Some((
             FactDomain::Relations,
             "markdown-link-resolution-unavailable",
@@ -3802,11 +3824,15 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "scala"
                 | "dart"
                 | "powershell"
+                | "astro"
         )
     {
         return language;
     }
-    if request.language().as_str() == "html" {
+    if matches!(request.language().as_str(), "html" | "astro") {
+        if fact.syntax_kind().as_str().starts_with("typescript.") {
+            return "typescript";
+        }
         if fact.syntax_kind().as_str().starts_with("javascript.") {
             return "javascript";
         }
@@ -3910,6 +3936,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "dart.file.module"
                 | "powershell.file.module"
                 | "markdown.file.module"
+                | "astro.file.module"
         )
         && matches!(
             language,
@@ -3932,6 +3959,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "dart"
                 | "powershell"
                 | "markdown"
+                | "astro"
         )
 }
 
@@ -3961,6 +3989,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str().ends_with(".signature")
         && fact.syntax_kind().as_str() != "sql.body.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
+        && !fact.syntax_kind().as_str().starts_with("astro.")
         && !matches!(
             fact.syntax_kind().as_str(),
             "markdown.code_block.signature"

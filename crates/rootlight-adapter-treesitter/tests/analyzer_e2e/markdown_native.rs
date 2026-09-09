@@ -259,6 +259,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             TOML_CASE,
             yaml_native::YAML,
             html_native::HTML,
+            astro_native::ASTRO,
             sql_native::SQL,
             r_native::R,
             solidity_native::SOLIDITY,
