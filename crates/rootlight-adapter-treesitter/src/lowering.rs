@@ -1342,20 +1342,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     &entity_source,
                 )?;
                 relations.insert(relation.id, relation);
-                if let Some(signature) = entity.signature_evidence.as_deref() {
+                if let Some(signature) = entity.signature_evidence.as_ref() {
                     let signature_span = entity
                         .signature_span
                         .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
                     let signature_source = source_for_span(self.full_source, signature_span);
-                    if let Some(envelope) = lexical_extension(
-                        self.full_source,
-                        provenance_id,
-                        signature_source,
-                        LexicalEvidenceKind::Signature,
-                        FactRef::Entity(entity.record.id),
-                        LexicalEvidenceFormat::SourceText,
-                        signature,
-                    ) {
+                    let lexical = signature.lexical(FactRef::Entity(entity.record.id));
+                    if let Some(envelope) = lexical.and_then(|lexical| {
+                        new_lexical_evidence_envelope(
+                            self.full_source.repository(),
+                            self.full_source.generation(),
+                            provenance_id,
+                            signature_source,
+                            &lexical,
+                        )
+                        .ok()
+                    }) {
                         if !insert_optional_extension(
                             envelope,
                             &mut extensions,
@@ -1700,8 +1702,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut nearest_declaration = HashMap::new();
         let mut captures = HashMap::<u64, AssociatedCaptures>::new();
         let mut scope_identity_captures = HashMap::<u64, ScopeIdentityCaptures>::new();
+        let mut signature_comments = Vec::new();
         for (index, fact) in ordered_facts.iter().enumerate() {
             check_periodically(index, cancellation)?;
+            if self.request.language().as_str() == "powershell"
+                && fact.kind() == SyntaxFactKind::Comment
+            {
+                signature_comments.push(fact.span());
+            }
             let parent_declaration = fact
                 .parent()
                 .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
@@ -1735,6 +1743,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
             }
         }
+        crate::runtime::sort_cancellable_by(
+            &mut signature_comments,
+            cancellation,
+            |left, right| {
+                (left.start_byte(), left.end_byte()).cmp(&(right.start_byte(), right.end_byte()))
+            },
+        )?;
+        signature_comments.dedup();
         let mut drafts = HashMap::<u64, EntityDraft>::new();
         let mut nearest_entity_ancestor = HashMap::new();
         let mut nearest_scope_ancestor = HashMap::<u64, Option<ScopeContext>>::new();
@@ -2112,7 +2128,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
             {
                 let text = self.text_for_span(signature.span())?;
                 let maximum = self.request.limits().ir().max_string_bytes;
-                let canonical = if kind == EntityKind::Constructor
+                let first_comment = signature_comments.partition_point(|comment| {
+                    comment.start_byte() < signature.span().start_byte()
+                });
+                let comments = &signature_comments[first_comment..];
+                let needs_projection = comments
+                    .first()
+                    .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
+                let projection = if needs_projection {
+                    project_commented_signature(text, signature.span(), comments, cancellation)?
+                } else {
+                    None
+                };
+                let signature_text = projection
+                    .as_ref()
+                    .map_or(text, rootlight_ir::SourceTextProjection::text);
+                let canonical = if needs_projection && projection.is_none() {
+                    None
+                } else if kind == EntityKind::Constructor
                     && self.request.language().as_str() == "dart"
                     && let Some(definition) = definition
                 {
@@ -2124,10 +2157,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         maximum,
                     )
                 } else {
-                    canonical_symbol_signature(text, maximum)
+                    canonical_symbol_signature(signature_text, maximum)
                 };
                 match canonical {
-                    Some(canonical) => (canonical, Some(text.to_owned()), Some(signature.span())),
+                    Some(canonical) => (
+                        canonical,
+                        Some(match projection {
+                            Some(projection) => SignatureEvidence::Projected(projection),
+                            None => SignatureEvidence::Contiguous(text.to_owned()),
+                        }),
+                        Some(signature.span()),
+                    ),
                     None => (String::new(), None, None),
                 }
             } else {
@@ -2373,6 +2413,93 @@ struct EntityPlan {
 }
 
 #[derive(Clone)]
+enum SignatureEvidence {
+    Contiguous(String),
+    Projected(rootlight_ir::SourceTextProjection),
+}
+
+impl SignatureEvidence {
+    fn lexical(&self, subject: FactRef) -> Option<LexicalEvidenceV1> {
+        match self {
+            Self::Contiguous(text) => LexicalEvidenceV1::from_complete_text(
+                LexicalEvidenceKind::Signature,
+                subject,
+                LexicalEvidenceFormat::SourceText,
+                text,
+            )
+            .ok(),
+            Self::Projected(projection) => Some(LexicalEvidenceV1::from_source_projection(
+                subject,
+                projection.clone(),
+            )),
+        }
+    }
+}
+
+fn project_commented_signature(
+    text: &str,
+    span: SourceSpan,
+    comments: &[SourceSpan],
+    cancellation: &Cancellation,
+) -> Result<Option<rootlight_ir::SourceTextProjection>, AdapterError> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    // Native comment facts identify trivia; quote contents are never scanned
+    // for comment markers. Every retained fragment keeps its original bytes.
+    for comment in comments
+        .iter()
+        .take_while(|comment| comment.start_byte() < span.end_byte())
+    {
+        cancellation.check()?;
+        let Some(start) = comment
+            .start_byte()
+            .checked_sub(span.start_byte())
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(end) = comment
+            .end_byte()
+            .checked_sub(span.start_byte())
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return Ok(None);
+        };
+        if start < cursor || end > text.len() {
+            return Ok(None);
+        }
+        if !push_signature_fragment(text, cursor..start, &mut ranges) {
+            return Ok(None);
+        }
+        cursor = end;
+    }
+    if !push_signature_fragment(text, cursor..text.len(), &mut ranges) {
+        return Ok(None);
+    }
+    Ok(rootlight_ir::SourceTextProjection::from_source(text, &ranges).ok())
+}
+
+fn push_signature_fragment(
+    text: &str,
+    range: std::ops::Range<usize>,
+    ranges: &mut Vec<std::ops::Range<usize>>,
+) -> bool {
+    let Some(fragment) = text.get(range.clone()) else {
+        return false;
+    };
+    let trimmed = fragment.trim_ascii();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if ranges.len() == rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS {
+        return false;
+    }
+    let start = range.start + fragment.len() - fragment.trim_ascii_start().len();
+    ranges.push(start..start + trimmed.len());
+    true
+}
+
+#[derive(Clone)]
 struct EntityDraft {
     local_id: u64,
     parent_entity: Option<u64>,
@@ -2389,7 +2516,7 @@ struct EntityDraft {
     kind: EntityKind,
     name: String,
     signature: String,
-    signature_evidence: Option<String>,
+    signature_evidence: Option<SignatureEvidence>,
     signature_span: Option<SourceSpan>,
     language: String,
     qualified_length: usize,
@@ -2402,7 +2529,7 @@ struct MaterializedEntity {
     direct_parent: ContainerRef,
     identity_guard: [u8; 32],
     definition_local_id: Option<u64>,
-    signature_evidence: Option<String>,
+    signature_evidence: Option<SignatureEvidence>,
     signature_span: Option<SourceSpan>,
 }
 

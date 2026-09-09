@@ -208,7 +208,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/44";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/45";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/3";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/2";
@@ -27227,6 +27227,13 @@ mod tests {
         let nested = (0..8).fold("{ param($deep) $deep + 1 }".to_owned(), |value, _| {
             format!("@{{ Entry = {value} }}")
         });
+        let source = source.replace(
+            "function Read-Entry { param",
+            &format!(
+                "function Read-Entry {{ <# {} #> param",
+                "documentation ".repeat(400)
+            ),
+        );
         let complete_source = format!("{source}$nested = {nested}\n");
         let source = complete_source.as_str();
         fs::write(fixture.path().join("catalog.psm1"), source).unwrap();
@@ -27320,6 +27327,7 @@ mod tests {
             .unwrap();
         assert_eq!(noop.generation, initial.generation);
         let changed = source
+            .replace("documentation ", "updated documentation ")
             .replace("return $Name", "Write-Output '雪'; return $Name")
             .replace("$leaf + 1", "$leaf + 1000")
             .replace("$deep + 1", "$deep + 1000")
@@ -27337,6 +27345,31 @@ mod tests {
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
             let document = generation.document();
+            let projected = document
+                .extensions
+                .iter()
+                .find(|extension| {
+                    extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+                        && extension.version == rootlight_ir::LEXICAL_PROJECTION_VERSION
+                })
+                .unwrap();
+            assert_eq!(projected.generation, receipt.generation);
+            let signature = rootlight_ir::decode_lexical_evidence_envelope(projected).unwrap();
+            assert_eq!(
+                signature.text(),
+                "function Read-Entry { param([string]$Name)"
+            );
+            let span = projected.evidence.source.as_ref().unwrap().span();
+            signature
+                .verify_source_text(
+                    expected_source
+                        .get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap(),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
             assert!(!document.skipped_regions.iter().any(|gap| matches!(
                 gap.reason,
                 rootlight_ir::SkippedRegionReason::ParseError

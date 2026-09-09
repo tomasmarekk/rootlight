@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LexicalProjectionV2",
+  "type": "object",
+  "properties": {
+    "complete_text_hash": {
+      "$ref": "#/$defs/ContentHash"
+    },
+    "format": {
+      "type": "string",
+      "const": "source_projection"
+    },
+    "kind": {
+      "type": "string",
+      "const": "signature"
+    },
+    "source_parts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SignatureSourcePart"
+      },
+      "maxItems": 64,
+      "minItems": 1
+    },
+    "subject": {
+      "description": "The common IR fact described by this evidence.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FileId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/SymbolId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "entity"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1,
+      "x-rootlight-max-utf8-bytes": 4096
+    },
+    "truncated": {
+      "const": false
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "subject",
+    "format",
+    "text",
+    "complete_text_hash",
+    "truncated",
+    "source_parts"
+  ],
+  "$defs": {
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "FactId": {
+      "type": "string",
+      "pattern": "^fact1_[a-z2-7]{39}$"
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "SignatureSourcePart": {
+      "description": "One byte mapping from an envelope-relative source range to retained text.\n\nIndividual mappings are wire data; their ordering, bounds and UTF-8 text\nboundaries are validated together by the lexical envelope decoder.",
+      "type": "object",
+      "properties": {
+        "source_end": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_start": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "text_end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "text_start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_start",
+        "source_end",
+        "text_start",
+        "text_end"
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}

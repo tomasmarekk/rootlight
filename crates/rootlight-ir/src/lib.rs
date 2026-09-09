@@ -17,6 +17,7 @@ mod identity;
 mod lexical;
 mod normalized;
 mod rebind;
+mod source_projection;
 mod validation;
 
 pub use identity::{
@@ -36,12 +37,14 @@ pub use identity::{
     entity_kind_identity_label, new_file_identity_claim_envelope,
     new_symbol_identity_claim_envelope,
 };
+#[cfg(feature = "schema")]
+pub use lexical::LexicalProjectionSchema;
 pub use lexical::{
-    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
-    LexicalEvidenceKind, LexicalEvidenceV1, LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES,
-    MAX_LEXICAL_SIGNATURE_BYTES, MAX_LEXICAL_SUMMARY_BYTES, decode_lexical_evidence,
-    decode_lexical_evidence_envelope, encode_lexical_evidence, new_lexical_evidence_envelope,
-    validate_lexical_evidence_envelope,
+    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LEXICAL_PROJECTION_VERSION,
+    LexicalEvidence, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1,
+    LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES, MAX_LEXICAL_SIGNATURE_BYTES,
+    MAX_LEXICAL_SUMMARY_BYTES, decode_lexical_evidence, decode_lexical_evidence_envelope,
+    encode_lexical_evidence, new_lexical_evidence_envelope, validate_lexical_evidence_envelope,
 };
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
@@ -65,6 +68,9 @@ pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,
     NormalizedRebindError, canonical_generation_neutral_digests,
     generation_neutral_workspace_bytes,
+};
+pub use source_projection::{
+    MAX_SIGNATURE_SOURCE_PARTS, SignatureSourcePart, SourceTextProjection,
 };
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,

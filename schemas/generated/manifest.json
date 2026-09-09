@@ -30,15 +30,19 @@
     },
     {
       "path": "crates/rootlight-ir/src/lexical.rs",
-      "blake3": "9acce8fa178e682b1948b3f4f99246e62f6edcbe9bd7388bf72710003d2ea1ea"
+      "blake3": "75a1365e3382f89f86a1f5baf6a33dbeba0a3a31d4af4328049027e31d216e0a"
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "2a92e1b74383a33e722b1336b878130be92e06d69fe1f8628c04fd1058c4f33d"
+      "blake3": "77897c22533d7637ec084181d860090e15fbb3823a2b5e403b240c53a1a44277"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
       "blake3": "f2ab5a52facd2d4307d828c766f05a71bc04a3814be7f229e0a1fc6ba4392de0"
+    },
+    {
+      "path": "crates/rootlight-ir/src/source_projection.rs",
+      "blake3": "9a86e816bd5f76b4824276ed6a2e7d5dfcca411817cddb7f6de120780fe62e7e"
     },
     {
       "path": "crates/rootlight-ir/src/validation.rs",
@@ -242,7 +246,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "b69efe109015cb625c4b5eaa77081fd7761b0f6a477661c75f4785ca136a26ad"
+      "blake3": "6db7c9694da0cbfdab24c02e5771c3379ddf41ca3e09e12bd5291b30668761e6"
     }
   ],
   "artifacts": [
@@ -305,6 +309,10 @@
     {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",
       "blake3": "b513422d0bb11c80fda6eaac11f20c6af74b41a4b0c1dc637b5636852f2706ff"
+    },
+    {
+      "path": "schemas/generated/json/ir-extension-rootlight-lexical-2.schema.json",
+      "blake3": "864e9fe00a828d42deaabb336f9d4adeda035f6d5920908f469c1d9108947e8b"
     },
     {
       "path": "schemas/generated/json/mcp-architecture-cycles-input-1.0.schema.json",

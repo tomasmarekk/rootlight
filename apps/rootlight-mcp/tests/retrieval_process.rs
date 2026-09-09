@@ -113,6 +113,24 @@ fn powershell_declarations_cross_real_process_boundaries() {
 }
 
 #[test]
+fn powershell_commented_signatures_cross_real_process_boundaries() {
+    let source = format!(
+        "function Read-Entry {{ <# {} #> [CmdletBinding()] param([string]$Name = 'literal # text'); $Name }}",
+        "documentation ".repeat(400)
+    );
+    source_entities_with_signatures_cross_process_boundaries(
+        "powershell",
+        "catalog.psm1",
+        &source,
+        &[("Read-Entry", "function", 1)],
+        &[(
+            "Read-Entry",
+            "function Read-Entry { [CmdletBinding()] param([string]$Name = 'literal # text')",
+        )],
+    );
+}
+
+#[test]
 fn powershell_empty_blocks_preserve_exact_retrieval_across_processes() {
     source_entities_cross_process_boundaries(
         "powershell",
@@ -476,6 +494,16 @@ fn source_entities_cross_process_boundaries(
     source: &str,
     queries: &[(&str, &str, usize)],
 ) {
+    source_entities_with_signatures_cross_process_boundaries(language, path, source, queries, &[]);
+}
+
+fn source_entities_with_signatures_cross_process_boundaries(
+    language: &str,
+    path: &str,
+    source: &str,
+    queries: &[(&str, &str, usize)],
+    signatures: &[(&str, &str)],
+) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, count) in queries {
@@ -539,6 +567,9 @@ fn source_entities_cross_process_boundaries(
             assert_eq!(explanation["schema_version"], "1.4");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
+            if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
+                assert_eq!(explanation["data"]["symbols"][0]["signature"], *signature);
+            }
             if language == "r" && kind == "function" {
                 assert_eq!(
                     explanation["data"]["symbols"][0]["signature"],

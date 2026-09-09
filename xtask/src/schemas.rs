@@ -123,12 +123,13 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 14] = [
     ("1.15", "protobuf/1.15/rootlight.desc"),
     ("1.16", "protobuf/1.16/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 23] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 24] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
     "crates/rootlight-ids/src/lib.rs",
     "crates/rootlight-ir/src/lexical.rs",
+    "crates/rootlight-ir/src/source_projection.rs",
     "crates/rootlight-ir/src/lib.rs",
     "crates/rootlight-ir/src/normalized.rs",
     "crates/rootlight-ir/src/validation.rs",
@@ -915,6 +916,9 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_normalized_ir_schema(&schema_root.join("ir-1.4.schema.json"))?;
     write_schema::<LexicalEvidenceV1>(
         &schema_root.join("ir-extension-rootlight-lexical-1.schema.json"),
+    )?;
+    write_schema::<rootlight_ir::LexicalProjectionSchema>(
+        &schema_root.join("ir-extension-rootlight-lexical-2.schema.json"),
     )?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
@@ -1738,7 +1742,59 @@ fn validate_generated_json_schemas(
     let lexical_unknown_subject_field_runtime =
         serde_json::to_string(&lexical_unknown_subject_field)
             .map_err(SchemaError::SerializeJson)?;
+    let projection_subject = decode_lexical_evidence(lexical_payload_text)
+        .map_err(|_| SchemaError::CompatibilityLexicalExtensionFixture)?
+        .subject();
+    let projection =
+        rootlight_ir::SourceTextProjection::from_source("fn /* comment */ f()", &[0..2, 17..20])
+            .map_err(|error| SchemaError::GeneratedSchemaSemantics(error.to_string()))?;
+    let projection =
+        rootlight_ir::LexicalEvidence::from_source_projection(projection_subject, projection);
+    let projection_runtime = rootlight_ir::encode_lexical_evidence(&projection)
+        .map_err(|error| SchemaError::GeneratedSchemaSemantics(error.to_string()))?;
+    let projection_payload =
+        serde_json::to_value(&projection).map_err(SchemaError::SerializeJson)?;
+    let mut projection_without_parts = projection_payload.clone();
+    projection_without_parts
+        .as_object_mut()
+        .expect("projection serializes as an object")
+        .remove("source_parts");
+    let mut projection_truncated = projection_payload.clone();
+    projection_truncated["truncated"] = serde_json::json!(true);
+    let mut projection_excess_parts = projection_payload.clone();
+    projection_excess_parts["source_parts"] = serde_json::json!(vec![
+        projection_payload["source_parts"][0].clone(); rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS + 1
+    ]);
     let mut cases = vec![
+        SchemaSemanticCase::valid_with_runtime(
+            "ir-extension-rootlight-lexical-2.schema.json",
+            "complete source-mapped signature",
+            projection_payload.clone(),
+            projection_runtime,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "projection cannot masquerade as contiguous evidence",
+            projection_payload,
+        ),
+        SchemaSemanticCase::invalid_with_runtime(
+            "ir-extension-rootlight-lexical-2.schema.json",
+            "projection requires source parts",
+            projection_without_parts.clone(),
+            serde_json::to_string(&projection_without_parts).map_err(SchemaError::SerializeJson)?,
+        ),
+        SchemaSemanticCase::invalid_with_runtime(
+            "ir-extension-rootlight-lexical-2.schema.json",
+            "projection cannot be truncated",
+            projection_truncated.clone(),
+            serde_json::to_string(&projection_truncated).map_err(SchemaError::SerializeJson)?,
+        ),
+        SchemaSemanticCase::invalid_with_runtime(
+            "ir-extension-rootlight-lexical-2.schema.json",
+            "projection bounds source part count",
+            projection_excess_parts.clone(),
+            serde_json::to_string(&projection_excess_parts).map_err(SchemaError::SerializeJson)?,
+        ),
         SchemaSemanticCase::valid(
             "config-1.0.schema.json",
             "minimal supported configuration",
@@ -2645,6 +2701,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.0.schema.json"),

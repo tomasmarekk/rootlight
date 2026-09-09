@@ -9,19 +9,23 @@ use rootlight_ids::{
 use serde::{Deserialize, Serialize};
 
 use crate::{ExtensionCriticality, ExtensionEnvelope, FactEvidence, FactRef, SourceRef};
+use crate::{SignatureSourcePart, SourceTextProjection};
 
 /// Namespace of the first-party lexical evidence extension.
 pub const LEXICAL_EXTENSION_NAMESPACE: &str = "rootlight.lexical";
-/// Exact payload version of the first-party lexical evidence extension.
+/// Payload version for contiguous first-party lexical evidence.
 pub const LEXICAL_EXTENSION_VERSION: &str = "1";
+/// Lexical envelope version for complete source-fragment projections.
+pub const LEXICAL_PROJECTION_VERSION: &str = "2";
 /// Maximum retained UTF-8 bytes in one signature.
 pub const MAX_LEXICAL_SIGNATURE_BYTES: usize = 4 * 1024;
 /// Maximum retained UTF-8 bytes in one documentation or comment summary.
 pub const MAX_LEXICAL_SUMMARY_BYTES: usize = 512;
 /// Maximum canonical JSON bytes in one lexical extension payload.
 ///
-/// The bound covers worst-case JSON escaping of a 4 KiB signature plus all
-/// fixed metadata while remaining far below the generic IR extension ceiling.
+/// The bound covers worst-case JSON escaping of a contiguous 4 KiB signature
+/// plus fixed metadata. Projections also charge their source mappings against
+/// this unchanged bound and fail encoding rather than dropping fragments.
 pub const MAX_LEXICAL_PAYLOAD_BYTES: usize = 25 * 1024;
 
 const LEXICAL_FACT_DOMAIN: &str = "rootlight.lexical/v1";
@@ -58,32 +62,41 @@ impl LexicalEvidenceKind {
     }
 }
 
-/// Closed text formats understood by lexical evidence version 1.
+/// Closed text formats understood by the versioned lexical evidence decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LexicalEvidenceFormat {
     /// Exact source-language text without prose generation.
     SourceText,
+    /// Exact source fragments joined by mapped presentation whitespace.
+    SourceProjection,
     /// Adapter-supplied plain text without markup semantics.
     PlainText,
 }
 
 /// One bounded, hash-linked lexical evidence payload.
 ///
-/// Fields are private so every constructed or decoded value satisfies the
-/// version 1 byte, format, truncation, and hash invariants.
+/// Fields are private so every constructed or decoded value satisfies its
+/// byte, format, truncation, mapping and hash invariants. Contiguous payloads
+/// retain their frozen version 1 encoding; projections use envelope version 2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LexicalEvidenceV1 {
+pub struct LexicalEvidence {
     kind: LexicalEvidenceKind,
     subject: FactRef,
     format: LexicalEvidenceFormat,
     text: String,
     complete_text_hash: ContentHash,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_parts: Option<Vec<SignatureSourcePart>>,
 }
 
-impl LexicalEvidenceV1 {
+/// Compatibility name for the bounded lexical evidence value.
+/// The envelope version distinguishes contiguous text from source projections.
+pub type LexicalEvidenceV1 = LexicalEvidence;
+
+impl LexicalEvidence {
     /// Creates bounded lexical evidence from the complete source-derived text.
     ///
     /// The constructor hashes the complete input, retains only a UTF-8-safe
@@ -116,6 +129,7 @@ impl LexicalEvidenceV1 {
             text: retained.to_owned(),
             complete_text_hash: content_hash(complete_text.as_bytes()),
             truncated,
+            source_parts: None,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -139,7 +153,7 @@ impl LexicalEvidenceV1 {
         self.format
     }
 
-    /// Returns the bounded retained text prefix.
+    /// Returns the bounded retained text, including mapped projection separators.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
@@ -163,6 +177,68 @@ impl LexicalEvidenceV1 {
         self.truncated
     }
 
+    /// Creates a complete signature from a byte-validated source projection.
+    ///
+    /// Its envelope uses version 2. Version 1 payload bytes remain unchanged.
+    #[must_use]
+    pub fn from_source_projection(subject: FactRef, projection: SourceTextProjection) -> Self {
+        Self {
+            kind: LexicalEvidenceKind::Signature,
+            subject,
+            format: LexicalEvidenceFormat::SourceProjection,
+            complete_text_hash: content_hash(projection.text.as_bytes()),
+            text: projection.text,
+            truncated: false,
+            source_parts: Some(projection.parts),
+        }
+    }
+
+    /// Returns exact byte mappings relative to the envelope's direct source.
+    ///
+    /// `None` identifies legacy contiguous text. Projection mappings cover all
+    /// retained bytes except the single presentation space between fragments.
+    #[must_use]
+    pub fn source_parts(&self) -> Option<&[SignatureSourcePart]> {
+        self.source_parts.as_deref()
+    }
+
+    /// Verifies retained fragments against the complete direct source text.
+    ///
+    /// Envelope decoding verifies self-consistency, not the producer's source
+    /// claim. Call this when the generation-bound source bytes are available.
+    ///
+    /// # Errors
+    ///
+    /// Rejects mismatching or out-of-bounds fragments. Contiguous evidence is
+    /// checked against its complete-text hash and retained prefix.
+    pub fn verify_source_text(&self, source: &str) -> Result<(), LexicalExtensionError> {
+        if let Some(parts) = &self.source_parts {
+            for part in parts {
+                let range = part.source_range();
+                let start = usize::try_from(range.start)
+                    .map_err(|_| LexicalExtensionError::InvalidSourceProjection)?;
+                let end = usize::try_from(range.end)
+                    .map_err(|_| LexicalExtensionError::InvalidSourceProjection)?;
+                if source.get(start..end) != self.text.get(part.text_range()) {
+                    return Err(LexicalExtensionError::SourceMismatch);
+                }
+            }
+        } else if content_hash(source.as_bytes()) != self.complete_text_hash
+            || !source.starts_with(&self.text)
+        {
+            return Err(LexicalExtensionError::SourceMismatch);
+        }
+        Ok(())
+    }
+
+    const fn envelope_version(&self) -> &'static str {
+        if self.source_parts.is_some() {
+            LEXICAL_PROJECTION_VERSION
+        } else {
+            LEXICAL_EXTENSION_VERSION
+        }
+    }
+
     fn from_wire(wire: WireLexicalEvidenceV1) -> Result<Self, LexicalExtensionError> {
         let evidence = Self {
             kind: wire.kind,
@@ -171,6 +247,7 @@ impl LexicalEvidenceV1 {
             text: wire.text,
             complete_text_hash: wire.complete_text_hash,
             truncated: wire.truncated,
+            source_parts: wire.source_parts,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -180,7 +257,14 @@ impl LexicalEvidenceV1 {
         if self.text.is_empty() {
             return Err(LexicalExtensionError::EmptyText);
         }
-        if self.format != self.kind.required_format() {
+        if self.source_parts.is_some() {
+            if self.kind != LexicalEvidenceKind::Signature
+                || self.format != LexicalEvidenceFormat::SourceProjection
+                || self.truncated
+            {
+                return Err(LexicalExtensionError::InvalidSourceProjection);
+            }
+        } else if self.format != self.kind.required_format() {
             return Err(LexicalExtensionError::IncompatibleFormat);
         }
 
@@ -196,6 +280,9 @@ impl LexicalEvidenceV1 {
             }
         } else if content_hash(self.text.as_bytes()) != self.complete_text_hash {
             return Err(LexicalExtensionError::CompleteTextHashMismatch);
+        }
+        if let Some(parts) = &self.source_parts {
+            crate::source_projection::validate_parts(&self.text, parts)?;
         }
         Ok(())
     }
@@ -244,6 +331,53 @@ impl schemars::JsonSchema for LexicalEvidenceV1 {
     }
 }
 
+/// JSON Schema view for source-projection lexical envelope payload version 2.
+#[cfg(feature = "schema")]
+#[derive(Debug)]
+pub struct LexicalProjectionSchema;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for LexicalProjectionSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LexicalProjectionV2".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut projection = lexical_schema_variant(
+            generator,
+            "signature",
+            "source_projection",
+            MAX_LEXICAL_SIGNATURE_BYTES,
+        );
+        let part_schema = generator.subschema_for::<SignatureSourcePart>();
+        let projection_object = projection
+            .as_object_mut()
+            .expect("lexical schema is an object");
+        projection_object
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("lexical variant properties are an object")
+            .insert(
+                "source_parts".to_owned(),
+                serde_json::json!({
+                    "type": "array", "minItems": 1, "maxItems": crate::MAX_SIGNATURE_SOURCE_PARTS,
+                    "items": part_schema,
+                }),
+            );
+        projection_object
+            .get_mut("required")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("lexical variant required fields are an array")
+            .push(serde_json::json!("source_parts"));
+        projection_object
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("lexical variant properties are an object")
+            .insert("truncated".to_owned(), serde_json::json!({"const": false}));
+        projection
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireLexicalEvidenceV1 {
@@ -253,6 +387,8 @@ struct WireLexicalEvidenceV1 {
     text: String,
     complete_text_hash: ContentHash,
     truncated: bool,
+    #[serde(default)]
+    source_parts: Option<Vec<SignatureSourcePart>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,7 +417,7 @@ impl From<WireFactRef> for FactRef {
 #[derive(Serialize)]
 struct LexicalEnvelopeIdentity<'a> {
     namespace: &'static str,
-    version: &'static str,
+    version: &'a str,
     repository: RepositoryId,
     generation: GenerationId,
     subject: FactRef,
@@ -306,7 +442,7 @@ pub fn encode_lexical_evidence(
     Ok(payload)
 }
 
-/// Decodes an exact version 1 lexical payload from canonical JSON.
+/// Decodes a contiguous or projected lexical payload from canonical JSON.
 ///
 /// The payload byte bound is checked before JSON decoding can allocate its text
 /// field. Direct Serde decoding into [`LexicalEvidenceV1`] is intentionally
@@ -359,6 +495,7 @@ pub fn new_lexical_evidence_envelope(
 ) -> Result<ExtensionEnvelope, LexicalExtensionError> {
     validate_source_owner(repository, generation, &source)?;
     validate_file_subject_source(evidence.subject, &source)?;
+    validate_projection_source(evidence, &source)?;
     let payload = encode_lexical_evidence(evidence)?;
     let id = derive_envelope_id(
         repository,
@@ -367,13 +504,14 @@ pub fn new_lexical_evidence_envelope(
         &source,
         provenance,
         &payload,
+        evidence.envelope_version(),
     )?;
     Ok(ExtensionEnvelope {
         id,
         repository,
         generation,
         namespace: LEXICAL_EXTENSION_NAMESPACE.to_owned(),
-        version: LEXICAL_EXTENSION_VERSION.to_owned(),
+        version: evidence.envelope_version().to_owned(),
         criticality: ExtensionCriticality::Noncritical,
         payload,
         provenance,
@@ -396,6 +534,9 @@ pub fn decode_lexical_evidence_envelope(
 ) -> Result<LexicalEvidenceV1, LexicalExtensionError> {
     validate_extension_identity(envelope)?;
     let evidence = decode_lexical_evidence(&envelope.payload)?;
+    if envelope.version != evidence.envelope_version() {
+        return Err(LexicalExtensionError::UnsupportedVersion);
+    }
     let source = envelope
         .evidence
         .source
@@ -403,6 +544,7 @@ pub fn decode_lexical_evidence_envelope(
         .ok_or(LexicalExtensionError::MissingDirectSourceEvidence)?;
     validate_source_owner(envelope.repository, envelope.generation, source)?;
     validate_file_subject_source(evidence.subject, source)?;
+    validate_projection_source(&evidence, source)?;
     if envelope.evidence.derivation.len() != 1
         || envelope.evidence.derivation.first() != Some(&evidence.subject)
     {
@@ -415,6 +557,7 @@ pub fn decode_lexical_evidence_envelope(
         source,
         envelope.provenance,
         &envelope.payload,
+        evidence.envelope_version(),
     )?;
     if envelope.id != expected_id {
         return Err(LexicalExtensionError::EnvelopeIdentityMismatch);
@@ -477,7 +620,9 @@ fn validate_extension_identity(envelope: &ExtensionEnvelope) -> Result<(), Lexic
     if envelope.namespace != LEXICAL_EXTENSION_NAMESPACE {
         return Err(LexicalExtensionError::UnsupportedNamespace);
     }
-    if envelope.version != LEXICAL_EXTENSION_VERSION {
+    if envelope.version != LEXICAL_EXTENSION_VERSION
+        && envelope.version != LEXICAL_PROJECTION_VERSION
+    {
         return Err(LexicalExtensionError::UnsupportedVersion);
     }
     if envelope.criticality != ExtensionCriticality::Noncritical {
@@ -519,10 +664,11 @@ fn derive_envelope_id(
     source: &SourceRef,
     provenance: FactId,
     payload: &str,
+    version: &str,
 ) -> Result<FactId, LexicalExtensionError> {
     let identity = LexicalEnvelopeIdentity {
         namespace: LEXICAL_EXTENSION_NAMESPACE,
-        version: LEXICAL_EXTENSION_VERSION,
+        version,
         repository,
         generation,
         subject,
@@ -533,6 +679,26 @@ fn derive_envelope_id(
     let bytes =
         serde_json::to_vec(&identity).map_err(|_| LexicalExtensionError::PayloadEncoding)?;
     Ok(derive_fact(LEXICAL_FACT_DOMAIN, &bytes).id())
+}
+
+fn validate_projection_source(
+    evidence: &LexicalEvidenceV1,
+    source: &SourceRef,
+) -> Result<(), LexicalExtensionError> {
+    if let Some(parts) = &evidence.source_parts {
+        let length = source
+            .span()
+            .end_byte()
+            .checked_sub(source.span().start_byte())
+            .ok_or(LexicalExtensionError::InvalidSourceProjection)?;
+        if parts
+            .last()
+            .is_none_or(|part| part.source_range().end > length)
+        {
+            return Err(LexicalExtensionError::InvalidSourceProjection);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "schema")]
@@ -621,6 +787,9 @@ fn lexical_subject_schema(generator: &mut schemars::SchemaGenerator) -> schemars
 /// Source-free failures for the lexical extension boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LexicalExtensionError {
+    /// A projection was partial, unordered, oversized or outside its source.
+    #[error("lexical source projection is invalid")]
+    InvalidSourceProjection,
     /// Complete or retained evidence was empty.
     #[error("lexical evidence text is empty")]
     EmptyText,
@@ -652,7 +821,7 @@ pub enum LexicalExtensionError {
         /// Payload hard byte limit.
         limit: usize,
     },
-    /// Payload was not valid strict version 1 JSON.
+    /// Payload was not valid strict lexical JSON.
     #[error("lexical evidence payload is malformed")]
     MalformedPayload,
     /// Payload JSON was semantically valid but not canonical.
@@ -661,7 +830,7 @@ pub enum LexicalExtensionError {
     /// Envelope namespace was not the first-party lexical namespace.
     #[error("lexical extension namespace is unsupported")]
     UnsupportedNamespace,
-    /// Envelope payload version was not exactly version 1.
+    /// Envelope payload version was unsupported or inconsistent with its format.
     #[error("lexical extension version is unsupported")]
     UnsupportedVersion,
     /// Envelope incorrectly marked the skippable payload critical.
@@ -742,6 +911,100 @@ mod tests {
             text,
         )
         .expect("signature fixture is valid")
+    }
+
+    #[test]
+    fn projected_signatures_preserve_exact_unicode_parts_and_versioned_identity() {
+        let text = "fn f <# documentation #> (雪)";
+        let tail = text.find("(雪)").unwrap();
+        let projection =
+            SourceTextProjection::from_source(text, &[0..4, tail..text.len()]).unwrap();
+        let (repository, generation, provenance, original, subject) = owner();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            crate::SourceSpan::new(
+                original.span().file(),
+                100,
+                100 + u64::try_from(text.len()).unwrap(),
+            )
+            .unwrap(),
+            original.content_hash(),
+            None,
+        );
+        let evidence = LexicalEvidenceV1::from_source_projection(subject, projection);
+        assert_eq!(evidence.text(), "fn f (雪)");
+        assert!(!evidence.is_truncated());
+        assert_eq!(evidence.verify_source_text(text), Ok(()));
+        assert!(evidence.verify_source_text("changed").is_err());
+        let envelope =
+            new_lexical_evidence_envelope(repository, generation, provenance, source, &evidence)
+                .unwrap();
+        assert_eq!(envelope.version, "2");
+        assert_eq!(
+            decode_lexical_evidence_envelope(&envelope),
+            Ok(evidence.clone())
+        );
+        let mut wrong_version = envelope.clone();
+        wrong_version.version = "1".to_owned();
+        assert!(decode_lexical_evidence_envelope(&wrong_version).is_err());
+        let mut outside_source = envelope.clone();
+        outside_source.evidence.source = Some(original);
+        assert!(decode_lexical_evidence_envelope(&outside_source).is_err());
+        let mut corrupted: serde_json::Value = serde_json::from_str(&envelope.payload).unwrap();
+        corrupted["source_parts"][1]["text_start"] = serde_json::json!(4);
+        assert!(decode_lexical_evidence(&serde_json::to_string(&corrupted).unwrap()).is_err());
+        corrupted["source_parts"][1]["text_start"] = serde_json::json!(5);
+        corrupted["truncated"] = serde_json::json!(true);
+        assert!(decode_lexical_evidence(&serde_json::to_string(&corrupted).unwrap()).is_err());
+    }
+
+    #[test]
+    fn projected_signatures_reject_invalid_ranges_without_partial_output() {
+        for ranges in [
+            vec![],
+            std::iter::once(0..0).collect(),
+            vec![0..4, 3..5],
+            vec![5..6, 0..1],
+            std::iter::once(0..999).collect(),
+            std::iter::once(1..2).collect(),
+        ] {
+            assert!(
+                SourceTextProjection::from_source("雪 token", &ranges).is_err(),
+                "{ranges:?}"
+            );
+        }
+        let oversized = "x".repeat(MAX_LEXICAL_SIGNATURE_BYTES + 1);
+        assert!(
+            SourceTextProjection::from_source(
+                &oversized,
+                std::slice::from_ref(&(0..oversized.len()))
+            )
+            .is_err()
+        );
+        let source = "x".repeat(crate::MAX_SIGNATURE_SOURCE_PARTS + 1);
+        let ranges: Vec<_> = (0..source.len()).map(|offset| offset..offset + 1).collect();
+        assert!(SourceTextProjection::from_source(&source, &ranges).is_err());
+    }
+
+    #[test]
+    fn projected_signature_mappings_share_the_existing_payload_budget() {
+        let source = "\0".repeat(4_032);
+        let ranges: Vec<_> = (0..crate::MAX_SIGNATURE_SOURCE_PARTS)
+            .map(|index| index * 63..(index + 1) * 63)
+            .collect();
+        let projection = SourceTextProjection::from_source(&source, &ranges).unwrap();
+        let (_, _, _, _, subject) = owner();
+        let evidence = LexicalEvidence::from_source_projection(subject, projection);
+        assert_eq!(evidence.text().len(), 4_095);
+        assert!(!evidence.is_truncated());
+        assert!(matches!(
+            encode_lexical_evidence(&evidence),
+            Err(LexicalExtensionError::PayloadTooLarge {
+                limit: MAX_LEXICAL_PAYLOAD_BYTES,
+                ..
+            })
+        ));
     }
 
     fn decode_test_value(

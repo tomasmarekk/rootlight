@@ -27,6 +27,57 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn powershell_commented_headers_retain_complete_compact_signatures() {
+    let source = format!(
+        "function Read-Entry {{ <# {} #> [CmdletBinding()] param([string]$Name = 'literal # text'); $Name }}",
+        "documentation ".repeat(400)
+    );
+    let result = output(&source);
+    let doc = result.document();
+    let entity = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Read-Entry")
+        .unwrap();
+    let signatures: Vec<_> = doc
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+        .filter_map(|extension| {
+            let value = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+            (value.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                && value.subject() == rootlight_ir::FactRef::Entity(entity.id))
+            .then_some((extension, value))
+        })
+        .collect();
+    assert_eq!(
+        signatures.len(),
+        1,
+        "long comments must not erase the callable header"
+    );
+    let (extension, signature) = &signatures[0];
+    assert!(!signature.is_truncated());
+    assert_eq!(
+        signature.text(),
+        "function Read-Entry { [CmdletBinding()] param([string]$Name = 'literal # text')"
+    );
+    assert_eq!(extension.version, rootlight_ir::LEXICAL_PROJECTION_VERSION);
+    assert_eq!(signature.source_parts().unwrap().len(), 2);
+    let span = extension.evidence.source.as_ref().unwrap().span();
+    let header = source
+        .get(usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap())
+        .unwrap();
+    assert!(header.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES);
+    signature.verify_source_text(header).unwrap();
+    assert!(signature.verify_source_text(signature.text()).is_err());
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "signature-capture-unavailable")
+    );
+}
+
+#[test]
 fn powershell_nested_literals_preserve_complete_bounded_source_ownership() {
     let mut value = "{ param($leaf) $leaf }".to_owned();
     for _ in 0..8 {
@@ -82,6 +133,87 @@ fn powershell_nested_literals_preserve_complete_bounded_source_ownership() {
                 && relation.subject == RelationEndpoint::Entity(owner.id)
                 && relation.object == RelationEndpoint::Entity(leaf.id))
     );
+}
+
+#[test]
+fn powershell_header_comment_edits_preserve_signature_identity() {
+    let mut expected = None;
+    for comment in ["short".to_owned(), "documentation ".repeat(400)] {
+        let source = format!(
+            "function Read-Entry {{ <# {comment} #> param(<# {comment} #>[string]$Name = 'literal # <# text #>'); $Name }}"
+        );
+        let result = output(&source);
+        let doc = result.document();
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Read-Entry")
+            .unwrap();
+        let (extension, signature) = doc
+            .extensions
+            .iter()
+            .filter_map(|extension| {
+                if extension.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
+                    return None;
+                }
+                let signature = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                (signature.subject() == rootlight_ir::FactRef::Entity(entity.id)
+                    && signature.kind() == rootlight_ir::LexicalEvidenceKind::Signature)
+                    .then_some((extension, signature))
+            })
+            .next()
+            .unwrap();
+        assert_eq!(
+            signature.text(),
+            "function Read-Entry { param( [string]$Name = 'literal # <# text #>')"
+        );
+        assert_eq!(signature.source_parts().unwrap().len(), 3);
+        let span = extension.evidence.source.as_ref().unwrap().span();
+        signature
+            .verify_source_text(
+                source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        if let Some(id) = expected {
+            assert_eq!(entity.id, id);
+        }
+        expected = Some(entity.id);
+    }
+}
+
+#[test]
+fn powershell_excessive_signature_parts_report_an_explicit_gap() {
+    let parameters = (0..rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS)
+        .map(|index| format!("<# parameter #>$value{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let result = output(&format!(
+        "function Read-Entry {{ param({parameters}); return 1 }}"
+    ));
+    let doc = result.document();
+    let entity = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Read-Entry")
+        .unwrap();
+    assert!(
+        doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "signature-capture-unavailable")
+    );
+    assert!(!doc.extensions.iter().any(|extension| {
+        if extension.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
+            return false;
+        }
+        let value = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+        value.subject() == rootlight_ir::FactRef::Entity(entity.id)
+            && value.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+    }));
 }
 
 #[test]
@@ -798,10 +930,11 @@ fn powershell_assignment_reads_do_not_become_written_definitions() {
 fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, POWERSHELL);
-    let fixture = Fixture::new(
-        POWERSHELL,
-        b"function Read-Entry { [int]$first, $second = 1, 2; $map = @{ Key = 1; $key = @{ Inner = 2 } }; Invoke-Entry { param($value) { param($inner) $inner + $value } }; return $first }\n",
+    let source = format!(
+        "function Read-Entry {{ <# {} #> param($input); [int]$first, $second = 1, 2; $map = @{{ Key = 1; $key = @{{ Inner = 2 }} }}; Invoke-Entry {{ param($value) {{ param($inner) $inner + $value }} }}; return $first }}\n",
+        "documentation ".repeat(400)
     );
+    let fixture = Fixture::new(POWERSHELL, source.as_bytes());
     let budget = limits();
     let initial_request = request(&fixture.snapshot, &fixture.source, POWERSHELL, &budget);
     let (initial, artifact) = analyzer
@@ -827,6 +960,29 @@ fn powershell_assignment_artifacts_preserve_all_targets_and_rebind_generation() 
     let fresh = analyze(&analyzer, &next_request, &ExtensionSupport::default());
     assert_eq!(replay.document(), fresh.document());
     assert_eq!(replay.report(), fresh.report());
+    let projected = replay
+        .document()
+        .extensions
+        .iter()
+        .find(|extension| {
+            extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+                && extension.version == rootlight_ir::LEXICAL_PROJECTION_VERSION
+        })
+        .unwrap();
+    assert_eq!(projected.generation, successor.source.generation());
+    let signature = rootlight_ir::decode_lexical_evidence_envelope(projected).unwrap();
+    assert_eq!(signature.text(), "function Read-Entry { param($input)");
+    let span = projected.evidence.source.as_ref().unwrap().span();
+    signature
+        .verify_source_text(
+            source
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
     let identities = |result: &AnalysisOutput| {
         result
             .document()
