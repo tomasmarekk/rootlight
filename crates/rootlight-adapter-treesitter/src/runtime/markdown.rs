@@ -52,6 +52,7 @@ impl TreeSitterProvider {
         // language injections. Each parse retains its fragment cap, while all
         // blocks share syntax-node and native-work budgets for the document.
         let mut context = NativeParseContext {
+            expression_envelope: None,
             range_origin: (0, Point { row: 0, column: 0 }),
             remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
                 request.limits().max_syntax_nodes(),

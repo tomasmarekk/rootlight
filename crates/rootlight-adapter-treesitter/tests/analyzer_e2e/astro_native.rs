@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn astro_embedded_preflight_and_replay_retain_complete_declarations() {
-    let source = "---\r\nfunction first(value: string) { return value; }\r\n---\r\n<style>.item { color: red; }</style><script>function last(value) { return value; }</script>";
+    let source = "---\r\nfunction first(value: string) { return value; }\r\n---\r\n<style>.item { color: red; }</style><script>function last(value) { return value; }</script>{(() => { const local = 1; consume(local); return local; })()}";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, ASTRO);
     let fixture = Fixture::new(ASTRO, source.as_bytes());
@@ -72,7 +72,8 @@ fn astro_embedded_preflight_and_replay_retain_complete_declarations() {
     }
     let edited_source = source
         .replace("return value;", "return value + '!';")
-        .replace("color: red", "color: blue");
+        .replace("color: red", "color: blue")
+        .replace("consume(local)", "consume( local )");
     let edited = fixture.rewrite(edited_source.as_bytes());
     let next = analyze(
         &analyzer,
@@ -209,7 +210,7 @@ fn astro_server_client_and_css_keep_original_identity() {
         );
     }
     assert!(
-        document
+        !document
             .skipped_regions
             .iter()
             .any(|gap| gap.detail == "astro-expression-analysis-unavailable")
@@ -306,8 +307,8 @@ fn astro_unprocessed_data_and_preprocessors_are_not_code_successes() {
 }
 
 #[test]
-fn astro_child_errors_do_not_hide_healthy_neighbors_or_template_gaps() {
-    let source = "---\nconst broken: = ;\n---\n<main title={name}>{name}<script>function healthy() {}</script></main>";
+fn astro_child_errors_do_not_hide_healthy_neighbors_or_template_calls() {
+    let source = "---\nconst broken: = ;\n---\n<main title={format(name)}>{render(name)}<script>function healthy() {}</script></main>";
     let result = output(source);
     let document = result.document();
     assert!(
@@ -333,5 +334,180 @@ fn astro_child_errors_do_not_hide_healthy_neighbors_or_template_gaps() {
         })
         .collect();
     expressions.sort_unstable();
-    assert_eq!(expressions, ["{name}", "{name}"]);
+    assert!(expressions.is_empty());
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn astro_expression_calls_keep_exact_bytes_without_duplicate_nested_extraction() {
+    for expression in [
+        "format(label)",
+        "({ label: format('é'), value: render(/}/) })",
+        "items.map((item: string) => <Card title={format(item)}>{render(item)}</Card>)",
+        "`value: ${format(label)}`",
+    ] {
+        let source = format!("<main>雪\r\n{{{expression}}}</main>");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            !document.skipped_regions.iter().any(|gap| matches!(
+                gap.detail.as_str(),
+                "astro-expression-analysis-unavailable" | "astro-embedded-parse-error"
+            )),
+            "{expression}: {:#?}",
+            document.skipped_regions
+        );
+        let calls: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .collect();
+        let expected = expression.matches("format(").count()
+            + expression.matches("render(").count()
+            + expression.matches(".map(").count();
+        assert_eq!(calls.len(), expected, "{expression}: {calls:#?}");
+        let mut ranges = BTreeSet::new();
+        for call in calls {
+            let span = call.source.span();
+            assert!(ranges.insert((span.start_byte(), span.end_byte())));
+            let text = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert_eq!(call.syntactic_text_hash, content_hash(text.as_bytes()));
+            assert_eq!(call.source.content_hash(), content_hash(source.as_bytes()));
+            assert!(
+                text.contains("format") || text.contains("render") || text.contains("map"),
+                "{text}"
+            );
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "astro-template-semantics-unavailable")
+        );
+    }
+}
+
+#[test]
+fn astro_expression_bodies_retain_written_definitions_and_reject_invalid_syntax() {
+    let source = "<main>{(() => { const local = 1; consume(local); return local; })()}</main>";
+    let result = output(source);
+    assert!(
+        result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "local" && entity.language == "typescript")
+    );
+    for source in [
+        "<main title={const value = 1}></main>",
+        "<main>{function broken(}</main>",
+        "<main>{/* comment */ const value = 1}</main>",
+        "<main title={/* no attribute value */}></main>",
+        "<main>{/* comment */ , ,}</main>",
+    ] {
+        let result = output(source);
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.reason == SkippedRegionReason::ParseError),
+            "{source}: {:#?}",
+            result.document().skipped_regions
+        );
+    }
+}
+
+#[test]
+fn astro_comment_interpolations_do_not_invent_code_or_parse_errors() {
+    for comment in [
+        "/* visible source, no runtime value */",
+        " /* é雪 { fakeCall() } */\r\n /* second */ ",
+        "// ignoredCall()\r\n",
+        "/* first */ // second\n /* third */",
+    ] {
+        let source = format!("<main>é\r\n{{{comment}}}{{realCall()}}</main>");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            !document.skipped_regions.iter().any(|gap| matches!(
+                gap.detail.as_str(),
+                "astro-expression-analysis-unavailable" | "astro-embedded-parse-error"
+            )),
+            "{source}: {:#?}",
+            document.skipped_regions
+        );
+        let calls: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .collect();
+        assert_eq!(calls.len(), 1, "{source}: {calls:#?}");
+        let span = calls[0].source.span();
+        let text = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert!(text.contains("realCall"), "{text}");
+        assert_eq!(calls[0].syntactic_text_hash, content_hash(text.as_bytes()));
+        assert_eq!(
+            calls[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn astro_expressions_share_the_existing_host_range_budget() {
+    let source = "<main>{first()}<span>{second()}</span>{third()}</main>";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, ASTRO);
+    let fixture = Fixture::new(ASTRO, source.as_bytes());
+    let base = limits();
+    for ranges in [0, 1, 2] {
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            ranges,
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            base.ir().clone(),
+        )
+        .unwrap();
+        let result = analyze(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, ASTRO, &budget),
+            &ExtensionSupport::default(),
+        );
+        let document = result.document();
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+                .count(),
+            ranges
+        );
+        let gaps: Vec<_> = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "astro-embedded-analysis-limit")
+            .collect();
+        assert_eq!(gaps.len(), 3 - ranges);
+        for gap in gaps {
+            let span = gap.source.span();
+            let text = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert!(matches!(text, "{first()}" | "{second()}" | "{third()}"));
+            assert_eq!(gap.reason, SkippedRegionReason::ResourceLimit);
+        }
+    }
 }

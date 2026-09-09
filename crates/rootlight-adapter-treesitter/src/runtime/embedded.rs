@@ -49,6 +49,7 @@ impl TreeSitterProvider {
         })?;
         dedup_query_candidates(candidates, cancellation)?;
         let mut parsed_ranges = 0usize;
+        let mut covered_expression_end = 0usize;
         let mut limited = false;
         let host_count = candidates.len();
         for index in 0..host_count {
@@ -56,10 +57,21 @@ impl TreeSitterProvider {
             let candidate = candidates[index];
             if !matches!(
                 candidate.syntax,
-                "html.embedded_text" | "astro.embedded_text" | "astro.frontmatter"
+                "html.embedded_text"
+                    | "astro.embedded_text"
+                    | "astro.frontmatter"
+                    | "astro.expression"
             ) || (!request.included_ranges().is_empty()
                 && !candidate_within_included_range(&candidate, request)?)
             {
+                continue;
+            }
+            let expression = candidate.syntax == "astro.expression";
+            if expression && candidate.start < covered_expression_end {
+                if candidate.end > covered_expression_end {
+                    return Err(provider_failure("expression-overlapping-ranges"));
+                }
+                candidates[index].syntax = "astro.expression_nested";
                 continue;
             }
             let Some(body) = tree
@@ -68,12 +80,37 @@ impl TreeSitterProvider {
             else {
                 return Err(provider_failure("embedded-host-node"));
             };
-            if !matches!(body.kind(), "raw_text" | "frontmatter_js_block")
+            if !(matches!(body.kind(), "raw_text" | "frontmatter_js_block")
+                || expression
+                    && matches!(
+                        body.kind(),
+                        "html_interpolation"
+                            | "attribute_interpolation"
+                            | "attribute_backtick_string"
+                    ))
                 || body.byte_range() != (candidate.start..candidate.end)
             {
                 return Err(provider_failure("embedded-host-span"));
             }
-            let language = if astro {
+            let language = if expression {
+                let bytes = request
+                    .source()
+                    .bytes()
+                    .get(candidate.start..candidate.end)
+                    .ok_or_else(|| provider_failure("expression-source-range"))?;
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| provider_failure("expression-source-encoding"))?;
+                // Spread attributes are host binding operations, not valid
+                // standalone spread expressions; a TSX error would mislabel them.
+                if body.kind() == "attribute_interpolation"
+                    && text
+                        .strip_prefix('{')
+                        .is_some_and(|text| text.trim_start().starts_with("..."))
+                {
+                    continue;
+                }
+                Some("typescript")
+            } else if astro {
                 astro_body_language(body, request.source().bytes(), cancellation)?
             } else {
                 body_language(body, request.source().bytes(), cancellation)?
@@ -117,19 +154,77 @@ impl TreeSitterProvider {
                 vec![IncludedRange::new(source.span(), language_id)],
                 &limits,
             )?;
-            let child = self.prepare_tree(
-                &child_request,
-                None,
-                &[],
-                self.config.default_settings(),
-                cancellation,
-            )?;
+            let (family, native_family, child_tree, child_traversal) = if expression {
+                let envelope = if body.kind() == "attribute_backtick_string" {
+                    None
+                } else {
+                    let envelope = super::expression::ExpressionEnvelope::new(
+                        request.source().bytes(),
+                        candidate.start,
+                        candidate.end,
+                    )
+                    .ok_or_else(|| provider_failure("expression-host-delimiters"))?;
+                    if body.kind() == "html_interpolation"
+                        && envelope
+                            .contains_only_comments(request.source().bytes(), cancellation)?
+                    {
+                        None
+                    } else {
+                        Some(envelope)
+                    }
+                };
+                let mut context = NativeParseContext {
+                    expression_envelope: envelope,
+                    range_origin: (body.start_byte(), body.start_position()),
+                    remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
+                        remaining_nodes,
+                        limits.max_syntax_depth(),
+                    )
+                    .max_progress_checks,
+                };
+                let tree = self.parse_native_tree(
+                    &child_request,
+                    &language_for(GrammarFamily::JavaScript),
+                    None,
+                    self.config.default_settings(),
+                    Some(&mut context),
+                    cancellation,
+                )?;
+                let report = inspect_tree(
+                    &tree,
+                    &child_request,
+                    remaining_nodes,
+                    limits.max_syntax_depth(),
+                    cancellation,
+                )?;
+                covered_expression_end = candidate.end;
+                (
+                    GrammarFamily::TypeScript,
+                    GrammarFamily::JavaScript,
+                    tree,
+                    report,
+                )
+            } else {
+                let child = self.prepare_tree(
+                    &child_request,
+                    None,
+                    &[],
+                    self.config.default_settings(),
+                    cancellation,
+                )?;
+                (
+                    child.family,
+                    native_family_for_source(child.family, request.source().path().as_str()),
+                    child.tree,
+                    child.traversal,
+                )
+            };
             traversal.processed_nodes = traversal
                 .processed_nodes
-                .checked_add(child.traversal.processed_nodes)
+                .checked_add(child_traversal.processed_nodes)
                 .ok_or_else(|| provider_failure("embedded-node-accounting"))?;
-            traversal.max_depth = traversal.max_depth.max(child.traversal.max_depth);
-            if let Some(diagnostic) = child.traversal.primary_diagnostic {
+            traversal.max_depth = traversal.max_depth.max(child_traversal.max_depth);
+            if let Some(diagnostic) = child_traversal.primary_diagnostic {
                 traversal.primary_diagnostic.get_or_insert(diagnostic);
                 traversal.skipped_regions = traversal
                     .skipped_regions
@@ -140,7 +235,7 @@ impl TreeSitterProvider {
                     _ if traversal.coverage == CoverageStatus::Unknown => CoverageStatus::Unknown,
                     _ => CoverageStatus::Bounded,
                 };
-                if !child.traversal.fully_traversed {
+                if !child_traversal.fully_traversed {
                     candidates[index].syntax = if astro {
                         "astro.embedded_limit"
                     } else {
@@ -167,12 +262,12 @@ impl TreeSitterProvider {
             }
             let pack = self
                 .query_packs
-                .get(child.family)
+                .get_for_native(family, native_family)
                 .ok_or_else(|| provider_failure("embedded-query-pack"))?;
             let mut child_candidates = if let Some(maximum) = max_facts {
                 let extraction = pack.extract(
-                    child.family,
-                    &child.tree,
+                    family,
+                    &child_tree,
                     request.source().bytes(),
                     remaining_nodes,
                     maximum.saturating_sub(candidates.len()),
@@ -182,16 +277,19 @@ impl TreeSitterProvider {
                 extraction.candidates
             } else {
                 pack.extract_identity(
-                    child.family,
-                    &child.tree,
+                    family,
+                    &child_tree,
                     request.source().bytes(),
                     remaining_nodes,
                     cancellation,
                 )?
             };
-            // Each body is a separate source module under its authored element.
-            // Joining bodies into one native parse would invent cross-tag syntax.
-            child_candidates.retain(|child| child.role != StructuralRole::Root);
+            // Server/client bodies own modules; template expressions do not.
+            // Their native lexical scopes remain under the authored host owner.
+            child_candidates.retain(|child| {
+                child.role != StructuralRole::Root
+                    && !(expression && child.role == StructuralRole::Module)
+            });
             for child in &mut child_candidates {
                 cancellation.check()?;
                 if child.role == StructuralRole::Module {

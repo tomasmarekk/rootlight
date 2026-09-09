@@ -106,6 +106,7 @@ impl Fixture {
 
 fn context(checks: usize) -> NativeParseContext {
     NativeParseContext {
+        expression_envelope: None,
         range_origin: (0, Point { row: 0, column: 0 }),
         remaining_progress_checks: checks,
     }

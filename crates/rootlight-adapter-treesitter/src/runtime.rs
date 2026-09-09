@@ -6,6 +6,7 @@
 //! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
 mod embedded;
+mod expression;
 mod markdown;
 
 #[cfg(test)]
@@ -62,6 +63,8 @@ static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 /// the host file's shared node, range and output budgets.
 /// Markdown inline regions retain original source coordinates through excluded
 /// container markers under the same bounded native parsing path.
+/// Astro expressions use TSX with coordinate-preserving outer delimiters;
+/// all emitted source evidence still refers to the untouched host snapshot.
 pub struct TreeSitterProvider {
     provider_id: u64,
     registry: GrammarRegistry,
@@ -460,6 +463,9 @@ impl TreeSitterProvider {
             .map_err(|_| provider_failure("included-ranges"))?;
 
         let mut callback_cancelled = false;
+        let envelope = context
+            .as_ref()
+            .and_then(|context| context.expression_envelope);
         let mut callback_limited = false;
         let mut progress_checks = 0usize;
         let mut progress = |_: &tree_sitter::ParseState| match cancellation.check() {
@@ -485,7 +491,10 @@ impl TreeSitterProvider {
         let chunk_bytes = settings.input_chunk_bytes();
         let mut input = |offset: usize, _point: Point| {
             let end = offset.saturating_add(chunk_bytes).min(source_bytes.len());
-            source_bytes.get(offset..end).unwrap_or_default()
+            envelope.map_or_else(
+                || source_bytes.get(offset..end).unwrap_or_default(),
+                |envelope| envelope.chunk(source_bytes, offset, end),
+            )
         };
         let options = ParseOptions::new().progress_callback(&mut progress);
         let tree = parser.parse_with_options(&mut input, old_tree, Some(options));
@@ -2322,6 +2331,7 @@ fn pre_extraction_fact_limit(budget: RemainingBudget) -> Result<usize, AdapterEr
 
 #[derive(Debug, Clone, Copy)]
 struct NativeParseContext {
+    expression_envelope: Option<expression::ExpressionEnvelope>,
     range_origin: (usize, Point),
     remaining_progress_checks: usize,
 }

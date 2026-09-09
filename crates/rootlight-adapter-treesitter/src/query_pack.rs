@@ -1709,10 +1709,20 @@ impl QueryPackRegistry {
     }
 
     pub(crate) fn get_for_source(&self, family: GrammarFamily, path: &str) -> Option<&QueryPack> {
-        if native_family_for_source(family, path) != family {
+        self.get_for_native(family, native_family_for_source(family, path))
+    }
+
+    pub(crate) fn get_for_native(
+        &self,
+        family: GrammarFamily,
+        native: GrammarFamily,
+    ) -> Option<&QueryPack> {
+        if family == GrammarFamily::TypeScript && native == GrammarFamily::JavaScript {
             Some(&self.typescript_tsx)
-        } else {
+        } else if family == native {
             self.get(family)
+        } else {
+            None
         }
     }
 
