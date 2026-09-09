@@ -704,6 +704,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind == "yaml.alias.reference" {
         return false;
     }
+    // Markdown labels bind within their document; destinations need URI/path
+    // semantics. A code symbol with the same spelling proves neither target.
+    if occurrence.syntax_kind.starts_with("markdown.") {
+        return false;
+    }
     // R namespaces, object members and computed callees need their own environment
     // evidence. A matching local spelling is not even a justified candidate.
     if matches!(

@@ -27,6 +27,289 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_named_links_and_images_bind_the_first_document_definition() {
+    let source = "[text][Guide] [GUIDE][] [guide] ![alt][Guide] ![guide][] ![GUIDE]\n\n> [Guide]: first.md\n\n[guide]: second.md\n";
+    let result = output(source);
+    let target = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::LinkDefinition && entity.canonical_name == "[Guide]"
+        })
+        .unwrap();
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect();
+    assert_eq!(references.len(), 6, "{references:#?}");
+    for reference in references {
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        let span = reference.source.span();
+        assert_eq!(
+            reference.syntactic_text_hash,
+            content_hash(
+                &source.as_bytes()[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()]
+            )
+        );
+        assert!(result.document().relations.iter().any(|relation| {
+            relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(reference.id)
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+        }));
+    }
+    assert_eq!(
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::LinkDefinition)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn markdown_reference_comparison_preserves_unicode_and_container_source() {
+    let source = "> [text][Straße\r\n> label] [É] [e\u{301}] [A\u{a0}B] [a b]\r\n\r\n[STRASSE label]: one.md\r\n[é]: two.md\r\n[a b]: three.md\r\n";
+    let result = output(source);
+    for (written, expected) in [
+        ("[Straße\r\n> label]", Some("[STRASSE label]")),
+        ("[É]", Some("[é]")),
+        ("[e\u{301}]", None),
+        ("[A\u{a0}B]", None),
+        ("[a b]", Some("[a b]")),
+    ] {
+        let occurrence = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.syntactic_text_hash == content_hash(written.as_bytes())
+            })
+            .unwrap_or_else(|| panic!("missing {written:?}"));
+        let target = expected.map(|name| {
+            result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap()
+                .id
+        });
+        if let Some(symbol) = target {
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol },
+                "{written}"
+            );
+        } else {
+            assert!(
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }),
+                "{written}"
+            );
+        }
+    }
+}
+
+#[test]
+fn markdown_bounded_plans_do_not_guess_reference_targets() {
+    let source = format!("{}\n[ref]: target.md\n", "[ref]\n\n".repeat(34));
+    let result = output(&source);
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect();
+    assert_eq!(references.len(), 32);
+    for occurrence in references {
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.detail == "markdown-reference-target-unavailable"
+                && gap.source.span() == occurrence.source.span()
+        }));
+    }
+}
+
+#[test]
+fn markdown_resolved_reference_artifacts_rebind_without_changing_targets() {
+    let source = "> [text][first\n> label]\n\n> [FIRST\n> LABEL]: target.md\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    let original = first
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .unwrap();
+    assert!(matches!(original.target, OccurrenceTarget::Resolved { .. }));
+    let current = replay
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .unwrap();
+    assert_eq!(current.target, original.target);
+    assert_eq!(current.source.generation(), changed.source.generation());
+    assert_eq!(
+        current.syntactic_text_hash,
+        content_hash(b"[first\n> label]")
+    );
+}
+
+#[test]
+fn markdown_inline_evidence_preserves_written_spans_and_hashes() {
+    let source = "# Links\r\n\r\n> é [full][Guide] [Guide][] [Guide] [direct](guide.md)\r\n> <https://example.test> and `code [opaque](hidden.md)`\r\n\r\n[Guide]: target.md\r\n";
+    let result = output(source);
+    let actual: BTreeSet<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role != OccurrenceRole::Definition)
+        .map(|occurrence| {
+            let span = occurrence.source.span();
+            let text = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert_eq!(
+                occurrence.syntactic_text_hash,
+                content_hash(text.as_bytes())
+            );
+            assert_eq!(
+                occurrence.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+            (occurrence.syntax_kind.as_str(), text)
+        })
+        .collect();
+    for expected in [
+        ("markdown.reference_label.reference", "[Guide]"),
+        ("markdown.collapsed_link.reference", "[Guide][]"),
+        ("markdown.shortcut_link.reference", "[Guide]"),
+        ("markdown.link_destination.reference", "guide.md"),
+        (
+            "markdown.link_destination.reference",
+            "<https://example.test>",
+        ),
+        ("markdown.code_span.string", "`code [opaque](hidden.md)`"),
+    ] {
+        assert!(
+            actual.contains(&expected),
+            "missing {expected:?}: {actual:#?}"
+        );
+    }
+    assert!(
+        !actual
+            .iter()
+            .any(|(kind, text)| kind.ends_with(".reference") && text.contains("hidden.md"))
+    );
+}
+
+#[test]
+fn markdown_inline_delimiters_do_not_cross_paragraphs() {
+    let source = "[opening\n\nclosing](hidden.md)\n\n`[literal](also-hidden.md)`\n\n```text\n[opaque](fenced.md)\n```\n";
+    let result = output(source);
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .all(|occurrence| { occurrence.syntax_kind != "markdown.link_destination.reference" })
+    );
+}
+
+#[test]
+fn markdown_inline_embedded_syntax_remains_an_exact_scoped_gap() {
+    let source = "Written <i title='x'>word</i> and $x+y$.\n";
+    let result = output(source);
+    let gaps: BTreeSet<_> = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-inline-embedded-unavailable")
+        .map(|gap| {
+            assert_eq!(gap.domain, FactDomain::Entities);
+            let span = gap.source.span();
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()]
+        })
+        .collect();
+    assert_eq!(gaps, BTreeSet::from(["<i title='x'>", "</i>", "$x+y$"]));
+}
+
+#[test]
+fn markdown_inline_range_budget_reports_each_unparsed_block() {
+    let source = "[direct](guide.md)\n\n".repeat(34);
+    let result = output(&source);
+    assert_eq!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.syntax_kind == "markdown.link_destination.reference"
+            })
+            .count(),
+        32
+    );
+    let gaps: Vec<_> = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-inline-budget-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 2);
+    for gap in gaps {
+        let span = gap.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            "[direct](guide.md)"
+        );
+    }
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
 fn markdown_blocks_preserve_authored_names_and_kinds() {
     let result = output(MARKDOWN.source);
     let document = result.document();
@@ -304,11 +587,6 @@ fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis(
             source,
         ),
         (
-            "markdown-inline-analysis-unavailable",
-            FactDomain::Occurrences,
-            "Use [entry][ref].",
-        ),
-        (
             "markdown-embedded-analysis-unavailable",
             FactDomain::Entities,
             "```rust\nfn embedded() {}\n```\n",
@@ -326,6 +604,14 @@ fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis(
             "{detail}"
         );
     }
+    assert!(first.document().occurrences.iter().any(|occurrence| {
+        occurrence.syntax_kind == "markdown.reference_label.reference"
+            && occurrence.syntactic_text_hash == content_hash(b"[ref]")
+    }));
+    assert!(!replay.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "markdown-inline-analysis-unavailable"
+            || gap.detail == "markdown-inline-parse-unavailable"
+    }));
     assert!(
         !replay
             .document()

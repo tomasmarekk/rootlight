@@ -6,6 +6,7 @@
 //! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
 mod embedded;
+mod markdown;
 
 use std::{
     collections::VecDeque,
@@ -56,6 +57,8 @@ static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// HTML script and style bodies use the JavaScript and CSS grammars under
 /// the host file's shared node, range and output budgets.
+/// Markdown inline regions retain original source coordinates through excluded
+/// container markers under the same bounded native parsing path.
 pub struct TreeSitterProvider {
     provider_id: u64,
     registry: GrammarRegistry,
@@ -381,10 +384,53 @@ impl TreeSitterProvider {
             cancellation,
         )?;
 
+        let tree = self.parse_native_tree(
+            request,
+            &language_for(native_family),
+            old_tree.as_ref(),
+            settings,
+            cancellation,
+        )?;
+
+        if matches!(reuse_status, ReuseStatus::Reused { .. }) {
+            let changed_ranges = old_tree.as_ref().map_or(Ok(0), |old| {
+                count_changed_ranges(old, &tree, self.config.max_syntax_nodes(), cancellation)
+            })?;
+            reuse_status = ReuseStatus::Reused { changed_ranges };
+        }
+        let traversal = inspect_tree(
+            &tree,
+            request,
+            request.limits().max_syntax_nodes(),
+            request.limits().max_syntax_depth(),
+            cancellation,
+        )?;
+        cancellation.check()?;
+        Ok(PreparedParse {
+            family,
+            identity,
+            tree,
+            traversal,
+            reuse_status,
+            reuse_key,
+        })
+    }
+
+    // The caller admits the full source and included ranges. Host and embedded
+    // grammars share the same pool, native work budget and cancellation path.
+    fn parse_native_tree(
+        &self,
+        request: &ParseRequest<'_>,
+        language: &tree_sitter::Language,
+        old_tree: Option<&Tree>,
+        settings: ParserSettings,
+        cancellation: &Cancellation,
+    ) -> Result<Tree, AdapterError> {
+        let source_bytes = request.source().bytes();
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
-            .set_language(&language_for(native_family))
+            .set_language(language)
             .map_err(|_| provider_failure("grammar-abi"))?;
         let included_ranges = tree_sitter_ranges(request, source_bytes, cancellation)?;
         parser
@@ -419,7 +465,7 @@ impl TreeSitterProvider {
             source_bytes.get(offset..end).unwrap_or_default()
         };
         let options = ParseOptions::new().progress_callback(&mut progress);
-        let tree = parser.parse_with_options(&mut input, old_tree.as_ref(), Some(options));
+        let tree = parser.parse_with_options(&mut input, old_tree, Some(options));
         if callback_cancelled {
             parser.reset();
             cancellation.check()?;
@@ -431,29 +477,7 @@ impl TreeSitterProvider {
         }
         let tree = tree.ok_or_else(|| provider_failure("parse-aborted"))?;
         cancellation.check()?;
-
-        if matches!(reuse_status, ReuseStatus::Reused { .. }) {
-            let changed_ranges = old_tree.as_ref().map_or(Ok(0), |old| {
-                count_changed_ranges(old, &tree, self.config.max_syntax_nodes(), cancellation)
-            })?;
-            reuse_status = ReuseStatus::Reused { changed_ranges };
-        }
-        let traversal = inspect_tree(
-            &tree,
-            request,
-            request.limits().max_syntax_nodes(),
-            request.limits().max_syntax_depth(),
-            cancellation,
-        )?;
-        cancellation.check()?;
-        Ok(PreparedParse {
-            family,
-            identity,
-            tree,
-            traversal,
-            reuse_status,
-            reuse_key,
-        })
+        Ok(tree)
     }
 
     #[allow(clippy::too_many_arguments)]

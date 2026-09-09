@@ -29,7 +29,7 @@ mod yaml;
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
 const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
 const HARD_MAX_QUERY_CAPTURES: usize = 2_097_152;
-const HARD_MAX_QUERY_FACTS: usize = 1_048_576;
+pub(crate) const HARD_MAX_QUERY_FACTS: usize = 1_048_576;
 // Optional query work stays proportional to the caller's emission budget;
 // identity patterns have their own hard-bounded scan below.
 const QUERY_MATCHES_PER_RETAINED_FACT: usize = 64;
@@ -1205,6 +1205,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Markdown, "link_reference_definition") => Some("markdown.link_definition"),
         (GrammarFamily::Markdown, "inline") => Some("markdown.inline"),
         (GrammarFamily::Markdown, "link_label") => Some("markdown.link_label"),
+        (GrammarFamily::Markdown, "block_continuation") => Some("markdown.continuation"),
         (GrammarFamily::Markdown, "paragraph") => Some("markdown.paragraph"),
         (GrammarFamily::Markdown, "atx_heading" | "setext_heading") => Some("markdown.heading"),
         (

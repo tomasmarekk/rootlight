@@ -935,6 +935,107 @@ fn missing_java_field_definition_is_reserved_in_preflight_quotas() {
 }
 
 #[test]
+fn markdown_reference_edges_are_reserved_before_ir_materialization() {
+    const MARKDOWN: &str = "[ref]: target.md\n\n[ref]\n";
+    let (_temporary, snapshot, source) = source_fixture_for(
+        MARKDOWN,
+        "docs/guide.md",
+        b"markdown-relation-quota-fixture",
+    );
+    let facts: Vec<_> = [
+        (
+            1,
+            None,
+            SyntaxFactKind::Root,
+            MARKDOWN,
+            0,
+            0,
+            "markdown.file.root",
+        ),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            MARKDOWN,
+            0,
+            1,
+            "markdown.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Declaration,
+            "[ref]: target.md\n",
+            0,
+            2,
+            "markdown.link_definition.declaration",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "[ref]",
+            0,
+            3,
+            "markdown.link_label.definition",
+        ),
+        (
+            5,
+            Some(2),
+            SyntaxFactKind::Occurrence,
+            "[ref]",
+            1,
+            2,
+            "markdown.shortcut_link.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(MARKDOWN, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect();
+    let language = LanguageId::new("markdown").unwrap();
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        language.clone(),
+        &limits(IrLimits::default()),
+        facts.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .document()
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+            .count(),
+        1
+    );
+    let mut ir = IrLimits::default();
+    ir.max_relations = 2;
+    let error = analyze_custom(&snapshot, &source, language, &limits(ir), facts).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: rootlight_adapter_sdk::ResourceKind::Records,
+                observed: 3,
+                limit: 2,
+            })
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
     const LUA: &str = "local value = 1\nreturn value\n";
     let (_temporary, snapshot, source) =

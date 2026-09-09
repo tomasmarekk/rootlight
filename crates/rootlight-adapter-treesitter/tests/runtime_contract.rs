@@ -301,6 +301,44 @@ fn included_ranges_report_the_unparsed_file_gap() {
 }
 
 #[test]
+fn markdown_inline_ranges_do_not_expand_across_unadmitted_source() {
+    let source = b"[first](one.md) PRIVATE [second](two.md)\n";
+    let fixture = Fixture::new("ranges.md", source);
+    let limits = limits(MAX_SOURCE_BYTES, 4096, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 4096, 64, 2 * 1024 * 1024);
+    let included: Vec<_> = [(0, 15), (23, 39)]
+        .into_iter()
+        .map(|(start, end)| {
+            IncludedRange::new(
+                SourceSpan::new(fixture.snapshot.file(), start, end).unwrap(),
+                LanguageId::new("markdown").unwrap(),
+            )
+        })
+        .collect();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "markdown",
+        included,
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(Duration::from_secs(30)),
+    )
+    .unwrap();
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(output.facts().iter().all(|fact| {
+        let span = fact.span();
+        (span.start_byte() >= 23 || span.end_byte() <= 15)
+            && fact.syntax_kind().as_str() != "markdown.inline_parsed.signature"
+    }));
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
 fn partial_traversal_does_not_count_absolute_included_range_offsets_as_coverage() {
     let mut source = vec![b' '; 100];
     source.extend_from_slice(b"fn ranged() {}\n".repeat(6).as_slice());

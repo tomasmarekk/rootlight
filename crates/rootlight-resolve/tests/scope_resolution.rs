@@ -370,6 +370,70 @@ fn r_qualified_and_unavailable_targets_bypass_name_scoring_in_all_apply_paths() 
 }
 
 #[test]
+fn markdown_references_are_not_promoted_by_code_symbol_scoring() {
+    for syntax in [
+        "markdown.reference_label.reference",
+        "markdown.shortcut_link.reference",
+        "markdown.collapsed_link.reference",
+        "markdown.shortcut_image.reference",
+        "markdown.collapsed_image.reference",
+        "markdown.link_destination.reference",
+    ] {
+        for resolved in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture.document.files[0].language = "markdown".to_owned();
+            let target = fixture.add_entity(
+                10,
+                "[guide]",
+                fixture.primary_file,
+                EntityKind::Variable,
+                None,
+            );
+            fixture.add_occurrence(
+                20,
+                "[guide]",
+                fixture.primary_file,
+                OccurrenceRole::Reference,
+                None,
+            );
+            let reference = fixture.document.occurrences.last_mut().unwrap();
+            reference.syntax_kind = syntax.to_owned();
+            if resolved {
+                reference.target = OccurrenceTarget::Resolved { symbol: target };
+            }
+            let reference = reference.clone();
+            fixture.validate();
+            let engine = ResolutionEngine::default();
+            let cancellation = Cancellation::new();
+            assert_eq!(
+                engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap()
+                    .required,
+                0
+            );
+            assert!(
+                engine
+                    .resolve(&fixture.document, &cancellation)
+                    .unwrap()
+                    .decisions
+                    .is_empty()
+            );
+            let (document, estimate) = engine
+                .apply_document_bounded(
+                    fixture.document,
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            assert_eq!(estimate.required, 0);
+            assert_eq!(document.occurrences, [reference]);
+            assert!(document.relations.is_empty());
+        }
+    }
+}
+
+#[test]
 fn yaml_serialization_aliases_are_not_promoted_by_name_scoring() {
     for resolved in [false, true] {
         let mut fixture = Fixture::new();

@@ -7,6 +7,7 @@
 (setext_heading (paragraph (inline) @definition)) @declaration
 (link_reference_definition (link_label) @definition) @declaration
 (paragraph) @string
+(block_continuation) @signature
 [(inline) (atx_heading) (setext_heading)
  (fenced_code_block) (indented_code_block) (html_block)
  (minus_metadata) (plus_metadata)] @signature

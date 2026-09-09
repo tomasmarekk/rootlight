@@ -15,6 +15,7 @@ rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 thiserror.workspace = true
 unicode-general-category.workspace = true
+unicode-casefold.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true

@@ -921,6 +921,17 @@ fn preflight_lowering_limits(
                     limits,
                 )?;
             }
+            if request.language().as_str() == "markdown"
+                && crate::markdown_bindings::is_reference(fact)
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                account_string(
+                    &mut string_bytes,
+                    crate::markdown_bindings::TARGET_UNAVAILABLE.len(),
+                    limits,
+                )?;
+            }
         }
         if is_definition_capture(fact) {
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
@@ -1210,6 +1221,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let markdown_bindings = if self.request.language().as_str() == "markdown"
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            let symbols = materialized
+                .values()
+                .filter_map(|entity| {
+                    entity
+                        .definition_local_id
+                        .map(|local| (local, entity.record.id))
+                })
+                .collect();
+            Some(crate::markdown_bindings::MarkdownBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let file_claim = FileIdentityClaim {
             file: file.id,
             repository: file.repository,
@@ -1474,6 +1507,34 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             FactDomain::Relations,
                             SkippedRegionReason::UnsupportedConstruct,
                             "yaml-alias-target-unavailable",
+                            provenance_id,
+                        )?;
+                        skipped.insert(region.id, region);
+                    }
+                }
+                if self.request.language().as_str() == "markdown"
+                    && crate::markdown_bindings::is_reference(fact)
+                {
+                    let target = markdown_bindings
+                        .as_ref()
+                        .map(|bindings| {
+                            bindings.resolve(fact, self.request.source().bytes(), cancellation)
+                        })
+                        .transpose()?
+                        .flatten();
+                    if let Some(symbol) = target {
+                        occurrence.target = OccurrenceTarget::Resolved { symbol };
+                        occurrence.id = derive_occurrence_record_id(&occurrence)
+                            .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                        let relation = lexical_reference_relation(&occurrence, symbol)?;
+                        relations.insert(relation.id, relation);
+                    } else {
+                        let region = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Relations,
+                            SkippedRegionReason::UnsupportedConstruct,
+                            crate::markdown_bindings::TARGET_UNAVAILABLE,
                             provenance_id,
                         )?;
                         skipped.insert(region.id, region);
@@ -2928,6 +2989,16 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Occurrences,
             "markdown-inline-analysis-unavailable",
         )),
+        "markdown.inline_limit.signature" => Some((
+            FactDomain::Occurrences,
+            "markdown-inline-budget-unavailable",
+        )),
+        "markdown.inline_error.signature" => {
+            Some((FactDomain::Occurrences, "markdown-inline-parse-unavailable"))
+        }
+        "markdown.inline_embedded.signature" => {
+            Some((FactDomain::Entities, "markdown-inline-embedded-unavailable"))
+        }
         "markdown.embedded_text.signature" => Some((
             FactDomain::Entities,
             "markdown-embedded-analysis-unavailable",

@@ -17,6 +17,15 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
+        if request.language().as_str() == "markdown" {
+            return self.extract_markdown_inline(
+                tree,
+                request,
+                traversal,
+                candidates,
+                cancellation,
+            );
+        }
         if request.language().as_str() != "html" {
             return Ok(false);
         }
@@ -179,7 +188,10 @@ impl TreeSitterProvider {
     }
 }
 
-fn embedded_limits(limits: &AnalysisLimits, nodes: usize) -> Result<AnalysisLimits, AdapterError> {
+pub(super) fn embedded_limits(
+    limits: &AnalysisLimits,
+    nodes: usize,
+) -> Result<AnalysisLimits, AdapterError> {
     AnalysisLimits::new(
         limits.max_source_bytes(),
         nodes,
