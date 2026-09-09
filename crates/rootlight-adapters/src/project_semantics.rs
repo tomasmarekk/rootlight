@@ -251,6 +251,7 @@ impl SemanticProjectAnalyzer {
                 parsed.push(ParsedInput {
                     input,
                     facts: Vec::new(),
+                    native_imports: BTreeMap::new(),
                     diagnostics: vec![AdapterDiagnostic::new(
                         DiagnosticCode::new("invalid-utf8")
                             .map_err(|_| provider_failure("project-diagnostic-code"))?,
@@ -279,6 +280,11 @@ impl SemanticProjectAnalyzer {
             )?;
             parsed.push(ParsedInput {
                 input,
+                native_imports: ecmascript::collect_imports(
+                    output.facts(),
+                    input.source().bytes(),
+                    cancellation,
+                )?,
                 facts: output.facts().to_vec(),
                 diagnostics: output.diagnostics().to_vec(),
                 parse_status: output.report().coverage().status(),
@@ -325,6 +331,7 @@ fn bound_project_syntax_facts(
                 language,
                 &input.facts,
                 input.input.source().bytes(),
+                &input.native_imports,
             )
         })
         .collect::<Vec<_>>();
@@ -379,8 +386,12 @@ fn bound_project_syntax_facts(
         // A relationship needs its complete syntax unit. Borrow enough to
         // retain one local edge and representative callable-owner edges for
         // imported bindings, so repeated sites cannot hide distinct callers.
-        let preferred_allowance =
-            preferred_relationship_allowance(language, &input.facts, input.input.source().bytes());
+        let preferred_allowance = preferred_relationship_allowance(
+            language,
+            &input.facts,
+            input.input.source().bytes(),
+            &input.native_imports,
+        );
         // Preserve enough Python syntax ancestry for one priority call and one
         // distinct nested local relationship in every later bounded input.
         let reserved_for_remaining = if language == SemanticProjectLanguage::Python {
@@ -416,6 +427,7 @@ fn bound_project_syntax_facts(
             &mut input.facts,
             input.input.source().bytes(),
             allowance,
+            &input.native_imports,
         );
         if input.facts.len() < original_len {
             input.diagnostics.push(AdapterDiagnostic::new(
@@ -450,6 +462,7 @@ fn retain_project_syntax_facts(
     facts: &mut Vec<SyntaxFact>,
     source: &[u8],
     allowance: usize,
+    native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
 ) {
     let facts_by_id = facts
         .iter()
@@ -495,6 +508,7 @@ fn retain_project_syntax_facts(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        native_imports,
     );
     for group in imported_call_groups {
         if remaining == 0 {
@@ -588,6 +602,7 @@ fn preferred_relationship_allowance(
     language: SemanticProjectLanguage,
     facts: &[SyntaxFact],
     source: &[u8],
+    native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
 ) -> usize {
     let facts_by_id = facts
         .iter()
@@ -627,6 +642,7 @@ fn preferred_relationship_allowance(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        native_imports,
     );
     for group in groups {
         let required = imported_call_syntax_fact_group_ids(&group, &facts_by_id, &call_names);
@@ -754,6 +770,7 @@ fn project_input_relationship_priority(
     language: SemanticProjectLanguage,
     facts: &[SyntaxFact],
     source: &[u8],
+    native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
 ) -> ProjectInputRelationshipPriority {
     let facts_by_id = facts
         .iter()
@@ -794,6 +811,7 @@ fn project_input_relationship_priority(
         &facts_by_id,
         &call_names,
         &declared_calls,
+        native_imports,
     )
     .into_iter()
     .map(|group| group.demand)
@@ -1083,6 +1101,7 @@ fn imported_call_syntax_fact_groups(
     facts_by_id: &BTreeMap<u64, &SyntaxFact>,
     call_names: &BTreeMap<u64, u64>,
     declared_calls: &BTreeSet<u64>,
+    native_imports: &BTreeMap<u64, ecmascript::ParsedImport>,
 ) -> Vec<ImportedCallSyntaxFactGroup> {
     let calls = facts
         .iter()
@@ -1114,45 +1133,54 @@ fn imported_call_syntax_fact_groups(
         .iter()
         .filter(|fact| fact.kind() == SyntaxFactKind::Import)
     {
-        let Some(text) = source_text(source, import.span()) else {
-            continue;
+        // Scheduling and resolution must share native binding evidence. A
+        // missing native result is not permission to retry textual guessing.
+        let legacy = if ecmascript::is_native_import(import) {
+            Vec::new()
+        } else {
+            source_text(source, import.span())
+                .map(|text| parse_import(language, text))
+                .unwrap_or_default()
         };
-        for (_, bindings) in parse_import(language, text) {
-            for binding in bindings {
-                for (call_id, call_name, receiver) in &calls {
-                    let binding = match &binding {
-                        ImportBinding::Named { local, .. }
-                            if call_name == local && receiver.is_none() =>
-                        {
-                            ImportedCallBinding::Named(local.clone())
-                        }
-                        ImportBinding::Namespace { local }
-                            if receiver.as_deref() == Some(local.as_str()) =>
-                        {
-                            ImportedCallBinding::Namespace(local.clone())
-                        }
-                        ImportBinding::Wildcard if receiver.is_none() => {
-                            ImportedCallBinding::Wildcard(call_name.clone())
-                        }
-                        ImportBinding::Dart(namespace)
-                            if namespace.admits(receiver.as_deref(), call_name) =>
-                        {
-                            ImportedCallBinding::Wildcard(call_name.clone())
-                        }
-                        ImportBinding::Named { .. }
-                        | ImportBinding::Namespace { .. }
-                        | ImportBinding::Wildcard
-                        | ImportBinding::SideEffect
-                        | ImportBinding::Dart(_) => continue,
-                    };
-                    let owner = facts_by_id.get(call_id).and_then(|call| {
-                        enclosing_callable_declaration(call, facts_by_id, &declaration_kinds)
-                    });
-                    grouped_calls
-                        .entry((import.local_id(), binding, owner))
-                        .or_default()
-                        .push(*call_id);
-                }
+        let bindings = native_imports
+            .get(&import.local_id())
+            .into_iter()
+            .flat_map(ecmascript::ParsedImport::runtime_bindings)
+            .chain(legacy.iter().flat_map(|(_, bindings)| bindings));
+        for binding in bindings {
+            for (call_id, call_name, receiver) in &calls {
+                let binding = match binding {
+                    ImportBinding::Named { local, .. }
+                        if call_name == local && receiver.is_none() =>
+                    {
+                        ImportedCallBinding::Named(local.clone())
+                    }
+                    ImportBinding::Namespace { local }
+                        if receiver.as_deref() == Some(local.as_str()) =>
+                    {
+                        ImportedCallBinding::Namespace(local.clone())
+                    }
+                    ImportBinding::Wildcard if receiver.is_none() => {
+                        ImportedCallBinding::Wildcard(call_name.clone())
+                    }
+                    ImportBinding::Dart(namespace)
+                        if namespace.admits(receiver.as_deref(), call_name) =>
+                    {
+                        ImportedCallBinding::Wildcard(call_name.clone())
+                    }
+                    ImportBinding::Named { .. }
+                    | ImportBinding::Namespace { .. }
+                    | ImportBinding::Wildcard
+                    | ImportBinding::SideEffect
+                    | ImportBinding::Dart(_) => continue,
+                };
+                let owner = facts_by_id.get(call_id).and_then(|call| {
+                    enclosing_callable_declaration(call, facts_by_id, &declaration_kinds)
+                });
+                grouped_calls
+                    .entry((import.local_id(), binding, owner))
+                    .or_default()
+                    .push(*call_id);
             }
         }
     }
@@ -1434,6 +1462,7 @@ pub enum SemanticProjectAnalyzerConfigError {
 struct ParsedInput<'request, 'source> {
     input: &'request ProjectSourceInput<'source>,
     facts: Vec<SyntaxFact>,
+    native_imports: BTreeMap<u64, ecmascript::ParsedImport>,
     diagnostics: Vec<AdapterDiagnostic>,
     parse_status: CoverageStatus,
     syntax_nodes: usize,
@@ -2164,18 +2193,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 }
             }
 
-            let native_imports = ecmascript::NativeImports::new(&facts, self.cancellation)?;
             for (fact_index, fact) in facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
                 match fact.kind() {
                     SyntaxFactKind::Import => {
-                        if fact
-                            .syntax_kind()
-                            .as_str()
-                            .ends_with(".native_import.import")
-                        {
-                            if let Some(import) =
-                                native_imports.parse(fact.span(), bytes, self.cancellation)?
+                        if ecmascript::is_native_import(fact) {
+                            if let Some(import) = self.parsed[file_index]
+                                .native_imports
+                                .remove(&fact.local_id())
                             {
                                 self.imports.push(ImportDraft {
                                     file: fact.span().file(),
