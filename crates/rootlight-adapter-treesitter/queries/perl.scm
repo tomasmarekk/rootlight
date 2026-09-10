@@ -13,6 +13,7 @@
 (assignment_expression) @scope
 (assignment_expression left: (_) @expression right: (_) @expression)
 (coderef_call_expression) @expression
+(coderef_call_expression . (_) @expression)
 (function_call_expression function: (function (varname (scalar))) @expression)
 [(eval_expression) (goto_expression) (substitution_regexp)] @expression
 [(conditional_statement) (loop_statement) (cstyle_for_statement) (for_statement)] @scope

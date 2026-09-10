@@ -157,6 +157,11 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
         "(".repeat(256),
         ")".repeat(256)
     );
+    let nested_code_receiver = format!(
+        "sub entry {{ 1 }} my $call = \\&entry; {}$call{}->();",
+        "(# receiver\n".repeat(256),
+        ")".repeat(256)
+    );
     let grouped_coderef = format!(
         "sub entry {{ 1 }} {}\\&entry{}->();",
         "(# grouping\n".repeat(256),
@@ -183,6 +188,7 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
         direct_coderef_calls.as_bytes(),
         variable_coderef_calls.as_bytes(),
         nested_code_values.as_bytes(),
+        nested_code_receiver.as_bytes(),
         grouped_coderef.as_bytes(),
         root_alias.as_bytes(),
         heredocs.as_bytes(),

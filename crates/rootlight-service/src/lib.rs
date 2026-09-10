@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/98";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/99";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23915,6 +23915,18 @@ mod tests {
                 reads,
             );
         }
+    }
+
+    #[test]
+    fn perl_grouped_coderef_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources_with_reads(
+            include_str!("../../../tests/fixtures/perl-bindings/coderef_grouped_receiver.pl"),
+            4,
+            2,
+            &[],
+            ("13", "17"),
+            4,
+        );
     }
 
     fn assert_perl_durable_sources_with_reads(

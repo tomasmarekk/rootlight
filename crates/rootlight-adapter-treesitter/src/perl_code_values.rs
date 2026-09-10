@@ -262,11 +262,31 @@ pub(super) fn resolve(
                 .start_byte()
                 .checked_add(offset)
                 .ok_or_else(invalid)?;
-            let variable = context
-                .variables
-                .range((start, 0)..=(start, u64::MAX))
-                .next();
-            if let Some((_, &(read, variable))) = variable
+            let variable = if kind == "perl.scalar_amper.expression" {
+                context
+                    .variables
+                    .range((start, 0)..=(start, u64::MAX))
+                    .next()
+                    .map(|(_, &variable)| variable)
+            } else {
+                // A grouped receiver need not start with its scalar. Use only the
+                // native operand interval, never a resolved variable from arguments.
+                let mut receiver = None;
+                for (_, &field) in fields.range((start, 0)..=(start, fact.span().end_byte())) {
+                    cancellation.check()?;
+                    if field.syntax_kind().as_str() == "perl.scalar_coderef_receiver.expression"
+                        && receiver.replace(field).is_some()
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if let Some(receiver) = receiver {
+                    context.single_variable(receiver, cancellation)?
+                } else {
+                    None
+                }
+            };
+            if let Some((read, variable)) = variable
                 && let Some(&call) = occurrences.get(&fact.span())
             {
                 allowed_reads.insert(read.local_id());

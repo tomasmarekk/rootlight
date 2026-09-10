@@ -551,6 +551,62 @@ fn perl_native_variable_coderef_calls_preserve_lexical_values() {
 }
 
 #[test]
+fn perl_native_grouped_coderef_receivers_preserve_callable_identity() {
+    assert_variable_coderef_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/coderef_grouped_receiver.pl"),
+        &[
+            ("($call)->()", "value"),
+            (
+                "(( # transparent receiver group\n    $call\n))->()",
+                "value",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_grouped_coderef_receivers_use_only_the_native_operand() {
+    for (source, written) in [
+        (
+            "sub value { 13 } my $call = \\&value; ($call)->($unknown);",
+            "($call)->($unknown)",
+        ),
+        (
+            "sub value { 13 } my $café = \\&value; ((# receiver λ😀\r\n$café\r\n))->();",
+            "((# receiver λ😀\r\n$café\r\n))->()",
+        ),
+    ] {
+        assert_variable_coderef_calls(source, &[(written, "value")]);
+    }
+    for call in [
+        "($unknown)->($call)",
+        "($call, $unknown)->()",
+        "($unknown || $call)->()",
+        "([$call])->()",
+        "('prefix' . $call)->()",
+        "(($call)->(",
+    ] {
+        let source = format!("sub value {{ 13 }} my $call = \\&value; {call};");
+        let result = output(&source);
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn perl_native_grouped_coderef_artifacts_preserve_generation_and_sources() {
+    assert_perl_artifact_replay(include_str!(
+        "../../../../tests/fixtures/perl-bindings/coderef_grouped_receiver.pl"
+    ));
+}
+
+#[test]
 fn perl_native_variable_coderef_calls_copy_values_before_reassignment() {
     assert_variable_coderef_calls(
         include_str!("../../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"),

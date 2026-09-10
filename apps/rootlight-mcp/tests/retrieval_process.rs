@@ -710,6 +710,22 @@ fn perl_variable_coderef_copies_cross_mcp_with_exact_targets_and_sources() {
 }
 
 #[test]
+fn perl_grouped_coderef_calls_cross_mcp_with_distinct_exact_sources() {
+    assert_relationship_source_sites(
+        "perl",
+        "calls.pm",
+        include_str!("../../../tests/fixtures/perl-bindings/coderef_grouped_receiver.pl"),
+        &[("value", "function", "($call)->()")],
+        "calls",
+        Some(2),
+        Some(&[
+            "($call)->()",
+            "(( # transparent receiver group\n    $call\n))->()",
+        ]),
+    );
+}
+
+#[test]
 fn perl_qualified_function_calls_cross_mcp_with_exact_sources() {
     for (source, written) in [
         (
@@ -1000,6 +1016,18 @@ fn assert_relationship_sources_with_count(
     relation: &str,
     source_count: Option<usize>,
 ) {
+    assert_relationship_source_sites(language, path, source, names, relation, source_count, None);
+}
+
+fn assert_relationship_source_sites(
+    language: &str,
+    path: &str,
+    source: &str,
+    names: &[(&str, &str, &str)],
+    relation: &str,
+    source_count: Option<usize>,
+    written_sites: Option<&[&str]>,
+) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, written) in names {
@@ -1059,7 +1087,7 @@ fn assert_relationship_sources_with_count(
         let items = groups[0]["items"].as_array().unwrap();
         assert_eq!(items.len(), expected_edges);
         assert_eq!(groups[0]["total_count"], expected_edges);
-        let references: Vec<_> = items
+        let mut references: Vec<_> = items
             .iter()
             .flat_map(|item| {
                 let sources = item["source_refs"].as_array().unwrap();
@@ -1084,7 +1112,12 @@ fn assert_relationship_sources_with_count(
                 "each call must have distinct source evidence"
             );
         }
+        if let Some(written_sites) = written_sites {
+            assert_eq!(references.len(), written_sites.len());
+            references.sort_by_key(|reference| reference["span"]["start_byte"].as_u64().unwrap());
+        }
         for (index, reference) in references.iter().enumerate() {
+            let written = written_sites.map_or(written, |sites| sites[index]);
             assert_eq!(reference["generation"], generation);
             let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
             let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();

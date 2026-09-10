@@ -6,7 +6,18 @@ use super::*;
 
 #[test]
 fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
-    let perl = "sub entry { 1 } my $ref = \\&entry; $ref->();";
+    assert_variable_coderef_edge_quotas("$ref", 1);
+}
+
+#[test]
+fn perl_grouped_coderef_edges_reserve_quotas_before_materialization() {
+    assert_variable_coderef_edge_quotas("((# receiver\n$ref))", 0);
+}
+
+fn assert_variable_coderef_edge_quotas(receiver: &str, receiver_nth: usize) {
+    let call = format!("{receiver}->()");
+    let text = format!("sub entry {{ 1 }} my $ref = \\&entry; {call};");
+    let perl = text.as_str();
     let (_temporary, snapshot, source) =
         source_fixture_for(perl, "src/module.pm", b"perl-code-value-quotas");
     let facts: Vec<_> = [
@@ -114,7 +125,7 @@ fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
             13,
             Some(3),
             SyntaxFactKind::Occurrence,
-            "$ref->()",
+            call.as_str(),
             0,
             3,
             "perl.coderef_application.reference",
@@ -123,7 +134,7 @@ fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
             14,
             Some(3),
             SyntaxFactKind::Signature,
-            "$ref->()",
+            call.as_str(),
             0,
             3,
             "perl.scalar_coderef.expression",
@@ -145,6 +156,15 @@ fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
             0,
             3,
             "perl.statement.scope",
+        ),
+        (
+            17,
+            Some(3),
+            SyntaxFactKind::Signature,
+            receiver,
+            receiver_nth,
+            3,
+            "perl.scalar_coderef_receiver.expression",
         ),
     ]
     .into_iter()
@@ -178,7 +198,7 @@ fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
         assert_eq!(calls.len(), 1);
         assert_eq!(
             calls[0].evidence.source.as_ref().unwrap().span(),
-            span_in(perl, &source, "$ref->()", 0)
+            span_in(perl, &source, &call, 0)
         );
         let total = output.document().relations.len();
         let mut ir = IrLimits::default();

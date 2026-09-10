@@ -360,12 +360,15 @@ fn value_expression(
     {
         return Ok("perl.code_flow_barrier");
     }
-    if node.kind() == "coderef_call_expression"
-        && !node.has_error()
-        && explicit_group_end(node, source, cancellation)?
-        && node.named_child(0).is_some_and(scalar_name)
-    {
+    if coderef_operand(node, source, cancellation)?.is_some_and(scalar_name) {
         return Ok("perl.scalar_coderef");
+    }
+    if let Some(parent) = node.parent()
+        && parent.kind() == "coderef_call_expression"
+        && parent.named_child(0) == Some(node)
+        && coderef_operand(parent, source, cancellation)?.is_some_and(scalar_name)
+    {
+        return Ok("perl.scalar_coderef_receiver");
     }
     if let Some(parent) = node.parent()
         && parent.kind() == "assignment_expression"
@@ -439,7 +442,7 @@ fn scalar_name(node: Node<'_>) -> bool {
             .is_some_and(|name| name.kind() == "varname" && name.named_child_count() == 0)
 }
 
-fn direct_coderef_operand<'tree>(
+fn coderef_operand<'tree>(
     node: Node<'tree>,
     source: &[u8],
     cancellation: &Cancellation,
@@ -463,6 +466,17 @@ fn direct_coderef_operand<'tree>(
         };
         operand = inner;
     }
+    Ok(Some(operand))
+}
+
+fn direct_coderef_operand<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let Some(operand) = coderef_operand(node, source, cancellation)? else {
+        return Ok(None);
+    };
     if operand.kind() != "refgen_expression" {
         return Ok(None);
     }
