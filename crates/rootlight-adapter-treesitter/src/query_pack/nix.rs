@@ -62,14 +62,21 @@ fn binding_name(node: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-fn static_name(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+fn static_name(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
     let mut cursor = node.walk();
     loop {
         cancellation.check()?;
-        if cursor.node().kind() == "interpolation" {
+        let literal = matches!(cursor.node().kind(), "interpolation" | "string_expression");
+        if literal && !literal_name(cursor.node(), source, cancellation)? {
             return Ok(false);
         }
-        if cursor.goto_first_child() {
+        // Decode a whole literal once: a quoted interpolation is still an
+        // evaluated string even when its embedded expression is a literal.
+        if !literal && cursor.goto_first_child() {
             continue;
         }
         loop {
@@ -83,23 +90,39 @@ fn static_name(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, Adap
     }
 }
 
+fn literal_name(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let written = node
+        .utf8_text(source)
+        .map_err(|_| super::query_failure("query-nix-key-utf8"))?;
+    Ok(
+        rootlight_adapter_sdk::nix_static_attribute_name(written, written.len(), cancellation)?
+            .is_some(),
+    )
+}
+
 pub(super) fn definition_node<'tree>(
     node: Node<'tree>,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<Node<'tree>>, AdapterError> {
     let Some(name) = binding_name(node) else {
         return Ok(None);
     };
-    Ok(static_name(name, cancellation)?.then_some(name))
+    Ok(static_name(name, source, cancellation)?.then_some(name))
 }
 
 pub(super) fn syntax(
     node: Node<'_>,
     role: StructuralRole,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
     if role == StructuralRole::DefinitionPart {
-        return Ok(Some(if static_name(node, cancellation)? {
+        return Ok(Some(if static_name(node, source, cancellation)? {
             "nix.path_segment"
         } else {
             "nix.dynamic_segment"
@@ -119,11 +142,11 @@ pub(super) fn syntax(
             {
                 "nix.parameter"
             }
-            _ if definition_node(node, cancellation)?.is_none() => {
+            _ if definition_node(node, source, cancellation)?.is_none() => {
                 let static_root = node
                     .child_by_field_name("attrpath")
                     .and_then(|path| path.child_by_field_name("attr"))
-                    .map(|root| static_name(root, cancellation))
+                    .map(|root| static_name(root, source, cancellation))
                     .transpose()?
                     .unwrap_or(false);
                 match (
@@ -192,7 +215,7 @@ mod tests {
         let cancellation = Cancellation::new();
         assert!(cancellation.cancel(CancellationReason::ClientRequest));
         assert!(matches!(
-            static_name(tree.root_node(), &cancellation),
+            static_name(tree.root_node(), b"{ name = 1; }", &cancellation),
             Err(AdapterError::Cancelled {
                 reason: CancellationReason::ClientRequest
             })

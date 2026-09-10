@@ -64,6 +64,59 @@ fn markdown_nix_merged_sets_preserve_recursion_and_host_definition_sites() {
 }
 
 #[test]
+fn markdown_nix_literal_keys_preserve_host_spelling_and_example_scope() {
+    let source = "# Keys λ😀\r\n```nix\r\nlet ${\"name\"} = 1; in name\r\n```\r\n```nix\r\nlet ${\"name\"} = 2; in name\r\n```\r\n";
+    let result = output(source);
+    let names: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|item| item.language == "nix" && item.canonical_name == r#"${"name"}"#)
+        .collect();
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0].id, names[1].id);
+    for name in names {
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Definition
+                    && item.target == (OccurrenceTarget::Resolved { symbol: name.id })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(r#"${"name"}"#)
+        );
+        let reads: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.target == (OccurrenceTarget::Resolved { symbol: name.id })
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(read.start_byte()).unwrap()
+                    ..usize::try_from(read.end_byte()).unwrap()
+            ),
+            Some("name")
+        );
+        assert!(read.start_byte() > span.end_byte());
+        assert!(read.start_byte() - span.end_byte() < 16);
+    }
+}
+
+#[test]
 fn markdown_nix_implicit_path_roots_keep_host_sources_and_separate_examples() {
     let source = "# Roots λ😀\r\n```nix\r\nlet a.b = 1; a.c = 2; in a\r\n```\r\n```nix\r\nlet a.d = 3; in a\r\n```\r\n";
     let result = output(source);

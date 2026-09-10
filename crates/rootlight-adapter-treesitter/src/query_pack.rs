@@ -600,7 +600,8 @@ impl QueryPack {
                         continue;
                     }
                     if role == StructuralRole::Definition {
-                        let Some(name) = nix::definition_node(capture.node, input.cancellation)?
+                        let Some(name) =
+                            nix::definition_node(capture.node, input.source, input.cancellation)?
                         else {
                             continue;
                         };
@@ -932,7 +933,7 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
-        _ if family == GrammarFamily::Nix => nix::syntax(capture.node, role, cancellation)?
+        _ if family == GrammarFamily::Nix => nix::syntax(capture.node, role, source, cancellation)?
             .ok_or_else(|| query_failure("query-nix-kind"))?,
         _ if family == GrammarFamily::ObjectiveC => objective_c::capture_syntax(capture.node, role)
             .ok_or_else(|| query_failure("query-objective-c-kind"))?,

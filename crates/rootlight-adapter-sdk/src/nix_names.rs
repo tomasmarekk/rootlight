@@ -8,15 +8,20 @@ use rootlight_cancel::Cancellation;
 
 use crate::AdapterError;
 
+mod literals;
+
 /// Decodes one bounded static Nix attribute name without evaluating expressions.
 ///
 /// Bare identifiers are borrowed. Quoted strings follow Nix escape and newline
-/// rules, including literal dollar pairs. Empty and nonidentifier keys are valid;
-/// paths, interpolation, malformed names, excess bytes or allocation failure
-/// return `None`. Both input and output fit `maximum_bytes`.
+/// rules, including literal dollar pairs. Empty and nonidentifier keys are valid.
+/// Literal-only `${...}` keys follow parser-level string folding, including
+/// parentheses and trivia. Evaluated expressions, malformed names, excess bytes
+/// or unavailable output storage return `None`. Both input and output fit
+/// `maximum_bytes`.
 ///
 /// # Errors
-/// Returns [`AdapterError::Cancelled`] when cancellation interrupts decoding.
+/// Returns [`AdapterError::Cancelled`] when cancellation interrupts decoding,
+/// or a sink error if bounded parser scratch storage cannot be allocated.
 pub fn nix_static_attribute_name<'a>(
     written: &'a str,
     maximum_bytes: usize,
@@ -40,7 +45,8 @@ fn bare_identifier(text: &str) -> bool {
 /// unrepresentable keys return `None`. Authored source spans are not changed.
 ///
 /// # Errors
-/// Returns [`AdapterError::Cancelled`] when decoding is interrupted.
+/// Returns [`AdapterError::Cancelled`] when decoding is interrupted,
+/// or a sink error if bounded parser scratch storage cannot be allocated.
 pub fn nix_canonical_attribute_name<'a>(
     written: &'a str,
     maximum_bytes: usize,
@@ -61,6 +67,23 @@ fn identifier_continuation(byte: u8) -> bool {
 }
 
 fn decode_name<'a>(
+    written: &'a str,
+    maximum_bytes: usize,
+    mut check: impl FnMut() -> Result<(), AdapterError>,
+) -> Result<Option<Cow<'a, str>>, AdapterError> {
+    check()?;
+    if written.len() > maximum_bytes {
+        return Ok(None);
+    }
+    if written.starts_with("${") {
+        return Ok(literals::key(written, maximum_bytes, &mut check)?
+            .filter(|(_, rest)| rest.is_empty())
+            .map(|(name, _)| name));
+    }
+    decode_plain_name(written, maximum_bytes, check)
+}
+
+fn decode_plain_name<'a>(
     written: &'a str,
     maximum_bytes: usize,
     mut check: impl FnMut() -> Result<(), AdapterError>,
@@ -161,6 +184,9 @@ fn readable_single_name(name: &str) -> bool {
 }
 
 fn segment(text: &str) -> Option<(Cow<'_, str>, &str)> {
+    if text.starts_with("${") {
+        return literals::key(text, text.len(), &mut || Ok(())).ok()?;
+    }
     let end = if text.starts_with('"') {
         let mut chars = text.char_indices();
         chars.next();
@@ -189,7 +215,7 @@ fn skip_trivia(mut text: &str) -> Option<&str> {
             text = comment.get(comment.find("*/")?.checked_add(2)?..)?;
         } else if let Some(comment) = text.strip_prefix('#') {
             text = comment
-                .find('\n')
+                .find(['\r', '\n'])
                 .and_then(|end| comment.get(end..))
                 .unwrap_or("");
         } else {
@@ -233,6 +259,143 @@ fn append(output: &mut String, text: &str, maximum_bytes: usize) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_attribute_expressions_follow_parser_string_folding() {
+        for (written, expected) in [
+            (r#"${"name"}"#, "name"),
+            (r#"${ ( /* key */ "n\ame" ) }"#, "name"),
+            ("${ # key\r (\"λ😀\") }", "λ😀"),
+            (r#"${""}"#, ""),
+            (r#"${scheme:path/to?query=1}"#, "scheme:path/to?query=1"),
+            ("${''name''}", "name"),
+            ("${''\n  name\n  ''}", "name\n"),
+            ("${''\rname''}", "\rname"),
+            ("${''''}", ""),
+            ("${''   ''}", ""),
+            ("${''''\\n''}", "\n"),
+            ("${''  ''\\n  ''}", "\n"),
+            ("${''$''}", "$"),
+            (r#"${''${"name"}''}"#, "name"),
+            (r#"${''  ${ ( ''${"name"}'' ) }''}"#, "name"),
+        ] {
+            assert_eq!(
+                nix_static_attribute_name(written, written.len(), &Cancellation::new())
+                    .unwrap()
+                    .as_deref(),
+                Some(expected),
+                "{written:?}"
+            );
+            assert!(
+                nix_static_attribute_name(written, written.len() - 1, &Cancellation::new())
+                    .unwrap()
+                    .is_none(),
+                "{written:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluated_or_malformed_attribute_expressions_never_fold() {
+        for written in [
+            "${name}",
+            "${(name)}",
+            r#"${"na" + "me"}"#,
+            r#"${if true then "name" else "other"}"#,
+            r#"${let name = "name"; in name}"#,
+            r#"${"${"name"}"}"#,
+            "${./name}",
+            "${42}",
+            "${scheme:}",
+            r#"${("name"}"#,
+            r#"${"name")}"#,
+            r#"${"name"}extra"#,
+            r#"${/* missing "name"}"#,
+            "${\"a\0b\"}",
+            "${''na''\\tme''}",
+            "${''$\0''}",
+            "${'''\0''}",
+            "${''name$''}",
+            r#"${''${"name"} ''}"#,
+            "${''${\"name\"}\n''}",
+            r#"${''prefix${"name"}''}"#,
+            r#"${''${name}''}"#,
+        ] {
+            assert!(
+                nix_static_attribute_name(written, written.len(), &Cancellation::new())
+                    .unwrap()
+                    .is_none(),
+                "{written:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_literal_names_are_iterative_bounded_and_cancellable() {
+        let written = format!(
+            "{}{}{}",
+            "${''".repeat(4096),
+            r#"${"name"}"#,
+            "''}".repeat(4096)
+        );
+        assert_eq!(
+            nix_static_attribute_name(&written, written.len(), &Cancellation::new())
+                .unwrap()
+                .as_deref(),
+            Some("name")
+        );
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            nix_static_attribute_name("", 0, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        let mut checks = 0;
+        assert!(matches!(
+            decode_name(&written, written.len(), || {
+                checks += 1;
+                if checks == 100 {
+                    cancel.check()?;
+                }
+                Ok(())
+            }),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert_eq!(checks, 100);
+    }
+
+    #[test]
+    fn literal_path_display_keeps_authored_identity_and_segment_boundaries() {
+        for (written, display) in [
+            (r#"${"name"}"#, "name"),
+            (r#"${"a.b"}.${''c''}"#, r#""a.b".c"#),
+            ("a # comment\r . ${\"b\"}", "a.b"),
+        ] {
+            assert_eq!(display_path(written).as_deref(), Some(display));
+            assert_eq!(
+                crate::structural_captured_name_for_language("nix", written, written.len())
+                    .as_deref(),
+                Some(written)
+            );
+        }
+    }
+
+    #[test]
+    fn indented_literal_folding_retains_parser_indentation_boundary() {
+        let written = format!("${{''{}name''}}", " ".repeat(1_000_001));
+        assert_eq!(
+            nix_static_attribute_name(&written, written.len(), &Cancellation::new())
+                .unwrap()
+                .as_deref(),
+            Some(" name")
+        );
+        let written = format!("${{''{}${{\"name\"}}''}}", " ".repeat(1_000_001));
+        assert!(
+            nix_static_attribute_name(&written, written.len(), &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn implicit_key_identity_is_canonical_bounded_and_not_a_display_label() {

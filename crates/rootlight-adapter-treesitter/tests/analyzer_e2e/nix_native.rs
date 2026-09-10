@@ -84,6 +84,140 @@ fn assert_bindings(source: &str, cases: &[(&str, &str, Option<&str>)]) {
 }
 
 #[test]
+fn nix_literal_interpolated_keys_shadow_outer_names_with_exact_sources() {
+    for key in [
+        r#"${"name"}"#,
+        r#"${ ( /* key */ "n\ame" ) }"#,
+        "${''name''}",
+        r#"${''${"name"}''}"#,
+    ] {
+        let source = format!("let name = 0; in rec {{ {key} = 1; result = name; }}");
+        let result = output(&source);
+        let target = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing literal-key definition: {:?}",
+                    result.document().entities
+                )
+            });
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Definition
+                    && item.target == (OccurrenceTarget::Resolved { symbol: target.id })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(key)
+        );
+        let start = source.rfind("name;").unwrap();
+        let reference = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.source.span().start_byte() == u64::try_from(start).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_nix_artifact_replay(&source);
+    }
+}
+
+#[test]
+fn nix_evaluated_string_keys_do_not_create_lexical_bindings() {
+    for key in [
+        r#""${"name"}""#,
+        r#"${"na" + "me"}"#,
+        r#"${''${"name"} ''}"#,
+        r#"${''${"name"}\n''}"#,
+    ] {
+        let source = format!("let name = 0; in rec {{ {key} = 1; result = name; }}");
+        assert_bindings(&source, &[("result = name;", "name", Some("name = 0"))]);
+    }
+}
+
+#[test]
+fn nix_literal_nonidentifier_keys_have_exact_written_definitions() {
+    for key in [r#"${scheme:path}"#, "${''\n  λ😀\n  ''}", r#"${""}"#] {
+        let source = format!("{{ {key} = 1; }}");
+        let result = output(&source);
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|item| item.canonical_name == key)
+            .unwrap();
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Definition
+                    && item.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(key)
+        );
+        assert_nix_artifact_replay(&source);
+    }
+}
+
+#[test]
+fn nix_literal_prefixes_share_written_attribute_namespaces() {
+    let source = r#"let ${"name"}.item = 1; name.other = 2; in name"#;
+    let result = output(source);
+    let roots: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|item| item.canonical_name == "name")
+        .collect();
+    assert_eq!(roots.len(), 1);
+    let read_start = u64::try_from(source.rfind("name").unwrap()).unwrap();
+    let read = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|item| {
+            item.role == OccurrenceRole::Reference && item.source.span().start_byte() == read_start
+        })
+        .unwrap();
+    assert_eq!(
+        read.target,
+        OccurrenceTarget::Resolved {
+            symbol: roots[0].id
+        }
+    );
+    assert_nix_artifact_replay(source);
+    assert_bindings(
+        r#"let ${"name"} = rec { part = 1; }; name.added = part; in name"#,
+        &[("added = part;", "part", Some("part = 1"))],
+    );
+}
+
+#[test]
 fn nix_merged_attribute_sets_follow_the_first_sets_recursion_mode() {
     for source in [
         "let a = { b = 1; }; a.c = 2; in a",

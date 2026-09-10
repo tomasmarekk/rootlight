@@ -603,6 +603,19 @@ fn nix_merged_rec_sets_cross_mcp_with_source_proven_added_field_reads() {
 }
 
 #[test]
+fn nix_literal_keys_cross_mcp_with_authored_and_decoded_search_names() {
+    assert_nix_lexical_relationship_sources(
+        r#"{ system ? "portable" }@args: let ${"identity"} = value: value; in { inherit system; result = identity args; }"#,
+        &[
+            (r#"${"identity"}"#, "function", "identity"),
+            ("identity", "function", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
+#[test]
 fn nix_implicit_path_owners_cross_mcp_as_noncallable_lexical_targets() {
     assert_nix_lexical_relationship_sources(
         "{ system ? \"portable\" }@args: let identity.part = value: value; identity.other = 2; in { inherit system; result = [ identity args ]; }",
