@@ -3090,7 +3090,7 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     match fact.syntax_kind().as_str() {
         "objective_c.file.root" => Some((
             FactDomain::Entities,
-            "objective-c-ivar-parameter-forward-and-preprocessed-declarations-unavailable",
+            "objective-c-forward-and-preprocessed-declarations-unavailable",
         )),
         "objective_c.file.module" => Some((
             FactDomain::Relations,

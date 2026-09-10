@@ -541,7 +541,33 @@ fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
         "objective-c",
         "declarations.m",
         include_str!("../../../tests/fixtures/objective-c/declarations.m"),
-        &[("value", "field", 1), ("add:to:", "method", 2)],
+        &[("value", "property", 1), ("add:to:", "method", 2)],
+    );
+}
+
+#[test]
+fn objective_c_ivars_and_parameters_cross_real_process_boundaries() {
+    source_entities_cross_process_boundaries(
+        "objective-c",
+        "members.m",
+        include_str!("../../../tests/fixtures/objective-c/members.m"),
+        &[
+            ("second", "field", 1),
+            ("next", "field", 1),
+            ("callback", "field", 1),
+            ("handler", "field", 1),
+            ("slots", "field", 1),
+            ("flags", "field", 1),
+            ("state", "field", 1),
+            ("left", "parameter", 2),
+            ("right", "parameter", 2),
+            ("value", "parameter", 2),
+            ("extra", "parameter", 2),
+            ("input", "parameter", 2),
+            ("combine:with:", "method", 2),
+            ("legacy:", "method", 2),
+            ("from:", "method", 2),
+        ],
     );
 }
 
@@ -579,7 +605,12 @@ fn source_entities_with_signatures_cross_process_boundaries(
 ) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
-    for &(name, kind, count) in queries {
+    for &(name, expected_kind, count) in queries {
+        let kind = match expected_kind {
+            "property" => "field",
+            "parameter" => "variable",
+            other => other,
+        };
         if matches!(kind, "import" | "export") {
             let located = fixture.standalone(
                 &format!("binding-path-{kind}"),
@@ -696,13 +727,13 @@ fn source_entities_with_signatures_cross_process_boundaries(
                 .expect("scan rows");
             // Public selectors group kinds; advanced rows retain the exact IR
             // kind independently asserted by these source-backed fixtures.
-            let row_kind = match (language, kind) {
+            let row_kind = match (language, expected_kind) {
                 ("r", "variable") => "parameter",
-                ("powershell" | "objective-c", "field") => "property",
+                ("powershell", "field") => "property",
                 ("scala" | "dart" | "powershell", "type") => "class",
                 ("scala", "module") => "namespace",
                 ("dart", "method") if name == "Store.named" => "constructor",
-                _ => kind,
+                _ => expected_kind,
             };
             assert!(
                 rows.iter().any(|row| row["id"] == symbol

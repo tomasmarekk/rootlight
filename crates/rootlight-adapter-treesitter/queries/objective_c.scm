@@ -17,6 +17,11 @@
  (method_definition (identifier) @definition_part)
  (method_parameter ":" @definition_part)]
 (property_declaration (struct_declaration (struct_declarator) @definition)) @declaration
+(instance_variable (struct_declaration (struct_declarator) @declaration @definition))
+(instance_variable (atomic_declaration (field_identifier) @definition) @declaration)
+; Bindings, not whole parameter nodes, keep selector colons owned by the method.
+(method_parameter ":" (identifier) @declaration @definition)
+(method_parameter declarator: (_) @declaration @definition)
 (function_definition declarator: (function_declarator declarator: (identifier) @definition)) @declaration @scope @signature
 [(struct_specifier name: (type_identifier) @definition)
  (union_specifier name: (type_identifier) @definition)

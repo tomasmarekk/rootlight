@@ -18,7 +18,73 @@ fn is_category(node: Node<'_>) -> bool {
     }
 }
 
+fn is_ivar_declarator(node: Node<'_>) -> bool {
+    node.kind() == "struct_declarator"
+        && node
+            .parent()
+            .and_then(|parent| parent.parent())
+            .is_some_and(|parent| parent.kind() == "instance_variable")
+}
+
+fn declarator_name(mut node: Node<'_>) -> Option<Node<'_>> {
+    loop {
+        match node.kind() {
+            "identifier" | "field_identifier" => return Some(node),
+            "struct_declarator" => {
+                // An unnamed bit-field's width can itself be an identifier;
+                // it is an expression after the colon, never a field binding.
+                let mut cursor = node.walk();
+                node = node.children(&mut cursor).find(|child| !child.is_extra())?;
+            }
+            "parenthesized_declarator" => {
+                let mut cursor = node.walk();
+                let mut declarators = node.named_children(&mut cursor).filter(|child| {
+                    matches!(
+                        child.kind(),
+                        "identifier"
+                            | "field_identifier"
+                            | "array_declarator"
+                            | "block_pointer_declarator"
+                            | "function_declarator"
+                            | "parenthesized_declarator"
+                            | "pointer_declarator"
+                    )
+                });
+                let inner = declarators.next()?;
+                if declarators.next().is_some() {
+                    return None;
+                }
+                node = inner;
+            }
+            "array_declarator"
+            | "block_pointer_declarator"
+            | "function_declarator"
+            | "pointer_declarator"
+            | "init_declarator" => {
+                node = node.child_by_field_name("declarator")?;
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
+    if matches!(
+        role,
+        StructuralRole::Declaration | StructuralRole::Definition
+    ) && is_ivar_declarator(node)
+    {
+        let mut cursor = node.walk();
+        if node
+            .children(&mut cursor)
+            .find(|child| !child.is_extra())
+            .is_some_and(|child| child.kind() == ":")
+        {
+            // Anonymous bit-fields occupy storage but define no named entity.
+            // Retain their expression references without inventing a binding.
+            return false;
+        }
+    }
     match role {
         StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature => {
             !is_category(node)
@@ -47,6 +113,20 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
 }
 
 pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if matches!(
+        role,
+        StructuralRole::Declaration | StructuralRole::Definition
+    ) {
+        if node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "method_parameter")
+        {
+            return Some("objective_c.parameter");
+        }
+        if is_ivar_declarator(node) || node.kind() == "atomic_declaration" {
+            return Some("objective_c.field");
+        }
+    }
     match role {
         StructuralRole::ScopeTrait => return Some("objective_c.owner"),
         StructuralRole::ScopeType => return Some("objective_c.owner_header"),
@@ -86,12 +166,12 @@ pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'s
 
 pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Range<usize>> {
     if role == StructuralRole::Definition {
-        if node.kind() == "struct_declarator" {
-            let mut declarator = node.named_child(0)?;
-            while declarator.kind() != "identifier" {
-                declarator = declarator.child_by_field_name("declarator")?;
-            }
-            return Some(declarator.byte_range());
+        if node.kind() == "struct_declarator"
+            || node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "method_parameter")
+        {
+            return declarator_name(node).map(|name| name.byte_range());
         }
         if matches!(node.kind(), "class_interface" | "protocol_declaration") {
             return primary_name(node).map(|name| name.byte_range());
@@ -142,6 +222,47 @@ pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Rang
 mod tests {
     use super::*;
     use crate::GrammarFamily;
+
+    #[test]
+    fn written_members_have_clean_native_syntax_and_only_named_definitions() {
+        let source = include_bytes!("../../../../tests/fixtures/objective-c/members.m");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let pack = super::super::QueryPack::compile(
+            GrammarFamily::ObjectiveC,
+            include_str!("../../queries/objective_c.scm"),
+        )
+        .unwrap();
+        let candidates = pack
+            .extract_identity(
+                GrammarFamily::ObjectiveC,
+                &tree,
+                source,
+                1024,
+                &rootlight_cancel::Cancellation::new(),
+            )
+            .unwrap();
+        let definitions: Vec<_> = candidates
+            .iter()
+            .filter(|capture| capture.role == StructuralRole::Definition)
+            .map(|capture| source.get(capture.start..capture.end).unwrap())
+            .collect();
+        assert_eq!(
+            definitions.iter().filter(|name| **name == b"first").count(),
+            2
+        );
+        for name in [b"PaddingWidth".as_slice(), b"argument", b"blockArgument"] {
+            assert!(!definitions.contains(&name), "{definitions:?}");
+        }
+    }
 
     #[test]
     fn selector_headers_retain_class_and_instance_dispatch() {

@@ -27,6 +27,142 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn objective_c_members_preserve_every_written_ivar_and_its_owner() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/members.m");
+    let result = output(source);
+    let document = result.document();
+    let owner = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Members")
+        .unwrap();
+    let fields: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Field)
+        .collect();
+    let mut names: Vec<_> = fields
+        .iter()
+        .map(|entity| entity.canonical_name.as_str())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "callback", "first", "flags", "handler", "next", "second", "slots", "state"
+        ]
+    );
+    for field in fields {
+        assert_eq!(
+            field.container,
+            Some(rootlight_ir::ContainerRef::Entity(owner.id))
+        );
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: field.id }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(written, field.canonical_name);
+        assert_eq!(
+            definition.syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+    }
+    let first: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "first")
+        .collect();
+    assert_eq!(first.len(), 2);
+    assert_ne!(first[0].id, first[1].id);
+}
+
+#[test]
+fn objective_c_members_keep_regular_and_legacy_parameters_out_of_selectors() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/members.m");
+    let result = output(source);
+    let document = result.document();
+    let methods: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 6);
+    for name in ["combine:with:", "legacy:", "from:"] {
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|entity| entity.canonical_name == name)
+                .count(),
+            2
+        );
+    }
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Parameter)
+        .collect();
+    assert_eq!(parameters.len(), 10);
+    for (name, selector) in [
+        ("left", "combine:with:"),
+        ("right", "combine:with:"),
+        ("value", "legacy:"),
+        ("extra", "legacy:"),
+        ("input", "from:"),
+    ] {
+        let named: Vec<_> = parameters
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(named.len(), 2);
+        assert_ne!(named[0].id, named[1].id);
+        for parameter in named {
+            let owner = methods
+                .iter()
+                .find(|method| {
+                    parameter.container == Some(rootlight_ir::ContainerRef::Entity(method.id))
+                })
+                .unwrap();
+            assert_eq!(owner.canonical_name, selector);
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: parameter.id,
+                            }
+                })
+                .unwrap();
+            let span = definition.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+        }
+    }
+    assert!(
+        !parameters
+            .iter()
+            .any(|parameter| parameter.canonical_name == "argument")
+    );
+}
+
+#[test]
 fn objective_c_selector_parts_form_exact_names_without_parameter_text() {
     let source = include_str!("../../../../tests/fixtures/objective-c/selectors.m");
     let result = output(source);
@@ -112,7 +248,7 @@ fn objective_c_partial_structure_does_not_claim_complete_language_analysis() {
     ));
     assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
     for detail in [
-        "objective-c-ivar-parameter-forward-and-preprocessed-declarations-unavailable",
+        "objective-c-forward-and-preprocessed-declarations-unavailable",
         "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
     ] {
         assert!(
@@ -136,6 +272,111 @@ fn objective_c_partial_structure_does_not_claim_complete_language_analysis() {
         calls
             .iter()
             .all(|call| matches!(call.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+#[test]
+fn objective_c_members_replay_exactly_with_successor_source_evidence() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/members.m");
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, OBJECTIVE_C);
+    let fixture = Fixture::new(OBJECTIVE_C, source.as_bytes());
+    let budget = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &budget);
+    let (initial, artifact) = analyzer
+        .analyze_and_capture(
+            &initial_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        initial
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        10
+    );
+    let successor = fixture.next_generation();
+    let replay_limits =
+        limits_with_syntax_records(artifact.syntax_fact_count().checked_add(1).unwrap());
+    let successor_request = request(
+        &successor.snapshot,
+        &successor.source,
+        OBJECTIVE_C,
+        &replay_limits,
+    );
+    let reused = analyzer
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &successor_request, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    assert_eq!(reused.report(), fresh.report());
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.container))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&initial), identities(&reused));
+    assert!(reused.document().entities.iter().all(|entity| {
+        entity
+            .evidence
+            .source
+            .as_ref()
+            .is_some_and(|reference| reference.generation() == successor.source.generation())
+    }));
+}
+
+#[test]
+fn objective_c_members_keep_identity_when_only_method_bodies_change() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/members.m");
+    let changed = source.replace("return left + right;", "return right + left;");
+    assert_ne!(source, changed);
+    let initial = output(source);
+    let updated = output(&changed);
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id,
+                    (entity.kind, entity.canonical_name.clone(), entity.container),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(identities(&initial), identities(&updated));
+    assert_eq!(
+        initial
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Field)
+            .count(),
+        8
+    );
+    assert_eq!(
+        initial
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        10
     );
 }
 

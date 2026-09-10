@@ -210,7 +210,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/76";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/77";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -26898,6 +26898,164 @@ mod tests {
                         read.data.chunks[0].bytes,
                         expected_source.as_bytes()[start..end]
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn objective_c_members_survive_noop_body_edit_clean_rebuild_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = include_str!("../../../tests/fixtures/objective-c/members.m");
+        let path = fixture.path().join("members.m");
+        fs::write(&path, source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let snapshot = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let identities = snapshot
+            .document()
+            .entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id,
+                    (entity.kind, entity.canonical_name.clone(), entity.container),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (kind, count) in [
+            (EntityKind::Field, 8),
+            (EntityKind::Property, 1),
+            (EntityKind::Parameter, 10),
+            (EntityKind::Method, 6),
+        ] {
+            assert_eq!(
+                identities
+                    .values()
+                    .filter(|(found, _, _)| *found == kind)
+                    .count(),
+                count
+            );
+        }
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source.replace("return left + right;", "return right + left;");
+        assert_ne!(source, changed);
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        for (receipt, expected_source) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .map(|entity| {
+                        (
+                            entity.id,
+                            (entity.kind, entity.canonical_name.clone(), entity.container),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+                identities
+            );
+            for detail in [
+                "objective-c-forward-and-preprocessed-declarations-unavailable",
+                "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
+            ] {
+                assert!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.detail == detail)
+                );
+            }
+            for (name, kind, count) in [
+                ("handler", EntityKind::Field, 1),
+                ("state", EntityKind::Field, 1),
+                ("left", EntityKind::Parameter, 2),
+                ("extra", EntityKind::Parameter, 2),
+                ("combine:with:", EntityKind::Method, 2),
+            ] {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbols = located
+                    .data
+                    .hits
+                    .iter()
+                    .filter_map(|hit| hit.symbol)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(symbols.len(), count);
+                for symbol in symbols {
+                    let explained = restored
+                        .symbol_explain(receipt.generation, symbol, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.kind, kind);
+                    let reference = explained.data.entity.evidence.source.unwrap();
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    let end = usize::try_from(reference.span().end_byte()).unwrap();
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        expected_source.as_bytes()[start..end]
+                    );
+                    assert_eq!(read.data.chunks[0].language, "objective-c");
                 }
             }
         }
