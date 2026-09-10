@@ -191,8 +191,12 @@ pub(super) fn resolve<'a>(
         );
         let code_reference = fact.syntax_kind().as_str() == "perl.code_function_name.reference";
         let bare = fact.syntax_kind().as_str() == "perl.bare_function_name.reference";
-        let amper =
-            code_reference || fact.syntax_kind().as_str() == "perl.amper_function_name.reference";
+        let amper = code_reference
+            || matches!(
+                fact.syntax_kind().as_str(),
+                "perl.amper_function_name.reference"
+                    | "perl.direct_coderef_function_name.reference"
+            );
         if !builtin
             && !bare
             && !amper

@@ -31,7 +31,28 @@ fn perl_qualified_callable_edges_reserve_quotas_before_materialization() {
     );
 }
 
+#[test]
+fn perl_direct_coderef_edges_reserve_quotas_before_materialization() {
+    assert_callable_edge_quotas_at(
+        "sub entry { 1 } (\\&entry)->(); my $ref = \\&entry;",
+        "perl.direct_coderef_function_name.reference",
+        "entry",
+        ("&entry", 0),
+        1,
+    );
+}
+
 fn assert_callable_edge_quotas(perl: &str, call_kind: &str, name: &str) {
+    assert_callable_edge_quotas_at(perl, call_kind, name, (name, 1), 0);
+}
+
+fn assert_callable_edge_quotas_at(
+    perl: &str,
+    call_kind: &str,
+    name: &str,
+    call: (&str, usize),
+    reference_skip: usize,
+) {
     let (_temporary, snapshot, source) =
         source_fixture_for(perl, "src/module.pm", b"perl-callable-quotas");
     let declaration = format!("sub {name} {{ 1 }}");
@@ -87,8 +108,8 @@ fn assert_callable_edge_quotas(perl: &str, call_kind: &str, name: &str) {
             7,
             Some(3),
             SyntaxFactKind::Occurrence,
-            name,
-            1,
+            call.0,
+            call.1,
             3,
             call_kind,
         ),
@@ -97,7 +118,7 @@ fn assert_callable_edge_quotas(perl: &str, call_kind: &str, name: &str) {
             Some(3),
             SyntaxFactKind::Occurrence,
             code_reference.as_str(),
-            0,
+            reference_skip,
             3,
             "perl.code_function_name.reference",
         ),

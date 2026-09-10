@@ -4543,6 +4543,7 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "perl.importable_function_name.reference"
         | "perl.amper_function_name.reference"
         | "perl.code_function_name.reference"
+        | "perl.direct_coderef_function_name.reference"
         | "perl.coderef_application.reference" => Some("perl-function-target-unavailable"),
         "perl.method_application.reference" => Some("perl-method-target-unavailable"),
         "perl.identifier.reference" | "perl.module_name.reference" => {

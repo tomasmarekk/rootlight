@@ -55,6 +55,14 @@ pub(super) fn retain_capture(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    if role == StructuralRole::Reference
+        && node.kind() == "coderef_call_expression"
+        && direct_coderef_operand(node, source, cancellation)?.is_some()
+    {
+        // The exact callable name carries this invocation's evidence. Retaining
+        // a second unresolved whole-expression occurrence would invent a gap.
+        return Ok(false);
+    }
     if role == StructuralRole::Reference && node.kind() == "bareword" {
         return Ok(node
             .parent()
@@ -95,6 +103,7 @@ pub(super) fn retain_capture(
 pub(super) fn syntax(
     node: Node<'_>,
     role: StructuralRole,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
     if role == StructuralRole::Reference
@@ -272,7 +281,11 @@ pub(super) fn syntax(
                     .parent()
                     .is_some_and(|parent| parent.kind() == "refgen_expression") =>
         {
-            "perl.code_function_name"
+            if directly_invoked_code_reference(node, source, cancellation)? {
+                "perl.direct_coderef_function_name"
+            } else {
+                "perl.code_function_name"
+            }
         }
         "function" => "perl.function_name",
         "string_content"
@@ -292,6 +305,95 @@ pub(super) fn syntax(
         "string_literal" | "interpolated_string_literal" | "command_string" => "perl.string",
         _ => return Ok(None),
     }))
+}
+
+fn direct_coderef_operand<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    cancellation.check()?;
+    if node.kind() != "coderef_call_expression"
+        || node.has_error()
+        || !explicit_group_end(node, source, cancellation)?
+    {
+        return Ok(None);
+    }
+    let Some(mut operand) = node.named_child(0) else {
+        return Ok(None);
+    };
+    while operand.kind() == "parenthesized_expression" {
+        if !explicit_group_end(operand, source, cancellation)? {
+            return Ok(None);
+        }
+        let Some(inner) = single_operand(operand, cancellation)? else {
+            return Ok(None);
+        };
+        operand = inner;
+    }
+    if operand.kind() != "refgen_expression" {
+        return Ok(None);
+    }
+    let Some(function) = single_operand(operand, cancellation)? else {
+        return Ok(None);
+    };
+    let static_name = function.kind() == "function"
+        && function
+            .named_child(0)
+            .is_some_and(|name| name.kind() == "varname" && name.named_child_count() == 0);
+    Ok(static_name.then_some(function))
+}
+
+fn explicit_group_end(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    // The native scanner can synthesize an empty ')' at EOF without setting
+    // has_error or is_missing. Only written delimiters establish this call shape.
+    for child in node.children(&mut node.walk()) {
+        cancellation.check()?;
+        if child.kind() == ")" && source.get(child.byte_range()) == Some(b")") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn single_operand<'tree>(
+    node: Node<'tree>,
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let mut result = None;
+    for child in node.named_children(&mut node.walk()) {
+        cancellation.check()?;
+        if child.kind() == "comment" {
+            continue;
+        }
+        if result.replace(child).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(result)
+}
+
+fn directly_invoked_code_reference(
+    function: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let Some(reference) = function.parent() else {
+        return Ok(false);
+    };
+    let mut parent = reference.parent();
+    while let Some(node) = parent {
+        cancellation.check()?;
+        if node.kind() != "parenthesized_expression" {
+            return Ok(direct_coderef_operand(node, source, cancellation)? == Some(function));
+        }
+        parent = node.parent();
+    }
+    Ok(false)
 }
 
 fn declaration_keyword(

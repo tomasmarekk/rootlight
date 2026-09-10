@@ -294,6 +294,53 @@ fn markdown_perl_qualified_storage_and_root_aliases_stay_inside_their_example() 
 }
 
 #[test]
+fn markdown_perl_direct_coderef_calls_keep_embedded_identity_and_sources() {
+    let source = "# Calls λ😀\r\n```perl\r\nsub value { 13 } (\\&value)->();\r\n```\r\n```perl\r\nsub value { 29 } ((\\&value))->();\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.syntactic_text_hash == content_hash(b"value")
+        })
+        .collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 2);
+    assert_ne!(definitions[0].target, definitions[1].target);
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 2);
+    for (call, definition) in calls.into_iter().zip(definitions) {
+        assert_eq!(call.target, definition.target);
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("&value")
+        );
+        assert_eq!(call.syntactic_text_hash, content_hash(b"&value"));
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.evidence.source.as_ref() == Some(&call.source)
+        }));
+    }
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| site.syntax_kind == "perl.coderef_application.reference")
+    );
+}
+
+#[test]
 fn markdown_perl_function_imports_and_storage_stay_inside_their_example() {
     let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; use subs qw(reverse); sub reverse { 29 } reverse('abc');\r\n```\r\n```perl\r\npackage Harbor; sub reverse { 41 } reverse('abc'); &reverse();\r\n```\r\n";
     assert_perl_function_example_isolation(source);

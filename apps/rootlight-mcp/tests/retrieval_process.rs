@@ -684,6 +684,18 @@ fn perl_function_calls_cross_mcp_with_exact_sources() {
 }
 
 #[test]
+fn perl_direct_coderef_calls_cross_mcp_with_both_exact_sources() {
+    assert_relationship_sources_with_count(
+        "perl",
+        "calls.pm",
+        include_str!("../../../tests/fixtures/perl-bindings/coderef_direct_bounded.pl"),
+        &[("value", "function", "&value")],
+        "calls",
+        Some(2),
+    );
+}
+
+#[test]
 fn perl_qualified_function_calls_cross_mcp_with_exact_sources() {
     for (source, written) in [
         (
@@ -963,6 +975,17 @@ fn assert_relationship_sources(
     names: &[(&str, &str, &str)],
     relation: &str,
 ) {
+    assert_relationship_sources_with_count(language, path, source, names, relation, None);
+}
+
+fn assert_relationship_sources_with_count(
+    language: &str,
+    path: &str,
+    source: &str,
+    names: &[(&str, &str, &str)],
+    relation: &str,
+    source_count: Option<usize>,
+) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, written) in names {
@@ -1009,16 +1032,44 @@ fn assert_relationship_sources(
                 .iter()
                 .any(|warning| { warning["code"] == "negative_claims_inconclusive" })
         );
-        assert_eq!(output["data"]["totals"]["total_edges"], 1, "{output:#}");
-        assert_eq!(output["data"]["totals"]["returned_edges"], 1);
+        let expected_edges = source_count.unwrap_or(1);
+        assert_eq!(
+            output["data"]["totals"]["total_edges"], expected_edges,
+            "{output:#}"
+        );
+        assert_eq!(output["data"]["totals"]["returned_edges"], expected_edges);
         let groups = output["data"]["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["seed"], symbol);
         assert_eq!(groups[0]["relation"], relation);
         let items = groups[0]["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1);
-        let references = items[0]["source_refs"].as_array().unwrap();
-        assert!(!references.is_empty());
+        assert_eq!(items.len(), expected_edges);
+        assert_eq!(groups[0]["total_count"], expected_edges);
+        let references: Vec<_> = items
+            .iter()
+            .flat_map(|item| {
+                let sources = item["source_refs"].as_array().unwrap();
+                assert!(!sources.is_empty());
+                if source_count.is_some() {
+                    assert_eq!(sources.len(), 1, "each call edge needs its own source");
+                }
+                sources
+            })
+            .collect();
+        if let Some(count) = source_count {
+            assert_eq!(references.len(), count, "{output:#}");
+            let mut starts: Vec<_> = references
+                .iter()
+                .map(|reference| reference["span"]["start_byte"].as_u64().unwrap())
+                .collect();
+            starts.sort_unstable();
+            starts.dedup();
+            assert_eq!(
+                starts.len(),
+                count,
+                "each call must have distinct source evidence"
+            );
+        }
         for (index, reference) in references.iter().enumerate() {
             assert_eq!(reference["generation"], generation);
             let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();

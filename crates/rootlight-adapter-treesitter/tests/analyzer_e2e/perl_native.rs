@@ -447,16 +447,105 @@ fn perl_native_function_calls_bare_require_is_not_a_callable_use() {
 }
 
 #[test]
-fn perl_native_function_calls_ampersands_distinguish_code_references() {
+fn perl_native_function_calls_ampersands_and_invoked_references_share_targets() {
     assert_function_sites(
         include_str!("../../../../tests/fixtures/perl-bindings/amper_and_reference.pl"),
         &[
             ("&value", Some(1), OccurrenceRole::CallSite),
             ("&value", Some(1), OccurrenceRole::CallSite),
-            ("&value", Some(1), OccurrenceRole::Reference),
+            ("&value", Some(1), OccurrenceRole::CallSite),
             ("&value", Some(0), OccurrenceRole::CallSite),
         ],
     );
+}
+
+#[test]
+fn perl_native_direct_coderef_invocations_use_exact_callable_targets() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/coderef_direct_bounded.pl");
+    assert_function_calls(source, &[("&value", Some(0)), ("&value", Some(0))]);
+    let result = output(source);
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| { site.syntax_kind == "perl.coderef_application.reference" })
+    );
+}
+
+#[test]
+fn perl_native_direct_coderef_preserves_argument_reference_roles() {
+    assert_function_sites(
+        "sub value { 13 } sub other { 29 } (\\&value)->(\\&other); my $saved = \\&value;",
+        &[
+            ("&value", Some(0), OccurrenceRole::CallSite),
+            ("&other", Some(1), OccurrenceRole::Reference),
+            ("&value", Some(0), OccurrenceRole::Reference),
+        ],
+    );
+    assert_function_calls(
+        "sub value { 13 } (\\&value # grouping trivia\n)->();",
+        &[("&value", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_direct_coderef_uses_lexical_and_qualified_storage() {
+    assert_function_calls(
+        "package Harbor; sub value { 13 } package main; (\\&Harbor::value)->();",
+        &[("&Harbor::value", Some(0))],
+    );
+    assert_function_calls(
+        "sub value { 13 } { my sub value { 29 } (\\&value)->(); } (\\&value)->();",
+        &[("&value", Some(1)), ("&value", Some(0))],
+    );
+    let source = "(\\&missing)->();";
+    assert_function_calls(source, &[("&missing", None)]);
+    let result = output(source);
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "perl-function-target-unavailable" })
+    );
+}
+
+#[test]
+fn perl_native_direct_coderef_does_not_search_arbitrary_callee_descendants() {
+    let source =
+        "sub value { 13 } sub other { 29 } my $pick = 1; ($pick ? \\&value : \\&other)->();";
+    assert_function_sites(
+        source,
+        &[
+            ("&value", Some(0), OccurrenceRole::Reference),
+            ("&other", Some(1), OccurrenceRole::Reference),
+        ],
+    );
+    let result = output(source);
+    let invocation = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "perl.coderef_application.reference")
+        .unwrap();
+    assert!(matches!(
+        invocation.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    for source in [
+        "sub value { 13 } (\\&value)->(",
+        "sub value { 13 } (\\&value, 1)->();",
+    ] {
+        let result = output(source);
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls)
+        );
+    }
 }
 
 #[test]

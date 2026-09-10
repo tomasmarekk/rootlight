@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/96";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/97";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23844,11 +23844,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn perl_direct_coderef_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources_with_edit(
+            include_str!("../../../tests/fixtures/perl-bindings/coderef_direct_bounded.pl"),
+            3,
+            2,
+            &[],
+            ("13", "17"),
+        );
+    }
+
     fn assert_perl_durable_sources(
         source: &str,
         declaration_count: usize,
         call_count: usize,
         written_names: &[(&str, &str)],
+    ) {
+        assert_perl_durable_sources_with_edit(
+            source,
+            declaration_count,
+            call_count,
+            written_names,
+            ("+ 1", "+ 23"),
+        );
+    }
+
+    fn assert_perl_durable_sources_with_edit(
+        source: &str,
+        declaration_count: usize,
+        call_count: usize,
+        written_names: &[(&str, &str)],
+        edit: (&str, &str),
     ) {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
@@ -23876,7 +23903,11 @@ mod tests {
                 .unwrap(),
             initial
         );
-        let changed = source.replace("+ 1", "+ 23");
+        let changed = source.replace(edit.0, edit.1);
+        assert_ne!(
+            source, changed,
+            "the lifecycle probe must mutate the source"
+        );
         fs::write(&path, &changed).unwrap();
         let updated = service
             .index_repository(fixture.path(), &deadline())

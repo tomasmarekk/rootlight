@@ -149,6 +149,12 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
     let grouped_imports = format!("use subs {}'entry'{};", "(".repeat(256), ")".repeat(256));
     let bare_calls = "sub entry { 1 } my $result = entry;\n".repeat(40);
     let qualified_calls = "sub main::Cove::entry { 1 } ::Cove::entry();\n".repeat(40);
+    let direct_coderef_calls = "sub entry { 1 } (\\&entry)->();\n".repeat(40);
+    let grouped_coderef = format!(
+        "sub entry {{ 1 }} {}\\&entry{}->();",
+        "(# grouping\n".repeat(256),
+        ")".repeat(256)
+    );
     let root_alias = format!(
         "sub {}Cove::entry {{ 1 }} ::Cove::entry();",
         "main::".repeat(256)
@@ -159,6 +165,7 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
         b"my sub broken ($value = (",
         b"print <<'END';\nunfinished",
         b"use subs qw(entry); sub entry { &{\"entry\"}(); }",
+        b"sub entry { 1 } (\\&entry)->(",
         "my $value = '雪';\r\nprint $value;\r\n".as_bytes(),
         nested.as_bytes(),
         declarations.as_bytes(),
@@ -166,6 +173,8 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
         grouped_imports.as_bytes(),
         bare_calls.as_bytes(),
         qualified_calls.as_bytes(),
+        direct_coderef_calls.as_bytes(),
+        grouped_coderef.as_bytes(),
         root_alias.as_bytes(),
         heredocs.as_bytes(),
     ];

@@ -959,8 +959,10 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
-        _ if family == GrammarFamily::Perl => perl::syntax(capture.node, role, cancellation)?
-            .ok_or_else(|| query_failure("query-perl-kind"))?,
+        _ if family == GrammarFamily::Perl => {
+            perl::syntax(capture.node, role, source, cancellation)?
+                .ok_or_else(|| query_failure("query-perl-kind"))?
+        }
         _ if family == GrammarFamily::Matlab => {
             matlab::syntax(capture.node, role, source, cancellation)?
                 .ok_or_else(|| query_failure("query-matlab-kind"))?
