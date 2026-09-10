@@ -6266,6 +6266,37 @@ async fn active_generation_preserves_independently_observed_stale_freshness() {
 }
 
 #[tokio::test]
+async fn non_defining_source_is_explicit_in_symbol_uncertainty() {
+    for profile in ["compact", "evidence"] {
+        let mut response = explain_response(source_reference(4, 12, 2, 2));
+        response.result.symbols[0]
+            .section_gaps
+            .push("definition_is_declaration".to_owned());
+        let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+        let output: SymbolExplainOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::SymbolExplain,
+                json!({"repository": {"repository_id": repository()},
+            "symbol_ids": [symbol(), missing_symbol()], "response_profile": profile}),
+            )
+            .await
+            .unwrap(),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected symbol explanation success");
+        };
+        let notes = &output.data.symbols[0].uncertainty;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code.as_str(), "definition_is_declaration");
+        assert_eq!(
+            notes[0].message.as_str(),
+            "definition reference points to a non-defining declaration"
+        );
+    }
+}
+
+#[tokio::test]
 async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     let response = explain_response(source_reference(4, 12, 2, 2));
     let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
@@ -6289,6 +6320,7 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     };
     assert_eq!(output.data.symbols[0].symbol_id, symbol());
     assert_eq!(output.data.symbols[0].kind, EntityKind::Function);
+    assert!(output.data.symbols[0].uncertainty.is_empty());
     assert_eq!(
         output.data.symbols[0].provenance[0].provider,
         "treesitter-rust"

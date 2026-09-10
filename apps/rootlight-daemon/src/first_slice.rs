@@ -11476,6 +11476,19 @@ fn symbol_explain(
         if signature_truncated {
             section_gaps.push("signature_truncated".to_owned());
         }
+        // Classify the selected source site, not the absence of a definition
+        // elsewhere in a possibly bounded occurrence scan.
+        let selected_role = |role| {
+            response.data.occurrences.iter().any(|occurrence| {
+                occurrence.role == role
+                    && occurrence.source == *definition
+                    && occurrence.target == rootlight_ir::OccurrenceTarget::Resolved { symbol }
+            })
+        };
+        if selected_role(OccurrenceRole::Declaration) && !selected_role(OccurrenceRole::Definition)
+        {
+            section_gaps.push("definition_is_declaration".to_owned());
+        }
         let (language, tier) = service
             .source_language_coverage_until(
                 generation.generation,

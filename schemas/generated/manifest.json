@@ -74,7 +74,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "0b8b06cce5494d107cf48f74dc077193b59458a305e61755c8bc1af8287a6e25"
+      "blake3": "dc62c6398cdf1771822c025e289337c6605d18a52a36cbbcadd332f3fabc37e0"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -788,27 +788,27 @@
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.1.schema.json",
-      "blake3": "3eb4d52b8bb0b286e79378ff5b0528ad7c0e9fb11058bff3b5d659edd1983e88"
+      "blake3": "d34ae8f4083802cf877424203c70c06c1766def3045ae291c7a2f94dc4cefe2e"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.2.schema.json",
-      "blake3": "0933439311da51b035ce7fcbbe64039f782ddc7933687f942806865602136e7d"
+      "blake3": "d766d27ab4d15490c1a3640c2df24f2a81800acc0b5944c671adf6f7bfffca3e"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.3.schema.json",
-      "blake3": "a284f236800f85a13a0bdf4a30b0b19c761fae198deab38f2d0c0cdcd515af56"
+      "blake3": "6c1d2a5f07a6a92436aa72393f46e5596442ff92c08a151378dab23546e7dbcc"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.4.schema.json",
-      "blake3": "c6a6892038fbfeaaa6623db2edaaf912607563722fed9aed9dc8ee6e9aec61d9"
+      "blake3": "91a0e7ba5e68b9cd6a789ae61f9843d96e006ea252c65c91cbe3f970b993fe90"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.5.schema.json",
-      "blake3": "0cfba900593e18022ece07af847464b9f79b878e2aa8310c915b7c4ca7816dea"
+      "blake3": "d31d62ec121e0286c15c910b81b49e2b8d73e394a9c3abeac6ef7c8d3414aced"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.6.schema.json",
-      "blake3": "e6ffab6061dd884de3a776a6a83a5eda489cc4d61cc15fc852b16a7506dc12c1"
+      "blake3": "15a9d962c603c158998c97e4ea432045351ad898a1fa0f5a81aa4966e474abb6"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json",

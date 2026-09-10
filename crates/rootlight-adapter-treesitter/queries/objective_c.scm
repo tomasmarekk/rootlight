@@ -4,6 +4,8 @@
 ; into their own patterns so a fourth capture cannot silently lose identity evidence.
 
 (translation_unit) @root @module @scope
+(class_declaration (identifier) @declaration @definition)
+(protocol_forward_declaration (identifier) @declaration @definition)
 (class_interface) @declaration @definition @scope
 (class_interface) @signature @scope_type
 (class_interface (identifier) @scope_trait)

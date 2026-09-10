@@ -27,6 +27,49 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_objective_c_forward_declarations_keep_host_sources_and_separate_examples() {
+    let fixture = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
+    let source = format!(
+        "# Forward types\n\n```objective-c\n{fixture}\n```\n\n```objective-c\n{fixture}\n```\n"
+    );
+    let result = output(&source);
+    let declarations: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+        .collect();
+    assert_eq!(declarations.len(), 14);
+    let mut identities = BTreeSet::new();
+    for declaration in declarations {
+        let OccurrenceTarget::Resolved { symbol } = declaration.target else {
+            panic!("embedded forward declaration has its written identity");
+        };
+        identities.insert(symbol);
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.language, "objective-c");
+        let span = declaration.source.span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(written, entity.canonical_name);
+        assert_eq!(
+            declaration.syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+    }
+    assert_eq!(identities.len(), 14);
+}
+
+#[test]
 fn markdown_lua_bindings_keep_visibility_and_example_boundaries() {
     let source = "# Examples\r\n\r\n~~~lua\r\nlocal outer = 1\r\ndo\r\n  local outer = outer\r\n  local function capture(parameter)\r\n    local snapshot = outer\r\n    local recursive = capture\r\n    return parameter\r\n  end\r\nend\r\nreturn outer\r\n~~~\r\n\r\n~~~lua\r\nlocal first = outer\r\nlocal outer = 2\r\nlocal second = outer\r\nlocal assigned = function() return assigned end\r\n~~~\r\n\r\n~~~rust\r\nfn foreign() {}\r\n~~~\r\n\r\n~~~lua\r\nlocal third = outer\r\nlocal missing = foreign\r\n~~~\r\n";
     let result = assert_lua_reference_bindings_in(

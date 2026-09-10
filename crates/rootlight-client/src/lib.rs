@@ -1281,7 +1281,8 @@ pub struct SymbolExplanation {
     pub qualified_name: String,
     /// Optional untrusted repository signature.
     pub signature: Option<String>,
-    /// Immutable definition selection.
+    /// Immutable source selection; `definition_is_declaration` in `section_gaps`
+    /// identifies a non-defining declaration at this location.
     pub definition: SourceReference,
     /// Exact outgoing call edges.
     pub outbound_exact: u64,

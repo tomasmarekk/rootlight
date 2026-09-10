@@ -27,6 +27,191 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn objective_c_forward_types_are_non_defining_source_declarations() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
+    let result = output(source);
+    let document = result.document();
+    let declarations: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+        .collect();
+    assert_eq!(declarations.len(), 7);
+    let mut names = Vec::new();
+    for declaration in declarations {
+        let OccurrenceTarget::Resolved { symbol } = declaration.target else {
+            panic!("a written declaration has its own source-backed identity");
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(
+            entity.kind,
+            if matches!(entity.canonical_name.as_str(), "Readable" | "Writable") {
+                EntityKind::Protocol
+            } else {
+                EntityKind::Class
+            }
+        );
+        assert!(!entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == declaration.target)
+        );
+        let span = declaration.source.span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(written, entity.canonical_name);
+        assert_eq!(
+            declaration.syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+        names.push(entity.canonical_name.as_str());
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Box", "Earlier", "Earlier", "Later", "Readable", "Readable", "Writable"
+        ]
+    );
+    for (name, kind, declaration_count) in [
+        ("Earlier", EntityKind::Class, 2),
+        ("Box", EntityKind::Class, 1),
+        ("Readable", EntityKind::Protocol, 2),
+    ] {
+        let entities: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == kind && entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), declaration_count + 1);
+        assert_eq!(
+            entities
+                .iter()
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            entities.len()
+        );
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::Definition
+                    && entities.iter().any(|entity| occurrence.target
+                        == OccurrenceTarget::Resolved { symbol: entity.id }))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Item")
+    );
+}
+
+#[test]
+fn objective_c_forward_identity_survives_unrelated_source_insertions() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
+    let initial = output(source);
+    let original: BTreeSet<_> = initial
+        .document()
+        .entities
+        .iter()
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(
+        initial
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+            .count(),
+        7
+    );
+    let changed = format!(
+        "@class Unrelated;\n{}",
+        source.replace("- (int)value;", "- (int)value;\n- (int)another;")
+    );
+    let updated = output(&changed);
+    let retained: BTreeSet<_> = updated
+        .document()
+        .entities
+        .iter()
+        .map(|entity| entity.id)
+        .collect();
+    assert!(original.is_subset(&retained));
+    assert_eq!(
+        updated
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn objective_c_forward_occurrences_survive_artifact_replay() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, OBJECTIVE_C);
+    let fixture = Fixture::new(OBJECTIVE_C, source.as_bytes());
+    let budget = limits();
+    let (initial, artifact) = analyzer
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        initial
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+            .count(),
+        7
+    );
+    let successor = fixture.next_generation();
+    let next = request(&successor.snapshot, &successor.source, OBJECTIVE_C, &budget);
+    let reused = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    assert_eq!(reused.report(), fresh.report());
+    assert!(
+        reused
+            .document()
+            .occurrences
+            .iter()
+            .all(|occurrence| occurrence.source.generation() == successor.source.generation())
+    );
+}
+
+#[test]
 fn objective_c_members_preserve_every_written_ivar_and_its_owner() {
     let source = include_str!("../../../../tests/fixtures/objective-c/members.m");
     let result = output(source);
@@ -248,7 +433,7 @@ fn objective_c_partial_structure_does_not_claim_complete_language_analysis() {
     ));
     assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
     for detail in [
-        "objective-c-forward-and-preprocessed-declarations-unavailable",
+        "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
         "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
     ] {
         assert!(

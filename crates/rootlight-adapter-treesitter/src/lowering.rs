@@ -2243,6 +2243,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     label,
                     position,
                 ))
+            } else if matches!(
+                fact.syntax_kind().as_str(),
+                "objective_c.forward_class.declaration"
+                    | "objective_c.forward_protocol.declaration"
+            ) {
+                // Forward declarations are written occurrences, not evidence that
+                // separate declarations or a later body share resolved identity.
+                let label = fact.syntax_kind().as_str();
+                let next = written_declarations
+                    .entry((fact.parent(), label.to_owned(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(source_occurrence_identity(
+                    "rootlight.objective-c-forward-declaration/1",
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    label,
+                    position,
+                ))
             } else if matches!(language_for_fact(self.request, fact), "r" | "powershell")
                 && kind != EntityKind::Module
             {
@@ -3090,7 +3111,7 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     match fact.syntax_kind().as_str() {
         "objective_c.file.root" => Some((
             FactDomain::Entities,
-            "objective-c-forward-and-preprocessed-declarations-unavailable",
+            "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
         )),
         "objective_c.file.module" => Some((
             FactDomain::Relations,
@@ -3365,7 +3386,14 @@ fn declaration_occurrence(
         generation: source.generation(),
         file: source.span().file(),
         source: source.clone(),
-        role: OccurrenceRole::Definition,
+        role: if matches!(
+            fact.syntax_kind().as_str(),
+            "objective_c.forward_class.definition" | "objective_c.forward_protocol.definition"
+        ) {
+            OccurrenceRole::Declaration
+        } else {
+            OccurrenceRole::Definition
+        },
         enclosing: match entity.direct_parent {
             ContainerRef::Entity(parent) => Some(parent),
             ContainerRef::Repository(_) | ContainerRef::File(_) => None,

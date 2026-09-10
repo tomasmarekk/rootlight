@@ -3087,7 +3087,8 @@ pub struct SymbolExplanation {
     /// Repository-controlled signature.
     #[schemars(length(max = 4096))]
     pub signature: Option<String>,
-    /// Exact definition evidence.
+    /// Exact source evidence. `definition_is_declaration` uncertainty marks
+    /// a non-defining declaration at this location.
     pub definition: SourceRef,
     /// Compact relation counts.
     pub relations: RelationSummary,
@@ -3134,7 +3135,8 @@ pub struct SymbolExplanationV1_0 {
     /// Repository-controlled signature.
     #[schemars(length(max = 4096))]
     pub signature: Option<String>,
-    /// Exact definition evidence.
+    /// Exact source evidence. `definition_is_declaration` uncertainty marks
+    /// a non-defining declaration at this location.
     pub definition: SourceRef,
     /// Compact relation counts.
     pub relations: RelationSummary,

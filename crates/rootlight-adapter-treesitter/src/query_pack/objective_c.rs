@@ -117,6 +117,15 @@ pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'s
         role,
         StructuralRole::Declaration | StructuralRole::Definition
     ) {
+        if node.kind() == "identifier"
+            && let Some(parent) = node.parent()
+        {
+            match parent.kind() {
+                "class_declaration" => return Some("objective_c.forward_class"),
+                "protocol_forward_declaration" => return Some("objective_c.forward_protocol"),
+                _ => {}
+            }
+        }
         if node
             .parent()
             .is_some_and(|parent| parent.kind() == "method_parameter")
@@ -222,6 +231,21 @@ pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Rang
 mod tests {
     use super::*;
     use crate::GrammarFamily;
+
+    #[test]
+    fn forward_declarations_and_generic_parameters_have_clean_native_syntax() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let source = include_bytes!("../../../../tests/fixtures/objective-c/forwards.m");
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+    }
 
     #[test]
     fn written_members_have_clean_native_syntax_and_only_named_definitions() {

@@ -1509,7 +1509,7 @@
           "minLength": 1
         },
         "definition": {
-          "description": "Exact definition evidence.",
+          "description": "Exact source evidence. `definition_is_declaration` uncertainty marks\na non-defining declaration at this location.",
           "$ref": "#/$defs/SourceRef"
         },
         "display_name": {

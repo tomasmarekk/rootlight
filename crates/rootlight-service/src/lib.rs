@@ -210,7 +210,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/77";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/78";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -26904,6 +26904,117 @@ mod tests {
     }
 
     #[test]
+    fn objective_c_forward_sources_survive_incremental_rebuild_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = include_str!("../../../tests/fixtures/objective-c/forwards.m");
+        let path = fixture.path().join("forwards.m");
+        fs::write(&path, source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.generation, noop.generation);
+        let changed = format!("@class Additional;\n{source}");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut previous = BTreeSet::new();
+        for (receipt, expected_source, count) in [
+            (&initial, source, 7),
+            (&updated, changed.as_str(), 8),
+            (clean, changed.as_str(), 8),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let declarations: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::Declaration)
+                .collect();
+            assert_eq!(declarations.len(), count);
+            let mut identities = BTreeSet::new();
+            for declaration in declarations {
+                let OccurrenceTarget::Resolved { symbol } = declaration.target else {
+                    panic!("forward declaration has a source-backed identity");
+                };
+                identities.insert(symbol);
+                let explained = restored
+                    .symbol_explain(receipt.generation, symbol, &deadline())
+                    .unwrap();
+                assert!(
+                    explained
+                        .data
+                        .occurrences
+                        .iter()
+                        .any(|occurrence| occurrence.id == declaration.id)
+                );
+                assert!(
+                    !explained
+                        .data
+                        .occurrences
+                        .iter()
+                        .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target == declaration.target)
+                );
+                assert_eq!(declaration.source.generation(), receipt.generation);
+                let reference = explained.data.entity.evidence.source.unwrap();
+                assert_eq!(reference, declaration.source);
+                let span = reference.span();
+                let written = expected_source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(written, explained.data.entity.canonical_name);
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+            }
+            assert_eq!(identities.len(), count);
+            assert!(previous.is_subset(&identities));
+            previous = identities;
+        }
+    }
+
+    #[test]
     fn objective_c_members_survive_noop_body_edit_clean_rebuild_and_restart() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -26997,7 +27108,7 @@ mod tests {
                 identities
             );
             for detail in [
-                "objective-c-forward-and-preprocessed-declarations-unavailable",
+                "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
                 "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
             ] {
                 assert!(

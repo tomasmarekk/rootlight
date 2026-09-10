@@ -10847,7 +10847,7 @@
                 },
                 "definition": {
                   "$ref": "#/$defs/SourceRef",
-                  "description": "Exact definition evidence."
+                  "description": "Exact source evidence. `definition_is_declaration` uncertainty marks\na non-defining declaration at this location."
                 },
                 "display_name": {
                   "description": "Repository-controlled display name.",

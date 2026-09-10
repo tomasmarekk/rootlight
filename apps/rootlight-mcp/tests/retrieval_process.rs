@@ -546,6 +546,99 @@ fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
 }
 
 #[test]
+fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp() {
+    let source = include_str!("../../../tests/fixtures/objective-c/forwards.m");
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("forwards.m", source)), FixtureLayout::Data);
+    for (name, total, declarations, ir_kind) in [
+        ("Earlier", 3, 2, "class"),
+        ("Later", 1, 1, "class"),
+        ("Box", 2, 1, "class"),
+        ("Readable", 3, 2, "protocol"),
+        ("Writable", 1, 1, "protocol"),
+    ] {
+        let arguments = json!({"query": name, "search_modes": ["exact"], "languages": ["objective-c"],
+            "scope": {"paths": ["forwards.m"]}, "max_results": 20, "response_profile": "evidence"});
+        let located = fixture.standalone("forward-locate", "code.locate", arguments.clone());
+        let batch = fixture.batch("forward-batch", "code.locate", arguments, "evidence");
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        let matches = output["data"]["matches"].as_array().unwrap();
+        for hit in matches.iter().filter(|hit| hit["kind"] != "type") {
+            assert_eq!(hit["kind"], "file");
+            assert_eq!(hit["path"], "forwards.m");
+            assert!(hit["symbol_id"].is_null());
+        }
+        let found: Vec<_> = matches.iter().filter(|hit| hit["kind"] == "type").collect();
+        assert_eq!(found.len(), total, "{output:#}");
+        let mut non_defining = 0;
+        let scan = fixture.standalone(
+            "forward-types",
+            "query.advanced",
+            json!({"query": {"op": "scan", "entity": "type"}}),
+        );
+        assert_success(&scan, "query.advanced");
+        for found in found {
+            assert_eq!(found["kind"], "type");
+            let symbol = &found["symbol_id"];
+            let reference = &found["source_ref"];
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+            let written = source.get(start..end).unwrap();
+            let is_declaration = written == name;
+            if is_declaration {
+                non_defining += 1;
+            }
+            assert!(
+                scan["result"]["structuredContent"]["data"]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == *symbol && row["kind"] == ir_kind)
+            );
+            let arguments = json!({"symbol_ids": [symbol], "response_profile": "evidence"});
+            let current =
+                fixture.standalone("forward-explain", "symbol.explain", arguments.clone());
+            let retained =
+                fixture.standalone_version("forward-retained", "symbol.explain", arguments, "1.0");
+            for response in [&current, &retained] {
+                assert_success(response, "symbol.explain");
+                let explanation = &response["result"]["structuredContent"]["data"]["symbols"][0];
+                assert_eq!(explanation["symbol_id"], *symbol);
+                assert_eq!(explanation["definition"], *reference);
+                let notes: Vec<_> = explanation["uncertainty"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|note| note["code"] == "definition_is_declaration")
+                    .collect();
+                assert_eq!(notes.len(), usize::from(is_declaration), "{explanation:#}");
+                if let Some(note) = notes.first() {
+                    assert_eq!(
+                        note["message"],
+                        "definition reference points to a non-defining declaration"
+                    );
+                }
+            }
+            let read = fixture.standalone(
+                "forward-source",
+                "source.read",
+                json!({"references": [{"source_ref": reference}], "response_profile": "evidence"}),
+            );
+            assert_success(&read, "source.read");
+            let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+            assert_eq!(chunk["content"], written);
+            for key in ["repository", "generation", "content_hash", "span"] {
+                assert_eq!(chunk["source_ref"][key], reference[key]);
+            }
+        }
+        assert_eq!(non_defining, declarations);
+    }
+    fixture.finish();
+}
+
+#[test]
 fn objective_c_ivars_and_parameters_cross_real_process_boundaries() {
     source_entities_cross_process_boundaries(
         "objective-c",

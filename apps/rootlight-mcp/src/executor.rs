@@ -8235,6 +8235,23 @@ fn map_symbol_explain(
                 })
             })
             .collect::<Result<Vec<_>, ToolExecutionError>>()?;
+        // Retained 1.0 responses omit section gaps but preserve uncertainty.
+        // A non-defining source site must remain explicit in every schema.
+        let uncertainty = if explanation
+            .section_gaps
+            .iter()
+            .any(|gap| gap == "definition_is_declaration")
+        {
+            vec![ResponseWarning {
+                code: SafeLabel::parse("definition_is_declaration")
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+                message: source_free_message(
+                    "definition reference points to a non-defining declaration",
+                )?,
+            }]
+        } else {
+            Vec::new()
+        };
         let section_gaps = explanation
             .section_gaps
             .into_iter()
@@ -8265,7 +8282,7 @@ fn map_symbol_explain(
             source_preview: explanation.source_preview,
             provenance,
             confidence,
-            uncertainty: Vec::new(),
+            uncertainty,
             section_gaps,
             trust: TrustClassification::UntrustedRepositoryData,
         });

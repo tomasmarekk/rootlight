@@ -143,7 +143,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
-                "swift.protocol.declaration" | "objective_c.protocol.declaration"
+                "swift.protocol.declaration"
+                    | "objective_c.protocol.declaration"
+                    | "objective_c.forward_protocol.declaration"
             ) =>
         {
             Some(EntityKind::Protocol)
