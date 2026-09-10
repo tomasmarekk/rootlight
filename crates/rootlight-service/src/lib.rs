@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/82";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/83";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -226,7 +226,7 @@ const DERIVED_PASS_ID: &str = "first-slice.derived";
 const SEARCH_PASS_ID: &str = "first-slice.search";
 const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/3";
 const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
-const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/2";
+const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/3";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
@@ -27029,10 +27029,25 @@ mod tests {
         assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
             "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }",
             &[
-                ("identity", "identity", rootlight_ir::EntityKind::Function),
-                ("value", "value", rootlight_ir::EntityKind::Parameter),
-                ("args", "args", rootlight_ir::EntityKind::Parameter),
-                ("system", "system", rootlight_ir::EntityKind::Parameter),
+                (
+                    "identity",
+                    "identity",
+                    "identity",
+                    rootlight_ir::EntityKind::Function,
+                ),
+                (
+                    "value",
+                    "value",
+                    "value",
+                    rootlight_ir::EntityKind::Parameter,
+                ),
+                ("args", "args", "args", rootlight_ir::EntityKind::Parameter),
+                (
+                    "system",
+                    "system",
+                    "system",
+                    rootlight_ir::EntityKind::Parameter,
+                ),
             ],
         );
     }
@@ -27045,13 +27060,20 @@ mod tests {
                 (
                     r#""\identity""#,
                     "identity",
+                    "identity",
                     rootlight_ir::EntityKind::Function,
                 ),
-                ("value", "value", rootlight_ir::EntityKind::Parameter),
-                ("args", "args", rootlight_ir::EntityKind::Parameter),
+                (
+                    "value",
+                    "value",
+                    "value",
+                    rootlight_ir::EntityKind::Parameter,
+                ),
+                ("args", "args", "args", rootlight_ir::EntityKind::Parameter),
                 (
                     "system",
                     r#""\system""#,
+                    "system",
                     rootlight_ir::EntityKind::Parameter,
                 ),
             ],
@@ -27060,7 +27082,7 @@ mod tests {
 
     fn assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
         source: &str,
-        expected_reads: &[(&str, &str, rootlight_ir::EntityKind)],
+        expected_reads: &[(&str, &str, &str, rootlight_ir::EntityKind)],
     ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -27127,10 +27149,31 @@ mod tests {
                     .find(|entity| entity.id == symbol)
                     .unwrap();
                 let span = read.source.span();
-                let (_, written, kind) = expected_reads
+                let (_, written, display, kind) = expected_reads
                     .iter()
-                    .find(|(name, _, _)| target.canonical_name == *name)
+                    .find(|(name, _, _, _)| target.canonical_name == *name)
                     .unwrap();
+                assert_eq!(target.display_name, *display);
+                for query in [*display, target.canonical_name.as_str()] {
+                    let located = restored
+                        .code_locate(
+                            receipt.generation,
+                            query.to_owned(),
+                            LocateMode::Exact,
+                            10,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(
+                        located
+                            .data
+                            .hits
+                            .iter()
+                            .any(|hit| hit.symbol == Some(symbol)),
+                        "missing source-name hit: {query}"
+                    );
+                }
                 assert_eq!(
                     expected.get(
                         usize::try_from(span.start_byte()).unwrap()

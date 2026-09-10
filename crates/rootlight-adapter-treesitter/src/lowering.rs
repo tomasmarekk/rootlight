@@ -3069,7 +3069,9 @@ fn materialize_entity(
         language: draft.language.clone(),
         tier,
         canonical_name: draft.name.clone(),
-        display_name: if draft.kind == EntityKind::Property || draft.language == "toml" {
+        display_name: if draft.kind == EntityKind::Property
+            || matches!(draft.language.as_str(), "toml" | "nix")
+        {
             rootlight_adapter_sdk::structural_display_name_for_language(
                 &draft.language,
                 &draft.name,

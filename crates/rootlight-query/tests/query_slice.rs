@@ -713,6 +713,8 @@ fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
             symbol_id: Some(entity.id),
             file_id: file.id,
             identifier: entity.display_name.clone(),
+            canonical_name: (entity.canonical_name != entity.display_name)
+                .then(|| entity.canonical_name.clone()),
             qualified_name: entity.qualified_name.clone(),
             path: file.path.clone(),
             kind: serialized_label(&entity.kind),
@@ -867,6 +869,28 @@ fn locate_and_explain_use_deterministic_typed_plans() {
     );
     assert!(explained.data.execution.limiting_resources().is_empty());
     assert_exact_response_accounting(&explained);
+}
+
+#[test]
+fn locate_rejects_canonical_aliases_not_proven_by_the_durable_entity() {
+    let snapshot = fixture_snapshot();
+    let mut search = fixture_search(&snapshot);
+    search.hits[0].canonical_name = Some("unrelated_name".to_owned());
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    let plan = service
+        .plan_code_locate(
+            "unrelated_name".to_owned(),
+            LocateMode::Exact,
+            1,
+            0,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        service.execute_code_locate(&plan, &Cancellation::new()),
+        Err(QueryError::IndexDrift)
+    ));
 }
 
 #[test]

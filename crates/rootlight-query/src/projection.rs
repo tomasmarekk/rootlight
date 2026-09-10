@@ -435,6 +435,7 @@ fn project_source_document(
             symbol_id: None,
             file_id: file.id,
             identifier: try_clone(identifier)?,
+            canonical_name: None,
             qualified_name: try_clone(identifier)?,
             path: try_clone(&file.path)?,
             kind: "file".to_owned(),
@@ -723,6 +724,11 @@ fn project_entity_document(
     let tier = serialized_label(&entity.tier)?;
     let next_text_bytes = [
         entity.display_name.len(),
+        if entity.canonical_name != entity.display_name {
+            entity.canonical_name.len()
+        } else {
+            0
+        },
         entity.qualified_name.len(),
         file.path.len(),
         kind.len(),
@@ -743,6 +749,9 @@ fn project_entity_document(
             symbol_id: Some(entity.id),
             file_id: file.id,
             identifier: try_clone(&entity.display_name)?,
+            canonical_name: (entity.canonical_name != entity.display_name)
+                .then(|| try_clone(&entity.canonical_name))
+                .transpose()?,
             qualified_name: try_clone(&entity.qualified_name)?,
             path: try_clone(&file.path)?,
             kind,

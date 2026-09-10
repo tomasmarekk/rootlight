@@ -394,6 +394,9 @@ pub fn structural_captured_name_for_fact<'a>(
 /// PowerShell literal keys decode quoting and escapes for readable display only;
 /// their canonical identity remains the exact written spelling. Unreadable or
 /// interpolated strings retain that spelling instead of inventing a value.
+/// Nix static keys decode escapes for display, and paths omit trivia while
+/// retaining quoted nonidentifier segments. A dotted single key stays quoted;
+/// ambiguous or expanding display text retains the original written name.
 /// Other languages are unchanged. The input must already be a
 /// bounded canonical name from [`structural_captured_name_for_language`]; display
 /// text is no longer than that input and must never replace the durable identity.
@@ -404,6 +407,8 @@ pub fn structural_display_name_for_language<'a>(
 ) -> Cow<'a, str> {
     if language == "powershell" {
         crate::powershell_names::display_key(canonical).unwrap_or(Cow::Borrowed(canonical))
+    } else if language == "nix" {
+        crate::nix_names::display_path(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if matches!(language, "json" | "toml") {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "yaml" {
@@ -458,6 +463,36 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nix_display_names_decode_static_paths_without_changing_authored_identity() {
+        for (written, display) in [
+            (r#""identity""#, "identity"),
+            (r#""\identity""#, "identity"),
+            (r#""λ😀""#, "λ😀"),
+            (r#""two words""#, "two words"),
+            (r#""\u0078""#, "u0078"),
+            (r#"a."\b""#, "a.b"),
+            ("a /* path trivia */ . b", "a.b"),
+            ("a # path trivia\r\n . b", "a.b"),
+            (r#""a.b""#, r#""a.b""#),
+            (r#""a.b" . c"#, r#""a.b".c"#),
+            (r#"a . "b c""#, r#"a."b c""#),
+            (r#""""#, r#""""#),
+            (r#""\n""#, r#""\n""#),
+        ] {
+            assert_eq!(
+                structural_display_name_for_language("nix", written),
+                display,
+                "{written}"
+            );
+            assert_eq!(
+                structural_captured_name_for_language("nix", written, written.len()).as_deref(),
+                Some(written)
+            );
+            assert!(display.len() <= written.len());
+        }
+    }
 
     #[test]
     fn scala_names_preserve_operators_and_bounded_backtick_identity() {

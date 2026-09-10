@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use rootlight_adapter_sdk::nix_static_attribute_name as static_binding_name;
 use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
@@ -159,65 +160,6 @@ fn introduces_bindings(fact: &SyntaxFact) -> bool {
         fact.syntax_kind().as_str(),
         "nix.function.scope" | "nix.let.scope" | "nix.rec_attrset.scope"
     )
-}
-
-fn bare_identifier(bytes: &[u8]) -> bool {
-    bytes
-        .first()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'\''))
-}
-
-fn static_binding_name<'a>(
-    written: &'a str,
-    maximum_name_bytes: usize,
-    cancellation: &Cancellation,
-) -> Result<Option<Cow<'a, str>>, AdapterError> {
-    cancellation.check()?;
-    if written.len() > maximum_name_bytes {
-        return Ok(None);
-    }
-    if bare_identifier(written.as_bytes()) {
-        return Ok(Some(Cow::Borrowed(written)));
-    }
-    let Some(inner) = written
-        .strip_prefix('"')
-        .and_then(|name| name.strip_suffix('"'))
-    else {
-        return Ok(None);
-    };
-    let mut decoded = inner.contains(['\\', '\r']).then(String::new);
-    let mut chars = inner.chars().peekable();
-    while let Some(character) = chars.next() {
-        cancellation.check()?;
-        let character = match character {
-            '\0' | '"' => return Ok(None),
-            '$' if chars.peek() == Some(&'{') => return Ok(None),
-            // Nix lexer.l unescapeStr is not JSON: unknown escapes drop the
-            // backslash, and only unescaped CR/CRLF normalize to LF. Keep this
-            // comparison key separate from authored names and source evidence.
-            '\\' => match chars.next() {
-                Some('n') => '\n',
-                Some('r') => '\r',
-                Some('t') => '\t',
-                Some('\0') | None => return Ok(None),
-                Some(escaped) => escaped,
-            },
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                '\n'
-            }
-            character => character,
-        };
-        if let Some(decoded) = &mut decoded {
-            decoded.push(character);
-        }
-    }
-    Ok(Some(decoded.map_or(Cow::Borrowed(inner), Cow::Owned)))
 }
 
 fn invalid_capture() -> AdapterError {

@@ -289,6 +289,7 @@ where
             let (
                 source,
                 expected_identifier,
+                expected_canonical,
                 expected_qualified,
                 expected_kind,
                 expected_tier,
@@ -303,6 +304,8 @@ where
                         .as_ref()
                         .ok_or(QueryError::IndexDrift)?,
                     entity.display_name.as_str(),
+                    (entity.canonical_name != entity.display_name)
+                        .then_some(entity.canonical_name.as_str()),
                     entity.qualified_name.as_str(),
                     serialized_label(&entity.kind)?,
                     serialized_label(&entity.tier)?,
@@ -333,6 +336,7 @@ where
                 (
                     source,
                     identifier,
+                    None,
                     identifier,
                     "file".to_owned(),
                     tier,
@@ -341,6 +345,7 @@ where
             };
             if expected_qualified != hit.qualified_name
                 || expected_identifier != hit.identifier
+                || expected_canonical != hit.canonical_name.as_deref()
                 || expected_language != hit.language
                 || file.path != hit.path
                 || file.generated != hit.generated
@@ -10592,6 +10597,7 @@ fn limits_optional_results(limiting_resources: &[QueryResource]) -> bool {
 fn locate_hit_memory(hit: &rootlight_search::SearchHit) -> Result<u64, QueryError> {
     [
         hit.identifier.len(),
+        hit.canonical_name.as_ref().map_or(0, String::len),
         hit.qualified_name.len(),
         hit.path.len(),
         hit.kind.len(),
@@ -10613,6 +10619,7 @@ fn search_hit_text_bytes(hits: &[rootlight_search::SearchHit]) -> Result<u64, Qu
     hits.iter().try_fold(0_u64, |total, hit| {
         [
             hit.identifier.len(),
+            hit.canonical_name.as_ref().map_or(0, String::len),
             hit.qualified_name.len(),
             hit.path.len(),
             hit.kind.len(),

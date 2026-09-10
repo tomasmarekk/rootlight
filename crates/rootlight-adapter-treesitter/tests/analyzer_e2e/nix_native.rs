@@ -234,6 +234,19 @@ fn nix_quoted_nonidentifiers_do_not_hide_unrelated_lexical_bindings() {
 }
 
 #[test]
+fn nix_literal_dollar_pairs_are_not_treated_as_interpolation() {
+    let source = r#"let "$${literal}" = 1; in { inherit "$${literal}"; }"#;
+    assert_bindings(
+        source,
+        &[(
+            r#"inherit "$${literal}""#,
+            r#""$${literal}""#,
+            Some(r#""$${literal}" = 1"#),
+        )],
+    );
+}
+
+#[test]
 fn nix_bounded_capture_plans_keep_reads_without_claiming_exact_bindings() {
     let source = format!("let x = 1; in [ {} ]", "x ".repeat(80));
     let provider = Arc::new(provider());
@@ -386,9 +399,51 @@ fn nix_empty_inheritance_never_invents_bindings() {
 
 #[test]
 fn nix_structural_artifact_rebinds_to_the_same_ir_as_a_clean_generation() {
+    assert_nix_artifact_replay(NIX.source);
+}
+
+#[test]
+fn nix_static_search_names_survive_artifact_replay_with_original_source_identity() {
+    let source = r#"{ "\item" = 1; a /* trivia */ . "b" = 2; "a.b" = 3; "λ😀" = 4; }"#;
+    let result = output(source);
+    for (written, display) in [
+        (r#""\item""#, "item"),
+        (r#"a /* trivia */ . "b""#, "a.b"),
+        (r#""a.b""#, r#""a.b""#),
+        (r#""λ😀""#, "λ😀"),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == written)
+            .unwrap();
+        assert_eq!(entity.display_name, display);
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+    }
+    assert_nix_artifact_replay(source);
+}
+
+fn assert_nix_artifact_replay(source: &str) {
     let provider = Arc::new(provider());
     let budget = limits();
-    let fixture = Fixture::new(NIX, NIX.source.as_bytes());
+    let fixture = Fixture::new(NIX, source.as_bytes());
     let analyzer = analyzer(&provider, NIX);
     let initial = request(&fixture.snapshot, &fixture.source, NIX, &budget);
     let (_, artifact) = analyzer

@@ -33,8 +33,8 @@ use crate::{
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "5";
-const STORED_HIT_VERSION: u8 = 3;
+const FORMAT_VERSION: &str = "6";
+const STORED_HIT_VERSION: u8 = 4;
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_QUALIFIED_BYTES: usize = 2_048;
@@ -1074,6 +1074,10 @@ impl Fields {
             normalize_exact(&source.identifier),
         );
         document.add_text(self.identifier_text, &source.identifier);
+        if let Some(canonical) = &source.canonical_name {
+            document.add_text(self.identifier_normalized, normalize_exact(canonical));
+            document.add_text(self.identifier_text, canonical);
+        }
         document.add_text(
             self.qualified_normalized,
             normalize_exact(&source.qualified_name),
@@ -1405,6 +1409,15 @@ fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
         encoded.extend_from_slice(&length.to_be_bytes());
         encoded.extend_from_slice(text.as_bytes());
     }
+    encoded.push(u8::from(source.canonical_name.is_some()));
+    if let Some(canonical) = &source.canonical_name {
+        let length =
+            u32::try_from(canonical.len()).map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "stored_hit_bytes",
+            })?;
+        encoded.extend_from_slice(&length.to_be_bytes());
+        encoded.extend_from_slice(canonical.as_bytes());
+    }
     Ok(encoded)
 }
 
@@ -1440,11 +1453,19 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
     let kind = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let language = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let tier = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
+    let canonical_name = match decoder.read_u8()? {
+        0 => None,
+        1 if symbol_id.is_some() => {
+            Some(decoder.read_text(MAX_IDENTIFIER_BYTES, TextValidation::Tokenized)?)
+        }
+        _ => return Err(SearchError::IncompatibleIndex),
+    };
     if !decoder.is_finished() {
         return Err(SearchError::IncompatibleIndex);
     }
     let text_bytes = [
         identifier.len(),
+        canonical_name.as_ref().map_or(0, String::len),
         qualified_name.len(),
         path.len(),
         kind.len(),
@@ -1459,6 +1480,7 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
             symbol_id,
             file_id,
             identifier,
+            canonical_name,
             qualified_name,
             path,
             kind,
@@ -2199,6 +2221,11 @@ fn validate_document(
     document: &LexicalDocument,
     cancellation: &Cancellation,
 ) -> Result<usize, SearchError> {
+    if document.symbol_id.is_none() && document.canonical_name.is_some() {
+        return Err(SearchError::InvalidDocument {
+            field: DocumentField::Identifier,
+        });
+    }
     if let Some(coverage) = document.source_coverage
         && (document.symbol_id.is_some()
             || coverage.omitted_word_bytes > coverage.source_bytes
@@ -2212,6 +2239,13 @@ fn validate_document(
         });
     }
     let mut bytes = 0usize;
+    bytes = add_optional(
+        bytes,
+        document.canonical_name.as_deref(),
+        MAX_IDENTIFIER_BYTES,
+        DocumentField::Identifier,
+        true,
+    )?;
     bytes = add_required(
         bytes,
         &document.identifier,
@@ -2646,7 +2680,12 @@ fn lexical_rank(mode: SearchMode, normalized_query: &str, hit: &SearchHit) -> u8
     let path = normalize_exact(&hit.path);
     match mode {
         SearchMode::Exact => {
-            if identifier == normalized_query {
+            if identifier == normalized_query
+                || hit
+                    .canonical_name
+                    .as_deref()
+                    .is_some_and(|name| normalize_exact(name) == normalized_query)
+            {
                 0
             } else if qualified == normalized_query {
                 1
@@ -2678,6 +2717,10 @@ fn lexical_rank(mode: SearchMode, normalized_query: &str, hit: &SearchHit) -> u8
 fn exact_candidate_matches_identity(normalized_query: &str, hit: &SearchHit) -> bool {
     hit.symbol_id.is_none()
         || normalize_exact(&hit.identifier) == normalized_query
+        || hit
+            .canonical_name
+            .as_deref()
+            .is_some_and(|name| normalize_exact(name) == normalized_query)
         || normalize_exact(&hit.qualified_name) == normalized_query
         || normalize_exact(&hit.path) == normalized_query
 }
@@ -3096,6 +3139,7 @@ mod tests {
             symbol_id: Some(SymbolId::from_bytes([byte; 20])),
             file_id: FileId::from_bytes([byte.wrapping_add(1); 20]),
             identifier: identifier.to_owned(),
+            canonical_name: None,
             qualified_name: format!("crate::{identifier}"),
             path: path.to_owned(),
             kind: "function".to_owned(),
@@ -3166,6 +3210,86 @@ mod tests {
             search(&index, "query_budget", SearchMode::Exact)[0].symbol_id,
             Some(SymbolId::from_bytes([1; 20]))
         );
+    }
+
+    #[test]
+    fn canonical_symbol_aliases_survive_storage_and_share_one_exact_search_identity() {
+        let mut source = document(1, "entry", "src/module.txt");
+        let original_bytes = validate_document(&source, &Cancellation::new()).unwrap();
+        source.canonical_name = Some(r#""\entry""#.to_owned());
+        let canonical = source.canonical_name.as_deref().unwrap();
+        assert_eq!(
+            validate_document(&source, &Cancellation::new()).unwrap(),
+            original_bytes + canonical.len()
+        );
+        let (stored, stored_bytes) =
+            decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0).unwrap();
+        assert_eq!(stored.canonical_name, source.canonical_name);
+        assert_eq!(
+            stored_bytes,
+            [
+                source.identifier.len(),
+                canonical.len(),
+                source.qualified_name.len(),
+                source.path.len(),
+                source.kind.len(),
+                source.language.len(),
+                source.tier.len()
+            ]
+            .into_iter()
+            .sum::<usize>()
+        );
+        let (_directory, _manifest, index) = build(vec![source.clone()]);
+        for query in ["entry", canonical] {
+            let hits = search(&index, query, SearchMode::Exact);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].symbol_id, source.symbol_id);
+            assert_eq!(hits[0].identifier, "entry");
+            assert_eq!(hits[0].canonical_name.as_deref(), Some(canonical));
+        }
+        let request = SearchRequest {
+            query: canonical.to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        assert_eq!(
+            index.search(
+                &request,
+                SearchBudget {
+                    max_returned_text_bytes: stored_bytes - 1,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new()
+            ),
+            Err(SearchError::ReturnedTextBudgetExceeded)
+        );
+        let budget = BuildBudget {
+            max_text_bytes: original_bytes,
+            ..BuildBudget::default()
+        };
+        assert!(matches!(
+            LexicalIndex::build_ephemeral(
+                generation(19),
+                vec![source.clone()],
+                budget,
+                &Cancellation::new()
+            ),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes"
+            })
+        ));
+        source.symbol_id = None;
+        assert!(matches!(
+            validate_document(&source, &Cancellation::new()),
+            Err(SearchError::InvalidDocument {
+                field: DocumentField::Identifier
+            })
+        ));
+        assert!(matches!(
+            decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0),
+            Err(SearchError::IncompatibleIndex)
+        ));
     }
 
     #[test]

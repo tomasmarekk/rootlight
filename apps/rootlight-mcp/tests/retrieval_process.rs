@@ -582,10 +582,67 @@ fn nix_quoted_lexical_relationships_preserve_authored_mcp_sources() {
         source,
         &[
             (r#""\identity""#, "function", "identity"),
+            ("identity", "function", "identity"),
             ("value", "variable", "value"),
             ("args", "variable", "args"),
         ],
     );
+}
+
+#[test]
+fn nix_static_path_search_keeps_dotted_keys_and_original_sources_distinct() {
+    let source = r#"{ "\item" = 1; a /* trivia */ . "b" = 2; "a.b" = 3; "λ😀" = 4; }"#;
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);
+    let mut symbols = std::collections::BTreeSet::new();
+    for (query, written) in [
+        ("item", r#""\item" = 1;"#),
+        ("a.b", r#"a /* trivia */ . "b" = 2;"#),
+        (r#""a.b""#, r#""a.b" = 3;"#),
+        ("λ😀", r#""λ😀" = 4;"#),
+    ] {
+        let arguments = json!({"query": query, "search_modes": ["exact"], "languages": ["nix"], "scope": {"paths": ["module.nix"]}, "response_profile": "evidence"});
+        let located = fixture.standalone("nix-static-name", "code.locate", arguments.clone());
+        assert_success(&located, "code.locate");
+        let batch = fixture.batch(
+            "nix-static-name-batch",
+            "code.locate",
+            arguments,
+            "evidence",
+        );
+        assert_standalone_batch_parity(&located, &batch, "code.locate");
+        let hits: Vec<_> = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit["kind"] == "variable")
+            .collect();
+        assert_eq!(hits.len(), 1, "{query}: {located:#}");
+        let symbol = hits[0]["symbol_id"].as_str().unwrap();
+        assert!(symbols.insert(symbol.to_owned()));
+        let reference = &hits[0]["source_ref"];
+        let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+        let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+        assert_eq!(source.get(start..end), Some(written));
+        let explained = fixture.standalone(
+            "nix-static-explain",
+            "symbol.explain",
+            json!({"symbol_ids": [symbol], "response_profile": "evidence"}),
+        );
+        assert_success(&explained, "symbol.explain");
+        assert_eq!(
+            explained["result"]["structuredContent"]["data"]["symbols"][0]["definition"],
+            *reference
+        );
+        let read = fixture.standalone("nix-static-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}));
+        assert_success(&read, "source.read");
+        let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+        assert_eq!(chunk["content"], written);
+        for key in ["repository", "generation", "content_hash", "span"] {
+            assert_eq!(chunk["source_ref"][key], reference[key]);
+        }
+    }
+    fixture.finish();
 }
 
 fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &str)]) {

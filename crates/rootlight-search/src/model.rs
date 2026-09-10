@@ -48,8 +48,11 @@ pub struct LexicalDocument {
     pub symbol_id: Option<SymbolId>,
     /// Stable identity of the declaring file.
     pub file_id: FileId,
-    /// Declared source spelling.
+    /// Human-readable identifier used for search and display.
     pub identifier: String,
+    /// Original symbol name when it differs from the display identifier.
+    /// File-only documents cannot carry this source-backed symbol alias.
+    pub canonical_name: Option<String>,
     /// Qualified source spelling, including containers.
     pub qualified_name: String,
     /// Repository-relative canonical display path.
@@ -199,8 +202,10 @@ pub struct SearchHit {
     pub symbol_id: Option<SymbolId>,
     /// Stable identity of the declaring file.
     pub file_id: FileId,
-    /// Declared source spelling.
+    /// Human-readable identifier used for search and display.
     pub identifier: String,
+    /// Original symbol-name alias, verified against durable IR by consumers.
+    pub canonical_name: Option<String>,
     /// Qualified source spelling.
     pub qualified_name: String,
     /// Repository-relative canonical display path.
