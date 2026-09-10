@@ -145,9 +145,7 @@ fn nix_lexical_bindings_dominate_with_without_inventing_dynamic_targets() {
 #[test]
 fn nix_lexical_bindings_never_fall_through_unmodeled_static_attribute_names() {
     for source in [
-        "let x = 1; in let \"x\" = 2; in x",
         "let x = 1; in let x.part = 2; in x",
-        "let x = 1; in rec { \"x\" = 2; result = x; }",
         "let x = 1; in rec { x.${key} = 2; result = x; }",
     ] {
         let context = if source.ends_with('x') {
@@ -156,6 +154,82 @@ fn nix_lexical_bindings_never_fall_through_unmodeled_static_attribute_names() {
             "result = x"
         };
         assert_bindings(source, &[(context, "x", None)]);
+    }
+}
+
+#[test]
+fn nix_quoted_lexical_names_resolve_to_exact_authored_definitions() {
+    for (source, read, written) in [
+        (r#"let x = 1; in let "x" = 2; in x"#, "x", r#""x""#),
+        (
+            r#"let x = 1; in rec { "\x" = 2; result = x; }"#,
+            "x",
+            r#""\x""#,
+        ),
+        (r#"let "x" = 1; in { inherit x; }"#, "x", r#""x""#),
+        (r#"let x = 1; in { inherit "\x"; }"#, r#""\x""#, "x"),
+        (
+            r#"let "a.b" = 1; in { inherit "a.b"; }"#,
+            r#""a.b""#,
+            r#""a.b""#,
+        ),
+        (r#"let "" = 1; in { inherit ""; }"#, r#""""#, r#""""#),
+        (
+            r#"let "λ😀" = 1; in { inherit "λ😀"; }"#,
+            r#""λ😀""#,
+            r#""λ😀""#,
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let start = source.find(written).unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && occurrence.source.span().end_byte()
+                        == u64::try_from(start + written.len()).unwrap()
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("missing authored definition: {source}");
+        };
+        let start = source.rfind(read).unwrap();
+        let reference = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && occurrence.source.span().end_byte()
+                        == u64::try_from(start + read.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved { symbol },
+            "{source}"
+        );
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(reference.id)
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+        }));
+    }
+}
+
+#[test]
+fn nix_quoted_nonidentifiers_do_not_hide_unrelated_lexical_bindings() {
+    for key in [r#""x.y""#, r#""""#, r#""λ😀""#, r#""\n""#, r#""\u0078""#] {
+        let source = format!("let x = 1; in let {key} = 2; in x");
+        assert_bindings(&source, &[("in x", "x", Some("x = 1"))]);
     }
 }
 

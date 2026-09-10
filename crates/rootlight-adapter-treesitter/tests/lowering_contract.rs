@@ -1157,16 +1157,28 @@ fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
 
 #[test]
 fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
-    const NIX: &str = "let value = 1; in value";
+    assert_nix_lexical_quotas("let value = 1; in value", "value = 1;", "value");
+}
+
+#[test]
+fn nix_quoted_lexical_relations_obey_the_same_preflight_quotas() {
+    assert_nix_lexical_quotas(
+        r#"let "\value" = 1; in value"#,
+        r#""\value" = 1;"#,
+        r#""\value""#,
+    );
+}
+
+fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
     let (_temporary, snapshot, source) =
-        source_fixture_for(NIX, "src/module.nix", b"nix-lexical-quota-fixture");
+        source_fixture_for(nix, "src/module.nix", b"nix-lexical-quota-fixture");
     let facts = [
-        (1, None, SyntaxFactKind::Root, NIX, 0, 0, "nix.file.root"),
+        (1, None, SyntaxFactKind::Root, nix, 0, 0, "nix.file.root"),
         (
             2,
             Some(1),
             SyntaxFactKind::Module,
-            NIX,
+            nix,
             0,
             1,
             "nix.file.module",
@@ -1175,7 +1187,7 @@ fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
             3,
             Some(2),
             SyntaxFactKind::Scope,
-            NIX,
+            nix,
             0,
             2,
             "nix.let.scope",
@@ -1184,7 +1196,7 @@ fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
             4,
             Some(3),
             SyntaxFactKind::Declaration,
-            "value = 1;",
+            declaration,
             0,
             3,
             "nix.variable.declaration",
@@ -1193,7 +1205,7 @@ fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
             5,
             Some(4),
             SyntaxFactKind::Occurrence,
-            "value",
+            definition,
             0,
             4,
             "nix.binding_name.definition",
@@ -1214,7 +1226,7 @@ fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
             id,
             parent,
             kind,
-            span_in(NIX, &source, text, nth),
+            span_in(nix, &source, text, nth),
             depth,
             label(syntax),
         )

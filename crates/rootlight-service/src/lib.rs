@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/81";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/82";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27026,12 +27026,47 @@ mod tests {
 
     #[test]
     fn nix_sources_survive_noop_incremental_rebuild_and_restart() {
+        assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
+            "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }",
+            &[
+                ("identity", "identity", rootlight_ir::EntityKind::Function),
+                ("value", "value", rootlight_ir::EntityKind::Parameter),
+                ("args", "args", rootlight_ir::EntityKind::Parameter),
+                ("system", "system", rootlight_ir::EntityKind::Parameter),
+            ],
+        );
+    }
+
+    #[test]
+    fn nix_quoted_sources_survive_noop_incremental_rebuild_and_restart() {
+        assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
+            r#"{ system ? "portable" }@args: let "\identity" = value: value; in { inherit "\system"; result = identity args; }"#,
+            &[
+                (
+                    r#""\identity""#,
+                    "identity",
+                    rootlight_ir::EntityKind::Function,
+                ),
+                ("value", "value", rootlight_ir::EntityKind::Parameter),
+                ("args", "args", rootlight_ir::EntityKind::Parameter),
+                (
+                    "system",
+                    r#""\system""#,
+                    rootlight_ir::EntityKind::Parameter,
+                ),
+            ],
+        );
+    }
+
+    fn assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
+        source: &str,
+        expected_reads: &[(&str, &str, rootlight_ir::EntityKind)],
+    ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
-        let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
         let path = fixture.path().join("module.nix");
         fs::write(&path, source).unwrap();
         let mut service =
@@ -27092,21 +27127,18 @@ mod tests {
                     .find(|entity| entity.id == symbol)
                     .unwrap();
                 let span = read.source.span();
+                let (_, written, kind) = expected_reads
+                    .iter()
+                    .find(|(name, _, _)| target.canonical_name == *name)
+                    .unwrap();
                 assert_eq!(
                     expected.get(
                         usize::try_from(span.start_byte()).unwrap()
                             ..usize::try_from(span.end_byte()).unwrap()
                     ),
-                    Some(target.canonical_name.as_str())
+                    Some(*written)
                 );
-                assert_eq!(
-                    target.kind,
-                    if target.canonical_name == "identity" {
-                        rootlight_ir::EntityKind::Function
-                    } else {
-                        rootlight_ir::EntityKind::Parameter
-                    }
-                );
+                assert_eq!(target.kind, *kind);
                 assert!(document.relations.iter().any(|relation| {
                     relation.predicate == rootlight_ir::RelationPredicate::RefersTo
                         && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(read.id)

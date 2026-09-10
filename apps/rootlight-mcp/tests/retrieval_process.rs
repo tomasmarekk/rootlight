@@ -565,13 +565,33 @@ fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
 #[test]
 fn nix_lexical_relationships_cross_mcp_with_exact_generation_bound_read_sources() {
     let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
+    assert_nix_lexical_relationship_sources(
+        source,
+        &[
+            ("identity", "function", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
+#[test]
+fn nix_quoted_lexical_relationships_preserve_authored_mcp_sources() {
+    let source = r#"{ system ? "portable" }@args: let "\identity" = value: value; in { inherit "\system"; result = identity args; }"#;
+    assert_nix_lexical_relationship_sources(
+        source,
+        &[
+            (r#""\identity""#, "function", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
+fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &str)]) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);
-    for (name, kind) in [
-        ("identity", "function"),
-        ("value", "variable"),
-        ("args", "variable"),
-    ] {
+    for &(name, kind, written) in names {
         let located = fixture.standalone(
             &format!("nix-binding-{name}"),
             "code.locate",
@@ -629,7 +649,7 @@ fn nix_lexical_relationships_cross_mcp_with_exact_generation_bound_read_sources(
             assert_eq!(reference["generation"], generation);
             let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
             let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
-            assert_eq!(source.get(start..end), Some(name));
+            assert_eq!(source.get(start..end), Some(written));
             let read = fixture.standalone(
                 &format!("nix-reference-read-{name}-{index}"),
                 "source.read",
@@ -638,7 +658,7 @@ fn nix_lexical_relationships_cross_mcp_with_exact_generation_bound_read_sources(
             );
             assert_success(&read, "source.read");
             let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
-            assert_eq!(chunk["content"], name);
+            assert_eq!(chunk["content"], written);
             for key in ["repository", "generation", "content_hash", "span"] {
                 assert_eq!(chunk["source_ref"][key], reference[key]);
             }

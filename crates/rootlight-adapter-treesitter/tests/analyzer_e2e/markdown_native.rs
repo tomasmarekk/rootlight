@@ -68,12 +68,22 @@ fn markdown_nix_bindings_retain_host_coordinates_and_separate_example_owners() {
 #[test]
 fn markdown_nix_lexical_bindings_do_not_cross_example_boundaries() {
     let source = "# Examples λ😀\r\n\r\n```nix\r\nlet value = 1; in value\r\n```\r\n\r\n```nix\r\nvalue\r\n```\r\n";
+    assert_markdown_nix_lexical_boundaries(source, "value");
+}
+
+#[test]
+fn markdown_nix_quoted_lexical_bindings_do_not_cross_example_boundaries() {
+    let source = "# Examples λ😀\r\n\r\n```nix\r\nlet \"\\value\" = 1; in value\r\n```\r\n\r\n```nix\r\nvalue\r\n```\r\n";
+    assert_markdown_nix_lexical_boundaries(source, r#""\value""#);
+}
+
+fn assert_markdown_nix_lexical_boundaries(source: &str, definition: &str) {
     let result = output(source);
     let document = result.document();
     let target = document
         .entities
         .iter()
-        .find(|entity| entity.canonical_name == "value")
+        .find(|entity| entity.canonical_name == definition)
         .unwrap();
     let mut reads: Vec<_> = document
         .occurrences
