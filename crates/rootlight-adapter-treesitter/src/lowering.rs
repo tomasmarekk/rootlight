@@ -2079,7 +2079,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // headers match. Offsets and function bodies must not affect identity.
                 let written_scope_identity = if matches!(
                     language_for_fact(self.request, fact),
-                    "r" | "powershell" | "nix" | "matlab"
+                    "r" | "powershell" | "nix" | "matlab" | "perl"
                 ) {
                     // Named MATLAB workspaces survive unrelated sibling insertion;
                     // only indistinguishable same-name siblings need an ordinal.
@@ -2439,7 +2439,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 language_for_fact(self.request, fact),
-                "r" | "powershell" | "nix" | "matlab"
+                "r" | "powershell" | "nix" | "matlab" | "perl"
             ) && kind != EntityKind::Module
             {
                 // Separate written occurrences and their children without claiming
@@ -3527,6 +3527,8 @@ fn written_source_identity(
         "rootlight.nix-source-occurrence/1"
     } else if language == "matlab" {
         "rootlight.matlab-source-occurrence/1"
+    } else if language == "perl" {
+        "rootlight.perl-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -4208,6 +4210,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "r"
                 | "nix"
                 | "matlab"
+                | "perl"
                 | "solidity"
                 | "scala"
                 | "dart"
@@ -4321,6 +4324,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "r.file.module"
                 | "nix.file.module"
                 | "matlab.file.module"
+                | "perl.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
@@ -4347,6 +4351,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "r"
                 | "nix"
                 | "matlab"
+                | "perl"
                 | "solidity"
                 | "scala"
                 | "dart"
@@ -4439,6 +4444,11 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "perl.variable_name.reference" => Some("perl-binding-target-unavailable"),
+        "perl.function_name.reference" => Some("perl-function-target-unavailable"),
+        "perl.method_application.reference" => Some("perl-method-target-unavailable"),
+        "perl.identifier.reference" => Some("perl-import-target-unavailable"),
+        "perl.package_context.reference" => Some("perl-package-ownership-unavailable"),
         "matlab.member_name.reference" => Some("matlab-member-target-unavailable"),
         "matlab.function_handle_name.reference"
         | "matlab.unqualified_function_handle_name.reference" => {

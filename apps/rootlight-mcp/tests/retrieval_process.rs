@@ -578,6 +578,32 @@ fn matlab_definitions_and_headers_cross_real_process_boundaries() {
 }
 
 #[test]
+fn perl_definitions_and_headers_cross_real_process_boundaries() {
+    source_entities_with_signatures_cross_process_boundaries(
+        "perl",
+        "measure.pm",
+        "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n",
+        &[
+            ("adjust", "function", 1),
+            ("$value", "parameter", 1),
+            ("$result", "variable", 1),
+        ],
+        &[("adjust", "sub adjust ($value)")],
+    );
+    source_entities_with_signatures_cross_process_boundaries(
+        "perl",
+        "counter.pl",
+        "class Counter { field $value; method read ($offset = 1) { $value + $offset } }\n",
+        &[
+            ("read", "method", 1),
+            ("$value", "field", 1),
+            ("$offset", "parameter", 1),
+        ],
+        &[("read", "method read ($offset = 1)")],
+    );
+}
+
+#[test]
 fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
     assert_relationship_sources(
         "matlab",
@@ -1121,6 +1147,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
                 | "markdown"
                 | "objective-c"
                 | "nix"
+                | "perl"
         ) {
             assert!(
                 output["warnings"]
@@ -1224,6 +1251,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
                     | "objective-c"
                     | "nix"
                     | "matlab"
+                    | "perl"
             )
         {
             // These fixtures use existing IR kinds, unlike the newer data

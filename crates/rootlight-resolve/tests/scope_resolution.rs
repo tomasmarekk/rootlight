@@ -594,6 +594,11 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
         ("matlab", "matlab.identifier.reference"),
         ("matlab", "matlab.application.reference"),
         ("matlab", "matlab.command.reference"),
+        ("perl", "perl.variable_name.reference"),
+        ("perl", "perl.function_name.reference"),
+        ("perl", "perl.method_application.reference"),
+        ("perl", "perl.identifier.reference"),
+        ("perl", "perl.package_context.reference"),
     ] {
         for resolved in [false, true] {
             let mut fixture = Fixture::new();

@@ -75,6 +75,8 @@ pub enum GrammarFamily {
     Nix,
     /// MATLAB written source syntax; runtime workspace and dispatch remain separate.
     Matlab,
+    /// Perl written declarations; package and runtime dispatch resolution remain separate.
+    Perl,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -154,7 +156,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(31);
+        let mut descriptors = Vec::with_capacity(32);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -187,6 +189,7 @@ impl GrammarRegistry {
             GrammarFamily::ObjectiveC,
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
+            GrammarFamily::Perl,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -314,6 +317,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
         GrammarFamily::Nix => tree_sitter_nix::LANGUAGE.into(),
         GrammarFamily::Matlab => tree_sitter_matlab::LANGUAGE.into(),
+        GrammarFamily::Perl => ts_parser_perl::LANGUAGE.into(),
     }
 }
 
@@ -328,6 +332,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Perl => GrammarIdentity {
+            language_id: "perl",
+            grammar_version: "2.0.0",
+            source_package_sha256: "db3cd8574afc19af4d3db44fe0cf94a5e8fc3f4056c0326baf5ba01a29666129",
+            parser_sha256: "1317bdaae2f50f5f82b6dbc7176425e9cee64a0dbfbb82aa17959aaefc54f199",
+            scanner_sha256: Some(
+                "a1e653a42e46ce04d3997467034e500f5f12afed92c98ae215c69d813e303043",
+            ),
+        },
         GrammarFamily::Matlab => GrammarIdentity {
             language_id: "matlab",
             grammar_version: "1.3.0",
@@ -643,7 +656,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 31);
+        assert_eq!(registry.descriptors().len(), 32);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -676,6 +689,7 @@ mod tests {
             GrammarFamily::ObjectiveC,
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
+            GrammarFamily::Perl,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -755,6 +769,7 @@ mod tests {
             (GrammarFamily::ObjectiveC, "objective-c", "tree-sitter-objc"),
             (GrammarFamily::Nix, "nix", "tree-sitter-nix"),
             (GrammarFamily::Matlab, "matlab", "tree-sitter-matlab"),
+            (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::PowerShell,
                 "powershell",

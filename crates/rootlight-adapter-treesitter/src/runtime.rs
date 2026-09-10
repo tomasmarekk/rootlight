@@ -1814,8 +1814,9 @@ fn remove_shadowed_candidates(
 ) -> Result<(), AdapterError> {
     // Most definition/reference and documentation/comment captures at one span
     // are redundant. Nix inherit instead both defines an attribute and reads an
-    // outer binding or a source-set field; those roles must survive independently
-    // with the same span.
+    // outer binding or a source-set field. Perl's written package name also
+    // carries unresolved package-context evidence; these roles must survive
+    // independently with the same span.
     cancellation.check()?;
     let mut group_start = 0usize;
     let mut write = 0usize;
@@ -1849,7 +1850,7 @@ fn remove_shadowed_candidates(
                 && candidate.role == StructuralRole::Reference
                 && !matches!(
                     candidate.syntax,
-                    "nix.inherited_name" | "nix.inherited_attribute"
+                    "nix.inherited_name" | "nix.inherited_attribute" | "perl.package_context"
                 )
                 || has_documentation && candidate.role == StructuralRole::Comment)
             {
@@ -2723,10 +2724,12 @@ mod tests {
     }
 
     #[test]
-    fn inherited_reads_survive_same_span_definitions_without_retaining_other_reads() {
+    fn distinct_reference_roles_survive_same_span_definitions_without_redundant_reads() {
         for (syntax, expected) in [
             ("nix.inherited_name", 2),
             ("nix.inherited_attribute", 2),
+            ("perl.package_context", 2),
+            ("perl.identifier", 1),
             ("nix.identifier", 1),
         ] {
             let mut captures = [StructuralRole::Definition, StructuralRole::Reference]

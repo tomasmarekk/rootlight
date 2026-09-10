@@ -24,6 +24,7 @@ mod markdown;
 mod matlab;
 mod nix;
 mod objective_c;
+mod perl;
 mod powershell;
 mod r;
 mod scala;
@@ -317,6 +318,9 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Perl {
+            expected.retain(|name| !matches!(*name, "call" | "import"));
+        }
         if family == GrammarFamily::Matlab {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
         }
@@ -604,6 +608,11 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Perl
+                    && !perl::retain_capture(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Matlab
                     && !matlab::retain_capture(capture.node, role, input.cancellation)?
                 {
@@ -950,6 +959,8 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
+        _ if family == GrammarFamily::Perl => perl::syntax(capture.node, role, cancellation)?
+            .ok_or_else(|| query_failure("query-perl-kind"))?,
         _ if family == GrammarFamily::Matlab => {
             matlab::syntax(capture.node, role, source, cancellation)?
                 .ok_or_else(|| query_failure("query-matlab-kind"))?
@@ -1142,12 +1153,19 @@ fn candidate_for_capture(
             GrammarFamily::ObjectiveC => "objective_c.call",
             GrammarFamily::Nix => "nix.call",
             GrammarFamily::Matlab => return Err(query_failure("query-matlab-ambiguous-call")),
+            GrammarFamily::Perl => return Err(query_failure("query-perl-unresolved-call")),
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Perl && role == StructuralRole::Signature {
+        end = perl::header_end(capture.node);
+        while end > start && source.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
+            end -= 1;
+        }
+    }
     if family == GrammarFamily::Matlab && role == StructuralRole::Definition {
         start = matlab::definition_start(capture.node);
     }
@@ -1891,7 +1909,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(31);
+        let mut packs = Vec::with_capacity(32);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1932,6 +1950,7 @@ impl QueryPackRegistry {
             (GrammarFamily::R, include_str!("../queries/r.scm")),
             (GrammarFamily::Nix, include_str!("../queries/nix.scm")),
             (GrammarFamily::Matlab, include_str!("../queries/matlab.scm")),
+            (GrammarFamily::Perl, include_str!("../queries/perl.scm")),
             (GrammarFamily::Scala, include_str!("../queries/scala.scm")),
             (GrammarFamily::Dart, include_str!("../queries/dart.scm")),
             (
@@ -2036,11 +2055,15 @@ mod tests {
             GrammarFamily::ObjectiveC,
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
+            GrammarFamily::Perl,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Perl {
+                expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
             if family == GrammarFamily::Matlab {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             }

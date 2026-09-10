@@ -11,6 +11,17 @@
 (optional_parameter . (scalar (varname)) @definition) @declaration
 (named_parameter . (scalar (varname)) @definition) @declaration
 (slurpy_parameter . [(array (varname)) (hash (varname))] @definition) @declaration
+; Variable-list groups have their own nodes; initializer reads are not bindings.
+(variable_declaration variable: [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
+(variable_declaration variables: [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
+(variable_group variables: [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
+(refalias_variable [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
+[(scalar) (array) (hash) (function)] @reference
+(use_statement module: (package) @reference)
+(method_call_expression) @reference
+[(package_statement name: (package) @reference)
+ (class_statement name: (package) @reference)
+ (role_statement name: (package) @reference)]
 (comment) @comment
 (pod) @documentation
 [(string_literal) (interpolated_string_literal) (command_string)] @string

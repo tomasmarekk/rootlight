@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/92";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/7";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/93";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -23649,6 +23649,146 @@ mod tests {
     }
 
     #[test]
+    fn perl_declarations_survive_noop_edit_clean_rebuild_and_restart() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("measure.pm");
+        let source =
+            "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n";
+        fs::write(&path, source).unwrap();
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 2);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            initial
+        );
+        let changed = source.replace("+ 1", "+ 23");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(initial.generation, updated.generation);
+        let work = service.incremental_evidence(updated.generation).unwrap();
+        assert_eq!(work.parsed_files(), 1);
+        assert_eq!(work.reused_parser_artifacts(), 1);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut prior_ids = None;
+        for (receipt, expected) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let declarations: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == "perl" && entity.kind != rootlight_ir::EntityKind::Module
+                })
+                .collect();
+            assert_eq!(declarations.len(), 4);
+            let ids: BTreeSet<_> = declarations.iter().map(|entity| entity.id).collect();
+            if let Some(previous) = &prior_ids {
+                assert_eq!(&ids, previous);
+            } else {
+                prior_ids = Some(ids);
+            }
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "measure.pm")
+                .unwrap();
+            assert_eq!(file.language, "perl");
+            let full = restored
+                .source_read(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().unwrap()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(full.data.chunks[0].bytes, expected.as_bytes());
+            for entity in declarations {
+                let hits = restored
+                    .code_locate(
+                        receipt.generation,
+                        entity.canonical_name.clone(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(
+                    hits.data
+                        .hits
+                        .iter()
+                        .any(|hit| hit.symbol == Some(entity.id))
+                );
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                    })
+                    .unwrap();
+                assert_eq!(site.source.generation(), receipt.generation);
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, entity.canonical_name.as_bytes());
+            }
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "perl-binding-target-unavailable")
+            );
+        }
+    }
+
+    #[test]
     fn matlab_script_routing_survives_reconcile_language_changes_and_restart() {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
@@ -25927,6 +26067,7 @@ mod tests {
             "sample.lua",
             "sample.md",
             "sample.nix",
+            "sample.pl",
             "sample.php",
             "sample.py",
             "sample.R",
@@ -26016,7 +26157,6 @@ mod tests {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
             ("analysis.mlx", "matlab"),
-            ("script.pl", "perl"),
             ("pipeline.groovy", "groovy"),
             ("boot.asm", "assembly"),
         ];
@@ -26062,7 +26202,7 @@ mod tests {
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
             ),
-            ("script.pl", "sub render { return 1; }\n", "perl"),
+            ("script.groovy", "def render() { return 1 }\n", "groovy"),
             (
                 "mystery.sourceblob",
                 "opaqueWidget configures lexicalFallback\n",
@@ -26144,7 +26284,7 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["objective-cpp", "matlab", "perl"] {
+        for language in ["objective-cpp", "matlab", "groovy"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)

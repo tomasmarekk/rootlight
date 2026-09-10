@@ -69,6 +69,6 @@ fn classes_roles_methods_and_forward_declarations_are_distinct_names() {
 fn opaque_text_cannot_create_declaration_captures() {
     for newline in ["\n", "\r\n"] {
         let source = "# λ😀 sub hidden {}\nmy $text = q{sub fake ($arg) {}};\n=pod\npackage Phantom;\n=cut\nmy $body = <<'END';\nsub phantom ($arg) {}\nEND\nsub actual ($value) { $value }\n".replace('\n', newline);
-        assert_eq!(definitions(&source), ["actual", "$value"]);
+        assert_eq!(definitions(&source), ["$text", "$body", "actual", "$value"]);
     }
 }

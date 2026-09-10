@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "229e2844d23fcc9fd7af631e08938cb1e6a0032aa4d974a0e6558ea9bce04061";
+    "8d37d8ef08a4432778cd289d8ed1d4247747c72598d2ff46bb4d701901995003";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,11 +37,16 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 31] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 32] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "ts-parser-perl",
+        "2.0.0",
+        "db3cd8574afc19af4d3db44fe0cf94a5e8fc3f4056c0326baf5ba01a29666129",
     ),
     (
         "tree-sitter-matlab",
@@ -223,6 +228,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/ts-parser-perl-2.0.0-LICENSE",
+        "68a9a526ae357ed5a2f8ca5dabb14131b283554b69639bb04816088d4b1f2fa0",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-matlab-1.3.0-LICENSE",
         "8673f5acd59bfb3bd129760a57f72092d5e3c01e05837532eac9497cf8006a46",
     )?;
@@ -326,7 +336,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 31 {
+    if manifest.grammars.len() != 32 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -366,6 +376,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "matlab",
         "nix",
         "objective-c",
+        "perl",
         "php",
         "powershell",
         "python",
@@ -537,7 +548,7 @@ fn validate_tree_sitter_dependencies(dependencies: &[Dependency]) -> Result<(), 
 }
 
 fn is_tree_sitter_package(name: &str) -> bool {
-    name == "tree-sitter" || name.starts_with("tree-sitter-")
+    name == "tree-sitter" || name.starts_with("tree-sitter-") || name.starts_with("ts-parser-")
 }
 
 fn validate_dependency_profile(
@@ -934,7 +945,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 31")]
+    #[error("grammar lock contains {0} grammars instead of 32")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

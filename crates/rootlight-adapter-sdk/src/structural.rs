@@ -159,7 +159,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "swift.property.declaration" => {
             Some(EntityKind::Property)
         }
-        SyntaxFactKind::Declaration if label == "ruby.namespace.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "ruby.namespace.declaration" | "perl.package.declaration"
+            ) =>
+        {
             Some(EntityKind::Namespace)
         }
         SyntaxFactKind::Declaration if label == "java.annotation.declaration" => {

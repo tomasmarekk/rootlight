@@ -761,6 +761,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("matlab.") {
         return false;
     }
+    // Perl sigils, package context and runtime imports require language-owned
+    // binding evidence; identical spelling alone does not establish a target.
+    if occurrence.syntax_kind.starts_with("perl.") {
+        return false;
+    }
     // ECMAScript member leaves require their receiver's module/type evidence.
     // Re-scoring a source-backed adapter gap by spelling would invent a target.
     if matches!(
