@@ -279,6 +279,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// its grammar-reviewed division and bracket operators, without resolving receivers.
 /// PowerShell preserves written names, including braced variables, without runtime
 /// scope expansion, escape evaluation or case-insensitive binding equivalence.
+/// Nix retains reviewed static attribute paths exactly, including quotes and trivia;
+/// canonical source identity is not evaluated attribute-name equivalence.
 /// Markdown preserves authored heading and label text; rendered text, reference
 /// case folding and generated fragment identifiers require separate interpretation.
 /// ECMAScript identifiers decode Unicode escapes without Unicode normalization;
@@ -325,7 +327,7 @@ pub fn structural_captured_name_for_language<'a>(
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
     } else if language == "r" {
         crate::r_names::canonical_r_name(text, maximum_bytes)
-    } else if matches!(language, "css" | "html" | "powershell" | "markdown") {
+    } else if matches!(language, "css" | "html" | "powershell" | "markdown" | "nix") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "lua" {

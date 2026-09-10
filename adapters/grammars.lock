@@ -18,6 +18,55 @@ capabilities = ["included-ranges", "incremental-edits", "progress-callback", "er
 parser_limits = ["source-bytes", "syntax-nodes", "syntax-depth", "included-ranges", "incremental-edits", "query-matches", "query-captures", "output-facts", "cache-bytes", "concurrent-parses", "deadline", "cancellation", "memory-admission"]
 
 [[grammars]]
+language = "nix"
+crate_name = "tree-sitter-nix"
+crate_version = "0.3.0"
+crates_io_checksum = "4952a9733f3a98f6683a0ccd1035d84ab7a52f7e84eeed58548d86765ad92de3"
+repository = "https://github.com/nix-community/tree-sitter-nix"
+tag = "v0.3.0"
+commit = "ea1d87f7996be1329ef6555dcacfa63a69bd55c6"
+parser_sha256 = "d8d70a0f199dd6b03e2c0687bc4ce01e2baa6bb51c903fb78b989c714c06d4b5"
+scanner_sha256 = "45e12521e8be62ea47525417c64d9372fa34e9e12bff643c430b8b3607be9d56"
+abi = 14
+analysis_tier = "D"
+license = "MIT"
+license_source = "adapters/licenses/tree-sitter-nix-0.3.0-LICENSE"
+license_sha256 = "c1b72e50266464ec5118d26200e17bf1f472d142e62ab637e1ffc23986657a78"
+modifications = "optional empty inheritance attribute lists, regenerated with CLI 0.26.8 ABI 14; four trailing comment spaces removed; see PATCHES.md"
+test_corpus = "54 unchanged upstream parser cases, independent RNix syntax comparison, scanner-state and public analyzer binding contracts"
+msrv = "native grammar and scanner verified with Rootlight MSRV 1.90"
+offline_behavior = "compiles pinned vendored C parser and stateless scanner with cached Cargo dependencies; never evaluates expressions or loads imports"
+capabilities = ["written-bindings", "function-parameters", "attribute-paths", "source-ranges", "incremental-edits"]
+semantic_depth = "source declarations and ownership; lexical resolution, dynamic attributes, with environments, import evaluation and runtime dispatch require separate analysis"
+audit_notes = ["original crate and upstream revision pinned; generated ABI 14 independently reproduced", "empty inherit retains no invented attribute nodes", "RNix is an isolated test-only oracle and does not enter the production dependency graph"]
+[grammars.vendored]
+manifest_path = "third_party/tree-sitter-nix-0.3.0/Cargo.toml"
+parser_path = "src/parser.c"
+scanner_path = "src/scanner.c"
+[grammars.vendored.files]
+".cargo_vcs_info.json" = "2fc8530579dd2028ba74ae55f45fa9782bbfc9c1de862548640d3aba3827432e"
+"Cargo.lock" = "130fa74758ce8f16243367f24c029190011351625a47161c6bee39b8e957ed39"
+"Cargo.toml" = "ea0cf679da64a418603eecad1f57ac43c942663521a033034e392d189e9d5d69"
+"Cargo.toml.orig" = "059881b7b806c0382ba1c236d6494bb556286b55f3062ce903346913586374aa"
+"grammar.js" = "b31447003cd85a7c5d9070e90728a2930528defc4243e4ab14030540f824ecdd"
+"LICENSE" = "c1b72e50266464ec5118d26200e17bf1f472d142e62ab637e1ffc23986657a78"
+"PATCHES.md" = "de635deaefc391089e874a93d186f8542d7c15e587930d81576340aaba5993b4"
+"README.md" = "d5415ef5bbdf73d9f82cce35788f6fe7f95999055c19032700539ab36365ccf2"
+"bindings/rust/build.rs" = "bbbb5cf8882de8573faa4e7f20270b2f136da4e2e5df1dfe1ea51dfabdd8efeb"
+"bindings/rust/lib.rs" = "696ba546d5dde03a13b6dd6fd77dddce5494c3b171e409c4bb74cdb28e703eef"
+"queries/highlights.scm" = "9955df66afae9bdf527aea82030f7e3a5d7b2f40726f75d8171cf7dd4e7bbe32"
+"queries/injections.scm" = "738139a3fc2002e94c978c672350a6dadc5ef3615ffccfb565ff65f0dfdafa5a"
+"queries/locals.scm" = "a6094f99b129b234ad54d629e50522174b7478ddd691e924ff276c90b73a802e"
+"queries/tags.scm" = "4b44f56c9a30e4c247961ac5d53bae0d1f27aa3523269ac03ed4f0bdb79aadfe"
+"src/grammar.json" = "ffd2b2f5d92886f7ed6649fe7f338182d14aaaa63318b05cfb3205674cf72acc"
+"src/node-types.json" = "5f47c9dca4b2d2826c51d701f81d1f0df2f20a11bc450c0816ae1a48e0eb6496"
+"src/parser.c" = "d8d70a0f199dd6b03e2c0687bc4ce01e2baa6bb51c903fb78b989c714c06d4b5"
+"src/scanner.c" = "45e12521e8be62ea47525417c64d9372fa34e9e12bff643c430b8b3607be9d56"
+"src/tree_sitter/alloc.h" = "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+"src/tree_sitter/array.h" = "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+"src/tree_sitter/parser.h" = "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+
+[[grammars]]
 language = "objective-c"
 crate_name = "tree-sitter-objc"
 crate_version = "3.0.2"

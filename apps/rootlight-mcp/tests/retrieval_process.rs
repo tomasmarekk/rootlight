@@ -546,6 +546,23 @@ fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
 }
 
 #[test]
+fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
+    let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
+    source_entities_with_signatures_cross_process_boundaries(
+        "nix",
+        "module.nix",
+        source,
+        &[
+            ("identity", "function", 1),
+            ("value", "parameter", 1),
+            ("args", "parameter", 1),
+            ("result", "variable", 1),
+        ],
+        &[("identity", "value:")],
+    );
+}
+
+#[test]
 fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp() {
     let source = include_str!("../../../tests/fixtures/objective-c/forwards.m");
     let mut fixture =
@@ -784,7 +801,15 @@ fn source_entities_with_signatures_cross_process_boundaries(
         assert_eq!(output["schema_version"], "1.5");
         if matches!(
             language,
-            "sql" | "r" | "solidity" | "scala" | "dart" | "powershell" | "markdown" | "objective-c"
+            "sql"
+                | "r"
+                | "solidity"
+                | "scala"
+                | "dart"
+                | "powershell"
+                | "markdown"
+                | "objective-c"
+                | "nix"
         ) {
             assert!(
                 output["warnings"]
@@ -881,7 +906,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         if !matches!(kind, "import" | "export")
             && matches!(
                 language,
-                "r" | "scala" | "dart" | "powershell" | "javascript" | "objective-c"
+                "r" | "scala" | "dart" | "powershell" | "javascript" | "objective-c" | "nix"
             )
         {
             // These fixtures use existing IR kinds, unlike the newer data

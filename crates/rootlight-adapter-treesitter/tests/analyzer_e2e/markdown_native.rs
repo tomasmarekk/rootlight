@@ -27,6 +27,45 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_nix_bindings_retain_host_coordinates_and_separate_example_owners() {
+    let source = "# Examples λ😀\r\n\r\n```nix\r\nlet identity = value: value; in identity 1\r\n```\r\n\r\n```nix\r\nlet identity = value: value; in identity 2\r\n```\r\n";
+    let result = output(source);
+    for (name, kind) in [
+        ("identity", EntityKind::Function),
+        ("value", EntityKind::Parameter),
+    ] {
+        let entities: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+            .collect();
+        assert_eq!(entities.len(), 2, "{:?}", result.document().entities);
+        assert_ne!(entities[0].id, entities[1].id);
+        for entity in entities {
+            assert_eq!(entity.language, "nix");
+            let definition = result
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+                })
+                .unwrap();
+            let span = definition.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+        }
+    }
+}
+
+#[test]
 fn markdown_objective_c_generic_bindings_retain_host_sources_and_distinct_owners() {
     let fixture = include_str!("../../../../tests/fixtures/objective-c/generics.m");
     let source = format!(
@@ -418,6 +457,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             dart_native::DART,
             powershell_native::POWERSHELL,
             objective_c_native::OBJECTIVE_C,
+            nix_native::NIX,
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()

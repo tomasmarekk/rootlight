@@ -1947,25 +1947,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings must not depend on sibling positions. JSON
                 // data is different: array positions are part of its address,
                 // while whitespace and value-body edits are not.
-                // R and PowerShell record source occurrences, not evaluated environments. Anonymous
+                // R, PowerShell and Nix record source occurrences, not evaluated environments. Anonymous
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
-                let written_scope_identity =
-                    if matches!(language_for_fact(self.request, fact), "r" | "powershell") {
-                        let next = written_scopes.entry(fact.parent()).or_default();
-                        let position = *next;
-                        *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                        Some(written_source_identity(
-                            language_for_fact(self.request, fact),
-                            parent_scope
-                                .as_ref()
-                                .and_then(|scope| scope.stable_identity),
-                            fact.syntax_kind().as_str(),
-                            position,
-                        ))
-                    } else {
-                        None
-                    };
+                let written_scope_identity = if matches!(
+                    language_for_fact(self.request, fact),
+                    "r" | "powershell" | "nix"
+                ) {
+                    let next = written_scopes.entry(fact.parent()).or_default();
+                    let position = *next;
+                    *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                    Some(written_source_identity(
+                        language_for_fact(self.request, fact),
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.stable_identity),
+                        fact.syntax_kind().as_str(),
+                        position,
+                    ))
+                } else {
+                    None
+                };
                 // Anonymous source blocks have no declared name. Their lexical
                 // position distinguishes disjoint bindings without hashing body
                 // contents or byte offsets; this is source identity, not dispatch.
@@ -2183,11 +2185,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 (std::borrow::Cow::Borrowed(name), None)
             } else if matches!(
                 fact.syntax_kind().as_str(),
-                "r.anonymous_function.declaration" | "powershell.anonymous_function.declaration"
+                "r.anonymous_function.declaration"
+                    | "powershell.anonymous_function.declaration"
+                    | "nix.anonymous_function.declaration"
             ) {
                 // This label is synthetic, not a written binding. The native
                 // callable span and scope identity retain its source ownership.
                 (std::borrow::Cow::Borrowed("<anonymous>"), None)
+            } else if matches!(
+                fact.syntax_kind().as_str(),
+                "nix.dynamic_variable.declaration" | "nix.dynamic_function.declaration"
+            ) {
+                // A computed key owns its source expression without inventing an evaluated name.
+                (std::borrow::Cow::Borrowed("<computed-key>"), None)
             } else if fact.syntax_kind().as_str() == "powershell.hashtable.declaration" {
                 // Source containers own entries without asserting a runtime variable binding.
                 (std::borrow::Cow::Borrowed("<hashtable>"), None)
@@ -2279,11 +2289,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     label,
                     position,
                 ))
-            } else if matches!(language_for_fact(self.request, fact), "r" | "powershell")
-                && kind != EntityKind::Module
+            } else if matches!(
+                language_for_fact(self.request, fact),
+                "r" | "powershell" | "nix"
+            ) && kind != EntityKind::Module
             {
-                // Reassignment can replace a binding at runtime. Preserve each written
-                // declaration and its children without claiming runtime binding identity.
+                // Separate written occurrences and their children without claiming
+                // runtime binding identity or merging disjoint source environments.
                 let label = fact.syntax_kind().as_str();
                 let next = written_declarations
                     .entry((fact.parent(), label.to_owned(), name.to_string()))
@@ -3139,6 +3151,14 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "nix.file.module" => Some((
+            FactDomain::Relations,
+            "nix-lexical-import-and-runtime-binding-resolution-unavailable",
+        )),
+        "nix.dynamic_variable.declaration" | "nix.dynamic_function.declaration" => Some((
+            FactDomain::Entities,
+            "nix-computed-attribute-name-unavailable",
+        )),
         "objective_c.file.root" => Some((
             FactDomain::Entities,
             "objective-c-preprocessed-and-inherited-c-declarations-unavailable",
@@ -3320,6 +3340,8 @@ fn written_source_identity(
 ) -> [u8; 32] {
     let context = if language == "r" {
         "rootlight.r-source-occurrence/1"
+    } else if language == "nix" {
+        "rootlight.nix-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -3999,6 +4021,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "html"
                 | "sql"
                 | "r"
+                | "nix"
                 | "solidity"
                 | "scala"
                 | "dart"
@@ -4110,6 +4133,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "html.file.module"
                 | "sql.file.module"
                 | "r.file.module"
+                | "nix.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
@@ -4134,6 +4158,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "html"
                 | "sql"
                 | "r"
+                | "nix"
                 | "solidity"
                 | "scala"
                 | "dart"

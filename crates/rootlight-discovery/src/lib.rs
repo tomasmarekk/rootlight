@@ -1659,6 +1659,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "nix",
+        suffixes: &[".nix"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "objective-cpp",
         suffixes: &[".mm"],
         aliases: &["objcxx"],
@@ -2584,6 +2592,26 @@ max_source_file_bytes = 2097152
         let capability = language_capabilities()
             .iter()
             .find(|capability| capability.language == "astro")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn nix_extensions_route_to_native_source_analysis_without_path_special_cases() {
+        for path in [
+            "default.nix",
+            "flake.nix",
+            "modules/service.nix",
+            "MODULE.NIX",
+        ] {
+            assert_eq!(extension_language(path), Some("nix"));
+        }
+        assert_ne!(extension_language("module.nix.bak"), Some("nix"));
+        assert_eq!(canonical_language("nix"), Some("nix"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "nix")
             .unwrap();
         assert_eq!(capability.analyzers, &["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");

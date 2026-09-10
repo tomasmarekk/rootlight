@@ -71,6 +71,8 @@ pub enum GrammarFamily {
     Astro,
     /// Objective-C source syntax; Objective-C++ requires a separate grammar.
     ObjectiveC,
+    /// Nix expressions and authored bindings without runtime evaluation.
+    Nix,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -150,7 +152,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(29);
+        let mut descriptors = Vec::with_capacity(30);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -181,6 +183,7 @@ impl GrammarRegistry {
             GrammarFamily::Markdown,
             GrammarFamily::Astro,
             GrammarFamily::ObjectiveC,
+            GrammarFamily::Nix,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -306,6 +309,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Markdown => tree_sitter_md::LANGUAGE.into(),
         GrammarFamily::Astro => tree_sitter_astro_next::LANGUAGE.into(),
         GrammarFamily::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
+        GrammarFamily::Nix => tree_sitter_nix::LANGUAGE.into(),
     }
 }
 
@@ -320,6 +324,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Nix => GrammarIdentity {
+            language_id: "nix",
+            grammar_version: "0.3.0",
+            source_package_sha256: "4952a9733f3a98f6683a0ccd1035d84ab7a52f7e84eeed58548d86765ad92de3",
+            parser_sha256: "d8d70a0f199dd6b03e2c0687bc4ce01e2baa6bb51c903fb78b989c714c06d4b5",
+            scanner_sha256: Some(
+                "45e12521e8be62ea47525417c64d9372fa34e9e12bff643c430b8b3607be9d56",
+            ),
+        },
         GrammarFamily::ObjectiveC => GrammarIdentity {
             language_id: "objective-c",
             grammar_version: "3.0.2",
@@ -617,7 +630,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 29);
+        assert_eq!(registry.descriptors().len(), 30);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -725,6 +738,7 @@ mod tests {
             (GrammarFamily::Markdown, "markdown", "tree-sitter-md"),
             (GrammarFamily::Astro, "astro", "tree-sitter-astro-next"),
             (GrammarFamily::ObjectiveC, "objective-c", "tree-sitter-objc"),
+            (GrammarFamily::Nix, "nix", "tree-sitter-nix"),
             (
                 GrammarFamily::PowerShell,
                 "powershell",

@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/79";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/80";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27021,6 +27021,97 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
             }
+        }
+    }
+
+    #[test]
+    fn nix_sources_survive_noop_incremental_rebuild_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
+        let path = fixture.path().join("module.nix");
+        fs::write(&path, source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = source.replace("value: value", "value: (value)");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut initial_ids = None;
+        for (receipt, expected) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.entities.len(), 8, "{:?}", document.entities);
+            let ids: BTreeSet<_> = document.entities.iter().map(|entity| entity.id).collect();
+            if let Some(initial_ids) = &initial_ids {
+                assert_eq!(initial_ids, &ids);
+            } else {
+                initial_ids = Some(ids);
+            }
+            for entity in &document.entities {
+                let explained = restored
+                    .symbol_explain(receipt.generation, entity.id, &deadline())
+                    .unwrap();
+                let reference = explained.data.entity.evidence.source.unwrap();
+                assert_eq!(reference.generation(), receipt.generation);
+                let span = reference.span();
+                let written = expected
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+            }
+            assert!(
+                document.skipped_regions.iter().any(|gap| gap.detail
+                    == "nix-lexical-import-and-runtime-binding-resolution-unavailable")
+            );
         }
     }
 
