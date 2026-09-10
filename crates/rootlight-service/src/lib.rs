@@ -23708,6 +23708,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn perl_extensionless_sources_survive_edit_rebuild_and_restart() {
+        for source in [
+            include_str!("../../../tests/fixtures/perl-bindings/shebang-probe"),
+            include_str!("../../../tests/fixtures/perl-bindings/shebang-arguments"),
+        ] {
+            assert_perl_extensionless_sources(source);
+        }
+    }
+
+    fn assert_perl_extensionless_sources(source: &str) {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("runner");
+        fs::write(&path, source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            initial
+        );
+        let changed = source.replace("42", "43");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(initial.generation, updated.generation);
+        assert_eq!(
+            service
+                .incremental_evidence(updated.generation)
+                .unwrap()
+                .parsed_files(),
+            1
+        );
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut symbol = None;
+        for (receipt, expected) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "runner")
+                .unwrap();
+            assert_eq!(file.language, "perl");
+            let full = restored
+                .source_read(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().unwrap()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(full.data.chunks[0].bytes, expected.as_bytes());
+            let function = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "answer")
+                .unwrap();
+            assert_eq!(function.language, "perl");
+            assert_eq!(function.kind, rootlight_ir::EntityKind::Function);
+            if let Some(previous) = symbol {
+                assert_eq!(function.id, previous);
+            }
+            symbol = Some(function.id);
+            let hits = restored
+                .code_locate(
+                    receipt.generation,
+                    "answer".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                hits.data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.symbol == Some(function.id))
+            );
+            let call = document
+                .occurrences
+                .iter()
+                .find(|site| site.role == rootlight_ir::OccurrenceRole::CallSite)
+                .unwrap();
+            assert_eq!(
+                call.target,
+                rootlight_ir::OccurrenceTarget::Resolved {
+                    symbol: function.id
+                }
+            );
+            assert_eq!(call.source.generation(), receipt.generation);
+            let read = restored
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![call.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"answer");
+        }
+    }
+
     fn assert_perl_durable_sources(
         source: &str,
         declaration_count: usize,

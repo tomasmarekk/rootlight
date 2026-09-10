@@ -605,6 +605,23 @@ fn perl_definitions_and_headers_cross_real_process_boundaries() {
 }
 
 #[test]
+fn perl_extensionless_definitions_cross_real_process_boundaries() {
+    for source in [
+        include_str!("../../../tests/fixtures/perl-bindings/shebang-probe"),
+        include_str!("../../../tests/fixtures/perl-bindings/shebang-arguments"),
+    ] {
+        source_entities_with_coverage_cross_process_boundaries(
+            "perl",
+            "runner",
+            source,
+            &[("answer", "function", 1)],
+            &[("answer", "sub answer")],
+            Some(true),
+        );
+    }
+}
+
+#[test]
 fn perl_lexical_relationships_cross_mcp_with_exact_read_sources() {
     assert_lexical_relationship_sources(
         "perl",

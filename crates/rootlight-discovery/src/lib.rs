@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 mod incremental;
 mod matlab;
 mod objective_c;
+mod shebang;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
@@ -35,8 +36,8 @@ pub use incremental::{
     correlate_incremental_manifest, discover_incremental, discover_incremental_with_progress,
 };
 
-/// Current deterministic discovery-manifest version.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.4";
+/// Current deterministic manifest and source-classification revision.
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.5";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1685,7 +1686,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "perl",
         suffixes: &[".pl", ".pm", ".pod"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "shebang"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -1834,20 +1835,7 @@ fn manifest_language(path: &str) -> Option<&'static str> {
 }
 
 fn shebang_language(content: &[u8]) -> Option<&'static str> {
-    let first_line = content.split(|byte| *byte == b'\n').next()?;
-    if !first_line.starts_with(b"#!") {
-        return None;
-    }
-    let line = String::from_utf8_lossy(first_line).to_ascii_lowercase();
-    if line.contains("python") {
-        Some("python")
-    } else if line.contains("node") || line.contains("deno") {
-        Some("javascript")
-    } else if line.contains("bash") || line.contains("sh") {
-        Some("bash")
-    } else {
-        None
-    }
+    shebang::language(content)
 }
 
 fn content_language(content: &[u8]) -> Option<&'static str> {
@@ -2875,6 +2863,73 @@ max_source_file_bytes = 2097152
             assert_eq!(canonical_language(language), Some(expected));
         }
         assert_eq!(canonical_language("unknown"), None);
+    }
+
+    #[test]
+    fn shebang_classification_recognizes_extensionless_perl_interpreters() {
+        let path = RelativePath::parse(Path::new("runner")).expect("fixture path");
+        for header in [
+            "#!/usr/bin/perl",
+            "#! /usr/local/bin/perl -w",
+            "#!/usr/bin/perl5.42.2 -w",
+            "#!/usr/bin/env perl",
+            "#!/usr/bin/env -S perl -w",
+            "#!/usr/bin/env --split-string=perl -w",
+            "#!/usr/bin/env -S 'perl' -w",
+            "#!/usr/bin/env -S \"perl\" -w",
+            "#!/usr/bin/env -S -u UNUSED perl -w",
+            "#!/usr/bin/env -S UNUSED=python perl -w",
+        ] {
+            let source = format!("{header}\nsub answer {{ return 42; }}\n");
+            let (class, signals) = classify(&path, source.as_bytes());
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "perl".to_owned(),
+                    evidence: LanguageEvidence::Shebang,
+                }],
+                "{header}"
+            );
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "perl")
+            .expect("Perl capability");
+        assert!(capability.detectors.contains(&"shebang"));
+    }
+
+    #[test]
+    fn shebang_classification_uses_interpreter_identity_not_argument_substrings() {
+        for (header, expected) in [
+            ("#!/usr/bin/python3.12 -u", Some("python")),
+            ("#!/usr/bin/env node", Some("javascript")),
+            ("#!/usr/bin/env -S deno run", Some("javascript")),
+            ("#!/bin/bash -e", Some("bash")),
+            ("#!/usr/bin/env sh", Some("bash")),
+            ("#!/usr/bin/perl python", Some("perl")),
+            ("#!/opt/python-tools/bin/runner", None),
+            ("#!/usr/bin/printf perl", None),
+            ("#!/usr/bin/env -S printf python", None),
+            ("#!/usr/bin/env -S --unset=perl printf", None),
+            ("#!/usr/bin/env -S -u python printf", None),
+            ("#!/usr/bin/env -S DATA=python printf", None),
+            ("#!/usr/bin/env perl -w", None),
+            ("#!/usr/bin/env -S perl-tool", None),
+            ("#!/usr/bin/perl5..42", None),
+            ("#!/usr/bin/perl5.42suffix", None),
+            ("#!/usr/bin/env -S 'perl", None),
+            ("#!/usr/bin/env -S ${RUNTIME}", None),
+            ("#!/usr/bin/env -S --unknown perl", None),
+            ("\n#!/usr/bin/perl", None),
+        ] {
+            assert_eq!(shebang_language(header.as_bytes()), expected, "{header}");
+        }
+        let mut source = b"#!/usr/bin/".to_vec();
+        source.resize(MAX_CLASSIFICATION_BYTES, b'x');
+        source.extend_from_slice(b"python\n");
+        assert_eq!(shebang_language(&source), None);
+        assert_eq!(shebang_language(b"#!/usr/bin/perl\xff\n"), None);
     }
 
     #[test]

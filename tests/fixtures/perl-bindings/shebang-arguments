@@ -1,0 +1,5 @@
+#!/usr/bin/env -S perl -I${SOURCE_INCLUDE}
+use strict;
+use warnings;
+sub answer { return 42; }
+print answer(), "\n";
