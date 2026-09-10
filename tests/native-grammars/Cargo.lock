@@ -153,6 +153,7 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+ "ts-parser-perl",
 ]
 
 [[package]]
@@ -408,6 +409,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-yaml"
 version = "0.7.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "ts-parser-perl"
+version = "2.0.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

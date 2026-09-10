@@ -1,0 +1,26 @@
+[package]
+name = "ts-parser-perl"
+description = "Actively maintained tree-sitter grammar for Perl"
+version = "2.0.0"
+license = "MIT"
+readme = "README.md"
+keywords = ["incremental", "parsing", "tree-sitter", "perl"]
+categories = ["parsing", "text-editors"]
+repository = "https://github.com/tree-sitter-perl/tree-sitter-perl"
+edition = "2021"
+autoexamples = false
+
+build = "bindings/rust/build.rs"
+include = ["/LICENSE", "bindings/rust/*", "grammar.js", "queries/*", "src/*", "lib/*"]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.5"
+
+[build-dependencies]
+cc = "1.0.87"
+
+[dev-dependencies]
+tree-sitter = "0.25.8"
