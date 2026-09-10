@@ -700,6 +700,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             powershell_native::POWERSHELL,
             objective_c_native::OBJECTIVE_C,
             nix_native::NIX,
+            matlab_native::MATLAB,
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()

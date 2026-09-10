@@ -756,6 +756,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("nix.") {
         return false;
     }
+    // MATLAB applications can index arrays or call functions. Unproven workspace
+    // bindings and member targets cannot be recovered by spelling-only scores.
+    if occurrence.syntax_kind.starts_with("matlab.") {
+        return false;
+    }
     // ECMAScript member leaves require their receiver's module/type evidence.
     // Re-scoring a source-backed adapter gap by spelling would invent a target.
     if matches!(

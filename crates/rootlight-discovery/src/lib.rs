@@ -1648,7 +1648,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["content", "extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "objective-c",
@@ -2651,7 +2651,7 @@ max_source_file_bytes = 2097152
         for (language, analyzers) in [
             ("objective-c", &["treesitter"][..]),
             ("objective-cpp", &["source-fallback"][..]),
-            ("matlab", &["source-fallback"][..]),
+            ("matlab", &["treesitter"][..]),
         ] {
             let capability = language_capabilities()
                 .iter()

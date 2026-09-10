@@ -53,6 +53,8 @@ mod ecmascript_references;
 mod html_native;
 #[path = "analyzer_e2e/markdown_native.rs"]
 mod markdown_native;
+#[path = "analyzer_e2e/matlab_native.rs"]
+mod matlab_native;
 #[path = "analyzer_e2e/nix_native.rs"]
 mod nix_native;
 #[path = "analyzer_e2e/objective_c_native.rs"]

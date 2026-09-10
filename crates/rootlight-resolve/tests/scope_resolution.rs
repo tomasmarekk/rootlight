@@ -591,6 +591,9 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
         ("nix", "nix.inherited_name.reference"),
         ("nix", "nix.member_name.reference"),
         ("nix", "nix.call.call"),
+        ("matlab", "matlab.identifier.reference"),
+        ("matlab", "matlab.application.reference"),
+        ("matlab", "matlab.command.reference"),
     ] {
         for resolved in [false, true] {
             let mut fixture = Fixture::new();

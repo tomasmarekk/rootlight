@@ -546,6 +546,24 @@ fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
 }
 
 #[test]
+fn matlab_definitions_and_headers_cross_real_process_boundaries() {
+    source_entities_with_signatures_cross_process_boundaries(
+        "matlab",
+        "measure.m",
+        "function result = measure(value)\nresult = value + 1;\nend\n",
+        &[("measure", "function", 1), ("value", "parameter", 1)],
+        &[("measure", "function result = measure(value)")],
+    );
+    source_entities_with_signatures_cross_process_boundaries(
+        "matlab",
+        "Meter.m",
+        include_str!("../../../tests/native-grammars/fixtures/matlab/Meter.m"),
+        &[("Value", "property", 1), ("get.Value", "method", 1)],
+        &[("get.Value", "function result = get.Value(obj)")],
+    );
+}
+
+#[test]
 fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
     let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
     source_entities_with_signatures_cross_process_boundaries(
@@ -1037,6 +1055,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
                 | "markdown"
                 | "objective-c"
                 | "nix"
+                | "matlab"
         ) {
             assert!(
                 output["warnings"]
@@ -1133,7 +1152,13 @@ fn source_entities_with_signatures_cross_process_boundaries(
         if !matches!(kind, "import" | "export")
             && matches!(
                 language,
-                "r" | "scala" | "dart" | "powershell" | "javascript" | "objective-c" | "nix"
+                "r" | "scala"
+                    | "dart"
+                    | "powershell"
+                    | "javascript"
+                    | "objective-c"
+                    | "nix"
+                    | "matlab"
             )
         {
             // These fixtures use existing IR kinds, unlike the newer data

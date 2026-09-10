@@ -132,6 +132,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "json.property.declaration"
+                    | "matlab.property.declaration"
                     | "objective_c.property.declaration"
                     | "powershell.property.declaration"
                     | "powershell.dynamic_property.declaration"

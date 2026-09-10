@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/88";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/89";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/7";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -2434,7 +2434,7 @@ struct FileOnlyFallbackPreparation<'root> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FirstSliceSourceCoverageReason {
-    /// The source language has no configured structural analyzer.
+    /// The source format or language has no configured structural analyzer.
     UnsupportedLanguage,
     /// Structural analysis exceeded a bounded repository resource.
     ResourceBounded,
@@ -15128,6 +15128,15 @@ fn supported_source_language<'a>(
     input: &'a ManifestInput,
     analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
 ) -> Option<&'a str> {
+    // Live scripts are containers, not MATLAB text. A native .m grammar does
+    // not provide the container reader required to analyze their embedded source.
+    if Path::new(&input.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mlx"))
+    {
+        return None;
+    }
     if let Some(language) = source_language_from_path(&input.path) {
         // A known source format must not fall through to another parser merely
         // because its contents include a shebang or embedded language signal.
@@ -23386,7 +23395,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_m_suffix_preserves_objc_symbols_and_matlab_source_fallback() {
+    fn shared_m_suffix_preserves_objc_and_matlab_native_symbols() {
         let fixture = TempDir::new().expect("fixture root exists");
         let objc = "@interface Meter\n- (int)read:(int)value;\n@end\n";
         let matlab = "function result = measure(value)\nresult = value;\nend\n";
@@ -23400,12 +23409,7 @@ mod tests {
             .expect("generation remains retained");
         for (path, content, language, reason) in [
             ("meter.m", objc, "objective-c", None),
-            (
-                "measure.m",
-                matlab,
-                "matlab",
-                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage),
-            ),
+            ("measure.m", matlab, "matlab", None),
         ] {
             let file = generation
                 .document()
@@ -23441,6 +23445,26 @@ mod tests {
                 && hit.language == "objective-c"
                 && hit.symbol.is_some()
         }));
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "measure".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("MATLAB function locates");
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.identifier == "measure"
+                    && hit.path == "measure.m"
+                    && hit.language == "matlab"
+                    && hit.symbol.is_some())
+        );
         let repeated = service
             .index_repository(fixture.path(), &deadline())
             .expect("mixed-language no-op succeeds");
@@ -25580,6 +25604,7 @@ mod tests {
             "sample.kt",
             "sample.lua",
             "sample.md",
+            "sample.nix",
             "sample.php",
             "sample.py",
             "sample.R",
@@ -25603,6 +25628,29 @@ mod tests {
         // the unconditional path route used for unambiguous source languages.
         assert_eq!(source_language_from_path("sample.m"), None);
         mapped.insert(extension_language("sample.m").expect("shared suffix is declared"));
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[(
+                "measure.m",
+                "function result = measure(value)\nresult = value;\nend\n",
+            )],
+        );
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("content route publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let matlab = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "measure.m")
+            .expect("MATLAB source is retained");
+        assert_eq!(matlab.language, "matlab");
+        mapped.insert(matlab.language.as_str());
         let registered = registry
             .descriptors()
             .iter()
@@ -25688,7 +25736,7 @@ mod tests {
                 "objective-cpp",
             ),
             (
-                "classify.m",
+                "classify.mlx",
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
             ),

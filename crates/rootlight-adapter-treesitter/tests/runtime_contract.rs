@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 30] = [
+    let cases: [(&str, &str, &[u8]); 31] = [
+        (
+            "measure.m",
+            "matlab",
+            b"function result = measure(value)\nresult = value;\nend\n",
+        ),
         (
             "sample.nix",
             "nix",

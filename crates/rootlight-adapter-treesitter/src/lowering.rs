@@ -938,7 +938,7 @@ fn preflight_lowering_limits(
                     limits,
                 )?;
             }
-            if let Some(detail) = nix_reference_gap(fact) {
+            if let Some(detail) = source_reference_gap(fact) {
                 if parse_output.report().coverage().status() == CoverageStatus::Complete {
                     lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 }
@@ -1580,7 +1580,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
-                if let Some(detail) = nix_reference_gap(fact)
+                if let Some(detail) = source_reference_gap(fact)
                     && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
                 {
                     let region = skipped_region(
@@ -2034,12 +2034,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings must not depend on sibling positions. JSON
                 // data is different: array positions are part of its address,
                 // while whitespace and value-body edits are not.
-                // R, PowerShell and Nix record source occurrences, not evaluated environments. Anonymous
+                // These dynamic languages record source occurrences, not evaluated environments. Anonymous
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
                 let written_scope_identity = if matches!(
                     language_for_fact(self.request, fact),
-                    "r" | "powershell" | "nix"
+                    "r" | "powershell" | "nix" | "matlab"
                 ) {
                     let next = written_scopes.entry(fact.parent()).or_default();
                     let position = *next;
@@ -2381,7 +2381,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 language_for_fact(self.request, fact),
-                "r" | "powershell" | "nix"
+                "r" | "powershell" | "nix" | "matlab"
             ) && kind != EntityKind::Module
             {
                 // Separate written occurrences and their children without claiming
@@ -3456,6 +3456,8 @@ fn written_source_identity(
         "rootlight.r-source-occurrence/1"
     } else if language == "nix" {
         "rootlight.nix-source-occurrence/1"
+    } else if language == "matlab" {
+        "rootlight.matlab-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -4136,6 +4138,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "sql"
                 | "r"
                 | "nix"
+                | "matlab"
                 | "solidity"
                 | "scala"
                 | "dart"
@@ -4248,6 +4251,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "sql.file.module"
                 | "r.file.module"
                 | "nix.file.module"
+                | "matlab.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
@@ -4273,6 +4277,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "sql"
                 | "r"
                 | "nix"
+                | "matlab"
                 | "solidity"
                 | "scala"
                 | "dart"
@@ -4363,8 +4368,11 @@ fn comment_text(text: &str) -> Option<&str> {
     (!text.is_empty()).then_some(text)
 }
 
-fn nix_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "matlab.identifier.reference" => Some("matlab-binding-target-unavailable"),
+        "matlab.application.reference" => Some("matlab-call-or-index-target-unavailable"),
+        "matlab.command.reference" => Some("matlab-command-target-unavailable"),
         "nix.identifier.reference" | "nix.inherited_name.reference" => {
             Some("nix-lexical-binding-target-unavailable")
         }
