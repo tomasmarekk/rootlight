@@ -92,6 +92,44 @@ fn markdown_matlab_bindings_keep_host_spans_and_separate_examples() {
 }
 
 #[test]
+fn markdown_perl_bindings_keep_host_sources_and_separate_lexical_pads() {
+    let source = "# Pads λ😀\r\n```perl\r\nmy $value = 1; print $value;\r\n```\r\n```perl\r\nprint $value;\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.language == "perl" && entity.canonical_name == "$value")
+        .unwrap();
+    let mut reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "perl.variable_name.reference")
+        .collect();
+    reads.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(reads.len(), 2);
+    assert_eq!(
+        reads[0].target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert!(matches!(
+        reads[1].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    for read in reads {
+        let span = read.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("$value")
+        );
+        assert_eq!(read.syntactic_text_hash, content_hash(b"$value"));
+    }
+}
+
+#[test]
 fn markdown_matlab_local_calls_do_not_escape_their_example() {
     let source = "# Calls λ😀\r\n```matlab\r\nfunction result = entry(value)\r\nresult = helper(value);\r\nend\r\nfunction result = helper(value)\r\nresult = value;\r\nend\r\n```\r\n```matlab\r\nresult = helper(1);\r\n```\r\n";
     let result = output(source);

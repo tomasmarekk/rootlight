@@ -25,11 +25,20 @@ fn binding(
                 return Ok((parent.named_child(0) == Some(node)).then_some("perl.parameter"));
             }
             "variable_declaration" => {
-                return Ok(Some(
-                    if parent.child(0).is_some_and(|child| child.kind() == "field") {
-                        "perl.field"
-                    } else {
-                        "perl.variable"
+                return Ok(Some(match declaration_keyword(parent, cancellation)? {
+                    Some("my" | "state") => "perl.lexical_variable",
+                    Some("field") => "perl.field",
+                    _ => "perl.package_variable",
+                }));
+            }
+            "for_statement" => {
+                if parent.child_by_field_name("list") == Some(node) {
+                    return Ok(None);
+                }
+                return Ok(declaration_keyword(parent, cancellation)?.map(
+                    |keyword| match keyword {
+                        "my" | "state" => "perl.lexical_variable",
+                        _ => "perl.package_variable",
                     },
                 ));
             }
@@ -61,6 +70,35 @@ pub(super) fn syntax(
     role: StructuralRole,
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if role == StructuralRole::Scope {
+        if node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                "conditional_statement" | "loop_statement" | "elsif"
+            ) && parent.child_by_field_name("condition") == Some(node)
+        }) {
+            return Ok(Some("perl.statement"));
+        }
+        match node.kind() {
+            "expression_statement" => return Ok(Some("perl.statement")),
+            "for_statement" => {
+                return Ok(Some(match declaration_keyword(node, cancellation)? {
+                    Some("my" | "state") => "perl.lexical_for",
+                    _ => "perl.package_for",
+                }));
+            }
+            "conditional_statement" | "loop_statement" | "cstyle_for_statement" => {
+                return Ok(Some("perl.control"));
+            }
+            "anonymous_subroutine_expression" => return Ok(Some("perl.lambda")),
+            "anonymous_method_expression" => return Ok(Some("perl.method_lambda")),
+            "class_phaser_statement" | "class_statement" | "role_statement" | "try_statement" => {
+                return Ok(Some("perl.unsupported_context"));
+            }
+            "phaser_statement" => return Ok(Some("perl.phaser")),
+            _ => {}
+        }
+    }
     if role == StructuralRole::Declaration && variable_kind(node) {
         return binding(node, cancellation);
     }
@@ -87,14 +125,48 @@ pub(super) fn syntax(
         }
         "bareword" | "package" => "perl.identifier",
         "scalar" | "array" | "hash" => "perl.variable_name",
+        "arraylen" => "perl.array_length",
+        "container_variable" | "slice_container_variable" | "keyval_container_variable" => {
+            if node
+                .parent()
+                .is_some_and(|parent| parent.child_by_field_name("array") == Some(node))
+            {
+                "perl.array_container"
+            } else if node
+                .parent()
+                .is_some_and(|parent| parent.child_by_field_name("hash") == Some(node))
+            {
+                "perl.hash_container"
+            } else {
+                "perl.dynamic_container"
+            }
+        }
         "function" => "perl.function_name",
         "method_call_expression" => "perl.method_application",
-        "block" => "perl.block",
+        "block" | "block_statement" => "perl.block",
         "comment" => "perl.comment",
         "pod" => "perl.documentation",
         "string_literal" | "interpolated_string_literal" | "command_string" => "perl.string",
         _ => return Ok(None),
     }))
+}
+
+fn declaration_keyword(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        match child.kind() {
+            "my" => return Ok(Some("my")),
+            "state" => return Ok(Some("state")),
+            "our" => return Ok(Some("our")),
+            "field" => return Ok(Some("field")),
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn header_end(node: Node<'_>) -> usize {

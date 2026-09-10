@@ -65,6 +65,127 @@ fn assert_definitions_exact(result: &AnalysisOutput, source: &str) {
     }
 }
 
+fn assert_binding_targets(source: &str, name: &str, targets: &[Option<usize>]) {
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && source.get(
+                    usize::try_from(site.source.span().start_byte()).unwrap()
+                        ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                ) == Some(name)
+        })
+        .collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    let mut references: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && source.get(
+                    usize::try_from(site.source.span().start_byte()).unwrap()
+                        ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                ) == Some(name)
+        })
+        .collect();
+    references.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(references.len(), targets.len(), "{name}: {references:#?}");
+    for (site, expected) in references.into_iter().zip(targets) {
+        if let Some(index) = expected {
+            assert_eq!(
+                site.target,
+                definitions[*index].target,
+                "{name} at {}",
+                site.source.span().start_byte()
+            );
+            assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::RefersTo
+                        && relation.evidence.source.as_ref() == Some(&site.source))
+            );
+        } else {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{name} at {}",
+                site.source.span().start_byte()
+            );
+        }
+    }
+}
+
+#[test]
+fn perl_native_lexical_initializers_and_statement_reads_use_previous_binding() {
+    assert_binding_targets(
+        "my $value = 11; { my $value = $value + 1; print $value; } print $value;\n",
+        "$value",
+        &[Some(0), Some(1), Some(0)],
+    );
+    assert_binding_targets(
+        "my $value = 2; { my @seen = ($value, my $value = $value + 1, $value); print $value; }\n",
+        "$value",
+        &[Some(0), Some(0), Some(0), Some(1)],
+    );
+}
+
+#[test]
+fn perl_native_control_bindings_cover_bodies_but_do_not_escape() {
+    assert_binding_targets(
+        "my $value = 40; for my $value (1, 2) { print $value; } print $value; if (my $value = 3) { print $value; } else { print $value; } print $value;\n",
+        "$value",
+        &[Some(1), Some(0), Some(2), Some(2), Some(0)],
+    );
+    assert_binding_targets(
+        "my $value = 7; for (my $value = $value; $value < 9; $value++) { print $value; } print $value;\n",
+        "$value",
+        &[Some(0), Some(1), Some(1), Some(1), Some(0)],
+    );
+}
+
+#[test]
+fn perl_native_signatures_and_closures_preserve_lexical_ownership() {
+    assert_binding_targets(
+        "sub adjust ($value, $step = $value + 1) { return $value + $step; }\n",
+        "$value",
+        &[Some(0), Some(0)],
+    );
+    assert_binding_targets(
+        "my $value = 9; for my $value (1, 2) { my $read = sub { return $value; }; } print $value;\n",
+        "$value",
+        &[Some(1), Some(0)],
+    );
+    assert_binding_targets(
+        "my $value = 3; my $read = sub ($value) { return $value; }; print $value;\n",
+        "$value",
+        &[Some(1), Some(0)],
+    );
+}
+
+#[test]
+fn perl_native_package_aliases_block_unproven_outer_lexical_targets() {
+    assert_binding_targets(
+        "my $value = 1; { our $value; print $value; } print $value;\n",
+        "$value",
+        &[None, Some(0)],
+    );
+}
+
+#[test]
+fn perl_native_our_initializer_retains_previous_lexical_reads() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/our_initializer_shadow.pl");
+    assert_binding_targets(
+        source,
+        "$value",
+        &[Some(0), Some(0), Some(0), None, Some(0)],
+    );
+    assert_binding_targets(source, "$Harbor::value", &[None]);
+}
+
 #[test]
 fn perl_native_preserves_declarations_parameters_and_sigil_names() {
     let source = "package Measure; sub adjust ($value, $step = $fallback, @rest) { my ($item, @item, %item) = (); return $value; }\n";
@@ -87,6 +208,97 @@ fn perl_native_preserves_declarations_parameters_and_sigil_names() {
     }
     assert!(!names(&result).iter().any(|(name, _)| *name == "$fallback"));
     assert_definitions_exact(&result, source);
+}
+
+#[test]
+fn perl_native_runtime_oracle_sources_keep_exact_lexical_targets() {
+    for (source, targets) in [
+        (
+            include_str!("../../../../tests/fixtures/perl-bindings/lexical_initializer.pl"),
+            vec![Some(0), Some(1), Some(0)],
+        ),
+        (
+            include_str!("../../../../tests/fixtures/perl-bindings/same_statement.pl"),
+            vec![Some(0), Some(0), Some(0), Some(1)],
+        ),
+        (
+            include_str!("../../../../tests/fixtures/perl-bindings/control_scopes.pl"),
+            vec![Some(1), Some(0), Some(2), Some(2), Some(0)],
+        ),
+        (
+            include_str!("../../../../tests/fixtures/perl-bindings/signature_default.pl"),
+            vec![Some(0), Some(0)],
+        ),
+        (
+            include_str!("../../../../tests/fixtures/perl-bindings/loop_closures.pl"),
+            vec![Some(1), Some(0)],
+        ),
+    ] {
+        assert_binding_targets(source, "$value", &targets);
+    }
+    // The runtime proves a package target here; lexical analysis must not
+    // misrepresent the written our alias as a resolved package-owned symbol.
+    assert_binding_targets(
+        include_str!("../../../../tests/fixtures/perl-bindings/package_alias.pl"),
+        "$value",
+        &[None, None, None],
+    );
+}
+
+#[test]
+fn perl_native_loop_lists_and_unicode_names_preserve_outer_bindings() {
+    assert_binding_targets(
+        "my $value = 2; for my $value ($value) { print $value; } print $value;\n",
+        "$value",
+        &[Some(0), Some(1), Some(0)],
+    );
+    for source in ["use utf8; my $e\u{301} = 1; { my $e\u{301} = $e\u{301} + 1; print $e\u{301}; } print $e\u{301};\n".to_owned(), "use utf8; my $e\u{301} = 1; { my $e\u{301} = $e\u{301} + 1; print $e\u{301}; } print $e\u{301};\r\n".to_owned()] {
+        assert_binding_targets(&source, "$e\u{301}", &[Some(0), Some(1), Some(0)]);
+    }
+}
+
+#[test]
+fn perl_native_container_reads_use_the_array_or_hash_namespace() {
+    let source = "my $items = 0; my @items = (1, 2); my %items = (key => 3); print $items, @items, %items, $items[0], $items{key}, @items[0,1], @items{key}, %items[0,1], %items{key}, $#items;\n";
+    let result = output(source);
+    let document = result.document();
+    let references: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && matches!(
+                    site.syntax_kind.as_str(),
+                    "perl.variable_name.reference"
+                        | "perl.array_container.reference"
+                        | "perl.hash_container.reference"
+                        | "perl.array_length.reference"
+                )
+        })
+        .collect();
+    assert_eq!(references.len(), 10);
+    for site in references {
+        let name = match site.syntax_kind.as_str() {
+            "perl.array_container.reference" | "perl.array_length.reference" => "@items",
+            "perl.hash_container.reference" => "%items",
+            _ => source
+                .get(
+                    usize::try_from(site.source.span().start_byte()).unwrap()
+                        ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                )
+                .unwrap(),
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: entity.id },
+            "{site:#?}"
+        );
+    }
 }
 
 #[test]
@@ -185,7 +397,7 @@ fn perl_native_body_edits_keep_written_entity_identity() {
 #[test]
 fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
     let source =
-        "package Measure; use Library; sub helper { 1 } my $value = helper(); $value->method();\n";
+        "package Measure; use Library; sub helper { 1 } our $value = helper(); $value->method();\n";
     let result = output(source);
     for detail in [
         "perl-package-ownership-unavailable",

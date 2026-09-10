@@ -1280,6 +1280,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let perl_bindings = if self.parse_output.report().coverage().status()
+            == CoverageStatus::Complete
+            && self
+                .parse_output
+                .facts()
+                .iter()
+                .any(|fact| fact.syntax_kind().as_str() == "perl.file.module")
+        {
+            let symbols = materialized
+                .values()
+                .filter_map(|entity| {
+                    entity
+                        .definition_local_id
+                        .map(|local| (local, entity.record.id))
+                })
+                .collect();
+            Some(crate::perl_bindings::PerlBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let markdown_bindings = if self.request.language().as_str() == "markdown"
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -1581,6 +1608,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &nix_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &perl_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
@@ -4444,7 +4480,11 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
-        "perl.variable_name.reference" => Some("perl-binding-target-unavailable"),
+        "perl.variable_name.reference"
+        | "perl.array_container.reference"
+        | "perl.hash_container.reference"
+        | "perl.array_length.reference"
+        | "perl.dynamic_container.reference" => Some("perl-binding-target-unavailable"),
         "perl.function_name.reference" => Some("perl-function-target-unavailable"),
         "perl.method_application.reference" => Some("perl-method-target-unavailable"),
         "perl.identifier.reference" => Some("perl-import-target-unavailable"),

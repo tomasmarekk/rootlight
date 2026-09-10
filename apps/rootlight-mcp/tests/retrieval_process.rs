@@ -604,6 +604,29 @@ fn perl_definitions_and_headers_cross_real_process_boundaries() {
 }
 
 #[test]
+fn perl_lexical_relationships_cross_mcp_with_exact_read_sources() {
+    assert_lexical_relationship_sources(
+        "perl",
+        "measure.pm",
+        "package Measure; sub adjust ($value, $step = $value + 1) { my $result = $step; return $result; }\n",
+        &[
+            ("$value", "variable", "$value"),
+            ("$step", "variable", "$step"),
+            ("$result", "variable", "$result"),
+        ],
+    );
+    assert_lexical_relationship_sources(
+        "perl",
+        "loop.pl",
+        "package Measure; for my $item (1, 2) { my $reader = sub { return $item; }; print $reader; }\n",
+        &[
+            ("$item", "variable", "$item"),
+            ("$reader", "variable", "$reader"),
+        ],
+    );
+}
+
+#[test]
 fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
     assert_relationship_sources(
         "matlab",

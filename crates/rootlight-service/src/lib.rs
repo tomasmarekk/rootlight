@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/93";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/94";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23783,8 +23783,42 @@ mod tests {
                 document
                     .skipped_regions
                     .iter()
-                    .any(|gap| gap.detail == "perl-binding-target-unavailable")
+                    .any(|gap| gap.detail == "perl-package-ownership-unavailable")
             );
+            let reads: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "perl.variable_name.reference")
+                .collect();
+            assert_eq!(reads.len(), 2);
+            for site in reads {
+                assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+                assert!(document.relations.iter().any(|edge| edge.predicate
+                    == rootlight_ir::RelationPredicate::RefersTo
+                    && edge.evidence.source.as_ref() == Some(&site.source)));
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                let span = site.source.span();
+                assert_eq!(
+                    read.data.chunks[0].bytes,
+                    expected
+                        .as_bytes()
+                        .get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap()
+                        )
+                        .unwrap()
+                );
+            }
         }
     }
 
