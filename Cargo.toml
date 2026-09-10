@@ -51,6 +51,7 @@ exclude = [
     "third_party/tree-sitter-css-0.25.0",
     "third_party/tree-sitter-html-0.23.2",
     "third_party/tree-sitter-json-0.24.8",
+    "third_party/tree-sitter-matlab-1.3.0",
     "third_party/tree-sitter-md-0.5.3",
     "third_party/tree-sitter-nix-0.3.0",
     "third_party/tree-sitter-objc-3.0.2",
