@@ -140,6 +140,96 @@ fn nix_literal_interpolated_keys_shadow_outer_names_with_exact_sources() {
 }
 
 #[test]
+fn nix_inherit_from_reads_each_source_field_and_preserves_local_definitions() {
+    let source = "let settings = { server = { port = 1; }; host = 2; }; inherit (settings) server host; in server.port";
+    assert_bindings(
+        source,
+        &[
+            ("(settings)", "settings", Some("settings =")),
+            ("server host;", "server", Some("server =")),
+            ("host;", "host", Some("host =")),
+            ("in server", "server", Some("server host;")),
+            (".port", "port", Some("port =")),
+        ],
+    );
+}
+
+#[test]
+fn nix_inherit_from_value_flow_handles_aliases_nested_sets_and_independent_names() {
+    for source in [
+        "let inherit ({ server = { port = 1; }; host = 2; }) server host; in server.port",
+        "let settings = { server = { port = 1; }; }; alias = settings; wrapper = { inherit (alias) server; }; in wrapper.server.port",
+        "let settings.nested.server = { port = 1; }; inherit (settings.nested) server; in server.port",
+        "let settings = rec { server = { port = 1; }; }; inherit ((settings)) server; in server.port",
+        "let server = { port = 0; }; in let settings = { server = { port = 1; }; }; inherit (settings) server; in server.port",
+        "let settings = { server = { port = 1; }; }; in (rec { inherit (settings) server; nested = server; }).nested.port",
+    ] {
+        assert_bindings(source, &[(".port", "port", Some("port = 1"))]);
+        assert_nix_artifact_replay(source);
+    }
+}
+
+#[test]
+fn nix_inherit_from_unknown_bases_never_fall_back_to_lexical_namesakes() {
+    for source in [
+        "let port = 0; in { inherit (environment) port; }",
+        "let port = 0; in { inherit ({ other = 1; }) port; }",
+        "let port = 0; in { inherit (1) port; }",
+        "let port = 0; in { inherit (if true then { port = 1; } else {}) port; }",
+        "let port = 0; in { inherit (rec { port = 1; __overrides = environment; }) port; }",
+        "let port = 0; settings = alias; alias = settings; in { inherit (settings) port; }",
+    ] {
+        assert_bindings(source, &[("port;", "port", None)]);
+        let result = output(source);
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "nix-inherited-attribute-target-unavailable")
+        );
+    }
+    assert_bindings(
+        "let server = { port = 0; }; in let inherit (environment) server; in server.port",
+        &[(".port", "port", None)],
+    );
+    assert_bindings(
+        "let settings = { inherit (settings) server; }; in settings.server.port",
+        &[(".port", "port", None)],
+    );
+}
+
+#[test]
+fn nix_inherit_from_literal_fields_preserve_exact_written_sources() {
+    for key in [r#""p.ort""#, r#""\port""#, r#"${"port"}"#, "${''port''}"] {
+        let source = format!("let settings = {{ {key} = 1; }}; in {{ inherit (settings) {key}; }}");
+        assert_bindings(
+            &source,
+            &[(&format!("{key};"), key, Some(&format!("{key} =")))],
+        );
+        assert_nix_artifact_replay(&source);
+    }
+}
+
+#[test]
+fn nix_inherit_from_inline_body_edits_preserve_both_definition_identities() {
+    let source = "let inherit ({ identity = value: value; }) identity; in identity";
+    let changed = source.replace("value: value", "value: (value)");
+    let first = output(source);
+    let second = output(&changed);
+    let ids = |output: &AnalysisOutput| {
+        output
+            .document()
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(ids(&first), ids(&second));
+    assert_bindings(source, &[("identity;", "identity", Some("identity ="))]);
+}
+
+#[test]
 fn nix_static_attribute_selections_resolve_each_written_path_component() {
     let source = "let settings = { server = { port = 8080; }; }; in settings.server.port";
     assert_bindings(

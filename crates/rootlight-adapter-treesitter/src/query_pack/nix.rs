@@ -129,18 +129,24 @@ pub(super) fn syntax(
             cancellation.check()?;
             outer = parent;
         }
-        let binding = outer
-            .parent()
-            .is_some_and(|parent| parent.kind() == "binding");
-        return Ok(Some(match (binding, node.kind()) {
-            (true, "variable_expression") => "nix.binding_value_variable",
-            (true, "attrset_expression" | "rec_attrset_expression") => "nix.binding_value_set",
-            (true, "select_expression") => "nix.binding_value_selection",
-            (true, _) => "nix.binding_value_unknown",
-            (false, "variable_expression") => "nix.selection_base_variable",
-            (false, "attrset_expression" | "rec_attrset_expression") => "nix.selection_base_set",
-            (false, "select_expression") => "nix.selection_base_selection",
-            (false, _) => "nix.selection_base_unknown",
+        let owner = outer.parent().map(|parent| parent.kind());
+        return Ok(Some(match (owner, node.kind()) {
+            (Some("binding"), "variable_expression") => "nix.binding_value_variable",
+            (Some("binding"), "attrset_expression" | "rec_attrset_expression") => {
+                "nix.binding_value_set"
+            }
+            (Some("binding"), "select_expression") => "nix.binding_value_selection",
+            (Some("binding"), _) => "nix.binding_value_unknown",
+            (Some("inherit_from"), "variable_expression") => "nix.inherit_base_variable",
+            (Some("inherit_from"), "attrset_expression" | "rec_attrset_expression") => {
+                "nix.inherit_base_set"
+            }
+            (Some("inherit_from"), "select_expression") => "nix.inherit_base_selection",
+            (Some("inherit_from"), _) => "nix.inherit_base_unknown",
+            (_, "variable_expression") => "nix.selection_base_variable",
+            (_, "attrset_expression" | "rec_attrset_expression") => "nix.selection_base_set",
+            (_, "select_expression") => "nix.selection_base_selection",
+            (_, _) => "nix.selection_base_unknown",
         }));
     }
     if role == StructuralRole::DefinitionPart {
@@ -192,6 +198,12 @@ pub(super) fn syntax(
                 .is_some_and(|parent| parent.kind() == "attrpath")
             {
                 "nix.selected_attribute"
+            } else if node
+                .parent()
+                .and_then(|parent| parent.parent())
+                .is_some_and(|parent| parent.kind() == "inherit_from")
+            {
+                "nix.inherited_attribute"
             } else {
                 "nix.inherited_name"
             }
@@ -211,6 +223,7 @@ pub(super) fn syntax(
         (_, "with_expression") => "nix.with",
         (_, "variable_expression") => "nix.identifier",
         (_, "select_expression") => "nix.selection",
+        (_, "inherit_from") => "nix.inherit_from",
         (_, "comment") => "nix.comment",
         (_, "string_expression" | "indented_string_expression") => "nix.string",
         (_, "path_expression" | "hpath_expression" | "spath_expression" | "uri_expression") => {

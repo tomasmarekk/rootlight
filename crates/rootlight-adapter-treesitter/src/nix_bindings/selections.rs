@@ -25,8 +25,19 @@ enum Step {
     Done(Option<Value>),
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionKind {
+    Path,
+    Inherited,
+}
+
+enum Owner {
+    Declaration,
+    Selection(SelectionKind),
+}
+
 struct Selection<'a> {
+    kind: SelectionKind,
     base: Option<u64>,
     parts: Vec<&'a SyntaxFact>,
 }
@@ -39,6 +50,7 @@ struct Plan<'a, 'facts> {
     set_ranges: HashMap<(u64, u64), u64>,
     expressions: HashMap<u64, Option<u64>>,
     inherited: HashMap<u64, Option<u64>>,
+    inherited_selections: HashMap<u64, Option<Task>>,
     children: HashMap<u64, BTreeMap<&'a str, u64>>,
     targets: HashMap<u64, SymbolId>,
     symbol_groups: HashMap<SymbolId, Option<u64>>,
@@ -51,11 +63,12 @@ pub(super) fn resolve<'a>(
     cancellation: &Cancellation,
 ) -> Result<HashMap<u64, SymbolId>, AdapterError> {
     cancellation.check()?;
-    if !bindings
-        .facts
-        .values()
-        .any(|fact| fact.syntax_kind().as_str() == "nix.selected_attribute.reference")
-    {
+    if !bindings.facts.values().any(|fact| {
+        matches!(
+            fact.syntax_kind().as_str(),
+            "nix.selected_attribute.reference" | "nix.inherited_attribute.reference"
+        )
+    }) {
         return Ok(HashMap::new());
     }
     let mut plan = Plan {
@@ -66,6 +79,7 @@ pub(super) fn resolve<'a>(
         set_ranges: HashMap::new(),
         expressions: HashMap::new(),
         inherited: HashMap::new(),
+        inherited_selections: HashMap::new(),
         children: HashMap::new(),
         targets: HashMap::new(),
         symbol_groups: HashMap::new(),
@@ -98,8 +112,15 @@ pub(super) fn resolve<'a>(
     for fact in bindings.facts.values() {
         cancellation.check()?;
         let label = fact.syntax_kind().as_str();
-        if label == "nix.selection.scope" {
-            plan.selections.entry(fact.local_id()).or_default();
+        if let Some(kind) = selection_kind(label) {
+            plan.selections.insert(
+                fact.local_id(),
+                Selection {
+                    kind,
+                    base: None,
+                    parts: Vec::new(),
+                },
+            );
             if plan
                 .selection_ranges
                 .insert(range(fact), fact.local_id())
@@ -125,14 +146,20 @@ pub(super) fn resolve<'a>(
         cancellation.check()?;
         let label = fact.syntax_kind().as_str();
         if label.starts_with("nix.binding_value_") {
-            if let Some(owner) = plan.owner(fact, false, cancellation)? {
+            if let Some(owner) = plan.owner(fact, Owner::Declaration, cancellation)? {
                 plan.expressions
                     .entry(owner)
                     .and_modify(|value| *value = None)
                     .or_insert(Some(fact.local_id()));
             }
-        } else if label.starts_with("nix.selection_base_") {
-            if let Some(owner) = plan.owner(fact, true, cancellation)? {
+        } else if label.starts_with("nix.selection_base_") || label.starts_with("nix.inherit_base_")
+        {
+            let kind = if label.starts_with("nix.inherit_base_") {
+                SelectionKind::Inherited
+            } else {
+                SelectionKind::Path
+            };
+            if let Some(owner) = plan.owner(fact, Owner::Selection(kind), cancellation)? {
                 let selection = plan
                     .selections
                     .get_mut(&owner)
@@ -141,8 +168,16 @@ pub(super) fn resolve<'a>(
                     return Err(invalid_capture());
                 }
             }
-        } else if label == "nix.selected_attribute.reference" {
-            if let Some(owner) = plan.owner(fact, true, cancellation)? {
+        } else if matches!(
+            label,
+            "nix.selected_attribute.reference" | "nix.inherited_attribute.reference"
+        ) {
+            let kind = if label == "nix.inherited_attribute.reference" {
+                SelectionKind::Inherited
+            } else {
+                SelectionKind::Path
+            };
+            if let Some(owner) = plan.owner(fact, Owner::Selection(kind), cancellation)? {
                 plan.selections
                     .get_mut(&owner)
                     .ok_or_else(invalid_capture)?
@@ -150,7 +185,7 @@ pub(super) fn resolve<'a>(
                     .push(fact);
             }
         } else if label == "nix.inherited_name.reference"
-            && let Some(owner) = plan.owner(fact, false, cancellation)?
+            && let Some(owner) = plan.owner(fact, Owner::Declaration, cancellation)?
         {
             plan.inherited
                 .entry(owner)
@@ -168,6 +203,19 @@ pub(super) fn resolve<'a>(
                 && left.span().end_byte() > right.span().start_byte()
             {
                 return Err(invalid_capture());
+            }
+        }
+    }
+    for (&scope, selection) in &plan.selections {
+        cancellation.check()?;
+        if selection.kind == SelectionKind::Inherited {
+            for (index, part) in selection.parts.iter().enumerate() {
+                if let Some(owner) = plan.owner(part, Owner::Declaration, cancellation)? {
+                    plan.inherited_selections
+                        .entry(owner)
+                        .and_modify(|value| *value = None)
+                        .or_insert(Some(Task::Component(scope, index)));
+                }
             }
         }
     }
@@ -191,7 +239,7 @@ impl Plan<'_, '_> {
     fn owner(
         &self,
         fact: &SyntaxFact,
-        selection: bool,
+        wanted: Owner,
         cancellation: &Cancellation,
     ) -> Result<Option<u64>, AdapterError> {
         let mut parent = fact.parent();
@@ -199,10 +247,10 @@ impl Plan<'_, '_> {
             cancellation.check()?;
             let Some(id) = parent else { return Ok(None) };
             let owner = self.bindings.fact(id)?;
-            if selection {
+            if let Owner::Selection(kind) = wanted {
                 // A selected expression can itself be the base of another
                 // selection; its own equal-range scope is not that outer owner.
-                if owner.syntax_kind().as_str() == "nix.selection.scope"
+                if selection_kind(owner.syntax_kind().as_str()) == Some(kind)
                     && range(owner) != range(fact)
                 {
                     return Ok(Some(id));
@@ -339,6 +387,11 @@ impl Plan<'_, '_> {
                         return Ok(Step::Need(dependency));
                     };
                     *value
+                } else if let Some(Some(selected)) = self.inherited_selections.get(&member.draft) {
+                    let Some(value) = cache.get(selected) else {
+                        return Ok(Step::Need(*selected));
+                    };
+                    *value
                 } else if let Some(Some(reference)) = self.inherited.get(&member.draft) {
                     self.variable(self.bindings.fact(*reference)?, true, cancellation)?
                 } else {
@@ -351,7 +404,11 @@ impl Plan<'_, '_> {
             }
             Task::Component(scope, index) => {
                 let selection = self.selections.get(&scope).ok_or_else(invalid_capture)?;
-                let prerequisite = if let Some(previous) = index.checked_sub(1) {
+                // Inherited names are siblings selecting the same base, not
+                // successive components of an attribute path.
+                let prerequisite = if selection.kind == SelectionKind::Path
+                    && let Some(previous) = index.checked_sub(1)
+                {
                     Task::Component(scope, previous)
                 } else if let Some(base) = selection.base {
                     Task::Expression(base)
@@ -406,6 +463,14 @@ fn dependency(task: Task, cache: &BTreeMap<Task, Option<Value>>) -> Step {
     cache
         .get(&task)
         .map_or(Step::Need(task), |value| Step::Done(*value))
+}
+
+fn selection_kind(label: &str) -> Option<SelectionKind> {
+    match label {
+        "nix.selection.scope" => Some(SelectionKind::Path),
+        "nix.inherit_from.scope" => Some(SelectionKind::Inherited),
+        _ => None,
+    }
 }
 
 fn range(fact: &SyntaxFact) -> (u64, u64) {

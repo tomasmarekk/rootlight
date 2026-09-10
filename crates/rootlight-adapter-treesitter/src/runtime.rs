@@ -1814,7 +1814,8 @@ fn remove_shadowed_candidates(
 ) -> Result<(), AdapterError> {
     // Most definition/reference and documentation/comment captures at one span
     // are redundant. Nix inherit instead both defines an attribute and reads an
-    // outer binding; those roles must survive independently with the same span.
+    // outer binding or a source-set field; those roles must survive independently
+    // with the same span.
     cancellation.check()?;
     let mut group_start = 0usize;
     let mut write = 0usize;
@@ -1846,7 +1847,10 @@ fn remove_shadowed_candidates(
                 .ok_or_else(|| provider_failure("query-shadow-invariant"))?;
             if !(has_definition
                 && candidate.role == StructuralRole::Reference
-                && candidate.syntax != "nix.inherited_name"
+                && !matches!(
+                    candidate.syntax,
+                    "nix.inherited_name" | "nix.inherited_attribute"
+                )
                 || has_documentation && candidate.role == StructuralRole::Comment)
             {
                 *candidates
@@ -2716,6 +2720,34 @@ mod tests {
             identities
         };
         assert_eq!(identities(&captures), identities(&expected));
+    }
+
+    #[test]
+    fn inherited_reads_survive_same_span_definitions_without_retaining_other_reads() {
+        for (syntax, expected) in [
+            ("nix.inherited_name", 2),
+            ("nix.inherited_attribute", 2),
+            ("nix.identifier", 1),
+        ] {
+            let mut captures = [StructuralRole::Definition, StructuralRole::Reference]
+                .into_iter()
+                .map(|role| QueryCandidate {
+                    start: 0,
+                    end: 4,
+                    role,
+                    syntax,
+                    required: role == StructuralRole::Definition,
+                    native_depth: 1,
+                })
+                .collect();
+            remove_shadowed_candidates(&mut captures, &Cancellation::new()).unwrap();
+            assert_eq!(captures.len(), expected);
+            assert!(
+                captures
+                    .iter()
+                    .any(|capture| capture.role == StructuralRole::Definition)
+            );
+        }
     }
 
     #[test]

@@ -150,7 +150,10 @@ impl<'a> NixBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancellation.check()?;
-        if fact.syntax_kind().as_str() == "nix.selected_attribute.reference" {
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "nix.selected_attribute.reference" | "nix.inherited_attribute.reference"
+        ) {
             return Ok(self.selected.get(&fact.local_id()).copied());
         }
         if !matches!(
@@ -480,7 +483,11 @@ mod tests {
                 Err(AdapterError::ProviderFailed { .. })
             ));
         }
-        for label in ["nix.selection.scope", "nix.attrset.scope"] {
+        for label in [
+            "nix.selection.scope",
+            "nix.inherit_from.scope",
+            "nix.attrset.scope",
+        ] {
             let captures = [
                 fact(1, None, label, 0, 3),
                 fact(2, None, label, 0, 3),

@@ -1417,6 +1417,149 @@ fn nix_selected_attribute_relations_reserve_existing_output_quotas() {
     }
 }
 
+#[test]
+fn nix_inherit_from_relations_reserve_quotas_with_same_span_local_definitions() {
+    let nix = "{ inherit ({ value = 1; }) value; }";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(nix, "src/module.nix", b"nix-inherit-quotas");
+    let facts = [
+        (1, None, SyntaxFactKind::Root, nix, 0, 0, "nix.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            nix,
+            0,
+            1,
+            "nix.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            nix,
+            0,
+            2,
+            "nix.attrset.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "inherit ({ value = 1; }) value;",
+            0,
+            3,
+            "nix.inherit_from.scope",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Scope,
+            "{ value = 1; }",
+            0,
+            4,
+            "nix.attrset.scope",
+        ),
+        (
+            6,
+            Some(5),
+            SyntaxFactKind::Signature,
+            "{ value = 1; }",
+            0,
+            5,
+            "nix.inherit_base_set.expression",
+        ),
+        (
+            7,
+            Some(5),
+            SyntaxFactKind::Declaration,
+            "value = 1;",
+            0,
+            5,
+            "nix.variable.declaration",
+        ),
+        (
+            8,
+            Some(7),
+            SyntaxFactKind::Occurrence,
+            "value",
+            0,
+            6,
+            "nix.binding_name.definition",
+        ),
+        (
+            9,
+            Some(4),
+            SyntaxFactKind::Declaration,
+            "value",
+            1,
+            4,
+            "nix.variable.declaration",
+        ),
+        (
+            10,
+            Some(9),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            5,
+            "nix.binding_name.definition",
+        ),
+        (
+            11,
+            Some(9),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            5,
+            "nix.inherited_attribute.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(nix, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect::<Vec<_>>();
+    for host in ["nix", "markdown"] {
+        let language = LanguageId::new(host).unwrap();
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(IrLimits::default()),
+            facts.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+                .count(),
+            1
+        );
+        let total = output.document().relations.len();
+        let mut ir = IrLimits::default();
+        ir.max_relations = total - 1;
+        let error = analyze_custom(&snapshot, &source, language, &limits(ir), facts.clone())
+            .expect_err("inherited reference must be reserved before materialization");
+        assert!(
+            matches!(error, AdapterError::Sink(SinkError::StreamLimit {
+            resource: rootlight_adapter_sdk::ResourceKind::Records, observed, limit
+        }) if observed == total && limit == total - 1),
+            "{error:?}"
+        );
+    }
+}
+
 fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
     let (_temporary, snapshot, source) =
         source_fixture_for(nix, "src/module.nix", b"nix-lexical-quota-fixture");

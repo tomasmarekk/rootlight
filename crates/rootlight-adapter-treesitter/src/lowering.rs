@@ -4369,6 +4369,7 @@ fn nix_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
             Some("nix-lexical-binding-target-unavailable")
         }
         "nix.selected_attribute.reference" => Some("nix-attribute-selection-target-unavailable"),
+        "nix.inherited_attribute.reference" => Some("nix-inherited-attribute-target-unavailable"),
         _ => None,
     }
 }

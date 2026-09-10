@@ -696,6 +696,20 @@ fn nix_selected_attributes_cross_mcp_with_exact_component_sources() {
     );
 }
 
+#[test]
+fn nix_inherit_from_fields_cross_mcp_as_distinct_source_and_local_symbols() {
+    assert_nix_lexical_relationship_sources(
+        r#"{ system ? "portable" }@args: let settings = { identity = value: value; }; inherit (settings) identity; in { inherit system; result = identity args; }"#,
+        &[
+            ("settings", "variable", "settings"),
+            ("identity", "function", "identity"),
+            ("identity", "variable", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
 fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &str)]) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);

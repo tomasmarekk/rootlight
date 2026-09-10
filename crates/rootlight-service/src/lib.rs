@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/87";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/88";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27205,6 +27205,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nix_inherit_from_sources_survive_noop_incremental_rebuild_and_restart() {
+        use rootlight_ir::EntityKind;
+
+        assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
+            r#"{ system ? "portable" }@args: let settings = { identity = value: value; }; inherit (settings) identity; in { inherit system; result = identity args; }"#,
+            10,
+            &[
+                ("settings", "settings", "settings", EntityKind::Variable),
+                ("identity", "identity", "identity", EntityKind::Function),
+                ("identity", "identity", "identity", EntityKind::Variable),
+                ("value", "value", "value", EntityKind::Parameter),
+                ("args", "args", "args", EntityKind::Parameter),
+                ("system", "system", "system", EntityKind::Parameter),
+            ],
+        );
+    }
+
     fn assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
         source: &str,
         expected_entity_count: usize,
@@ -27282,7 +27300,9 @@ mod tests {
                 let span = read.source.span();
                 let (_, written, display, kind) = expected_reads
                     .iter()
-                    .find(|(name, _, _, _)| target.canonical_name == *name)
+                    .find(|(name, _, _, kind)| {
+                        target.canonical_name == *name && target.kind == *kind
+                    })
                     .unwrap();
                 assert_eq!(target.display_name, *display);
                 for query in [*display, target.canonical_name.as_str()] {
