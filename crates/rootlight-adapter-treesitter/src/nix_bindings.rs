@@ -38,14 +38,72 @@ impl<'a> NixBindings<'a> {
                 return Err(invalid_capture());
             }
         }
+        let mut paths = BTreeMap::<u64, Vec<&SyntaxFact>>::new();
         for fact in facts {
             cancellation.check()?;
             if matches!(
                 fact.syntax_kind().as_str(),
+                "nix.path_segment.definition_part" | "nix.dynamic_segment.definition_part"
+            ) && let Some(owner) = fact.parent()
+            {
+                paths.entry(owner).or_default().push(fact);
+            }
+        }
+        let mut path_owners = BTreeSet::new();
+        for (owner, mut parts) in paths {
+            cancellation.check()?;
+            if parts.len() < 2 {
+                continue;
+            }
+            path_owners.insert(owner);
+            let Some(scope) = result.nearest_boundary(Some(owner), cancellation)? else {
+                continue;
+            };
+            if !introduces_bindings(result.fact(scope)?) {
+                continue;
+            }
+            crate::runtime::sort_cancellable_by(&mut parts, cancellation, |left, right| {
+                (left.span().start_byte(), left.span().end_byte())
+                    .cmp(&(right.span().start_byte(), right.span().end_byte()))
+            })?;
+            let root = parts.first().ok_or_else(invalid_capture)?;
+            let start = usize::try_from(root.span().start_byte()).map_err(|_| invalid_capture())?;
+            let end = usize::try_from(root.span().end_byte()).map_err(|_| invalid_capture())?;
+            let written = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
+                .map_err(|_| invalid_capture())?;
+            let Some(name) = static_binding_name(written, maximum_name_bytes, cancellation)? else {
+                result.unmodeled_scopes.insert(scope);
+                continue;
+            };
+            let symbol = symbols.get(&root.local_id()).copied();
+            // Multiple paths can define the same implicit root. Missing or
+            // conflicting identities still shadow outer names rather than merge.
+            result
+                .bindings
+                .entry((scope, name))
+                .and_modify(|binding| {
+                    if *binding != symbol {
+                        *binding = None;
+                    }
+                })
+                .or_insert(symbol);
+        }
+        for fact in facts {
+            cancellation.check()?;
+            if path_owners.contains(&fact.local_id())
+                || fact
+                    .parent()
+                    .is_some_and(|owner| path_owners.contains(&owner))
+            {
+                continue;
+            }
+            if matches!(
+                fact.syntax_kind().as_str(),
                 "nix.dynamic_path_variable.declaration" | "nix.dynamic_path_function.declaration"
             ) {
-                // A computed leaf still introduces its static path root. That
-                // implicit owner has no materialized definition identity yet.
+                // Old or incomplete providers may omit the native path parts.
+                // Without a root identity, a computed suffix must not expose an
+                // enclosing namesake.
                 if let Some(scope) = result.nearest_boundary(fact.parent(), cancellation)?
                     && introduces_bindings(result.fact(scope)?)
                 {
@@ -66,8 +124,8 @@ impl<'a> NixBindings<'a> {
             let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
             let bytes = source.get(start..end).ok_or_else(invalid_capture)?;
             let written = std::str::from_utf8(bytes).map_err(|_| invalid_capture())?;
-            // Qualified paths still need implicit root identities. An unavailable
-            // name cannot prove the absence of a shadowing declaration.
+            // Qualified paths without native parts remain unmodeled. An
+            // unavailable name cannot prove the absence of a shadowing binding.
             let Some(name) = static_binding_name(written, maximum_name_bytes, cancellation)? else {
                 result.unmodeled_scopes.insert(scope);
                 continue;

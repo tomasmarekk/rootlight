@@ -32,6 +32,30 @@ fn bare_identifier(text: &str) -> bool {
         && text.bytes().all(identifier_continuation)
 }
 
+/// Canonicalizes one static Nix key for an implicit attribute-path owner.
+///
+/// Unlike display formatting, this always preserves a complete key syntax:
+/// nonidentifiers remain quoted and equivalent escapes share one spelling.
+/// Input and output must fit `maximum_bytes`; malformed, evaluated or
+/// unrepresentable keys return `None`. Authored source spans are not changed.
+///
+/// # Errors
+/// Returns [`AdapterError::Cancelled`] when decoding is interrupted.
+pub fn nix_canonical_attribute_name<'a>(
+    written: &'a str,
+    maximum_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<Option<Cow<'a, str>>, AdapterError> {
+    let Some(name) = nix_static_attribute_name(written, maximum_bytes, cancellation)? else {
+        return Ok(None);
+    };
+    if bare_identifier(&name) {
+        return Ok(Some(name));
+    }
+    let mut output = String::new();
+    Ok(append_segment(&mut output, &name, maximum_bytes).map(|()| Cow::Owned(output)))
+}
+
 fn identifier_continuation(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'\'')
 }
@@ -209,6 +233,42 @@ fn append(output: &mut String, text: &str, maximum_bytes: usize) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_key_identity_is_canonical_bounded_and_not_a_display_label() {
+        for (written, expected) in [
+            (r#""\a""#, "a"),
+            (r#""a.b""#, r#""a.b""#),
+            (r#""λ😀""#, r#""λ😀""#),
+            (r#""""#, r#""""#),
+            ("\"\r\"", r#""\n""#),
+        ] {
+            let canonical = nix_canonical_attribute_name(written, 64, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(canonical, expected);
+            assert_eq!(
+                nix_static_attribute_name(&canonical, 64, &Cancellation::new()).unwrap(),
+                nix_static_attribute_name(written, 64, &Cancellation::new()).unwrap()
+            );
+            assert_eq!(
+                nix_canonical_attribute_name(&canonical, 64, &Cancellation::new())
+                    .unwrap()
+                    .as_deref(),
+                Some(canonical.as_ref())
+            );
+        }
+        assert!(
+            nix_canonical_attribute_name("\"\r\"", 3, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            nix_canonical_attribute_name(r#""${value}""#, 64, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn literal_dollar_pairs_and_escaped_dollars_remain_distinct_from_interpolation() {

@@ -27,6 +27,38 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_nix_implicit_path_roots_keep_host_sources_and_separate_examples() {
+    let source = "# Roots λ😀\r\n```nix\r\nlet a.b = 1; a.c = 2; in a\r\n```\r\n```nix\r\nlet a.d = 3; in a\r\n```\r\n";
+    let result = output(source);
+    let roots: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "nix" && entity.canonical_name == "a")
+        .collect();
+    assert_eq!(roots.len(), 2);
+    assert_ne!(roots[0].id, roots[1].id);
+    for root in roots {
+        let evidence = root.evidence.source.as_ref().unwrap();
+        assert_eq!(
+            source.get(
+                usize::try_from(evidence.span().start_byte()).unwrap()
+                    ..usize::try_from(evidence.span().end_byte()).unwrap()
+            ),
+            Some("a")
+        );
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Reference
+                    && occurrence.target == (OccurrenceTarget::Resolved { symbol: root.id }))
+        );
+    }
+}
+
+#[test]
 fn markdown_nix_bindings_retain_host_coordinates_and_separate_example_owners() {
     let source = "# Examples λ😀\r\n\r\n```nix\r\nlet identity = value: value; in identity 1\r\n```\r\n\r\n```nix\r\nlet identity = value: value; in identity 2\r\n```\r\n";
     let result = output(source);

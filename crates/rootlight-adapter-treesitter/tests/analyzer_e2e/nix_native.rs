@@ -84,6 +84,68 @@ fn assert_bindings(source: &str, cases: &[(&str, &str, Option<&str>)]) {
 }
 
 #[test]
+fn nix_attribute_path_roots_merge_written_sites_without_becoming_callable_leaves() {
+    let source = "let a.b = value: value; a.c = 2; in a";
+    let result = output(source);
+    let document = result.document();
+    let roots: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "a")
+        .collect();
+    assert_eq!(
+        roots.len(),
+        1,
+        "missing unique implicit root: {:?}",
+        document.entities
+    );
+    let root = roots[0];
+    assert_eq!(root.kind, EntityKind::Variable);
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition
+                && occurrence.target == (OccurrenceTarget::Resolved { symbol: root.id })
+        })
+        .collect();
+    assert_eq!(definitions.len(), 2);
+    for definition in definitions {
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("a")
+        );
+    }
+    let reference = document
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::Reference
+                && occurrence.source.span().end_byte() == u64::try_from(source.len()).unwrap()
+        })
+        .unwrap();
+    assert_eq!(
+        reference.target,
+        OccurrenceTarget::Resolved { symbol: root.id }
+    );
+    let leaf = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "a.b")
+        .unwrap();
+    assert_eq!(leaf.kind, EntityKind::Function);
+    assert_ne!(leaf.id, root.id);
+    assert_eq!(
+        leaf.container,
+        Some(rootlight_ir::ContainerRef::Entity(root.id))
+    );
+}
+
+#[test]
 fn nix_lexical_bindings_follow_recursive_scope_and_plain_attribute_boundaries() {
     let source = "let x = 1; forward = later; later = 2; in { x = 3; plain = x; nested = rec { x = 4; own = x; }; shadow = let x = 5; in x; old = let { body = x; x = 6; }; }";
     assert_bindings(
@@ -143,7 +205,7 @@ fn nix_lexical_bindings_dominate_with_without_inventing_dynamic_targets() {
 }
 
 #[test]
-fn nix_lexical_bindings_never_fall_through_unmodeled_static_attribute_names() {
+fn nix_lexical_path_roots_shadow_outer_names_even_with_computed_suffixes() {
     for source in [
         "let x = 1; in let x.part = 2; in x",
         "let x = 1; in rec { x.${key} = 2; result = x; }",
@@ -153,8 +215,114 @@ fn nix_lexical_bindings_never_fall_through_unmodeled_static_attribute_names() {
         } else {
             "result = x"
         };
-        assert_bindings(source, &[(context, "x", None)]);
+        let result = output(source);
+        let reference_start = source.find(context).unwrap() + context.find('x').unwrap();
+        let reference = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.source.span().start_byte() == u64::try_from(reference_start).unwrap()
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = reference.target else {
+            panic!("missing implicit root: {reference:?}")
+        };
+        let root = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(root.canonical_name, "x");
+        let span = root.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("x")
+        );
+        assert!(span.start_byte() > 10, "must not resolve the outer x");
     }
+}
+
+#[test]
+fn nix_implicit_roots_replay_and_retain_identity_across_trivia_and_value_edits() {
+    let original = "let a.b.c = 1; a.b.d = 2; in a";
+    let changed = "let a /* owner */ . b.c = 10; a.b.d = 20; in a";
+    assert_nix_artifact_replay(original);
+    let first = output(original);
+    let second = output(changed);
+    for name in ["a", "a.b"] {
+        let first = first
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let second = second
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(first.id, second.id);
+    }
+    let dynamic = output("let ${key}.part = 1; in missing");
+    assert!(
+        dynamic
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "nix-implicit-attribute-owner-unavailable")
+    );
+}
+
+#[test]
+fn nix_nested_quoted_prefixes_merge_but_separate_lexical_scopes_do_not() {
+    let source = r#"let a."b".c = 1; "\a".b.d = 2; in a"#;
+    let result = output(source);
+    for name in ["a", "a.b"] {
+        let roots: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(roots.len(), 1, "{name}");
+        assert_eq!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .filter(|item| item.role == OccurrenceRole::Definition
+                    && item.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: roots[0].id
+                        }))
+                .count(),
+            2
+        );
+    }
+    let separate = output("[ (let a.b = 1; in a) (let a.c = 2; in a) ]");
+    let roots: Vec<_> = separate
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "a")
+        .collect();
+    assert_eq!(roots.len(), 2, "separate lexical roots must not merge");
+    assert_ne!(roots[0].id, roots[1].id);
+    assert_bindings(
+        "let x = 1; in { x.part = 2; result = x; }",
+        &[("result = x", "x", Some("x = 1"))],
+    );
+    assert_bindings(
+        "let x = 1; in let x = 2; x.part = 3; in x",
+        &[("in x", "x", None)],
+    );
 }
 
 #[test]

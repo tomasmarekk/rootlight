@@ -4,6 +4,7 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 mod embedded;
+mod nix_paths;
 mod toml;
 mod yaml;
 
@@ -871,6 +872,19 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
+        if nix_paths::is_segment(fact) {
+            // Each native path component may introduce one implicit owner with
+            // its own definition, containment edge and identity extension.
+            entity_candidates = checked_add(entity_candidates, 1)?;
+            occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+            account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                nix_paths::OWNER_UNAVAILABLE.len(),
+                limits,
+            )?;
+        }
         if let Some(kind) = structural_entity_kind(fact) {
             entity_candidates = checked_add(entity_candidates, 1)?;
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
@@ -1344,6 +1358,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
+            if nix_paths::is_segment(fact)
+                && (entity_plan.nix_path_gaps.contains(&fact.local_id())
+                    || entity_plan
+                        .unsupported_scope_entities
+                        .contains(&fact.local_id()))
+            {
+                let region = skipped_region(
+                    self.full_source,
+                    fact.span(),
+                    FactDomain::Entities,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    nix_paths::OWNER_UNAVAILABLE,
+                    provenance_id,
+                )?;
+                skipped.insert(region.id, region);
+            }
             if let Some((domain, detail)) = source_coverage_gap(fact) {
                 let reason = match fact.syntax_kind().as_str() {
                     "html.embedded_limit.signature"
@@ -1916,6 +1946,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         )?;
         signature_comments.dedup();
         let mut drafts = HashMap::<u64, EntityDraft>::new();
+        let mut nix_contexts = HashMap::new();
         let mut nearest_entity_ancestor = HashMap::new();
         let mut nearest_scope_ancestor = HashMap::<u64, Option<ScopeContext>>::new();
         let mut unsupported_scope_entities = BTreeSet::new();
@@ -2498,6 +2529,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
             for length in [language.len(), name.len(), name.len(), qualified_length] {
                 account_string(total_string_bytes, length, self.request.limits().ir())?;
             }
+            if language == "nix" {
+                nix_contexts.insert(
+                    fact.local_id(),
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                );
+            }
             drafts.insert(
                 fact.local_id(),
                 EntityDraft {
@@ -2594,6 +2633,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
             yaml_aliases.extend(plan.aliases);
             embedded::restore_host_depths(&facts, &mut drafts, base, cancellation)?;
         }
+        let nix_path_gaps = nix_paths::resolve(
+            self.parse_output.facts(),
+            self.source_text,
+            &nix_contexts,
+            &mut drafts,
+            total_string_bytes,
+            self.request.limits().ir(),
+            cancellation,
+        )?;
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -2615,6 +2663,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         });
         Ok(EntityPlan {
             drafts,
+            nix_path_gaps,
             nearest_entity_ancestor,
             unsupported_scope_entities,
             duplicate_data_keys,
@@ -2755,6 +2804,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    nix_path_gaps: BTreeSet<u64>,
     drafts: Vec<EntityDraft>,
     nearest_entity_ancestor: HashMap<u64, Option<u64>>,
     unsupported_scope_entities: BTreeSet<u64>,
@@ -4323,6 +4373,9 @@ fn comment_text(text: &str) -> Option<&str> {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if nix_paths::is_segment(fact) {
+        return None;
+    }
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,

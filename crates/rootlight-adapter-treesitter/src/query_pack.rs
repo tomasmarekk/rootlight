@@ -357,6 +357,9 @@ impl QueryPack {
             if family == GrammarFamily::ObjectiveC {
                 expected.extend(["definition_part", "scope_trait", "scope_type"]);
             }
+            if family == GrammarFamily::Nix {
+                expected.push("definition_part");
+            }
             if supports_terminal_call_name(family) {
                 expected.push(TERMINAL_CALL_NAME_CAPTURE);
             }
@@ -2049,6 +2052,9 @@ mod tests {
                 }
                 if family == GrammarFamily::ObjectiveC {
                     expected.extend(["definition_part", "scope_trait", "scope_type"]);
+                }
+                if family == GrammarFamily::Nix {
+                    expected.push("definition_part");
                 }
                 if supports_terminal_call_name(family) {
                     expected.push(TERMINAL_CALL_NAME_CAPTURE);

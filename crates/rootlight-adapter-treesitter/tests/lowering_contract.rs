@@ -1156,6 +1156,134 @@ fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
 }
 
 #[test]
+fn nix_implicit_path_owners_reserve_entities_occurrences_and_relations() {
+    let nix = "let value.part = 1; in value";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(nix, "src/module.nix", b"nix-path-quota-fixture");
+    let facts = [
+        (1, None, SyntaxFactKind::Root, nix, 0, 0, "nix.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            nix,
+            0,
+            1,
+            "nix.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            nix,
+            0,
+            2,
+            "nix.let.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Declaration,
+            "value.part = 1;",
+            0,
+            3,
+            "nix.variable.declaration",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Occurrence,
+            "value.part",
+            0,
+            4,
+            "nix.binding_name.definition",
+        ),
+        (
+            6,
+            Some(4),
+            SyntaxFactKind::Occurrence,
+            "value",
+            0,
+            4,
+            "nix.path_segment.definition_part",
+        ),
+        (
+            7,
+            Some(4),
+            SyntaxFactKind::Occurrence,
+            "part",
+            0,
+            4,
+            "nix.path_segment.definition_part",
+        ),
+        (
+            8,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            3,
+            "nix.identifier.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(nix, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect::<Vec<_>>();
+    for host in ["nix", "markdown"] {
+        let language = LanguageId::new(host).unwrap();
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(IrLimits::default()),
+            facts.clone(),
+        )
+        .unwrap();
+        assert_eq!(output.document().entities.len(), 3);
+        assert_eq!(output.document().occurrences.len(), 3);
+        assert_eq!(output.document().relations.len(), 4);
+        for quota in ["entities", "occurrences", "relations"] {
+            let mut ir = IrLimits::default();
+            let (observed, maximum) = match quota {
+                "entities" => {
+                    ir.max_entities = 3;
+                    (4, 3)
+                }
+                "occurrences" => {
+                    ir.max_occurrences = 4;
+                    (5, 4)
+                }
+                _ => {
+                    ir.max_relations = 4;
+                    (5, 4)
+                }
+            };
+            let error = analyze_custom(
+                &snapshot,
+                &source,
+                language.clone(),
+                &limits(ir),
+                facts.clone(),
+            )
+            .expect_err("implicit owners require reservations before materialization");
+            assert!(
+                matches!(error, AdapterError::Sink(SinkError::StreamLimit { resource: rootlight_adapter_sdk::ResourceKind::Records, observed: actual, limit }) if actual == observed && limit == maximum),
+                "{quota}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
     assert_nix_lexical_quotas("let value = 1; in value", "value = 1;", "value");
 }

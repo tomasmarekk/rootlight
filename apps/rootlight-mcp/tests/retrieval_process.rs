@@ -590,6 +590,18 @@ fn nix_quoted_lexical_relationships_preserve_authored_mcp_sources() {
 }
 
 #[test]
+fn nix_implicit_path_owners_cross_mcp_as_noncallable_lexical_targets() {
+    assert_nix_lexical_relationship_sources(
+        "{ system ? \"portable\" }@args: let identity.part = value: value; identity.other = 2; in { inherit system; result = [ identity args ]; }",
+        &[
+            ("identity", "variable", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
+#[test]
 fn nix_static_path_search_keeps_dotted_keys_and_original_sources_distinct() {
     let source = r#"{ "\item" = 1; a /* trivia */ . "b" = 2; "a.b" = 3; "λ😀" = 4; }"#;
     let mut fixture =

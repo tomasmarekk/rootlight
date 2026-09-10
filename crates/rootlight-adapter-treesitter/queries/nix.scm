@@ -2,6 +2,7 @@
 ; Native selectors preserve quoted paths and separate parameters from ordinary reads.
 (source_code) @root @module
 (binding) @declaration @definition @signature
+(binding attrpath: (attrpath attr: (_) @definition_part))
 (function_expression) @scope @declaration @signature
 (function_expression universal: (identifier) @declaration @definition)
 (formal) @declaration @definition

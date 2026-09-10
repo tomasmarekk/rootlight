@@ -84,6 +84,13 @@ pub(super) fn syntax(
     role: StructuralRole,
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if role == StructuralRole::DefinitionPart {
+        return Ok(Some(if static_name(node, cancellation)? {
+            "nix.path_segment"
+        } else {
+            "nix.dynamic_segment"
+        }));
+    }
     if role == StructuralRole::Definition {
         return Ok(Some("nix.binding_name"));
     }
