@@ -92,6 +92,39 @@ fn markdown_matlab_bindings_keep_host_spans_and_separate_examples() {
 }
 
 #[test]
+fn markdown_matlab_local_calls_do_not_escape_their_example() {
+    let source = "# Calls λ😀\r\n```matlab\r\nfunction result = entry(value)\r\nresult = helper(value);\r\nend\r\nfunction result = helper(value)\r\nresult = value;\r\nend\r\n```\r\n```matlab\r\nresult = helper(1);\r\n```\r\n";
+    let result = output(source);
+    let calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let span = calls[0].source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("helper(value)")
+    );
+    let offset = u64::try_from(source.find("helper(1)").unwrap()).unwrap();
+    let unresolved: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.source.span().start_byte() == offset)
+        .collect();
+    assert_eq!(unresolved.len(), 2);
+    assert!(
+        unresolved
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+#[test]
 fn markdown_nix_merged_sets_preserve_recursion_and_host_definition_sites() {
     let source = "# Sets λ😀\r\n```nix\r\nlet a = rec { field = 1; }; a.added = field; in a\r\n```\r\n```nix\r\nlet a = rec { field = 2; }; a.added = field; in a\r\n```\r\n";
     let result = output(source);

@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/90";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/91";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/7";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23404,7 +23404,7 @@ mod tests {
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let path = fixture.path().join("update.m");
-        let source = "function result = update(value)\nlocal = value;\nlocal = local + 1;\nresult = local;\nend\n";
+        let source = "function result = update(value)\nlocal = value;\nlocal = local + 1;\nresult = helper(local);\nend\nfunction out = helper(item)\nout = item;\nend\n";
         fs::write(&path, source).unwrap();
         fs::write(
             fixture.path().join("companion.rs"),
@@ -23455,6 +23455,42 @@ mod tests {
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
             let document = snapshot.document();
+            let helper = document
+                .entities
+                .iter()
+                .find(|entity| entity.language == "matlab" && entity.canonical_name == "helper")
+                .unwrap();
+            let calls: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::CallSite
+                        && site.target == OccurrenceTarget::Resolved { symbol: helper.id }
+                })
+                .collect();
+            assert_eq!(calls.len(), 1);
+            let call = calls[0];
+            assert_eq!(call.source.generation(), receipt.generation);
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(call.id)
+                        && edge.object == RelationEndpoint::Entity(helper.id))
+            );
+            let call_source = restored
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![call.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(call_source.data.chunks[0].bytes, b"helper(local)");
             let variables: Vec<_> = document
                 .entities
                 .iter()

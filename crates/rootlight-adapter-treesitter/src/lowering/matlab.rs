@@ -4,10 +4,13 @@
 
 use super::*;
 
+mod functions;
+
 #[derive(Default)]
 pub(super) struct Plan {
     pub(super) references: HashMap<u64, u64>,
     pub(super) writes: HashMap<u64, Option<u64>>,
+    pub(super) calls: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +69,7 @@ pub(super) fn resolve(
     drafts: &mut HashMap<u64, EntityDraft>,
     complete: bool,
     maximum_name_bytes: usize,
+    scope_names: &HashMap<SourceSpan, Option<&str>>,
     cancellation: &Cancellation,
 ) -> Result<Plan, AdapterError> {
     let mut plan = Plan::default();
@@ -248,36 +252,84 @@ pub(super) fn resolve(
             }
         }
     }
+    let functions = functions::Functions::new(
+        facts,
+        source,
+        &owners,
+        &workspaces,
+        scope_names,
+        cancellation,
+    )?;
+    let mut function_reads = HashMap::new();
     for fact in facts {
         cancellation.check()?;
-        if fact.syntax_kind().as_str() != "matlab.identifier.reference" {
+        let handle =
+            fact.syntax_kind().as_str() == "matlab.unqualified_function_handle_name.reference";
+        let indexed_value = fact.syntax_kind().as_str() == "matlab.indexed_value_name.reference";
+        if fact.syntax_kind().as_str() != "matlab.identifier.reference" && !handle && !indexed_value
+        {
             continue;
         }
         let Some(name) = source_name(source, fact, maximum_name_bytes)? else {
             continue;
         };
         let owner = owners.get(&fact.local_id()).copied().flatten();
-        if let Some(target) = lookup(owner, name, &representatives, &workspaces, cancellation)? {
+        let variable = if handle {
+            None
+        } else {
+            lookup_entry(owner, name, &representatives, &workspaces, cancellation)?
+        };
+        let target = match variable {
+            Some(target) => target,
+            None if indexed_value => None,
+            None => functions.resolve(owner, name, cancellation)?,
+        };
+        if let Some(target) = target {
             plan.references.insert(fact.local_id(), target);
+            if !handle && functions.is_function(target) {
+                function_reads.insert((owner, fact.span().start_byte()), target);
+            }
+        }
+    }
+    for fact in facts {
+        cancellation.check()?;
+        if fact.syntax_kind().as_str() == "matlab.named_application.reference"
+            && let Some(target) = function_reads.get(&(
+                owners.get(&fact.local_id()).copied().flatten(),
+                fact.span().start_byte(),
+            ))
+        {
+            plan.references.insert(fact.local_id(), *target);
+            plan.calls.insert(fact.local_id());
         }
     }
     Ok(plan)
 }
 
 fn lookup(
-    mut workspace: Option<u64>,
+    workspace: Option<u64>,
     name: &str,
     representatives: &BTreeMap<(u64, &str), Option<u64>>,
     workspaces: &HashMap<u64, Workspace>,
     cancellation: &Cancellation,
 ) -> Result<Option<u64>, AdapterError> {
+    lookup_entry(workspace, name, representatives, workspaces, cancellation).map(Option::flatten)
+}
+
+fn lookup_entry(
+    mut workspace: Option<u64>,
+    name: &str,
+    representatives: &BTreeMap<(u64, &str), Option<u64>>,
+    workspaces: &HashMap<u64, Workspace>,
+    cancellation: &Cancellation,
+) -> Result<Option<Option<u64>>, AdapterError> {
     for _ in 0..=workspaces.len() {
         cancellation.check()?;
         let Some(current) = workspace else {
             return Ok(None);
         };
         if let Some(target) = representatives.get(&(current, name)) {
-            return Ok(*target);
+            return Ok(Some(*target));
         }
         workspace = workspaces.get(&current).ok_or_else(invalid)?.parent;
     }
@@ -289,12 +341,16 @@ fn source_name<'a>(
     fact: &SyntaxFact,
     maximum: usize,
 ) -> Result<Option<&'a str>, AdapterError> {
-    let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid())?;
-    let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid())?;
-    let text = source.get(start..end).ok_or_else(invalid)?;
+    let text = source_text(source, fact)?;
     Ok(rootlight_adapter_sdk::structural_captured_name(
         text, maximum,
     ))
+}
+
+fn source_text<'a>(source: &'a str, fact: &SyntaxFact) -> Result<&'a str, AdapterError> {
+    let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid())?;
+    let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid())?;
+    source.get(start..end).ok_or_else(invalid)
 }
 
 fn invalid() -> AdapterError {

@@ -112,9 +112,44 @@ pub(super) fn syntax(
         return binding(node, cancellation);
     }
     if role == StructuralRole::Reference && node.kind() == "identifier" {
-        return Ok(Some(reference_syntax(node)));
+        return reference_syntax(node, cancellation).map(Some);
+    }
+    if node.kind() == "function_call"
+        && let Some(name) = direct_application_name(node, cancellation)?
+    {
+        return Ok(Some(if name.utf8_text(source) == Ok("import") {
+            "matlab.import"
+        } else {
+            "matlab.named_application"
+        }));
     }
     Ok(native_syntax(node, source))
+}
+
+fn direct_application_name<'tree>(
+    node: Node<'tree>,
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let Some(name) = node.child_by_field_name("name") else {
+        return Ok(None);
+    };
+    if name.kind() != "identifier"
+        || node.parent().is_some_and(|owner| {
+            owner.kind() == "field_expression" && owner.child_by_field_name("object") != Some(node)
+        })
+    {
+        return Ok(None);
+    }
+    let mut next = name.next_sibling();
+    while let Some(child) = next {
+        cancellation.check()?;
+        if !child.is_extra() {
+            // Braces index values; superclass dispatch is not a file-local call.
+            return Ok((child.kind() == "(").then_some(name));
+        }
+        next = child.next_sibling();
+    }
+    Ok(None)
 }
 
 fn native_syntax(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
@@ -141,6 +176,13 @@ fn native_syntax(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
         "identifier" | "property_name" => "matlab.identifier",
         "lambda" => "matlab.lambda",
         "function_call" => "matlab.application",
+        "command"
+            if node
+                .named_child(0)
+                .is_some_and(|name| name.utf8_text(source) == Ok("import")) =>
+        {
+            "matlab.import"
+        }
         "command" => "matlab.command",
         "comment" => "matlab.comment",
         "string" => "matlab.string",
@@ -148,22 +190,37 @@ fn native_syntax(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
     })
 }
 
-fn reference_syntax(node: Node<'_>) -> &'static str {
+fn reference_syntax(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
     let Some(parent) = node.parent() else {
-        return "matlab.identifier";
+        return Ok("matlab.identifier");
     };
-    match parent.kind() {
+    if parent.kind() == "function_call" && parent.child_by_field_name("name") == Some(node) {
+        if parent.parent().is_some_and(|owner| {
+            owner.kind() == "field_expression"
+                && owner.child_by_field_name("object") != Some(parent)
+        }) {
+            return Ok("matlab.member_name");
+        }
+        let mut cursor = parent.walk();
+        for child in parent.children(&mut cursor) {
+            cancellation.check()?;
+            if child.kind() == "superclass" {
+                return Ok("matlab.member_name");
+            }
+            if child.kind() == "{" {
+                return Ok("matlab.indexed_value_name");
+            }
+        }
+    }
+    Ok(match parent.kind() {
         "field_expression" if parent.child_by_field_name("object") != Some(node) => {
             "matlab.member_name"
         }
-        "function_call"
-            if parent.child_by_field_name("name") == Some(node)
-                && parent.parent().is_some_and(|owner| {
-                    owner.kind() == "field_expression"
-                        && owner.child_by_field_name("object") != Some(parent)
-                }) =>
-        {
-            "matlab.member_name"
+        "handle_operator" if parent.named_child_count() == 1 => {
+            "matlab.unqualified_function_handle_name"
         }
         "handle_operator" => "matlab.function_handle_name",
         "metaclass_operator" | "superclasses" | "superclass" | "property_name"
@@ -179,7 +236,7 @@ fn reference_syntax(node: Node<'_>) -> &'static str {
             "matlab.member_name"
         }
         _ => "matlab.identifier",
-    }
+    })
 }
 
 pub(super) fn definition_start(node: Node<'_>) -> usize {

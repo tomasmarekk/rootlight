@@ -578,6 +578,17 @@ fn matlab_definitions_and_headers_cross_real_process_boundaries() {
 }
 
 #[test]
+fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
+    assert_relationship_sources(
+        "matlab",
+        "entry.m",
+        "function result = entry(value)\nresult = helper(value);\ndisp(result);\nend\nfunction result = helper(value)\nresult = value;\nend\n",
+        &[("helper", "function", "helper(value)")],
+        "calls",
+    );
+}
+
+#[test]
 fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
     let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
     source_entities_with_signatures_cross_process_boundaries(
@@ -752,6 +763,16 @@ fn assert_lexical_relationship_sources(
     source: &str,
     names: &[(&str, &str, &str)],
 ) {
+    assert_relationship_sources(language, path, source, names, "references");
+}
+
+fn assert_relationship_sources(
+    language: &str,
+    path: &str,
+    source: &str,
+    names: &[(&str, &str, &str)],
+    relation: &str,
+) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, written) in names {
@@ -771,7 +792,7 @@ fn assert_lexical_relationship_sources(
         assert_eq!(matches.len(), 1, "{located:#}");
         let symbol = matches[0]["symbol_id"].clone();
         let generation = matches[0]["source_ref"]["generation"].clone();
-        let arguments = json!({"symbol_ids": [symbol.clone()], "relations": ["references"],
+        let arguments = json!({"symbol_ids": [symbol.clone()], "relations": [relation],
             "direction": "inbound", "include_candidates": false, "response_profile": "evidence"});
         let response = fixture.standalone(
             &format!("lexical-references-{name}"),
@@ -803,7 +824,7 @@ fn assert_lexical_relationship_sources(
         let groups = output["data"]["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["seed"], symbol);
-        assert_eq!(groups[0]["relation"], "references");
+        assert_eq!(groups[0]["relation"], relation);
         let items = groups[0]["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         let references = items[0]["source_refs"].as_array().unwrap();

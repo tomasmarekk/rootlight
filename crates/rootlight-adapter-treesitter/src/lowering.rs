@@ -1598,9 +1598,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved {
                         symbol: target.record.id,
                     };
+                    let is_call = entity_plan.matlab.calls.contains(&fact.local_id());
+                    if is_call {
+                        occurrence.role = OccurrenceRole::CallSite;
+                    }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
-                    let relation = lexical_reference_relation(&occurrence, target.record.id)?;
+                    let mut relation = lexical_reference_relation(&occurrence, target.record.id)?;
+                    if is_call {
+                        relation.predicate = RelationPredicate::Calls;
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+                    }
                     relations.insert(relation.id, relation);
                 }
                 if let Some(detail) = source_reference_gap(fact)
@@ -2688,6 +2697,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             &mut drafts,
             self.parse_output.report().coverage().status() == CoverageStatus::Complete,
             self.request.limits().ir().max_string_bytes,
+            &matlab_scope_names,
             cancellation,
         )?;
         let mut drafts: Vec<_> = drafts.into_values().collect();
@@ -4430,14 +4440,20 @@ fn comment_text(text: &str) -> Option<&str> {
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "matlab.member_name.reference" => Some("matlab-member-target-unavailable"),
-        "matlab.function_handle_name.reference" => {
+        "matlab.function_handle_name.reference"
+        | "matlab.unqualified_function_handle_name.reference" => {
             Some("matlab-function-handle-target-unavailable")
         }
         "matlab.type_or_attribute_name.reference" => {
             Some("matlab-type-or-attribute-target-unavailable")
         }
-        "matlab.identifier.reference" => Some("matlab-binding-target-unavailable"),
-        "matlab.application.reference" => Some("matlab-call-or-index-target-unavailable"),
+        "matlab.identifier.reference" | "matlab.indexed_value_name.reference" => {
+            Some("matlab-binding-target-unavailable")
+        }
+        "matlab.application.reference" | "matlab.named_application.reference" => {
+            Some("matlab-call-or-index-target-unavailable")
+        }
+        "matlab.import.reference" => Some("matlab-import-target-unavailable"),
         "matlab.command.reference" => Some("matlab-command-target-unavailable"),
         "nix.identifier.reference" | "nix.inherited_name.reference" => {
             Some("nix-lexical-binding-target-unavailable")

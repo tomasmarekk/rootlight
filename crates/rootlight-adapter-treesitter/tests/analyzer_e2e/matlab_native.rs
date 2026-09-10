@@ -50,6 +50,50 @@ fn reference_in<'a>(
 }
 
 #[test]
+fn matlab_local_functions_bind_names_and_prove_direct_calls() {
+    let source = "function result = entry(value)\nresult = helper(value);\ncallback = @helper;\nend\nfunction result = helper(value)\nresult = value;\nend\n";
+    let result = output(source);
+    let helper = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "helper" && entity.kind == EntityKind::Function)
+        .unwrap();
+    for fragment in ["helper(value);", "@helper"] {
+        assert_eq!(
+            reference_in(&result, source, fragment, "helper").target,
+            OccurrenceTarget::Resolved { symbol: helper.id }
+        );
+    }
+    let call = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.role == OccurrenceRole::CallSite)
+        .unwrap();
+    assert_eq!(
+        call.target,
+        OccurrenceTarget::Resolved { symbol: helper.id }
+    );
+    let span = call.source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("helper(value)")
+    );
+    assert!(
+        result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(call.id)
+                && edge.object == RelationEndpoint::Entity(helper.id))
+    );
+}
+
+#[test]
 fn matlab_duplicate_formal_parameters_do_not_create_exact_bindings() {
     let source = "function result = invalid(value, value)\nresult = value;\nend\n";
     let result = output(source);
@@ -69,9 +113,258 @@ fn matlab_duplicate_formal_parameters_do_not_create_exact_bindings() {
 }
 
 #[test]
+fn matlab_nested_function_visibility_tracks_ancestry_and_siblings() {
+    let source = "function result = outer(value)\nresult = first(value);\nfunction result = first(value)\nresult = second(value);\nfunction result = hidden(value)\nresult = first(value);\nend\nend\nfunction result = second(value)\nresult = outer(value) + hidden(value);\nend\nend\nfunction result = separate(value)\nresult = first(value);\nend\n";
+    let result = output(source);
+    for (fragment, name) in [
+        ("result = first(value);\nfunction", "first"),
+        ("second(value);", "second"),
+        ("result = first(value);\nend\nend", "first"),
+        ("outer(value) +", "outer"),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(
+            reference_in(&result, source, fragment, name).target,
+            OccurrenceTarget::Resolved { symbol: entity.id },
+            "{fragment}"
+        );
+    }
+    assert!(matches!(
+        reference_in(&result, source, "+ hidden(value)", "hidden").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    let separate = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "separate")
+        .unwrap();
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.enclosing == Some(separate.id)
+                && site.syntax_kind == "matlab.named_application.reference")
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert_eq!(
+        result
+            .document()
+            .relations
+            .iter()
+            .filter(|edge| edge.predicate == RelationPredicate::Calls)
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn matlab_function_calls_respect_variable_shadowing_and_duplicate_formals() {
+    for header in ["helper", "helper, helper"] {
+        let source = format!(
+            "function result = entry({header})\nresult = helper(1);\nend\nfunction result = helper(value)\nresult = value;\nend\n"
+        );
+        let result = output(&source);
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls)
+        );
+        let read = reference_in(&result, &source, "helper(1)", "helper");
+        if header.contains(',') {
+            assert!(matches!(read.target, OccurrenceTarget::Unresolved { .. }));
+        } else {
+            let parameter = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Parameter && entity.canonical_name == "helper"
+                })
+                .unwrap();
+            assert_eq!(
+                read.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn matlab_unqualified_handles_select_functions_not_variables_or_members() {
+    let source = "function result = entry(helper)\nresult = @helper;\nqualified = @package.helper;\nend\nfunction result = helper(value)\nresult = value;\nend\n";
+    let result = output(source);
+    let helper = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "helper")
+        .unwrap();
+    assert_eq!(
+        reference_in(&result, source, "@helper", "helper").target,
+        OccurrenceTarget::Resolved { symbol: helper.id }
+    );
+    assert!(matches!(
+        reference_in(&result, source, "@package.helper", "helper").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn matlab_explicit_imports_block_local_targets_but_wildcards_do_not() {
+    for (import, expected) in [
+        ("import package.helper", false),
+        ("import package.other", true),
+        ("import package.*", true),
+        ("import('package.helper')", false),
+        ("import package.other package.helper", false),
+        (
+            "% import package.helper\ntext = 'import package.helper';",
+            true,
+        ),
+    ] {
+        let source = format!(
+            "function result = entry(value)\n{import};\nresult = helper(value);\nend\nfunction result = helper(value)\nresult = value;\nend\n"
+        );
+        let result = output(&source);
+        assert_eq!(
+            matches!(
+                reference_in(&result, &source, "helper(value);", "helper").target,
+                OccurrenceTarget::Resolved { .. }
+            ),
+            expected,
+            "{import}"
+        );
+        assert_eq!(
+            result
+                .document()
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                .count(),
+            usize::from(expected),
+            "{import}"
+        );
+    }
+}
+
+#[test]
+fn matlab_nested_functions_inherit_explicit_imports_not_script_imports() {
+    let source = "import package.helper\nvalue = entry(1);\nfunction result = entry(value)\nresult = helper(value);\nend\nfunction result = nested(value)\nimport package.helper\nresult = inner(value);\nfunction result = inner(value)\nresult = helper(value) + value;\nend\nend\nfunction result = helper(value)\nresult = value;\nend\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_in(&result, source, "helper(value);", "helper").target,
+        OccurrenceTarget::Resolved { .. }
+    ));
+    assert!(matches!(
+        reference_in(&result, source, "helper(value) +", "helper").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn matlab_duplicate_function_declarations_block_exact_targets() {
+    let source = "function result = entry(value)\nresult = helper(value);\nend\nfunction result = helper(value)\nresult = value;\nend\nfunction result = helper(value)\nresult = value + 1;\nend\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_in(&result, source, "helper(value);", "helper").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn matlab_member_brace_and_superclass_applications_are_not_local_calls() {
+    for application in ["object.helper(1)", "helper{1}", "helper@Base(1)"] {
+        let source = format!(
+            "function result = entry(object)\nresult = {application};\nend\nfunction result = helper(value)\nresult = value;\nend\n"
+        );
+        let result = output(&source);
+        assert!(
+            matches!(
+                reference_in(&result, &source, application, "helper").target,
+                OccurrenceTarget::Unresolved { .. }
+            ),
+            "{application}"
+        );
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls),
+            "{application}"
+        );
+    }
+}
+
+#[test]
+fn matlab_chained_application_proves_only_the_named_inner_call() {
+    let source = "function result = entry(value)\nresult = helper(value)(1);\nend\nfunction result = helper(value)\nresult = value;\nend\n";
+    let result = output(source);
+    let calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let span = calls[0].source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("helper(value)")
+    );
+}
+
+#[test]
+fn matlab_continued_calls_keep_exact_source_and_ignore_member_import_names() {
+    let source = "function result = entry(value)\nvalue.import('package.helper');\nresult = helper ... continued call\n(value);\nend\nfunction result = helper(value)\nresult = value;\nend\n";
+    let result = output(source);
+    let calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let span = calls[0].source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("helper ... continued call\n(value)")
+    );
+}
+
+#[test]
 fn matlab_bounded_capture_plans_do_not_guess_lexical_targets() {
     let source = format!(
-        "function result = sum_values(value)\nresult = {};\nend\n",
+        "function result = sum_values(value)\nresult = helper(value) + {};\nend\nfunction out = helper(item)\nout = item;\nend\n",
         vec!["value"; 80].join(" + ")
     );
     let provider = Arc::new(provider());
@@ -90,6 +383,13 @@ fn matlab_bounded_capture_plans_do_not_guess_lexical_targets() {
         .filter(|site| site.role == OccurrenceRole::Reference)
         .collect();
     assert!(!reads.is_empty());
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
     assert!(
         reads
             .iter()
@@ -656,7 +956,7 @@ fn matlab_applications_do_not_claim_calls_without_binding_evidence() {
         .document()
         .occurrences
         .iter()
-        .filter(|occurrence| occurrence.syntax_kind == "matlab.application.reference")
+        .filter(|occurrence| occurrence.syntax_kind == "matlab.named_application.reference")
         .collect();
     assert_eq!(applications.len(), 1);
     assert!(matches!(
