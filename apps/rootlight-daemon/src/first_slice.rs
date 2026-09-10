@@ -11477,11 +11477,17 @@ fn symbol_explain(
             section_gaps.push("signature_truncated".to_owned());
         }
         // Classify the selected source site, not the absence of a definition
-        // elsewhere in a possibly bounded occurrence scan.
+        // elsewhere in a possibly bounded occurrence scan. The selected source
+        // may include generic parameters around the narrower name occurrence.
         let selected_role = |role| {
             response.data.occurrences.iter().any(|occurrence| {
                 occurrence.role == role
-                    && occurrence.source == *definition
+                    && occurrence.source.repository() == definition.repository()
+                    && occurrence.source.generation() == definition.generation()
+                    && occurrence.source.content_hash() == definition.content_hash()
+                    && occurrence.source.span().file() == definition.span().file()
+                    && occurrence.source.span().start_byte() >= definition.span().start_byte()
+                    && occurrence.source.span().end_byte() <= definition.span().end_byte()
                     && occurrence.target == rootlight_ir::OccurrenceTarget::Resolved { symbol }
             })
         };

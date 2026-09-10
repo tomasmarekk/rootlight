@@ -586,7 +586,9 @@ fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp()
             let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
             let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
             let written = source.get(start..end).unwrap();
-            let is_declaration = written == name;
+            let is_declaration = written
+                .strip_prefix(name)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.trim_start().starts_with('<'));
             if is_declaration {
                 non_defining += 1;
             }
@@ -636,6 +638,40 @@ fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp()
         assert_eq!(non_defining, declarations);
     }
     fixture.finish();
+}
+
+#[test]
+fn objective_c_generic_parameters_cross_real_process_boundaries() {
+    let source = include_str!("../../../tests/fixtures/objective-c/generics.m");
+    source_entities_cross_process_boundaries(
+        "objective-c",
+        "generics.m",
+        source,
+        &[
+            ("Element", "type_parameter", 2),
+            ("Key", "type_parameter", 1),
+            ("Value", "type_parameter", 1),
+            ("Input", "type_parameter", 1),
+            ("Other", "type_parameter", 1),
+            ("Item", "type_parameter", 1),
+        ],
+    );
+    let embedded = format!(
+        "# Generic examples\n\n```objective-c\n{source}\n```\n\n```objective-c\n{source}\n```\n"
+    );
+    source_entities_cross_process_boundaries(
+        "objective-c",
+        "examples.md",
+        &embedded,
+        &[
+            ("Element", "type_parameter", 4),
+            ("Key", "type_parameter", 2),
+            ("Value", "type_parameter", 2),
+            ("Input", "type_parameter", 2),
+            ("Other", "type_parameter", 2),
+            ("Item", "type_parameter", 2),
+        ],
+    );
 }
 
 #[test]
@@ -702,6 +738,7 @@ fn source_entities_with_signatures_cross_process_boundaries(
         let kind = match expected_kind {
             "property" => "field",
             "parameter" => "variable",
+            "type_parameter" => "type",
             other => other,
         };
         if matches!(kind, "import" | "export") {

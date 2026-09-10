@@ -27,6 +27,114 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_objective_c_generic_bindings_retain_host_sources_and_distinct_owners() {
+    let fixture = include_str!("../../../../tests/fixtures/objective-c/generics.m");
+    let source = format!(
+        "# Generic types\n\n```objective-c\n{fixture}\n```\n\n```objective-c\n{fixture}\n```\n"
+    );
+    let result = output(&source);
+    let parameters: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .collect();
+    assert_eq!(parameters.len(), 14);
+    assert_eq!(
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method && entity.canonical_name == "extra")
+            .count(),
+        2
+    );
+    assert_eq!(
+        parameters
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        14
+    );
+    for parameter in parameters {
+        assert_eq!(parameter.language, "objective-c");
+        let reference = parameter.evidence.source.as_ref().unwrap();
+        let span = reference.span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(written, parameter.canonical_name);
+        let occurrence = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: parameter.id,
+                        }
+            })
+            .unwrap();
+        assert_eq!(&occurrence.source, reference);
+        assert_eq!(
+            occurrence.syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn markdown_swift_extension_examples_keep_distinct_stable_method_identities() {
+    let fixture = "struct Entry {}\nextension Entry { func copy() -> Entry { return self } }\n";
+    let source = format!("# Extensions\n\n```swift\n{fixture}\n```\n\n```swift\n{fixture}\n```\n");
+    let initial = output(&source);
+    let methods: Vec<_> = initial
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.language == "swift"
+                && entity.kind == EntityKind::Method
+                && entity.canonical_name == "copy"
+        })
+        .collect();
+    assert_eq!(methods.len(), 2);
+    let ids: BTreeSet<_> = methods.iter().map(|entity| entity.id).collect();
+    assert_eq!(ids.len(), 2);
+    for method in methods {
+        let reference = method.evidence.source.as_ref().unwrap();
+        let span = reference.span();
+        assert_eq!(
+            source
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                )
+                .unwrap(),
+            "func copy() -> Entry { return self }"
+        );
+    }
+    let changed = output(&source.replace("return self", "return  self"));
+    assert_eq!(
+        ids,
+        changed
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "swift"
+                && entity.kind == EntityKind::Method
+                && entity.canonical_name == "copy")
+            .map(|entity| entity.id)
+            .collect()
+    );
+}
+
+#[test]
 fn markdown_objective_c_forward_declarations_keep_host_sources_and_separate_examples() {
     let fixture = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
     let source = format!(

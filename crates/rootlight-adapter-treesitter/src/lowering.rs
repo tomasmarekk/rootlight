@@ -2065,6 +2065,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let context = ScopeContext {
                     stable_identity,
                     collision_guard,
+                    lexical_module: stable_header
+                        .as_ref()
+                        .filter(|header| {
+                            matches!(
+                                header.kind,
+                                StableScopeKind::SwiftExtension | StableScopeKind::ObjectiveCOwner
+                            )
+                        })
+                        .and(parent_entity)
+                        .filter(|parent| {
+                            drafts.get(parent).is_some_and(|module| {
+                                module.kind == EntityKind::Module && module.parent_entity.is_some()
+                            })
+                        })
+                        .or_else(|| parent_scope.as_ref().and_then(|scope| scope.lexical_module)),
                     qualified_prefix: stable_header
                         .as_ref()
                         .filter(|header| header.kind != StableScopeKind::CssContext)
@@ -2408,6 +2423,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 EntityDraft {
                     local_id: fact.local_id(),
                     parent_entity,
+                    lexical_module: parent_entity
+                        .is_none()
+                        .then(|| parent_scope.as_ref().and_then(|scope| scope.lexical_module))
+                        .flatten(),
                     scope_identity: member_scope_identity,
                     data_identity: None,
                     data_root_entity: None,
@@ -2756,6 +2775,7 @@ fn push_signature_fragment(
 struct EntityDraft {
     local_id: u64,
     parent_entity: Option<u64>,
+    lexical_module: Option<u64>,
     scope_identity: Option<[u8; 32]>,
     data_identity: Option<[u8; 32]>,
     data_root_entity: Option<u64>,
@@ -2791,6 +2811,7 @@ struct MaterializedEntity {
 struct ScopeContext {
     stable_identity: Option<[u8; 32]>,
     collision_guard: Option<[u8; 32]>,
+    lexical_module: Option<u64>,
     qualified_prefix: Option<Arc<str>>,
     kind: Option<StableScopeKind>,
     unsupported_semantic_identity: bool,
@@ -2920,6 +2941,15 @@ fn materialize_entity(
     if let Some(scope_identity) = draft.scope_identity {
         container_identity.push(3);
         container_identity.extend_from_slice(&scope_identity);
+    }
+    if let Some(module) = draft.lexical_module {
+        // Extensions/categories name an external type without owning it, but
+        // identical embedded examples must retain separate source identities.
+        let module = materialized
+            .get(&module)
+            .ok_or_else(|| provider_failure("embedded-source-owner-missing"))?;
+        container_identity.push(6);
+        container_identity.extend_from_slice(module.record.id.as_bytes());
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
@@ -3111,7 +3141,7 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     match fact.syntax_kind().as_str() {
         "objective_c.file.root" => Some((
             FactDomain::Entities,
-            "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
+            "objective-c-preprocessed-and-inherited-c-declarations-unavailable",
         )),
         "objective_c.file.module" => Some((
             FactDomain::Relations,
@@ -4547,6 +4577,10 @@ mod tests {
             ("go.type.declaration", EntityKind::TypeAlias),
             ("go.constant.declaration", EntityKind::Constant),
             ("typescript.interface.declaration", EntityKind::Interface),
+            (
+                "objective_c.type_parameter.declaration",
+                EntityKind::TypeParameter,
+            ),
             ("typescript.type_alias.declaration", EntityKind::TypeAlias),
             (
                 "typescript.type_parameter.declaration",

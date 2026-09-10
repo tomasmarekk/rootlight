@@ -2,7 +2,9 @@
 //! Native label and colon ranges remain separate facts within one written name.
 
 use super::StructuralRole;
-use std::ops::Range;
+use rootlight_adapter_sdk::AdapterError;
+use rootlight_cancel::Cancellation;
+use std::{collections::HashMap, ops::Range};
 use tree_sitter::Node;
 
 fn primary_name(node: Node<'_>) -> Option<Node<'_>> {
@@ -24,6 +26,124 @@ fn is_ivar_declarator(node: Node<'_>) -> bool {
             .parent()
             .and_then(|parent| parent.parent())
             .is_some_and(|parent| parent.kind() == "instance_variable")
+}
+
+fn next_written_sibling(mut node: Node<'_>) -> Option<Node<'_>> {
+    loop {
+        node = node.next_sibling()?;
+        if !node.is_extra() {
+            return Some(node);
+        }
+    }
+}
+
+fn type_parameter_list(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "type_identifier" {
+        return None;
+    }
+    let parent = node.parent()?;
+    let list = if parent.kind() == "type_name" {
+        let mut cursor = parent.walk();
+        if parent
+            .named_children(&mut cursor)
+            .filter(|child| !child.is_extra())
+            .take(2)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        // A bound is a use of another type, never another parameter binding.
+        let mut previous = parent.prev_sibling();
+        while previous.is_some_and(|child| child.is_extra()) {
+            previous = previous.and_then(|child| child.prev_sibling());
+        }
+        if previous.is_some_and(|child| child.kind() == ":") {
+            return None;
+        }
+        parent.parent()?
+    } else {
+        parent
+    };
+    (list.kind() == "parameterized_arguments").then_some(list)
+}
+
+fn declares_type_parameters(
+    list: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let Some(owner) = list.parent() else {
+        return Ok(false);
+    };
+    if owner.kind() == "class_declaration" {
+        return Ok(true);
+    }
+    if owner.kind() != "class_interface" {
+        return Ok(false);
+    }
+    let Some(name) = primary_name(owner) else {
+        return Ok(false);
+    };
+    if next_written_sibling(name) != Some(list) {
+        return Ok(false);
+    }
+    // Before a superclass/category delimiter this is a binding list. A bare
+    // root-class list can instead name protocols; variance/bounds disambiguate it.
+    if next_written_sibling(list).is_some_and(|next| matches!(next.kind(), ":" | "(")) {
+        return Ok(true);
+    }
+    let mut cursor = list.walk();
+    for (index, child) in list.children(&mut cursor).enumerate() {
+        if index % 64 == 0 {
+            cancellation.check()?;
+        }
+        if matches!(child.kind(), "__covariant" | "__contravariant" | ":") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Per-scan memoization prevents repeated whole-list scans for each parameter.
+#[derive(Default)]
+pub(super) struct TypeParameterCaptures {
+    lists: HashMap<usize, bool>,
+}
+
+impl TypeParameterCaptures {
+    /// Filters parameter candidates using bounded, cancellable list classification.
+    ///
+    /// # Errors
+    /// Returns cancellation or allocation failures from the current query scan.
+    pub(super) fn retain(
+        &mut self,
+        node: Node<'_>,
+        role: StructuralRole,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        if !matches!(
+            role,
+            StructuralRole::Declaration | StructuralRole::Definition
+        ) || node.kind() != "type_identifier"
+            || !node.parent().is_some_and(|parent| {
+                matches!(parent.kind(), "type_name" | "parameterized_arguments")
+            })
+        {
+            return Ok(true);
+        }
+        let Some(list) = type_parameter_list(node) else {
+            return Ok(false);
+        };
+        if let Some(retained) = self.lists.get(&list.id()) {
+            return Ok(*retained);
+        }
+        let retained = declares_type_parameters(list, cancellation)?;
+        self.lists
+            .try_reserve(1)
+            .map_err(|_| super::query_failure("query-objective-c-parameter-allocation"))?;
+        self.lists.insert(list.id(), retained);
+        Ok(retained)
+    }
 }
 
 fn declarator_name(mut node: Node<'_>) -> Option<Node<'_>> {
@@ -117,6 +237,9 @@ pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'s
         role,
         StructuralRole::Declaration | StructuralRole::Definition
     ) {
+        if type_parameter_list(node).is_some() {
+            return Some("objective_c.type_parameter");
+        }
         if node.kind() == "identifier"
             && let Some(parent) = node.parent()
         {
@@ -174,6 +297,18 @@ pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'s
 }
 
 pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Range<usize>> {
+    if role == StructuralRole::Declaration
+        && node.kind() == "identifier"
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "class_declaration")
+        && let Some(arguments) =
+            next_written_sibling(node).filter(|next| next.kind() == "parameterized_arguments")
+    {
+        // Enclose only this forward's parameters, not those of sibling classes
+        // in the same statement. The separate definition capture keeps its name.
+        return Some(node.start_byte()..arguments.end_byte());
+    }
     if role == StructuralRole::Definition {
         if node.kind() == "struct_declarator"
             || node
@@ -231,6 +366,90 @@ pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Rang
 mod tests {
     use super::*;
     use crate::GrammarFamily;
+
+    #[test]
+    fn generic_list_classification_is_cached_and_cancellable() {
+        let source = b"@interface Bag<__covariant Item, Other>\n@end\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let owner = tree.root_node().named_child(0).unwrap();
+        let mut cursor = owner.walk();
+        let list = owner
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "parameterized_arguments")
+            .unwrap();
+        let mut cursor = list.walk();
+        let binding = list
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "type_identifier")
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let mut cache = TypeParameterCaptures::default();
+        for _ in 0..128 {
+            assert!(
+                cache
+                    .retain(binding, StructuralRole::Declaration, &cancellation)
+                    .unwrap()
+            );
+            assert!(
+                cache
+                    .retain(binding, StructuralRole::Definition, &cancellation)
+                    .unwrap()
+            );
+        }
+        assert_eq!(cache.lists.len(), 1);
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(declares_type_parameters(list, &cancellation).is_err());
+    }
+
+    #[test]
+    fn generic_bindings_exclude_protocols_bounds_and_superclass_arguments() {
+        let source = include_bytes!("../../../../tests/fixtures/objective-c/generics.m");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let pack = super::super::QueryPack::compile(
+            GrammarFamily::ObjectiveC,
+            include_str!("../../queries/objective_c.scm"),
+        )
+        .unwrap();
+        let candidates = pack
+            .extract_identity(
+                GrammarFamily::ObjectiveC,
+                &tree,
+                source,
+                1024,
+                &rootlight_cancel::Cancellation::new(),
+            )
+            .unwrap();
+        let names: Vec<_> = candidates
+            .iter()
+            .filter(|capture| {
+                capture.role == StructuralRole::Definition
+                    && capture.syntax == "objective_c.type_parameter"
+            })
+            .map(|capture| {
+                std::str::from_utf8(source.get(capture.start..capture.end).unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Element", "Key", "Value", "Element", "Input", "Other", "Item"
+            ]
+        );
+    }
 
     #[test]
     fn forward_declarations_and_generic_parameters_have_clean_native_syntax() {

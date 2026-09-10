@@ -472,7 +472,7 @@ pub fn revision_resolves_to_head(
 /// Each revision is passed as a separate Git argument after validation, then
 /// the diff uses the resolved immutable object identifiers. Hooks, filters,
 /// prompts, optional locks, external diff drivers, text conversion, and lazy
-/// object fetches remain disabled by [`GitRunner`].
+/// object fetches remain disabled by the internal Git runner.
 ///
 /// # Errors
 ///

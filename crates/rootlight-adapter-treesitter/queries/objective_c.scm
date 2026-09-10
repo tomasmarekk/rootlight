@@ -6,6 +6,8 @@
 (translation_unit) @root @module @scope
 (class_declaration (identifier) @declaration @definition)
 (protocol_forward_declaration (identifier) @declaration @definition)
+[(parameterized_arguments (type_identifier) @declaration @definition)
+ (parameterized_arguments (type_name (type_identifier) @declaration @definition))]
 (class_interface) @declaration @definition @scope
 (class_interface) @signature @scope_type
 (class_interface (identifier) @scope_trait)

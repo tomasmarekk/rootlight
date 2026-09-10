@@ -27,6 +27,194 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn objective_c_forward_generic_parameters_belong_to_each_written_class() {
+    let source = "@class Left<Item>, Right<Item>;\n@class Left<Item>;\n";
+    let result = output(source);
+    let parameters: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .collect();
+    assert_eq!(parameters.len(), 3);
+    let ids: BTreeSet<_> = parameters.iter().map(|entity| entity.id).collect();
+    assert_eq!(ids.len(), 3);
+    let mut parents = BTreeSet::new();
+    for parameter in parameters {
+        assert_eq!(parameter.canonical_name, "Item");
+        let Some(rootlight_ir::ContainerRef::Entity(owner)) = parameter.container else {
+            panic!("forward parameter requires its written class");
+        };
+        parents.insert(owner);
+        let class = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == owner)
+            .unwrap();
+        assert_eq!(class.kind, EntityKind::Class);
+        assert!(matches!(class.canonical_name.as_str(), "Left" | "Right"));
+        let span = class.evidence.source.as_ref().unwrap().span();
+        let written = source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(written, format!("{}<Item>", class.canonical_name));
+    }
+    assert_eq!(parents.len(), 3);
+    let updated = output(&format!("@class Unrelated<Item>;\n{source}"));
+    let next: BTreeSet<_> = updated
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(next.len(), 4);
+    assert!(ids.is_subset(&next));
+}
+
+#[test]
+fn objective_c_generic_identities_survive_source_insertions_and_artifact_replay() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/generics.m");
+    let original = output(source);
+    let ids: BTreeSet<_> = original
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(ids.len(), 7);
+    let changed = output(&format!("@class Additional;\n{source}"));
+    assert_eq!(
+        ids,
+        changed
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::TypeParameter)
+            .map(|entity| entity.id)
+            .collect()
+    );
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, OBJECTIVE_C);
+    let fixture = Fixture::new(OBJECTIVE_C, source.as_bytes());
+    let budget = limits();
+    let (_, artifact) = analyzer
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let successor = fixture.next_generation();
+    let next = request(&successor.snapshot, &successor.source, OBJECTIVE_C, &budget);
+    let reused = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    assert_eq!(reused.report(), fresh.report());
+    assert!(
+        reused
+            .document()
+            .occurrences
+            .iter()
+            .all(|occurrence| occurrence.source.generation() == successor.source.generation())
+    );
+}
+
+#[test]
+fn objective_c_generic_parameters_have_exact_sources_and_lexical_owners() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/generics.m");
+    let result = output(source);
+    let document = result.document();
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::TypeParameter)
+        .collect();
+    assert_eq!(parameters.len(), 7);
+    let mut names = Vec::new();
+    for parameter in parameters {
+        let name = parameter.canonical_name.as_str();
+        let reference = parameter.evidence.source.as_ref().unwrap();
+        let span = reference.span();
+        assert_eq!(
+            source
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                )
+                .unwrap(),
+            name
+        );
+        let occurrence = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.target
+                    == OccurrenceTarget::Resolved {
+                        symbol: parameter.id,
+                    }
+                    && occurrence.role == OccurrenceRole::Definition
+            })
+            .unwrap();
+        assert_eq!(&occurrence.source, reference);
+        assert_eq!(
+            occurrence.syntactic_text_hash,
+            content_hash(name.as_bytes())
+        );
+        match parameter.container {
+            Some(rootlight_ir::ContainerRef::Entity(id)) => {
+                let owner = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == id)
+                    .unwrap();
+                assert_eq!(owner.kind, EntityKind::Class);
+                assert_eq!(
+                    owner.canonical_name,
+                    match name {
+                        "Element" => "Container",
+                        "Key" | "Value" => "Pair",
+                        "Input" => "Pending",
+                        "Other" => "Later",
+                        "Item" => "Covariant",
+                        _ => panic!("unexpected binding"),
+                    }
+                );
+            }
+            Some(rootlight_ir::ContainerRef::File(_)) => {
+                assert_eq!(name, "Element");
+                assert!(parameter.qualified_name.contains("Container"));
+            }
+            Some(rootlight_ir::ContainerRef::Repository(_)) | None => {
+                panic!("type parameter requires a lexical owner")
+            }
+        }
+        names.push(name);
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Element", "Element", "Input", "Item", "Key", "Other", "Value"
+        ]
+    );
+}
+
+#[test]
 fn objective_c_forward_types_are_non_defining_source_declarations() {
     let source = include_str!("../../../../tests/fixtures/objective-c/forwards.m");
     let result = output(source);
@@ -114,12 +302,18 @@ fn objective_c_forward_types_are_non_defining_source_declarations() {
             1
         );
     }
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "Item")
+        .collect();
+    assert_eq!(parameters.len(), 2);
     assert!(
-        !document
-            .entities
+        parameters
             .iter()
-            .any(|entity| entity.canonical_name == "Item")
+            .all(|entity| entity.kind == EntityKind::TypeParameter)
     );
+    assert_ne!(parameters[0].id, parameters[1].id);
 }
 
 #[test]
@@ -433,7 +627,7 @@ fn objective_c_partial_structure_does_not_claim_complete_language_analysis() {
     ));
     assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
     for detail in [
-        "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
+        "objective-c-preprocessed-and-inherited-c-declarations-unavailable",
         "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
     ] {
         assert!(

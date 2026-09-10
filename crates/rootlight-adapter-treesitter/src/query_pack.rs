@@ -560,6 +560,7 @@ impl QueryPack {
         let mut match_count = 0usize;
         let mut capture_count = 0usize;
         let mut limit = None;
+        let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
 
         'query: while let Some(query_match) = matches.next() {
             if match_count >= limits.matches {
@@ -589,6 +590,11 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::ObjectiveC
+                    && !objective_c_parameters.retain(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::ObjectiveC
                     && !objective_c::retain_capture(capture.node, role)
                 {

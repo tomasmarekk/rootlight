@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod catalog;
+mod coverage_languages;
 mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
@@ -210,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/78";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/79";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -12685,14 +12686,33 @@ impl FirstSliceService {
         }
         let mut grouped =
             BTreeMap::<(FirstSliceCoverageGapReason, Option<String>), BTreeSet<FileId>>::new();
+        let embedded_languages = if file_only_fallback {
+            coverage_languages::SourceLanguageScopes::default()
+        } else {
+            coverage_languages::SourceLanguageScopes::from_snapshot(snapshot, cancellation)?
+        };
         {
-            let mut observe = |reason, file: Option<FileId>| {
-                let language = file
-                    .and_then(|file| snapshot.find_file(file))
-                    .map(|file| file.language.clone());
+            let mut observe = |reason,
+                               file: Option<FileId>,
+                               source: Option<SourceSpan>|
+             -> Result<(), FirstSliceError> {
+                let selection = source
+                    .map(|span| embedded_languages.resolve(span, cancellation))
+                    .transpose()?
+                    .unwrap_or(coverage_languages::SourceLanguage::Host);
+                let language = match selection {
+                    coverage_languages::SourceLanguage::Host => file
+                        .and_then(|file| snapshot.find_file(file))
+                        .map(|file| file.language.clone()),
+                    coverage_languages::SourceLanguage::Embedded(language) => {
+                        Some(language.to_owned())
+                    }
+                    coverage_languages::SourceLanguage::Ambiguous => None,
+                };
                 if let Some(file) = file {
                     grouped.entry((reason, language)).or_default().insert(file);
                 }
+                Ok(())
             };
             if !file_only_fallback {
                 for diagnostic in &document.diagnostics {
@@ -12722,7 +12742,11 @@ impl FirstSliceService {
                         _ => None,
                     };
                     if let Some(reason) = reason {
-                        observe(reason, file);
+                        observe(
+                            reason,
+                            file,
+                            diagnostic.source.as_ref().map(SourceRef::span),
+                        )?;
                     }
                 }
                 for skipped in &document.skipped_regions {
@@ -12741,7 +12765,11 @@ impl FirstSliceService {
                         }
                         _ => continue,
                     };
-                    observe(reason, Some(skipped.source.span().file()));
+                    observe(
+                        reason,
+                        Some(skipped.source.span().file()),
+                        Some(skipped.source.span()),
+                    )?;
                 }
                 for file in &document.files {
                     if file.generated
@@ -12751,14 +12779,14 @@ impl FirstSliceService {
                                 && coverage.status != CoverageStatus::Complete
                         })
                     {
-                        observe(FirstSliceCoverageGapReason::Generated, Some(file.id));
+                        observe(FirstSliceCoverageGapReason::Generated, Some(file.id), None)?;
                     }
                     let lexical_incomplete = lease.source_lexical_coverage(file.id).map_or(
                         file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64,
                         |coverage| !coverage.is_complete(),
                     );
                     if lexical_incomplete {
-                        observe(FirstSliceCoverageGapReason::Truncated, Some(file.id));
+                        observe(FirstSliceCoverageGapReason::Truncated, Some(file.id), None)?;
                     }
                 }
             }
@@ -26904,6 +26932,146 @@ mod tests {
     }
 
     #[test]
+    fn objective_c_generic_sources_survive_noop_incremental_rebuild_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = include_str!("../../../tests/fixtures/objective-c/generics.m");
+        let path = fixture.path().join("generics.m");
+        fs::write(&path, source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 1);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop.generation, initial.generation);
+        let changed = format!("@class Additional;\n{source}");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut initial_ids = None;
+        for (receipt, expected_source) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let parameters: Vec<_> = snapshot
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::TypeParameter)
+                .collect();
+            assert_eq!(parameters.len(), 7);
+            let ids: BTreeSet<_> = parameters.iter().map(|entity| entity.id).collect();
+            if let Some(initial_ids) = &initial_ids {
+                assert_eq!(initial_ids, &ids);
+            } else {
+                initial_ids = Some(ids);
+            }
+            for parameter in parameters {
+                let explained = restored
+                    .symbol_explain(receipt.generation, parameter.id, &deadline())
+                    .unwrap();
+                let reference = explained.data.entity.evidence.source.unwrap();
+                assert_eq!(reference.generation(), receipt.generation);
+                let span = reference.span();
+                let written = expected_source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(written, parameter.canonical_name);
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn objective_c_embedded_coverage_retains_language_and_file_counts_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = include_str!("../../../tests/fixtures/objective-c/generics.m");
+        fs::write(
+            fixture.path().join("examples.md"),
+            format!(
+                "# Examples\n\n```objective-c\n{source}\n```\n\n```objective-c\n{source}\n```\n"
+            ),
+        )
+        .unwrap();
+        fs::write(fixture.path().join("healthy.rs"), "pub fn healthy() {}\n").unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let assert_gaps = |service: &FirstSliceService| {
+            let gaps = service
+                .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+                .unwrap();
+            let embedded: Vec<_> = gaps
+                .iter()
+                .filter(|gap| {
+                    gap.reason == FirstSliceCoverageGapReason::Unsupported
+                        && gap.language.as_deref() == Some("objective-c")
+                })
+                .collect();
+            assert_eq!(embedded.len(), 1, "{gaps:?}");
+            // Two examples still represent one affected physical source file.
+            assert_eq!(embedded[0].files, 1);
+            assert!(!gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Unsupported
+                    && gap.language.as_deref() == Some("rust")
+            }));
+        };
+        assert_gaps(&service);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        assert_gaps(&restored);
+    }
+
+    #[test]
     fn objective_c_forward_sources_survive_incremental_rebuild_and_restart() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -26986,7 +27154,12 @@ mod tests {
                 );
                 assert_eq!(declaration.source.generation(), receipt.generation);
                 let reference = explained.data.entity.evidence.source.unwrap();
-                assert_eq!(reference, declaration.source);
+                assert_eq!(reference.span().file(), declaration.source.span().file());
+                assert_eq!(
+                    reference.span().start_byte(),
+                    declaration.source.span().start_byte()
+                );
+                assert!(reference.span().end_byte() >= declaration.source.span().end_byte());
                 let span = reference.span();
                 let written = expected_source
                     .get(
@@ -26994,7 +27167,13 @@ mod tests {
                             ..usize::try_from(span.end_byte()).unwrap(),
                     )
                     .unwrap();
-                assert_eq!(written, explained.data.entity.canonical_name);
+                assert!(
+                    written
+                        .strip_prefix(&explained.data.entity.canonical_name)
+                        .is_some_and(|suffix| {
+                            suffix.is_empty() || suffix.trim_start().starts_with('<')
+                        })
+                );
                 let read = restored
                     .source_read_with_options_and_budget(
                         receipt.generation,
@@ -27108,7 +27287,7 @@ mod tests {
                 identities
             );
             for detail in [
-                "objective-c-generic-parameter-preprocessed-and-inherited-c-declarations-unavailable",
+                "objective-c-preprocessed-and-inherited-c-declarations-unavailable",
                 "objective-c-inheritance-message-dispatch-and-cross-file-binding-unavailable",
             ] {
                 assert!(
