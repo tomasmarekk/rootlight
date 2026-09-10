@@ -2,6 +2,7 @@
 ; Native selectors preserve quoted paths and separate parameters from ordinary reads.
 (source_code) @root @module
 (binding) @declaration @definition @signature
+(binding expression: (_) @expression)
 (binding attrpath: (attrpath attr: (_) @definition_part))
 (function_expression) @scope @declaration @signature
 (function_expression universal: (identifier) @declaration @definition)
@@ -12,7 +13,9 @@
 (apply_expression) @call
 (apply_expression function: (variable_expression) @call_name)
 (variable_expression) @reference
-(select_expression) @reference
+(select_expression) @scope
+(select_expression expression: (_) @expression)
+(select_expression attrpath: (attrpath attr: (_) @reference))
 (comment) @comment
 ((comment) @documentation (#match? @documentation "^/\\*\\*"))
 [(string_expression) (indented_string_expression) (path_expression) (hpath_expression) (spath_expression) (uri_expression)] @string

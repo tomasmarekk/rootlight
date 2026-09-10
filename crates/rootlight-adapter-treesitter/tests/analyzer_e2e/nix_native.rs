@@ -140,6 +140,146 @@ fn nix_literal_interpolated_keys_shadow_outer_names_with_exact_sources() {
 }
 
 #[test]
+fn nix_static_attribute_selections_resolve_each_written_path_component() {
+    let source = "let settings = { server = { port = 8080; }; }; in settings.server.port";
+    assert_bindings(
+        source,
+        &[
+            ("settings.server", "settings", Some("settings =")),
+            ("server.port", "server", Some("server =")),
+            (".port", "port", Some("port =")),
+        ],
+    );
+}
+
+#[test]
+fn nix_selection_value_flow_follows_inline_sets_aliases_and_written_merges() {
+    for source in [
+        "({ port = 1; }).port",
+        "let settings = { port = 1; }; alias = (settings); in (alias).port",
+        "let settings = { server = { port = 1; }; }; alias = settings.server; in alias.port",
+        "let settings = { server = { port = 1; }; }; in (settings.server).port",
+        "let settings.server = { port = 1; }; settings.server.host = 2; in settings.server.port",
+        "let settings = { port = 1; }; wrapper = { inherit settings; }; in wrapper.settings.port",
+        "let settings = { port = 1; }; in settings.port or 0",
+        "let settings = rec { own = settings; port = 1; }; in settings.own.port",
+        "({ __overrides = environment; port = 1; }).port",
+        "let __overrides = environment; settings = { port = 1; }; in settings.port",
+    ] {
+        assert_bindings(source, &[(".port", "port", Some("port = 1"))]);
+        assert_nix_artifact_replay(source);
+    }
+    assert_bindings(
+        "let settings = { port = 1; }; in let settings = { port = 2; }; in settings.port",
+        &[(".port", "port", Some("port = 2"))],
+    );
+}
+
+#[test]
+fn nix_unknown_selection_values_never_resolve_an_unrelated_field() {
+    for source in [
+        "let settings = alias; alias = settings; in settings.port",
+        "let settings = { port = 1; }; f = value: settings; in (f {}).port",
+        "let settings = { port = 1; }; in (if true then settings else {}).port",
+        "let port = 1; settings = 2; in settings.port",
+        "let settings = { server = { port = 1; }; }; key = \"server\"; in settings.${key}.port",
+        "let port = 1; in environment.port",
+        "let settings = rec { port = 1; __overrides = environment; }; in settings.port",
+        "(rec { port = 1; __overrides = environment; }).port",
+    ] {
+        assert_bindings(source, &[(".port", "port", None)]);
+    }
+    assert_bindings(
+        "let port = 0; in rec { port = 1; __overrides = environment; read = port; }",
+        &[("read = port;", "port", None)],
+    );
+}
+
+#[test]
+fn nix_selected_literal_keys_keep_exact_written_reference_spans() {
+    for (written, definition) in [
+        (r#""p.ort""#, r#""p.ort""#),
+        (r#"${"port"}"#, "port"),
+        (r#""\port""#, "port"),
+        ("${''port''}", "port"),
+    ] {
+        let source = format!("let settings = {{ {definition} = 1; }}; in settings.{written}");
+        let result = output(&source);
+        let target = result
+            .document()
+            .entities
+            .iter()
+            .find(|item| item.canonical_name == definition)
+            .unwrap();
+        let start = source.rfind(written).unwrap();
+        let reference = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.source.span().start_byte() == u64::try_from(start).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            reference.source.span().end_byte(),
+            u64::try_from(start + written.len()).unwrap()
+        );
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_nix_artifact_replay(&source);
+    }
+}
+
+#[test]
+fn nix_long_alias_chains_resolve_without_recursive_value_evaluation() {
+    let mut source = String::from("let base = { port = 1; }; item0 = base; ");
+    for index in 1..256 {
+        source.push_str(&format!("item{index} = item{}; ", index - 1));
+    }
+    source.push_str("in item255.port");
+    assert_bindings(&source, &[(".port", "port", Some("port = 1"))]);
+}
+
+#[test]
+fn nix_bounded_selection_capture_does_not_claim_exact_targets() {
+    let source = format!(
+        "let settings = {{ port = 1; }}; in [ {} ]",
+        "settings.port ".repeat(80)
+    );
+    let provider = Arc::new(provider());
+    let budget = limits_with_syntax_records(256);
+    let fixture = Fixture::new(NIX, source.as_bytes());
+    let result = analyze(
+        &analyzer(&provider, NIX),
+        &request(&fixture.snapshot, &fixture.source, NIX, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    let selected: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|item| item.syntax_kind == "nix.selected_attribute.reference")
+        .collect();
+    assert!(!selected.is_empty());
+    assert!(
+        selected
+            .iter()
+            .all(|item| matches!(item.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "nix-attribute-selection-target-unavailable")
+    );
+}
+
+#[test]
 fn nix_evaluated_string_keys_do_not_create_lexical_bindings() {
     for key in [
         r#""${"name"}""#,
@@ -896,7 +1036,7 @@ fn nix_source_bindings_do_not_invent_attribute_or_runtime_call_targets() {
     );
     for occurrence in document.occurrences.iter().filter(|occurrence| {
         occurrence.role == OccurrenceRole::CallSite
-            || occurrence.syntax_kind == "nix.member_name.reference"
+            || occurrence.syntax_kind == "nix.selected_attribute.reference"
     }) {
         assert!(matches!(
             occurrence.target,

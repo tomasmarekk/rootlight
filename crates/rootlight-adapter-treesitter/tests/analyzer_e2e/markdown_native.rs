@@ -117,6 +117,43 @@ fn markdown_nix_literal_keys_preserve_host_spelling_and_example_scope() {
 }
 
 #[test]
+fn markdown_nix_selected_attributes_keep_each_example_and_host_source() {
+    let source = "# Settings λ😀\r\n```nix\r\nlet settings = { port = 1; }; in settings.port\r\n```\r\n```nix\r\nlet settings = { port = 2; }; in settings.port\r\n```\r\n";
+    let result = output(source);
+    let fields: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|item| item.language == "nix" && item.canonical_name == "port")
+        .collect();
+    assert_eq!(fields.len(), 2);
+    assert_ne!(fields[0].id, fields[1].id);
+    for field in fields {
+        let definition = field.evidence.source.as_ref().unwrap().span();
+        let reads: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.target == (OccurrenceTarget::Resolved { symbol: field.id })
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(read.start_byte()).unwrap()
+                    ..usize::try_from(read.end_byte()).unwrap()
+            ),
+            Some("port")
+        );
+        assert!(read.start_byte() > definition.end_byte());
+        assert!(read.start_byte() - definition.end_byte() < 32);
+    }
+}
+
+#[test]
 fn markdown_nix_implicit_path_roots_keep_host_sources_and_separate_examples() {
     let source = "# Roots λ😀\r\n```nix\r\nlet a.b = 1; a.c = 2; in a\r\n```\r\n```nix\r\nlet a.d = 3; in a\r\n```\r\n";
     let result = output(source);

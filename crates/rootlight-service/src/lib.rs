@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/86";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/87";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27149,6 +27149,41 @@ mod tests {
             &[
                 (
                     r#"${"identity"}"#,
+                    "identity",
+                    "identity",
+                    rootlight_ir::EntityKind::Function,
+                ),
+                (
+                    "value",
+                    "value",
+                    "value",
+                    rootlight_ir::EntityKind::Parameter,
+                ),
+                ("args", "args", "args", rootlight_ir::EntityKind::Parameter),
+                (
+                    "system",
+                    "system",
+                    "system",
+                    rootlight_ir::EntityKind::Parameter,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn nix_selected_sources_survive_noop_incremental_rebuild_and_restart() {
+        assert_nix_sources_survive_noop_incremental_rebuild_and_restart(
+            r#"{ system ? "portable" }@args: let settings = { identity = value: value; }; in { inherit system; result = settings.identity args; }"#,
+            9,
+            &[
+                (
+                    "settings",
+                    "settings",
+                    "settings",
+                    rootlight_ir::EntityKind::Variable,
+                ),
+                (
+                    "identity",
                     "identity",
                     "identity",
                     rootlight_ir::EntityKind::Function,

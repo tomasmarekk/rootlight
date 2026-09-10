@@ -1,5 +1,5 @@
-//! Source-proven Nix lexical identities over parser-independent captures.
-//! Binding identities do not evaluate attributes, imports or callable values;
+//! Source-proven Nix lexical and attribute identities over native captures.
+//! Written value flow does not execute imports or callable values;
 //! unavailable inner declarations must never expose an enclosing namesake.
 
 use std::borrow::Cow;
@@ -10,12 +10,15 @@ use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
 
+mod selections;
+
 pub(super) struct NixBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     attributes: crate::nix_attributes::Attributes,
     bindings: BTreeMap<(u64, Cow<'a, str>), Option<SymbolId>>,
     unmodeled_scopes: BTreeSet<u64>,
     maximum_name_bytes: usize,
+    selected: HashMap<u64, SymbolId>,
 }
 
 impl<'a> NixBindings<'a> {
@@ -38,6 +41,7 @@ impl<'a> NixBindings<'a> {
             bindings: BTreeMap::new(),
             unmodeled_scopes: BTreeSet::new(),
             maximum_name_bytes,
+            selected: HashMap::new(),
         };
         for fact in facts {
             cancellation.check()?;
@@ -50,6 +54,23 @@ impl<'a> NixBindings<'a> {
             .extend(result.attributes.unknown.iter().copied());
         for (&id, group) in &result.attributes.groups {
             cancellation.check()?;
+            if group.name == "__overrides"
+                && (result
+                    .attributes
+                    .groups
+                    .get(&group.parent)
+                    .is_some_and(|parent| parent.recursive)
+                    || result.facts.get(&group.parent).is_some_and(|parent| {
+                        matches!(
+                            parent.syntax_kind().as_str(),
+                            "nix.rec_attrset.scope" | "nix.bound_rec_attrset.scope"
+                        )
+                    }))
+            {
+                // Nix evaluates __overrides before exposing a recursive set's
+                // fields and can replace even its already-written lexical values.
+                result.unmodeled_scopes.insert(group.parent);
+            }
             if !group.valid {
                 result.unmodeled_scopes.insert(id);
             }
@@ -118,6 +139,7 @@ impl<'a> NixBindings<'a> {
                 .and_modify(|binding| *binding = None)
                 .or_insert_with(|| symbols.get(&fact.local_id()).copied());
         }
+        result.selected = selections::resolve(&result, source, symbols, cancellation)?;
         Ok(result)
     }
 
@@ -128,6 +150,9 @@ impl<'a> NixBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancellation.check()?;
+        if fact.syntax_kind().as_str() == "nix.selected_attribute.reference" {
+            return Ok(self.selected.get(&fact.local_id()).copied());
+        }
         if !matches!(
             fact.syntax_kind().as_str(),
             "nix.identifier.reference" | "nix.inherited_name.reference"
@@ -137,10 +162,23 @@ impl<'a> NixBindings<'a> {
         let Some(name) = static_binding_name(name, self.maximum_name_bytes, cancellation)? else {
             return Ok(None);
         };
+        self.lookup(
+            fact,
+            &name,
+            fact.syntax_kind().as_str() == "nix.inherited_name.reference",
+            cancellation,
+        )
+    }
+
+    fn lookup(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        inherited: bool,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SymbolId>, AdapterError> {
         let mut scope = self.nearest_boundary(fact.parent(), cancellation)?;
-        if fact.syntax_kind().as_str() == "nix.inherited_name.reference"
-            && let Some(owner) = scope
-        {
+        if inherited && let Some(owner) = scope {
             // Bare inherit reads the environment outside the containing set/let,
             // whereas inherit (expr) evaluates expr in the ordinary environment.
             scope = self.outer_boundary(owner, cancellation)?;
@@ -153,7 +191,7 @@ impl<'a> NixBindings<'a> {
             if self.unmodeled_scopes.contains(&current) {
                 return Ok(None);
             }
-            if let Some(binding) = self.bindings.get(&(current, Cow::Borrowed(name.as_ref()))) {
+            if let Some(binding) = self.bindings.get(&(current, Cow::Borrowed(name))) {
                 return Ok(*binding);
             }
             if self
@@ -424,6 +462,51 @@ mod tests {
         assert!(matches!(
             plan.resolve(&facts[4], "x", &cancellation),
             Err(AdapterError::Cancelled { .. }),
+        ));
+    }
+
+    #[test]
+    fn selected_capture_cycles_and_missing_owners_are_rejected() {
+        for parent in [7, 99] {
+            let captures = [fact(
+                7,
+                Some(parent),
+                "nix.selected_attribute.reference",
+                0,
+                1,
+            )];
+            assert!(matches!(
+                NixBindings::new(&captures, b"x", &HashMap::new(), 64, &Cancellation::new()),
+                Err(AdapterError::ProviderFailed { .. })
+            ));
+        }
+        for label in ["nix.selection.scope", "nix.attrset.scope"] {
+            let captures = [
+                fact(1, None, label, 0, 3),
+                fact(2, None, label, 0, 3),
+                fact(3, Some(1), "nix.selected_attribute.reference", 1, 2),
+            ];
+            assert!(matches!(
+                NixBindings::new(&captures, b"xxx", &HashMap::new(), 64, &Cancellation::new()),
+                Err(AdapterError::ProviderFailed { .. })
+            ));
+        }
+        let captures = [
+            fact(1, None, "nix.selection.scope", 0, 3),
+            fact(2, Some(1), "nix.selected_attribute.reference", 0, 1),
+            fact(3, Some(1), "nix.selected_attribute.reference", 0, 2),
+        ];
+        assert!(matches!(
+            NixBindings::new(&captures, b"xxx", &HashMap::new(), 64, &Cancellation::new()),
+            Err(AdapterError::ProviderFailed { .. })
+        ));
+        let bindings =
+            NixBindings::new(&[], b"", &HashMap::new(), 64, &Cancellation::new()).unwrap();
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            selections::resolve(&bindings, b"", &HashMap::new(), &cancellation),
+            Err(AdapterError::Cancelled { .. })
         ));
     }
 }

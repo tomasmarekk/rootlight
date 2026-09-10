@@ -62,6 +62,7 @@ pub(crate) enum StructuralRole {
     Module,
     Declaration,
     Signature,
+    Expression,
     Import,
     Scope,
     ScopeTrait,
@@ -85,6 +86,7 @@ impl StructuralRole {
             "module" => Some(Self::Module),
             "declaration" => Some(Self::Declaration),
             "signature" => Some(Self::Signature),
+            "expression" => Some(Self::Expression),
             "import" => Some(Self::Import),
             "scope" => Some(Self::Scope),
             "scope_trait" => Some(Self::ScopeTrait),
@@ -108,9 +110,11 @@ impl StructuralRole {
             Self::Root => SyntaxFactKind::Root,
             Self::Module => SyntaxFactKind::Module,
             Self::Declaration => SyntaxFactKind::Declaration,
-            Self::Signature | Self::ScopeTrait | Self::ScopeType | Self::TestAttribute => {
-                SyntaxFactKind::Signature
-            }
+            Self::Signature
+            | Self::Expression
+            | Self::ScopeTrait
+            | Self::ScopeType
+            | Self::TestAttribute => SyntaxFactKind::Signature,
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
             Self::Definition
@@ -130,6 +134,7 @@ impl StructuralRole {
             Self::Module => "module",
             Self::Declaration => "declaration",
             Self::Signature => "signature",
+            Self::Expression => "expression",
             Self::Import => "import",
             Self::Scope => "scope",
             Self::ScopeTrait => "scope_trait",
@@ -169,7 +174,7 @@ impl StructuralRole {
             Self::Call | Self::ScopedCall => 7,
             // A retained terminal name is safe only when its containing call
             // survived the same bounded extraction.
-            Self::CallName | Self::Reference => 8,
+            Self::CallName | Self::Reference | Self::Expression => 8,
             Self::Comment => 9,
             Self::StringLiteral => 10,
         }
@@ -358,7 +363,7 @@ impl QueryPack {
                 expected.extend(["definition_part", "scope_trait", "scope_type"]);
             }
             if family == GrammarFamily::Nix {
-                expected.push("definition_part");
+                expected.extend(["definition_part", "expression"]);
             }
             if supports_terminal_call_name(family) {
                 expected.push(TERMINAL_CALL_NAME_CAPTURE);
@@ -606,6 +611,9 @@ impl QueryPack {
                             continue;
                         };
                         capture.node = name;
+                    }
+                    if role == StructuralRole::Expression {
+                        capture.node = nix::expression_node(capture.node, input.cancellation)?;
                     }
                 }
                 if input.family == GrammarFamily::ObjectiveC
@@ -2055,7 +2063,7 @@ mod tests {
                     expected.extend(["definition_part", "scope_trait", "scope_type"]);
                 }
                 if family == GrammarFamily::Nix {
-                    expected.push("definition_part");
+                    expected.extend(["definition_part", "expression"]);
                 }
                 if supports_terminal_call_name(family) {
                     expected.push(TERMINAL_CALL_NAME_CAPTURE);

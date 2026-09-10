@@ -683,6 +683,19 @@ fn nix_static_path_search_keeps_dotted_keys_and_original_sources_distinct() {
     fixture.finish();
 }
 
+#[test]
+fn nix_selected_attributes_cross_mcp_with_exact_component_sources() {
+    assert_nix_lexical_relationship_sources(
+        r#"{ system ? "portable" }@args: let settings = { identity = value: value; }; in { inherit system; result = settings.identity args; }"#,
+        &[
+            ("settings", "variable", "settings"),
+            ("identity", "function", "identity"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
 fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &str)]) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);

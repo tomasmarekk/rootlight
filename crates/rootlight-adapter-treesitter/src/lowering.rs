@@ -938,19 +938,12 @@ fn preflight_lowering_limits(
                     limits,
                 )?;
             }
-            if matches!(
-                fact.syntax_kind().as_str(),
-                "nix.identifier.reference" | "nix.inherited_name.reference"
-            ) {
+            if let Some(detail) = nix_reference_gap(fact) {
                 if parse_output.report().coverage().status() == CoverageStatus::Complete {
                     lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 }
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
-                account_string(
-                    &mut string_bytes,
-                    "nix-lexical-binding-target-unavailable".len(),
-                    limits,
-                )?;
+                account_string(&mut string_bytes, detail.len(), limits)?;
             }
             if request.language().as_str() == "markdown"
                 && crate::markdown_bindings::is_reference(fact)
@@ -1587,17 +1580,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
-                if matches!(
-                    fact.syntax_kind().as_str(),
-                    "nix.identifier.reference" | "nix.inherited_name.reference"
-                ) && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                if let Some(detail) = nix_reference_gap(fact)
+                    && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
                 {
                     let region = skipped_region(
                         self.full_source,
                         fact.span(),
                         FactDomain::Relations,
                         SkippedRegionReason::UnsupportedConstruct,
-                        "nix-lexical-binding-target-unavailable",
+                        detail,
                         provenance_id,
                     )?;
                     skipped.insert(region.id, region);
@@ -4370,6 +4361,16 @@ fn comment_text(text: &str) -> Option<&str> {
         .trim_start_matches('#')
         .trim();
     (!text.is_empty()).then_some(text)
+}
+
+fn nix_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "nix.identifier.reference" | "nix.inherited_name.reference" => {
+            Some("nix-lexical-binding-target-unavailable")
+        }
+        "nix.selected_attribute.reference" => Some("nix-attribute-selection-target-unavailable"),
+        _ => None,
+    }
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {

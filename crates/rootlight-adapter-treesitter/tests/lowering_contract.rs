@@ -1297,6 +1297,126 @@ fn nix_quoted_lexical_relations_obey_the_same_preflight_quotas() {
     );
 }
 
+#[test]
+fn nix_selected_attribute_relations_reserve_existing_output_quotas() {
+    let nix = "({ value = 1; }).value";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(nix, "src/module.nix", b"nix-selection-quotas");
+    let facts: Vec<_> = [
+        (1, None, SyntaxFactKind::Root, nix, 0, 0, "nix.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            nix,
+            0,
+            1,
+            "nix.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            nix,
+            0,
+            2,
+            "nix.selection.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "{ value = 1; }",
+            0,
+            3,
+            "nix.attrset.scope",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Signature,
+            "{ value = 1; }",
+            0,
+            4,
+            "nix.selection_base_set.expression",
+        ),
+        (
+            6,
+            Some(4),
+            SyntaxFactKind::Declaration,
+            "value = 1;",
+            0,
+            4,
+            "nix.variable.declaration",
+        ),
+        (
+            7,
+            Some(6),
+            SyntaxFactKind::Occurrence,
+            "value",
+            0,
+            5,
+            "nix.binding_name.definition",
+        ),
+        (
+            8,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            3,
+            "nix.selected_attribute.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(nix, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect();
+    for host in ["nix", "markdown"] {
+        let language = LanguageId::new(host).unwrap();
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(IrLimits::default()),
+            facts.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+                .count(),
+            1
+        );
+        let mut ir = IrLimits::default();
+        ir.max_relations = 2;
+        let error = analyze_custom(&snapshot, &source, language, &limits(ir), facts.clone())
+            .expect_err("selected reference must be reserved before materialization");
+        assert!(
+            matches!(
+                error,
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: rootlight_adapter_sdk::ResourceKind::Records,
+                    observed: 3,
+                    limit: 2
+                })
+            ),
+            "{error:?}"
+        );
+    }
+}
+
 fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
     let (_temporary, snapshot, source) =
         source_fixture_for(nix, "src/module.nix", b"nix-lexical-quota-fixture");

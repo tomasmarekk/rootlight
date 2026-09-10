@@ -121,6 +121,28 @@ pub(super) fn syntax(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if role == StructuralRole::Expression {
+        let mut outer = node;
+        while let Some(parent) = outer.parent()
+            && parent.kind() == "parenthesized_expression"
+        {
+            cancellation.check()?;
+            outer = parent;
+        }
+        let binding = outer
+            .parent()
+            .is_some_and(|parent| parent.kind() == "binding");
+        return Ok(Some(match (binding, node.kind()) {
+            (true, "variable_expression") => "nix.binding_value_variable",
+            (true, "attrset_expression" | "rec_attrset_expression") => "nix.binding_value_set",
+            (true, "select_expression") => "nix.binding_value_selection",
+            (true, _) => "nix.binding_value_unknown",
+            (false, "variable_expression") => "nix.selection_base_variable",
+            (false, "attrset_expression" | "rec_attrset_expression") => "nix.selection_base_set",
+            (false, "select_expression") => "nix.selection_base_selection",
+            (false, _) => "nix.selection_base_unknown",
+        }));
+    }
     if role == StructuralRole::DefinitionPart {
         return Ok(Some(if static_name(node, source, cancellation)? {
             "nix.path_segment"
@@ -165,7 +187,14 @@ pub(super) fn syntax(
     }
     Ok(Some(match (role, node.kind()) {
         (StructuralRole::Reference, "identifier" | "string_expression" | "interpolation") => {
-            "nix.inherited_name"
+            if node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "attrpath")
+            {
+                "nix.selected_attribute"
+            } else {
+                "nix.inherited_name"
+            }
         }
         (StructuralRole::Signature, _) => "nix.function_header",
         (StructuralRole::Call, _) => "nix.call",
@@ -181,7 +210,7 @@ pub(super) fn syntax(
         (_, "rec_attrset_expression" | "let_attrset_expression") => "nix.rec_attrset",
         (_, "with_expression") => "nix.with",
         (_, "variable_expression") => "nix.identifier",
-        (_, "select_expression") => "nix.member_name",
+        (_, "select_expression") => "nix.selection",
         (_, "comment") => "nix.comment",
         (_, "string_expression" | "indented_string_expression") => "nix.string",
         (_, "path_expression" | "hpath_expression" | "spath_expression" | "uri_expression") => {
@@ -189,6 +218,20 @@ pub(super) fn syntax(
         }
         _ => return Ok(None),
     }))
+}
+
+pub(super) fn expression_node<'tree>(
+    mut node: Node<'tree>,
+    cancellation: &Cancellation,
+) -> Result<Node<'tree>, AdapterError> {
+    while node.kind() == "parenthesized_expression" {
+        cancellation.check()?;
+        let Some(inner) = node.child_by_field_name("expression") else {
+            break;
+        };
+        node = inner;
+    }
+    Ok(node)
 }
 
 pub(super) fn signature_range(node: Node<'_>) -> Option<std::ops::Range<usize>> {
