@@ -80,6 +80,16 @@ pub(super) fn syntax(
             return Ok(Some("perl.statement"));
         }
         match node.kind() {
+            "package_statement" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    cancellation.check()?;
+                    if child.kind() == "block" {
+                        return Ok(Some("perl.package_block"));
+                    }
+                }
+                return Ok(Some("perl.package_switch"));
+            }
             "expression_statement" => return Ok(Some("perl.statement")),
             "for_statement" => {
                 return Ok(Some(match declaration_keyword(node, cancellation)? {

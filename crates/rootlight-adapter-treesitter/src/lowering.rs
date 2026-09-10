@@ -6,6 +6,7 @@
 mod embedded;
 mod matlab;
 mod nix_paths;
+mod perl;
 mod toml;
 mod yaml;
 
@@ -1300,6 +1301,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.parse_output.facts(),
                 self.request.source().bytes(),
                 &symbols,
+                &entity_plan
+                    .perl
+                    .aliases
+                    .iter()
+                    .filter_map(|(&definition, declaration)| {
+                        materialized
+                            .get(declaration)
+                            .map(|entity| (definition, entity.record.id))
+                    })
+                    .collect(),
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
             )?)
@@ -1623,6 +1634,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(target) = entity_plan
+                    .perl
+                    .references
+                    .get(&fact.local_id())
+                    .and_then(|local| materialized.get(local))
+                {
+                    occurrence.target = OccurrenceTarget::Resolved {
+                        symbol: target.record.id,
+                    };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, target.record.id)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(target) = entity_plan
@@ -2736,6 +2761,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
             &matlab_scope_names,
             cancellation,
         )?;
+        let perl = perl::resolve(
+            self.parse_output.facts(),
+            self.source_text,
+            &mut drafts,
+            self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+            total_string_bytes,
+            self.request.limits().ir(),
+            cancellation,
+        )?;
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -2756,6 +2790,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            perl,
             matlab,
             drafts,
             nix_path_gaps,
@@ -2899,6 +2934,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    perl: perl::Plan,
     matlab: matlab::Plan,
     nix_path_gaps: BTreeSet<u64>,
     drafts: Vec<EntityDraft>,
@@ -3367,6 +3403,9 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "perl.function.declaration" => {
+            Some((FactDomain::Entities, "perl-function-ownership-unavailable"))
+        }
         "nix.file.module" => Some((
             FactDomain::Relations,
             "nix-attribute-import-and-runtime-binding-resolution-unavailable",

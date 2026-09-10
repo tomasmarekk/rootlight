@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/94";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/95";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23650,6 +23650,21 @@ mod tests {
 
     #[test]
     fn perl_declarations_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n",
+            4,
+        );
+    }
+
+    #[test]
+    fn perl_package_aliases_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package Harbor; our $value = 0 + 1; package Cove; print $value, $Harbor::value;\n",
+            3,
+        );
+    }
+
+    fn assert_perl_durable_sources(source: &str, declaration_count: usize) {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
         let storage = durable_test_tempdir();
@@ -23658,8 +23673,6 @@ mod tests {
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let path = fixture.path().join("measure.pm");
-        let source =
-            "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n";
         fs::write(&path, source).unwrap();
         fs::write(
             fixture.path().join("companion.rs"),
@@ -23719,7 +23732,7 @@ mod tests {
                     entity.language == "perl" && entity.kind != rootlight_ir::EntityKind::Module
                 })
                 .collect();
-            assert_eq!(declarations.len(), 4);
+            assert_eq!(declarations.len(), declaration_count);
             let ids: BTreeSet<_> = declarations.iter().map(|entity| entity.id).collect();
             if let Some(previous) = &prior_ids {
                 assert_eq!(&ids, previous);
@@ -23779,12 +23792,31 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, entity.canonical_name.as_bytes());
             }
-            assert!(
-                document
-                    .skipped_regions
+            for package_reference in document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "perl.package_context.reference")
+            {
+                let span = package_reference.source.span();
+                let name = expected
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                let package = document
+                    .entities
                     .iter()
-                    .any(|gap| gap.detail == "perl-package-ownership-unavailable")
-            );
+                    .find(|entity| {
+                        entity.canonical_name == name
+                            && entity.kind == rootlight_ir::EntityKind::Namespace
+                    })
+                    .unwrap();
+                assert_eq!(
+                    package_reference.target,
+                    OccurrenceTarget::Resolved { symbol: package.id }
+                );
+            }
             let reads: Vec<_> = document
                 .occurrences
                 .iter()

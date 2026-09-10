@@ -1,5 +1,5 @@
 //! Perl lexical pads derived from native declaration and statement scopes.
-//! Source identities describe bindings, not runtime values or package aliases;
+//! Package aliases use identities proved by the package-ownership pass;
 //! unavailable inner identities still prevent fallback to an outer namesake.
 
 use std::{
@@ -14,6 +14,7 @@ use rootlight_ids::SymbolId;
 #[derive(Clone, Copy)]
 struct Binding {
     visible_from: u64,
+    immediate_from: Option<u64>,
     symbol: Option<SymbolId>,
 }
 
@@ -29,6 +30,7 @@ impl<'a> PerlBindings<'a> {
         facts: &'a [SyntaxFact],
         source: &'a [u8],
         symbols: &HashMap<u64, SymbolId>,
+        package_symbols: &HashMap<u64, SymbolId>,
         maximum_name_bytes: usize,
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
@@ -68,6 +70,7 @@ impl<'a> PerlBindings<'a> {
                     .or_default()
                     .push(Binding {
                         visible_from: fact.span().start_byte(),
+                        immediate_from: None,
                         symbol: None,
                     });
             }
@@ -91,9 +94,11 @@ impl<'a> PerlBindings<'a> {
                 .or_default()
                 .push(Binding {
                     visible_from,
-                    symbol: lexical
-                        .then(|| symbols.get(&fact.local_id()).copied())
-                        .flatten(),
+                    immediate_from: (!lexical && package_symbols.contains_key(&fact.local_id()))
+                        .then_some(fact.span().end_byte()),
+                    symbol: if lexical { symbols } else { package_symbols }
+                        .get(&fact.local_id())
+                        .copied(),
                 });
         }
         for bindings in result.bindings.values_mut() {
@@ -131,6 +136,8 @@ impl<'a> PerlBindings<'a> {
             return Ok(None);
         }
         let mut scope = self.nearest_scope(fact.parent(), cancellation)?;
+        let mut immediate = None;
+        let mut ambiguous_immediate = false;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
             let Some(id) = scope else {
@@ -150,12 +157,25 @@ impl<'a> PerlBindings<'a> {
                     }
                     return Ok(binding.symbol);
                 }
+                // our exempts later reads in its own statement from strict vars,
+                // but only when no previously visible binding is found outside.
+                for binding in bindings.iter().skip(after) {
+                    cancellation.check()?;
+                    if binding
+                        .immediate_from
+                        .is_some_and(|start| start <= fact.span().start_byte())
+                        && let Some(symbol) = binding.symbol
+                    {
+                        ambiguous_immediate |= immediate.is_some_and(|prior| prior != symbol);
+                        immediate = Some(symbol);
+                    }
+                }
             }
             let owner = self.fact(id)?;
-            if matches!(
-                owner.syntax_kind().as_str(),
-                "perl.file.scope" | "perl.unsupported_context.scope"
-            ) {
+            if owner.syntax_kind().as_str() == "perl.file.scope" {
+                return Ok((!ambiguous_immediate).then_some(immediate).flatten());
+            }
+            if owner.syntax_kind().as_str() == "perl.unsupported_context.scope" {
                 return Ok(None);
             }
             scope = self.nearest_scope(owner.parent(), cancellation)?;
@@ -184,7 +204,8 @@ impl<'a> PerlBindings<'a> {
                 }
                 "perl.lexical_variable.declaration" => lexical = Some(true),
                 "perl.package_variable.declaration" | "perl.field.declaration" => {
-                    // Package aliases and fields do not have proven lexical targets.
+                    // Package identities come from the separate ownership pass;
+                    // fields still block a guessed outer lexical target.
                     lexical = Some(false);
                 }
                 "perl.statement.scope" if lexical.is_some() => {
@@ -237,12 +258,13 @@ impl<'a> PerlBindings<'a> {
     }
 }
 
-fn is_scope(fact: &SyntaxFact) -> bool {
+pub(super) fn is_scope(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Scope
         && matches!(
             fact.syntax_kind().as_str(),
             "perl.file.scope"
                 | "perl.block.scope"
+                | "perl.package_block.scope"
                 | "perl.function.scope"
                 | "perl.method.scope"
                 | "perl.lambda.scope"
@@ -343,9 +365,15 @@ mod tests {
         let symbol = SymbolId::from_bytes([9; 20]);
         for symbols in [HashMap::from([(4, symbol)]), HashMap::new()] {
             for _ in 0..2 {
-                let plan =
-                    PerlBindings::new(&facts, b"my $x=1; $x;", &symbols, 64, &Cancellation::new())
-                        .unwrap();
+                let plan = PerlBindings::new(
+                    &facts,
+                    b"my $x=1; $x;",
+                    &symbols,
+                    &HashMap::new(),
+                    64,
+                    &Cancellation::new(),
+                )
+                .unwrap();
                 let reference = facts.iter().find(|fact| fact.local_id() == 5).unwrap();
                 assert_eq!(
                     plan.resolve(reference, "$x", &Cancellation::new()).unwrap(),
@@ -373,6 +401,7 @@ mod tests {
                     &facts,
                     b"my $x=1; $x;",
                     &HashMap::new(),
+                    &HashMap::new(),
                     64,
                     &Cancellation::new()
                 ),
@@ -386,13 +415,14 @@ mod tests {
         let cancelled = Cancellation::new();
         cancelled.cancel(CancellationReason::ClientRequest);
         assert!(matches!(
-            PerlBindings::new(&[], b"", &HashMap::new(), 64, &cancelled),
+            PerlBindings::new(&[], b"", &HashMap::new(), &HashMap::new(), 64, &cancelled),
             Err(AdapterError::Cancelled { .. })
         ));
         let facts = facts();
         let plan = PerlBindings::new(
             &facts,
             b"my $x=1; $x;",
+            &HashMap::new(),
             &HashMap::new(),
             64,
             &Cancellation::new(),

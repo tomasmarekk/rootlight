@@ -627,6 +627,18 @@ fn perl_lexical_relationships_cross_mcp_with_exact_read_sources() {
 }
 
 #[test]
+fn perl_package_relationships_cross_mcp_with_exact_read_sources() {
+    for written in ["$value", "$Harbor::value"] {
+        assert_lexical_relationship_sources(
+            "perl",
+            "measure.pm",
+            &format!("package Harbor; our $value = 7; package Cove; print {written};\n"),
+            &[("$value", "variable", written)],
+        );
+    }
+}
+
+#[test]
 fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
     assert_relationship_sources(
         "matlab",

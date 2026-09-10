@@ -66,6 +66,15 @@ fn assert_definitions_exact(result: &AnalysisOutput, source: &str) {
 }
 
 fn assert_binding_targets(source: &str, name: &str, targets: &[Option<usize>]) {
+    assert_named_binding_targets(source, name, name, targets);
+}
+
+fn assert_named_binding_targets(
+    source: &str,
+    name: &str,
+    definition_name: &str,
+    targets: &[Option<usize>],
+) {
     let result = output(source);
     let document = result.document();
     let mut definitions: Vec<_> = document
@@ -76,7 +85,7 @@ fn assert_binding_targets(source: &str, name: &str, targets: &[Option<usize>]) {
                 && source.get(
                     usize::try_from(site.source.span().start_byte()).unwrap()
                         ..usize::try_from(site.source.span().end_byte()).unwrap(),
-                ) == Some(name)
+                ) == Some(definition_name)
         })
         .collect();
     definitions.sort_by_key(|site| site.source.span().start_byte());
@@ -167,11 +176,11 @@ fn perl_native_signatures_and_closures_preserve_lexical_ownership() {
 }
 
 #[test]
-fn perl_native_package_aliases_block_unproven_outer_lexical_targets() {
+fn perl_native_package_aliases_shadow_outer_lexical_targets() {
     assert_binding_targets(
         "my $value = 1; { our $value; print $value; } print $value;\n",
         "$value",
-        &[None, Some(0)],
+        &[Some(1), Some(0)],
     );
 }
 
@@ -181,9 +190,102 @@ fn perl_native_our_initializer_retains_previous_lexical_reads() {
     assert_binding_targets(
         source,
         "$value",
-        &[Some(0), Some(0), Some(0), None, Some(0)],
+        &[Some(0), Some(0), Some(0), Some(1), Some(0)],
     );
-    assert_binding_targets(source, "$Harbor::value", &[None]);
+    assert_named_binding_targets(source, "$Harbor::value", "$value", &[Some(1)]);
+}
+
+#[test]
+fn perl_native_our_initializer_preserves_previous_alias_or_uses_immediate_alias() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/alias_initializer.pl");
+    assert_binding_targets(
+        source,
+        "$value",
+        &[Some(0), Some(0), Some(0), Some(1), Some(0)],
+    );
+    assert_named_binding_targets(source, "$Cove::value", "$value", &[Some(1)]);
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/immediate_initializer.pl");
+    assert_binding_targets(source, "$value", &[Some(0), Some(0)]);
+    assert_named_binding_targets(source, "$main::value", "$value", &[Some(0)]);
+}
+
+#[test]
+fn perl_native_package_variables_keep_aliases_across_package_switches() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/alias_switch.pl");
+    assert_binding_targets(source, "$value", &[Some(0), Some(0), Some(0)]);
+    assert_named_binding_targets(source, "$Harbor::value", "$value", &[Some(0), Some(0)]);
+}
+
+#[test]
+fn perl_native_package_variables_share_reopened_storage_and_keep_all_sites() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/package_reopening.pl");
+    assert_binding_targets(source, "$value", &[Some(0), Some(0), Some(0)]);
+    assert_named_binding_targets(source, "$Harbor::value", "$value", &[Some(0)]);
+    let result = output(source);
+    let document = result.document();
+    for name in ["Harbor", "$value"] {
+        let entities: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), 1, "{name}: {entities:#?}");
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: entities[0].id,
+                        }
+            })
+            .collect();
+        assert_eq!(definitions.len(), 2, "{name}: {definitions:#?}");
+        for site in definitions {
+            let span = site.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+            assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn perl_native_package_variables_keep_qualified_names_and_block_restoration() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/qualified_names.pl");
+    assert_binding_targets(source, "$value", &[Some(1), Some(1), Some(0)]);
+    assert_named_binding_targets(source, "$Harbor::value", "$value", &[Some(0), Some(0)]);
+    assert_named_binding_targets(
+        source,
+        "$Cove::value",
+        "$value",
+        &[Some(1), Some(1), Some(1)],
+    );
+    let result = output(source);
+    let variables: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "$value")
+        .collect();
+    assert_eq!(variables.len(), 2);
+    assert_ne!(variables[0].id, variables[1].id);
+    assert!(
+        variables
+            .iter()
+            .any(|entity| entity.qualified_name.ends_with("Harbor::$value"))
+    );
+    assert!(
+        variables
+            .iter()
+            .any(|entity| entity.qualified_name.ends_with("Cove::$value"))
+    );
 }
 
 #[test]
@@ -236,12 +338,10 @@ fn perl_native_runtime_oracle_sources_keep_exact_lexical_targets() {
     ] {
         assert_binding_targets(source, "$value", &targets);
     }
-    // The runtime proves a package target here; lexical analysis must not
-    // misrepresent the written our alias as a resolved package-owned symbol.
     assert_binding_targets(
         include_str!("../../../../tests/fixtures/perl-bindings/package_alias.pl"),
         "$value",
-        &[None, None, None],
+        &[Some(0), Some(0), Some(0)],
     );
 }
 
@@ -400,10 +500,8 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
         "package Measure; use Library; sub helper { 1 } our $value = helper(); $value->method();\n";
     let result = output(source);
     for detail in [
-        "perl-package-ownership-unavailable",
         "perl-import-target-unavailable",
         "perl-function-target-unavailable",
-        "perl-binding-target-unavailable",
         "perl-method-target-unavailable",
     ] {
         assert!(
@@ -427,13 +525,53 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
             .iter()
             .any(|edge| edge.predicate == RelationPredicate::Calls)
     );
-    assert!(
-        result
+    for kind in [
+        "perl.identifier.reference",
+        "perl.function_name.reference",
+        "perl.method_application.reference",
+    ] {
+        let sites: Vec<_> = result
             .document()
             .occurrences
             .iter()
-            .filter(|site| site.syntax_kind.ends_with(".reference"))
-            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+            .filter(|site| site.syntax_kind == kind)
+            .collect();
+        assert_eq!(sites.len(), 1, "{kind}");
+        assert!(matches!(
+            sites[0].target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+    assert_binding_targets(source, "$value", &[Some(0)]);
+    assert_binding_targets("print $Unknown::value;\n", "$Unknown::value", &[None]);
+}
+
+#[test]
+fn perl_native_function_ownership_gap_stays_scoped_after_package_resolution() {
+    let result = output(PERL.source);
+    let document = result.document();
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference)
+            .all(|site| matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function)
+        .unwrap();
+    let gap = document
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "perl-function-ownership-unavailable")
+        .expect("source-backed declarations do not prove package or lexical function ownership");
+    assert_eq!(gap.domain, FactDomain::Entities);
+    assert_eq!(Some(&gap.source), function.evidence.source.as_ref());
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
     );
 }
 

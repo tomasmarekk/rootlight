@@ -1,7 +1,7 @@
 ; Perl written declarations retain native names and source extents.
 ; Package ownership and reference resolution require a separate binding pass.
 (source_file) @root @module @scope
-(package_statement name: (package) @definition) @declaration
+(package_statement name: (package) @definition) @declaration @scope
 (class_statement name: (package) @definition) @declaration
 (role_statement name: (package) @definition) @declaration
 (subroutine_declaration_statement name: (bareword) @definition) @declaration @scope @signature
