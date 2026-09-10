@@ -1406,7 +1406,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 )?;
                 skipped.insert(region.id, region);
             }
-            if let Some((domain, detail)) = source_coverage_gap(fact) {
+            if let Some((domain, detail)) = source_coverage_gap(fact)
+                && !(entity_plan.perl.owned_functions.contains(&fact.local_id())
+                    && materialized.contains_key(&fact.local_id()))
+            {
                 let reason = match fact.syntax_kind().as_str() {
                     "html.embedded_limit.signature"
                     | "astro.embedded_limit.signature"
@@ -1645,9 +1648,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved {
                         symbol: target.record.id,
                     };
+                    let is_call = entity_plan.perl.calls.contains(&fact.local_id());
+                    if is_call {
+                        occurrence.role = OccurrenceRole::CallSite;
+                    }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
-                    let relation = lexical_reference_relation(&occurrence, target.record.id)?;
+                    let mut relation = lexical_reference_relation(&occurrence, target.record.id)?;
+                    if is_call {
+                        relation.predicate = RelationPredicate::Calls;
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+                    }
                     relations.insert(relation.id, relation);
                 }
                 if let Some(target) = entity_plan
@@ -4524,9 +4536,21 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "perl.hash_container.reference"
         | "perl.array_length.reference"
         | "perl.dynamic_container.reference" => Some("perl-binding-target-unavailable"),
-        "perl.function_name.reference" => Some("perl-function-target-unavailable"),
+        "perl.function_name.reference"
+        | "perl.static_function_name.reference"
+        | "perl.bare_function_name.reference"
+        | "perl.builtin_function_name.reference"
+        | "perl.importable_function_name.reference"
+        | "perl.amper_function_name.reference"
+        | "perl.code_function_name.reference"
+        | "perl.coderef_application.reference" => Some("perl-function-target-unavailable"),
         "perl.method_application.reference" => Some("perl-method-target-unavailable"),
-        "perl.identifier.reference" => Some("perl-import-target-unavailable"),
+        "perl.identifier.reference" | "perl.module_name.reference" => {
+            Some("perl-import-target-unavailable")
+        }
+        "perl.subs_import.reference" | "perl.subs_word_list.reference" => {
+            Some("perl-import-target-unavailable")
+        }
         "perl.package_context.reference" => Some("perl-package-ownership-unavailable"),
         "matlab.member_name.reference" => Some("matlab-member-target-unavailable"),
         "matlab.function_handle_name.reference"

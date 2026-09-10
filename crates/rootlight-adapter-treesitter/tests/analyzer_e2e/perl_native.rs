@@ -26,6 +26,695 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+fn assert_function_calls(source: &str, expected: &[(&str, Option<usize>)]) {
+    let sites: Vec<_> = expected
+        .iter()
+        .map(|&(name, target)| (name, target, OccurrenceRole::CallSite))
+        .collect();
+    assert_function_sites(source, &sites);
+}
+
+fn assert_function_sites(source: &str, expected: &[(&str, Option<usize>, OccurrenceRole)]) {
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document.occurrences.iter().filter(|site| {
+        site.role == OccurrenceRole::Definition && matches!(site.target,
+            OccurrenceTarget::Resolved { symbol } if document.entities.iter().any(|entity| entity.id == symbol && entity.kind == EntityKind::Function))
+    }).collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    let written = |site: &rootlight_ir::OccurrenceRecord| {
+        let span = site.source.span();
+        source
+            .get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap(),
+            )
+            .unwrap()
+    };
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.role,
+                OccurrenceRole::Reference | OccurrenceRole::CallSite
+            ) && site.syntax_kind.ends_with("function_name.reference")
+                && expected.iter().any(|(name, _, _)| *name == written(site))
+        })
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), expected.len(), "{calls:#?}");
+    for (site, &(name, target, role)) in calls.into_iter().zip(expected) {
+        assert_eq!(written(site), name);
+        assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+        if let Some(target) = target {
+            assert_eq!(
+                site.target,
+                definitions[target].target,
+                "{name} at {}",
+                site.source.span().start_byte()
+            );
+            assert_eq!(site.role, role);
+            let predicate = if role == OccurrenceRole::CallSite {
+                RelationPredicate::Calls
+            } else {
+                RelationPredicate::RefersTo
+            };
+            let edges: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.predicate == predicate
+                })
+                .collect();
+            assert_eq!(edges.len(), 1);
+            let OccurrenceTarget::Resolved { symbol } = definitions[target].target else {
+                panic!("definition is unresolved")
+            };
+            assert_eq!(edges[0].object, RelationEndpoint::Entity(symbol));
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+            assert!(!document.relations.iter().any(|edge| edge.subject
+                == RelationEndpoint::Occurrence(site.id)
+                && edge.predicate
+                    == if predicate == RelationPredicate::Calls {
+                        RelationPredicate::RefersTo
+                    } else {
+                        RelationPredicate::Calls
+                    }));
+        } else {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        }
+    }
+}
+
+#[test]
+fn perl_native_root_package_aliases_share_namespaces_variables_and_calls() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_package_aliases.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("value", Some(0)),
+            ("::Cove::value", Some(0)),
+            ("Cove::other", Some(1)),
+            ("main::Cove::other", Some(1)),
+            ("::Cove::other", Some(1)),
+        ],
+    );
+    for name in [
+        "$value",
+        "$Cove::value",
+        "$main::Cove::value",
+        "$::Cove::value",
+    ] {
+        assert_named_binding_targets(source, name, "$value", &[Some(0)]);
+    }
+    let result = output(source);
+    let namespaces: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Namespace)
+        .collect();
+    assert_eq!(namespaces.len(), 2);
+    assert!(
+        namespaces
+            .iter()
+            .any(|entity| entity.canonical_name == "Cove")
+    );
+    assert_eq!(
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Function)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn perl_native_root_package_aliases_preserve_non_root_main_components() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_repeated_root_aliases.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("main::main::Cove::value", Some(0)),
+            ("::main::Cove::value", Some(0)),
+            ("Cove::main::value", Some(1)),
+        ],
+    );
+    assert_named_binding_targets(source, "$main::main::Cove::value", "$value", &[Some(0)]);
+    let result = output(source);
+    assert_eq!(
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Function)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn perl_native_root_package_aliases_do_not_erase_empty_stash_components() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_empty_components.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("::::Cove::value", None),
+            ("main::::Cove::value", None),
+            ("Cove::value", Some(0)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_root_package_aliases_keep_definition_sources_and_replay() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_package_aliases.pl");
+    let result = output(source);
+    let mut sites: Vec<_> = result.document().occurrences.iter().filter(|site| {
+        site.role == OccurrenceRole::Definition && matches!(site.target,
+            OccurrenceTarget::Resolved { symbol } if result.document().entities.iter().any(|entity| entity.id == symbol && entity.kind == EntityKind::Namespace))
+    }).collect();
+    sites.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(sites.len(), 3);
+    assert_eq!(sites[0].target, sites[1].target);
+    assert_ne!(sites[0].target, sites[2].target);
+    for (site, name) in sites.iter().zip(["Cove", "main::Cove", "main"]) {
+        assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+        let span = site.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+    assert_perl_artifact_replay(source);
+}
+
+#[test]
+fn perl_native_function_calls_qualified_declarations_select_written_storage() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/qualified_declaration.pl");
+    assert_function_calls(source, &[("Cove::value", Some(0))]);
+    let result = output(source);
+    let function = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function)
+        .unwrap();
+    let signatures: Vec<_> = result
+        .document()
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+        .filter_map(|extension| {
+            let evidence = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+            (evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                && evidence.subject() == rootlight_ir::FactRef::Entity(function.id))
+            .then_some(evidence)
+        })
+        .collect();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(signatures[0].text(), "sub Cove::value");
+}
+
+#[test]
+fn perl_native_function_calls_qualified_forward_keeps_ambient_body_package() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/qualified_forward_body.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("value", Some(1)),
+            ("Cove::value", Some(0)),
+            ("value", Some(0)),
+        ],
+    );
+    let result = output(source);
+    let functions: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 2);
+    let mut definitions: Vec<_> = result.document().occurrences.iter().filter(|site| {
+        site.role == OccurrenceRole::Definition
+            && matches!(site.target, OccurrenceTarget::Resolved { symbol } if functions.iter().any(|entity| entity.id == symbol))
+    }).collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 3);
+    assert_eq!(definitions[0].target, definitions[2].target);
+    assert_ne!(definitions[0].target, definitions[1].target);
+    for (site, written) in definitions.iter().zip(["value", "value", "Cove::value"]) {
+        assert_eq!(site.syntactic_text_hash, content_hash(written.as_bytes()));
+        let span = site.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+    }
+}
+
+#[test]
+fn perl_native_function_calls_qualified_domains_do_not_collide() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_storage_domains.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("Cove::value", Some(0)),
+            ("Reef::value", Some(1)),
+            ("::value", Some(2)),
+            ("main::value", Some(2)),
+        ],
+    );
+    let result = output(source);
+    let functions: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 3);
+    assert_eq!(
+        functions
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+    assert!(
+        functions
+            .iter()
+            .all(|entity| entity.canonical_name == "value")
+    );
+    for prefix in ["Cove::value", "Reef::value"] {
+        assert!(
+            functions
+                .iter()
+                .any(|entity| entity.qualified_name == prefix)
+        );
+    }
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "perl-function-ownership-unavailable")
+    );
+}
+
+#[test]
+fn perl_native_qualified_storage_ids_survive_body_edits_and_replay() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/qualified_storage_domains.pl");
+    let before = output(source);
+    let after = output(&source.replace("{ 13 }", "{ 1300 }"));
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(identities(&before), identities(&after));
+    assert_perl_artifact_replay(source);
+}
+
+#[test]
+fn perl_native_function_calls_bare_names_follow_lexical_declarations() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/bare_calls.pl"),
+        &[("value", Some(0)), ("value", Some(1))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_bare_positions_exclude_autoquoted_keys() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/bareword_positions_bounded.pl");
+    assert_function_calls(
+        source,
+        &[
+            ("value", Some(0)),
+            ("value", Some(0)),
+            ("value", Some(0)),
+            ("value", Some(1)),
+            ("value", Some(1)),
+            ("value", Some(1)),
+            ("increment", Some(2)),
+        ],
+    );
+    let result = output(source);
+    for key in ["value =>", "{value}"] {
+        let offset = source.find(key).unwrap() + usize::from(key.starts_with('{'));
+        assert!(!result.document().occurrences.iter().any(|site| {
+            site.source.span().start_byte() == u64::try_from(offset).unwrap()
+                && matches!(
+                    site.role,
+                    OccurrenceRole::Reference | OccurrenceRole::CallSite
+                )
+        }));
+    }
+}
+
+#[test]
+fn perl_native_function_calls_bare_names_require_prior_package_evidence() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/bare_binding_order.pl"),
+        &[
+            ("value", None),
+            ("value", Some(0)),
+            ("value", None),
+            ("value", Some(0)),
+        ],
+    );
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/bare_import_forward.pl"),
+        &[("value", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_bare_invocants_follow_compile_position() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/bare_invocant_order.pl"),
+        &[("value", None), ("value", Some(2)), ("value", Some(2))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_bare_require_is_not_a_callable_use() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/bare_require_name.pl");
+    let result = output(source);
+    let sites: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "perl.module_name.reference")
+        .collect();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].syntactic_text_hash, content_hash(b"value"));
+    assert!(matches!(
+        sites[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(!result.document().relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(sites[0].id)
+            && edge.predicate == RelationPredicate::Calls
+    }));
+    assert!(result.document().skipped_regions.iter().any(|gap| {
+        gap.source == sites[0].source && gap.detail == "perl-import-target-unavailable"
+    }));
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/bare_require_grouping.pl"),
+        &[("value", Some(0)), ("value", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_ampersands_distinguish_code_references() {
+    assert_function_sites(
+        include_str!("../../../../tests/fixtures/perl-bindings/amper_and_reference.pl"),
+        &[
+            ("&value", Some(1), OccurrenceRole::CallSite),
+            ("&value", Some(1), OccurrenceRole::CallSite),
+            ("&value", Some(1), OccurrenceRole::Reference),
+            ("&value", Some(0), OccurrenceRole::CallSite),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_ampersands_reject_dynamic_targets() {
+    let source =
+        "sub value { 13 } &value(); &$value(); &{\"value\"}(); my $ref = \\&value; $ref->();\n";
+    assert_function_sites(
+        source,
+        &[
+            ("&value", Some(0), OccurrenceRole::CallSite),
+            ("&$value", None, OccurrenceRole::CallSite),
+            ("&{\"value\"}", None, OccurrenceRole::CallSite),
+            ("&value", Some(0), OccurrenceRole::Reference),
+        ],
+    );
+    let result = output(source);
+    let document = result.document();
+    let invocation = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "perl.coderef_application.reference")
+        .unwrap();
+    assert!(matches!(
+        invocation.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(invocation.syntactic_text_hash, content_hash(b"$ref->()"));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "perl-function-target-unavailable"
+                && gap.source == invocation.source)
+    );
+    assert!(!document.relations.iter().any(|edge| edge.subject
+        == RelationEndpoint::Occurrence(invocation.id)
+        && edge.predicate == RelationPredicate::Calls));
+}
+
+#[test]
+fn perl_native_function_calls_grouped_imports() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/grouped_subs_import.pl"),
+        &[("length", Some(0)), ("reverse", Some(1))],
+    );
+    for prefix in [
+        "use subs ((('length')), ('reverse'));",
+        "use subs (qw(length reverse));",
+        "use subs ('length', (qw(reverse)));",
+    ] {
+        let source = format!(
+            "{prefix} sub length {{ 29 }} sub reverse {{ 41 }} length('abc'); reverse 'abc';\n"
+        );
+        assert_function_calls(&source, &[("length", Some(0)), ("reverse", Some(1))]);
+    }
+}
+
+#[test]
+fn perl_native_function_calls_grouped_imports_reject_expression_boundaries() {
+    for prefix in [
+        "no subs ('length', 'reverse');",
+        "use Other ('length', 'reverse');",
+        "use subs (['length', 'reverse']);",
+        "use subs (('length' . 'extra'), ('reverse' . 'extra'));",
+        "use subs ($condition ? 'length' : 'reverse');",
+        "use subs (helper('length', 'reverse'));",
+        "use subs (qw(leng\\th rev\\erse));",
+        "use subs (\"$length\", \"$reverse\");",
+    ] {
+        let source = format!(
+            "{prefix} sub length {{ 29 }} sub reverse {{ 41 }} length('abc'); reverse 'abc';\n"
+        );
+        assert_function_calls(&source, &[("length", None), ("reverse", None)]);
+    }
+    assert_function_calls(
+        "sub length { 29 } length('abc'); use subs ('length'); length('abc');\n",
+        &[("length", None), ("length", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_imported_word_list() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/builtin_import_list.pl"),
+        &[("length", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_imported_list_operator() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/builtin_list_operator.pl"),
+        &[("reverse", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_imported_lists_reject_unproven_names() {
+    for prefix in [
+        "",
+        "no subs qw(length reverse);",
+        "use Other qw(length reverse);",
+        "use subs 'length reverse';",
+        "use subs 'reverse' . 'extra';",
+        "use subs qw(rev\\erse);",
+        "use subs $names;",
+    ] {
+        let source = format!(
+            "{prefix} sub length {{ 29 }} sub reverse {{ 41 }} length('abc'); reverse('abc'); reverse 'abc'; CORE::reverse('abc');\n"
+        );
+        assert_function_calls(
+            &source,
+            &[
+                ("length", None),
+                ("reverse", None),
+                ("reverse", None),
+                ("CORE::reverse", None),
+            ],
+        );
+    }
+    assert_function_calls(
+        "use subs qw( length\treverse\n); sub length { 29 } sub reverse { 41 } length('abc'); reverse('abc'); reverse 'abc'; CORE::reverse('abc');\n",
+        &[
+            ("length", Some(0)),
+            ("reverse", Some(1)),
+            ("reverse", Some(1)),
+            ("CORE::reverse", None),
+        ],
+    );
+    assert_function_calls(
+        "package North; use subs qw(reverse); sub reverse { 29 } package South; sub reverse { 41 } reverse('abc'); North::reverse('abc');\n",
+        &[("reverse", None), ("North::reverse", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_follow_package_context() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/package_functions.pl"),
+        &[
+            ("value", Some(0)),
+            ("value", Some(1)),
+            ("Harbor::value", Some(0)),
+            ("Cove::value", Some(1)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_require_exact_builtin_import_evidence() {
+    for prefix in [
+        "",
+        "no subs 'length';",
+        "use Other 'length';",
+        "use subs 'length extra';",
+    ] {
+        let source = format!("{prefix} sub length {{ 29 }} length('abc'); CORE::length('abc');\n");
+        assert_function_calls(&source, &[("length", None), ("CORE::length", None)]);
+    }
+    assert_function_calls(
+        "sub length { 29 } length('abc'); use subs 'length'; length('abc');\n",
+        &[("length", None), ("length", Some(0))],
+    );
+    assert_function_calls(
+        "package North; use subs 'length'; sub length { 29 } package South; sub length { 41 } length('abc'); North::length('abc');\n",
+        &[("length", None), ("North::length", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_lexical_builtin_without_import() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/builtin_lexical.pl"),
+        &[("length", Some(0)), ("length", None)],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_lexical_builtin_over_import() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/builtin_lexical_after_import.pl"),
+        &[("length", Some(1)), ("length", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_preserve_lexical_body_visibility() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/lexical_sub_shadow.pl"),
+        &[
+            ("value", Some(0)),
+            ("value", Some(0)),
+            ("value", Some(1)),
+            ("value", Some(0)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_fill_lexical_forward_declarations() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/forward_lexical_sub.pl"),
+        &[("value", Some(1)), ("North::value", Some(0))],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_keep_our_aliases_across_packages() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/our_sub_switch.pl"),
+        &[
+            ("value", Some(2)),
+            ("value", Some(1)),
+            ("South::value", Some(0)),
+            ("value", Some(2)),
+            ("North::value", Some(1)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_fill_our_forward_storage() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/our_forward_switch.pl"),
+        &[
+            ("value", Some(1)),
+            ("North::value", Some(0)),
+            ("South::value", Some(1)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_keep_previous_lexical_target_in_our_body() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/our_body_shadow.pl"),
+        &[
+            ("value", Some(0)),
+            ("value", Some(1)),
+            ("value", Some(0)),
+            ("South::value", Some(1)),
+        ],
+    );
+}
+
+#[test]
+fn perl_native_function_calls_distinguish_imported_builtin_overrides() {
+    assert_function_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/imported_builtin.pl"),
+        &[
+            ("length", Some(0)),
+            ("CORE::length", None),
+            ("length", None),
+            ("North::length", Some(0)),
+        ],
+    );
+}
+
 fn names(result: &AnalysisOutput) -> BTreeSet<(&str, EntityKind)> {
     result
         .document()
@@ -501,7 +1190,6 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
     let result = output(source);
     for detail in [
         "perl-import-target-unavailable",
-        "perl-function-target-unavailable",
         "perl-method-target-unavailable",
     ] {
         assert!(
@@ -518,16 +1206,9 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
         result.report().coverage().status(),
         CoverageStatus::Complete
     );
-    assert!(
-        !result
-            .document()
-            .relations
-            .iter()
-            .any(|edge| edge.predicate == RelationPredicate::Calls)
-    );
+    assert_function_calls(source, &[("helper", Some(0))]);
     for kind in [
         "perl.identifier.reference",
-        "perl.function_name.reference",
         "perl.method_application.reference",
     ] {
         let sites: Vec<_> = result
@@ -544,10 +1225,21 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
     }
     assert_binding_targets(source, "$value", &[Some(0)]);
     assert_binding_targets("print $Unknown::value;\n", "$Unknown::value", &[None]);
+    let unknown = output("external();\n");
+    let gap = unknown
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "perl-function-target-unavailable")
+        .unwrap();
+    assert_eq!(gap.domain, FactDomain::Relations);
+    assert_eq!(gap.source.span().start_byte(), 0);
+    assert_eq!(gap.source.span().end_byte(), 8);
+    assert_function_calls("external();\n", &[("external", None)]);
 }
 
 #[test]
-fn perl_native_function_ownership_gap_stays_scoped_after_package_resolution() {
+fn perl_native_function_ownership_gaps_require_unproven_declarations() {
     let result = output(PERL.source);
     let document = result.document();
     assert!(
@@ -562,11 +1254,49 @@ fn perl_native_function_ownership_gap_stays_scoped_after_package_resolution() {
         .iter()
         .find(|entity| entity.kind == EntityKind::Function)
         .unwrap();
+    let package = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Measure")
+        .unwrap();
+    assert_eq!(
+        function.container,
+        Some(rootlight_ir::ContainerRef::Entity(package.id))
+    );
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "perl-function-ownership-unavailable")
+    );
+    let result = output("package Measure; sub Other::adjust ($value) { return $value; }\n");
+    let function = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function)
+        .unwrap();
+    assert_eq!(function.canonical_name, "adjust");
+    assert_eq!(function.qualified_name, "Other::adjust");
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "perl-function-ownership-unavailable")
+    );
+    let result = output("package Measure; my sub Other::adjust ($value) { return $value; }\n");
+    let document = result.document();
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function)
+        .unwrap();
     let gap = document
         .skipped_regions
         .iter()
         .find(|gap| gap.detail == "perl-function-ownership-unavailable")
-        .expect("source-backed declarations do not prove package or lexical function ownership");
+        .expect("qualified lexical declarations cannot become proven package storage");
     assert_eq!(gap.domain, FactDomain::Entities);
     assert_eq!(Some(&gap.source), function.evidence.source.as_ref());
     assert_ne!(
@@ -577,9 +1307,20 @@ fn perl_native_function_ownership_gap_stays_scoped_after_package_resolution() {
 
 #[test]
 fn perl_native_artifact_replay_matches_fresh_generation() {
+    assert_perl_artifact_replay(PERL.source);
+}
+
+#[test]
+fn perl_native_bare_call_artifacts_rebind_generation() {
+    assert_perl_artifact_replay(include_str!(
+        "../../../../tests/fixtures/perl-bindings/bareword_positions_bounded.pl"
+    ));
+}
+
+fn assert_perl_artifact_replay(text: &str) {
     let provider = Arc::new(provider());
     let budget = limits();
-    let fixture = Fixture::new(PERL, PERL.source.as_bytes());
+    let fixture = Fixture::new(PERL, text.as_bytes());
     let analyzer = analyzer(&provider, PERL);
     let (_, artifact) = analyzer
         .analyze_and_capture(

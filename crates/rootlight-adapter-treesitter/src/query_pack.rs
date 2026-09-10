@@ -609,7 +609,7 @@ impl QueryPack {
                 }
                 let mut capture = *capture;
                 if input.family == GrammarFamily::Perl
-                    && !perl::retain_capture(capture.node, role, input.cancellation)?
+                    && !perl::retain_capture(capture.node, role, input.source, input.cancellation)?
                 {
                     continue;
                 }

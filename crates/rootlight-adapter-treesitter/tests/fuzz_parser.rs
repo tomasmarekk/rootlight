@@ -25,7 +25,7 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
 // CI replays one reviewed corpus; broader random campaigns use a separate runner config.
 const FUZZ_SEED: u64 = 202_607_170_404;
-const FUZZ_ROUTES: [(&str, &str); 20] = [
+const FUZZ_ROUTES: [(&str, &str); 21] = [
     ("fuzz.dart", "dart"),
     ("fuzz.toml", "toml"),
     ("fuzz.json", "json"),
@@ -46,6 +46,7 @@ const FUZZ_ROUTES: [(&str, &str); 20] = [
     ("fuzz.swift", "swift"),
     ("fuzz.css", "css"),
     ("fuzz.sh", "bash"),
+    ("fuzz.pl", "perl"),
 ];
 
 #[test]
@@ -137,6 +138,124 @@ fn html_embedded_hostile_sources_share_bounds_and_release_the_parser() {
         .is_ok()
     );
     assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
+    let provider = provider();
+    let nested = format!("my $value = {}1{};", "(".repeat(256), ")".repeat(256));
+    let declarations = "my sub entry { 1 } &entry();\n".repeat(40);
+    let imports = format!("use subs qw({});", "entry ".repeat(400));
+    let grouped_imports = format!("use subs {}'entry'{};", "(".repeat(256), ")".repeat(256));
+    let bare_calls = "sub entry { 1 } my $result = entry;\n".repeat(40);
+    let qualified_calls = "sub main::Cove::entry { 1 } ::Cove::entry();\n".repeat(40);
+    let root_alias = format!(
+        "sub {}Cove::entry {{ 1 }} ::Cove::entry();",
+        "main::".repeat(256)
+    );
+    let heredocs = "print <<'FIRST', <<'SECOND';\none\nFIRST\ntwo\nSECOND\n";
+    let sources: &[&[u8]] = &[
+        &[0xff, 0xfe, 0x80],
+        b"my sub broken ($value = (",
+        b"print <<'END';\nunfinished",
+        b"use subs qw(entry); sub entry { &{\"entry\"}(); }",
+        "my $value = '雪';\r\nprint $value;\r\n".as_bytes(),
+        nested.as_bytes(),
+        declarations.as_bytes(),
+        imports.as_bytes(),
+        grouped_imports.as_bytes(),
+        bare_calls.as_bytes(),
+        qualified_calls.as_bytes(),
+        root_alias.as_bytes(),
+        heredocs.as_bytes(),
+    ];
+    let mut rejected = 0;
+    for source in sources {
+        for (nodes, depth) in [(1, 1), (16, 4), (256, 32)] {
+            let fixture = Fixture::new("input.pl", source);
+            let budget = limits(nodes, depth);
+            let input = request(&fixture, &budget, "perl");
+            match execute_parse(
+                &provider,
+                &input,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            ) {
+                Ok(output) => {
+                    assert!(std::str::from_utf8(source).is_ok());
+                    assert!(output.report().resources().syntax_nodes() <= nodes);
+                    assert!(output.report().resources().max_syntax_depth() <= depth);
+                    assert!(output.facts().len() <= 8);
+                    assert!(output.facts().iter().all(|fact| {
+                        usize::try_from(fact.span().end_byte()).is_ok_and(|end| end <= source.len())
+                    }));
+                }
+                Err(AdapterError::ProviderFailed { code }) if code.as_str() == "invalid-utf8" => {
+                    assert!(std::str::from_utf8(source).is_err());
+                }
+                Err(AdapterError::ProviderFailed { code }) => {
+                    assert!(
+                        matches!(
+                            code.as_str(),
+                            "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"
+                        ),
+                        "{code:?}"
+                    );
+                    rejected += 1;
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed,
+                    limit,
+                })) => {
+                    assert_eq!(limit, 8);
+                    assert!(observed > limit);
+                    assert_eq!(
+                        provider.required_syntax_fact_count(&input, &deadline()),
+                        Ok(observed)
+                    );
+                    rejected += 1;
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::SyntaxDepth,
+                    observed,
+                    limit,
+                })) => {
+                    assert_eq!(limit, depth);
+                    assert!(observed > limit);
+                    rejected += 1;
+                }
+                other => panic!("unexpected bounded Perl parse: {other:?}"),
+            }
+            let cancellation = deadline();
+            assert!(cancellation.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &input,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+        }
+        let cleanup = Fixture::new("cleanup.pl", cleanup_source("cleanup.pl", "perl"));
+        let budget = limits(256, 32);
+        assert!(
+            execute_parse(
+                &provider,
+                &request(&cleanup, &budget, "perl"),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .is_ok()
+        );
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+    assert!(rejected > 0);
 }
 
 #[test]
@@ -484,6 +603,7 @@ fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
         "swift" => b"func cleanup() {}\n",
         "css" => b".cleanup { color: red; }\n",
         "bash" => b"cleanup() { :; }\n",
+        "perl" => b"sub cleanup {}\n",
         "json" => br#"{"cleanup":true}"#,
         "toml" => b"cleanup = true\n",
         _ => b"",

@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/95";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/96";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23653,6 +23653,8 @@ mod tests {
         assert_perl_durable_sources(
             "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n",
             4,
+            0,
+            &[],
         );
     }
 
@@ -23661,10 +23663,57 @@ mod tests {
         assert_perl_durable_sources(
             "package Harbor; our $value = 0 + 1; package Cove; print $value, $Harbor::value;\n",
             3,
+            0,
+            &[],
         );
     }
 
-    fn assert_perl_durable_sources(source: &str, declaration_count: usize) {
+    #[test]
+    fn perl_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package Measure; sub adjust ($value) { return $value + 1; } my $result = adjust(2); print $result;\n",
+            4,
+            1,
+            &[],
+        );
+    }
+
+    #[test]
+    fn perl_bare_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package Measure; sub adjust ($value) { return $value + 1; } my $result = adjust 2; print $result;\n",
+            4,
+            1,
+            &[],
+        );
+    }
+
+    #[test]
+    fn perl_qualified_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package Measure; sub Cove::adjust ($value) { return $value + 1; } my $result = Cove::adjust(2); print $result;\n",
+            4,
+            1,
+            &[("adjust", "Cove::adjust")],
+        );
+    }
+
+    #[test]
+    fn perl_root_aliases_survive_noop_edit_clean_rebuild_and_restart() {
+        assert_perl_durable_sources(
+            "package main::Measure; sub adjust ($value) { return $value + 1; } my $result = ::main::Measure::adjust(2); print $result;\n",
+            4,
+            1,
+            &[("Measure", "main::Measure")],
+        );
+    }
+
+    fn assert_perl_durable_sources(
+        source: &str,
+        declaration_count: usize,
+        call_count: usize,
+        written_names: &[(&str, &str)],
+    ) {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
         let storage = durable_test_tempdir();
@@ -23790,7 +23839,17 @@ mod tests {
                         &deadline(),
                     )
                     .unwrap();
-                assert_eq!(read.data.chunks[0].bytes, entity.canonical_name.as_bytes());
+                let written = written_names
+                    .iter()
+                    .find_map(|(canonical, written)| {
+                        (*canonical == entity.canonical_name).then_some(*written)
+                    })
+                    .unwrap_or(entity.canonical_name.as_str());
+                assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+                assert_eq!(
+                    site.syntactic_text_hash,
+                    rootlight_ids::content_hash(written.as_bytes())
+                );
             }
             for package_reference in document
                 .occurrences
@@ -23808,7 +23867,13 @@ mod tests {
                     .entities
                     .iter()
                     .find(|entity| {
-                        entity.canonical_name == name
+                        entity.canonical_name
+                            == written_names
+                                .iter()
+                                .find_map(|(canonical, written)| {
+                                    (*written == name).then_some(*canonical)
+                                })
+                                .unwrap_or(name)
                             && entity.kind == rootlight_ir::EntityKind::Namespace
                     })
                     .unwrap();
@@ -23820,14 +23885,33 @@ mod tests {
             let reads: Vec<_> = document
                 .occurrences
                 .iter()
-                .filter(|site| site.syntax_kind == "perl.variable_name.reference")
+                .filter(|site| {
+                    site.syntax_kind == "perl.variable_name.reference"
+                        || site.role == OccurrenceRole::CallSite
+                })
                 .collect();
-            assert_eq!(reads.len(), 2);
+            assert_eq!(reads.len(), 2 + call_count);
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|site| site.role == OccurrenceRole::CallSite)
+                    .count(),
+                call_count
+            );
             for site in reads {
                 assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
-                assert!(document.relations.iter().any(|edge| edge.predicate
-                    == rootlight_ir::RelationPredicate::RefersTo
-                    && edge.evidence.source.as_ref() == Some(&site.source)));
+                let predicate = if site.role == OccurrenceRole::CallSite {
+                    rootlight_ir::RelationPredicate::Calls
+                } else {
+                    rootlight_ir::RelationPredicate::RefersTo
+                };
+                assert!(
+                    document
+                        .relations
+                        .iter()
+                        .any(|edge| edge.predicate == predicate
+                            && edge.evidence.source.as_ref() == Some(&site.source))
+                );
                 let read = restored
                     .source_read_with_options_and_budget(
                         receipt.generation,

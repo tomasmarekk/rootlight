@@ -35,6 +35,9 @@ const SOURCE: &str =
 #[path = "lowering_contract/yaml_ownership.rs"]
 mod yaml_ownership;
 
+#[path = "lowering_contract/perl_calls.rs"]
+mod perl_calls;
+
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
     assert_data_key_captures(

@@ -27,10 +27,16 @@
 (variable_declaration variables: [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
 (variable_group variables: [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
 (refalias_variable [(scalar (varname)) (array (varname)) (hash (varname))] @declaration @definition)
-[(scalar) (array) (hash) (function)] @reference
+[(scalar) (array) (hash) (function) (bareword)] @reference
+[(func0op_call_expression function: _ @reference)
+ (func1op_call_expression function: _ @reference)]
+; Retention admits only literal subs arguments through transparent list wrappers.
+(string_literal content: (string_content) @reference)
+(quoted_word_list content: (string_content) @reference)
 [(container_variable) (slice_container_variable) (keyval_container_variable) (arraylen)] @reference
 (use_statement module: (package) @reference)
 (method_call_expression) @reference
+(coderef_call_expression) @reference
 [(package_statement name: (package) @reference)
  (class_statement name: (package) @reference)
  (role_statement name: (package) @reference)]

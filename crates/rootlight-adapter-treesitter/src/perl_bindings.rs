@@ -266,6 +266,8 @@ pub(super) fn is_scope(fact: &SyntaxFact) -> bool {
                 | "perl.block.scope"
                 | "perl.package_block.scope"
                 | "perl.function.scope"
+                | "perl.lexical_function.scope"
+                | "perl.our_function.scope"
                 | "perl.method.scope"
                 | "perl.lambda.scope"
                 | "perl.method_lambda.scope"

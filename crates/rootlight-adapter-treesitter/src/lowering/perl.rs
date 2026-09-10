@@ -4,10 +4,14 @@
 
 use super::*;
 
+mod functions;
+
 #[derive(Default)]
 pub(super) struct Plan {
     pub(super) aliases: HashMap<u64, u64>,
     pub(super) references: HashMap<u64, u64>,
+    pub(super) calls: BTreeSet<u64>,
+    pub(super) owned_functions: BTreeSet<u64>,
 }
 
 struct Context<'a> {
@@ -60,8 +64,11 @@ pub(super) fn resolve(
                     .and_then(|definition| text(source, definition, limits.max_string_bytes))
             })
             .transpose()?
-            .flatten()
-            .filter(|name| package_name(name));
+            .flatten();
+        let name = match name {
+            Some(name) => canonical_package(name, cancellation)?,
+            None => None,
+        };
         names.insert(fact.span(), name);
         if let (Some(name), Some(root)) = (name, context.module(fact, cancellation)?) {
             let key = (root, name);
@@ -73,7 +80,7 @@ pub(super) fn resolve(
             }) {
                 namespaces.insert(key, fact.local_id());
             }
-            namespace_sites.push((fact.local_id(), root));
+            namespace_sites.push((fact.local_id(), root, name));
         }
     }
     for fact in facts {
@@ -133,10 +140,12 @@ pub(super) fn resolve(
     }
     // A package declaration's lexical placement does not create new storage.
     // The file module keeps independent embedded examples in separate universes.
-    for (id, root) in namespace_sites {
+    for (id, root, name) in namespace_sites {
         cancellation.check()?;
         let draft = drafts.get_mut(&id).ok_or_else(invalid)?;
         package_owner(draft, root);
+        draft.name.clear();
+        draft.name.push_str(name);
     }
     for (definition, id, root, package) in aliases {
         cancellation.check()?;
@@ -145,6 +154,15 @@ pub(super) fn resolve(
         package_owner(draft, parent);
         plan.aliases.insert(definition, id);
     }
+    functions::resolve(
+        &context,
+        source,
+        drafts,
+        &namespaces,
+        &mut plan,
+        limits,
+        cancellation,
+    )?;
     refresh_layout(drafts, strings, limits, cancellation)?;
     for fact in facts {
         cancellation.check()?;
@@ -156,6 +174,7 @@ pub(super) fn resolve(
         };
         if fact.syntax_kind().as_str() == "perl.package_context.reference" {
             if context.package_declaration(fact.parent(), cancellation)?
+                && let Some(name) = canonical_package(name, cancellation)?
                 && let Some(target) = namespaces.get(&(root, name))
             {
                 plan.references.insert(fact.local_id(), *target);
@@ -177,8 +196,7 @@ pub(super) fn resolve(
         let Some((package, leaf)) = name.rsplit_once("::") else {
             continue;
         };
-        let package = if package.is_empty() { "main" } else { package };
-        if package_name(package)
+        if let Some(package) = canonical_package(package, cancellation)?
             && identifier(leaf)
             && let Some(target) = variables.get(&(root, package, sigil, leaf))
         {
@@ -386,6 +404,24 @@ fn package_name(name: &str) -> bool {
     name.split("::").all(identifier)
 }
 
+fn canonical_package<'a>(
+    mut name: &'a str,
+    cancellation: &Cancellation,
+) -> Result<Option<&'a str>, AdapterError> {
+    // Root qualifiers alias the main stash; a non-root `main` component does not.
+    // Borrow the canonical suffix so repeated qualifiers need no new allocation.
+    name = name.strip_prefix("::").unwrap_or(name);
+    loop {
+        cancellation.check()?;
+        match name.strip_prefix("main::") {
+            Some(suffix) => name = suffix,
+            None => break,
+        }
+    }
+    let name = if name.is_empty() { "main" } else { name };
+    Ok(package_name(name).then_some(name))
+}
+
 fn variable_name(name: &str) -> Option<(char, &str)> {
     let sigil = name.chars().next()?;
     let leaf = name.get(1..)?;
@@ -410,6 +446,37 @@ mod tests {
             0,
             SyntaxKindLabel::new(label).unwrap(),
         )
+    }
+
+    #[test]
+    fn package_names_normalize_only_proven_root_aliases() {
+        for (written, expected) in [
+            ("", Some("main")),
+            ("main", Some("main")),
+            ("::Cove", Some("Cove")),
+            ("main::Cove", Some("Cove")),
+            ("main::main::Cove", Some("Cove")),
+            ("::main::Cove", Some("Cove")),
+            ("Cove::main", Some("Cove::main")),
+            ("::::Cove", None),
+            ("main::::Cove", None),
+            ("Cove::", None),
+            ("Cove::9", None),
+        ] {
+            assert_eq!(
+                canonical_package(written, &Cancellation::new()).unwrap(),
+                expected,
+                "{written}"
+            );
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        for written in ["", "Cove", "main::main::Cove"] {
+            assert!(matches!(
+                canonical_package(written, &cancellation),
+                Err(AdapterError::Cancelled { .. })
+            ));
+        }
     }
 
     #[test]

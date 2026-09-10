@@ -177,6 +177,194 @@ fn markdown_perl_package_storage_does_not_escape_its_example() {
 }
 
 #[test]
+fn markdown_perl_bare_calls_do_not_borrow_later_or_neighbor_declarations() {
+    let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; sub value { 13 } my $result = value;\r\n```\r\n```perl\r\npackage Harbor; my $before = value; sub value { 29 } my $after = value;\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.syntactic_text_hash == content_hash(b"value")
+        })
+        .collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 2);
+    assert_ne!(definitions[0].target, definitions[1].target);
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "perl.bare_function_name.reference")
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 3);
+    for (site, target) in calls.into_iter().zip([Some(0), None, Some(1)]) {
+        let span = site.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("value")
+        );
+        assert_eq!(site.syntactic_text_hash, content_hash(b"value"));
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::Calls
+            })
+            .collect();
+        if let Some(target) = target {
+            assert_eq!(site.target, definitions[target].target);
+            assert_eq!(site.role, OccurrenceRole::CallSite);
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+        } else {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(edges.is_empty());
+        }
+    }
+}
+
+#[test]
+fn markdown_perl_qualified_storage_and_root_aliases_stay_inside_their_example() {
+    let source = "# Functions λ😀\r\n```perl\r\nsub main::Cove::value { 13 } ::Cove::value();\r\n```\r\n```perl\r\nsub Cove::value { 29 } main::Cove::value();\r\n```\r\n```perl\r\nCove::value();\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let functions: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 2);
+    assert_ne!(functions[0].id, functions[1].id);
+    assert!(
+        functions.iter().all(
+            |entity| entity.canonical_name == "value" && entity.qualified_name == "Cove::value"
+        )
+    );
+    let mut definitions: Vec<_> = document.occurrences.iter().filter(|site| {
+        site.role == OccurrenceRole::Definition && matches!(site.target,
+            OccurrenceTarget::Resolved { symbol } if functions.iter().any(|entity| entity.id == symbol))
+    }).collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "perl.static_function_name.reference")
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 2);
+    assert_eq!(calls.len(), 3);
+    for (site, (name, target)) in calls.iter().zip([
+        ("::Cove::value", Some(0)),
+        ("main::Cove::value", Some(1)),
+        ("Cove::value", None),
+    ]) {
+        assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+        let span = site.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::Calls
+            })
+            .collect();
+        if let Some(target) = target {
+            assert_eq!(site.target, definitions[target].target);
+            assert_eq!(site.role, OccurrenceRole::CallSite);
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+        } else {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(edges.is_empty());
+        }
+    }
+}
+
+#[test]
+fn markdown_perl_function_imports_and_storage_stay_inside_their_example() {
+    let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; use subs qw(reverse); sub reverse { 29 } reverse('abc');\r\n```\r\n```perl\r\npackage Harbor; sub reverse { 41 } reverse('abc'); &reverse();\r\n```\r\n";
+    assert_perl_function_example_isolation(source);
+}
+
+#[test]
+fn markdown_perl_grouped_imports_stay_inside_their_example() {
+    let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; use subs ((('reverse'))); sub reverse { 29 } reverse('abc');\r\n```\r\n```perl\r\npackage Harbor; sub reverse { 41 } reverse('abc'); &reverse();\r\n```\r\n";
+    assert_perl_function_example_isolation(source);
+}
+
+fn assert_perl_function_example_isolation(source: &str) {
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.syntactic_text_hash == content_hash(b"reverse")
+        })
+        .collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 2);
+    assert_ne!(definitions[0].target, definitions[1].target);
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.syntax_kind.as_str(),
+                "perl.importable_function_name.reference" | "perl.amper_function_name.reference"
+            )
+        })
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].target, definitions[0].target);
+    assert!(matches!(
+        calls[1].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(calls[2].target, definitions[1].target);
+    for (call, written) in calls.into_iter().zip(["reverse", "reverse", "&reverse"]) {
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+        assert_eq!(call.syntactic_text_hash, content_hash(written.as_bytes()));
+        if let OccurrenceTarget::Resolved { symbol } = call.target {
+            assert_eq!(call.role, OccurrenceRole::CallSite);
+            let edges: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(call.id)
+                        && edge.predicate == RelationPredicate::Calls
+                })
+                .collect();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].object, RelationEndpoint::Entity(symbol));
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&call.source));
+        }
+    }
+}
+
+#[test]
 fn markdown_matlab_local_calls_do_not_escape_their_example() {
     let source = "# Calls λ😀\r\n```matlab\r\nfunction result = entry(value)\r\nresult = helper(value);\r\nend\r\nfunction result = helper(value)\r\nresult = value;\r\nend\r\n```\r\n```matlab\r\nresult = helper(1);\r\n```\r\n";
     let result = output(source);

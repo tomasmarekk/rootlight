@@ -52,8 +52,35 @@ fn binding(
 pub(super) fn retain_capture(
     node: Node<'_>,
     role: StructuralRole,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    if role == StructuralRole::Reference && node.kind() == "bareword" {
+        return Ok(node
+            .parent()
+            .is_some_and(|parent| parent.child_by_field_name("name") != Some(node)));
+    }
+    if role == StructuralRole::Reference && node.kind() == "string_content" {
+        let mut ancestor = node.parent().and_then(|literal| literal.parent());
+        while let Some(parent) = ancestor {
+            cancellation.check()?;
+            match parent.kind() {
+                // Grouping preserves literal argument identity; expressions such as
+                // concatenation, conditionals and array references do not.
+                "parenthesized_expression" | "list_expression" => ancestor = parent.parent(),
+                "use_statement" => {
+                    return Ok(parent
+                        .child(0)
+                        .is_some_and(|keyword| keyword.kind() == "use")
+                        && parent.child_by_field_name("module").is_some_and(|module| {
+                            source.get(module.byte_range()) == Some(b"subs")
+                        }));
+                }
+                _ => return Ok(false),
+            }
+        }
+        return Ok(false);
+    }
     if !variable_kind(node) {
         return Ok(true);
     }
@@ -70,6 +97,16 @@ pub(super) fn syntax(
     role: StructuralRole,
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if role == StructuralRole::Reference
+        && node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                "func0op_call_expression" | "func1op_call_expression"
+            ) && parent.child_by_field_name("function") == Some(node)
+        })
+    {
+        return Ok(Some("perl.builtin_function_name"));
+    }
     if role == StructuralRole::Scope {
         if node.parent().is_some_and(|parent| {
             matches!(
@@ -80,6 +117,13 @@ pub(super) fn syntax(
             return Ok(Some("perl.statement"));
         }
         match node.kind() {
+            "subroutine_declaration_statement" => {
+                return Ok(Some(match declaration_keyword(node, cancellation)? {
+                    Some("my" | "state") => "perl.lexical_function",
+                    Some("our") => "perl.our_function",
+                    _ => "perl.function",
+                }));
+            }
             "package_statement" => {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
@@ -133,6 +177,15 @@ pub(super) fn syntax(
         "mandatory_parameter" | "optional_parameter" | "named_parameter" | "slurpy_parameter" => {
             "perl.parameter"
         }
+        "bareword"
+            if role == StructuralRole::Reference
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "require_expression") =>
+        {
+            "perl.module_name"
+        }
+        "bareword" if role == StructuralRole::Reference => "perl.bare_function_name",
         "bareword" | "package" => "perl.identifier",
         "scalar" | "array" | "hash" => "perl.variable_name",
         "arraylen" => "perl.array_length",
@@ -151,8 +204,88 @@ pub(super) fn syntax(
                 "perl.dynamic_container"
             }
         }
+        // The grammar aliases builtin list operators to `function` too. Only
+        // native bareword terminals prove this direct user-function form.
+        "function"
+            if role == StructuralRole::Reference
+                && matches!(node.grammar_name(), "_identifier" | "_bareword_token1")
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "function_call_expression"
+                        && parent.child_by_field_name("function") == Some(node)
+                        && !parent
+                            .named_children(&mut parent.walk())
+                            .any(|child| child.kind() == "indirect_object")
+                }) =>
+        {
+            "perl.static_function_name"
+        }
+        // A native user-function alias has no keyword child. Its bare spelling
+        // still needs a declaration/import visible at this compile position.
+        "function"
+            if role == StructuralRole::Reference
+                && node.child_count() == 0
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "ambiguous_function_call_expression"
+                        && parent.child_by_field_name("function") == Some(node)
+                        && !parent
+                            .named_children(&mut parent.walk())
+                            .any(|child| child.kind() == "indirect_object")
+                }) =>
+        {
+            "perl.bare_function_name"
+        }
+        // Builtin list operators retain an anonymous keyword child in this alias.
+        // Require a lexical binding or subs import, never a same-named declaration alone.
+        "function"
+            if role == StructuralRole::Reference
+                && node.named_child_count() == 0
+                && node.parent().is_some_and(|parent| {
+                    matches!(
+                        parent.kind(),
+                        "function_call_expression" | "ambiguous_function_call_expression"
+                    ) && parent.child_by_field_name("function") == Some(node)
+                        && !parent
+                            .named_children(&mut parent.walk())
+                            .any(|child| child.kind() == "indirect_object")
+                }) =>
+        {
+            "perl.importable_function_name"
+        }
+        "function"
+            if role == StructuralRole::Reference
+                && node
+                    .named_child(0)
+                    .is_some_and(|name| name.kind() == "varname")
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "function_call_expression"
+                        && parent.child_by_field_name("function") == Some(node)
+                }) =>
+        {
+            "perl.amper_function_name"
+        }
+        "function"
+            if role == StructuralRole::Reference
+                && node
+                    .named_child(0)
+                    .is_some_and(|name| name.kind() == "varname")
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "refgen_expression") =>
+        {
+            "perl.code_function_name"
+        }
         "function" => "perl.function_name",
+        "string_content"
+            if role == StructuralRole::Reference
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "quoted_word_list") =>
+        {
+            "perl.subs_word_list"
+        }
+        "string_content" if role == StructuralRole::Reference => "perl.subs_import",
         "method_call_expression" => "perl.method_application",
+        "coderef_call_expression" => "perl.coderef_application",
         "block" | "block_statement" => "perl.block",
         "comment" => "perl.comment",
         "pod" => "perl.documentation",

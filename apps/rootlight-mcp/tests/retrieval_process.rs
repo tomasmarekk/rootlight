@@ -579,7 +579,7 @@ fn matlab_definitions_and_headers_cross_real_process_boundaries() {
 
 #[test]
 fn perl_definitions_and_headers_cross_real_process_boundaries() {
-    source_entities_with_signatures_cross_process_boundaries(
+    source_entities_with_coverage_cross_process_boundaries(
         "perl",
         "measure.pm",
         "package Measure; sub adjust ($value) { my $result = $value + 1; return $result; }\n",
@@ -589,6 +589,7 @@ fn perl_definitions_and_headers_cross_real_process_boundaries() {
             ("$result", "variable", 1),
         ],
         &[("adjust", "sub adjust ($value)")],
+        Some(false),
     );
     source_entities_with_signatures_cross_process_boundaries(
         "perl",
@@ -647,6 +648,95 @@ fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
         &[("helper", "function", "helper(value)")],
         "calls",
     );
+}
+
+#[test]
+fn perl_function_calls_cross_mcp_with_exact_sources() {
+    for source in [
+        "package Harbor; sub target { 1 } { our sub target; package Cove; target(); } external();\n",
+        "package Harbor; my sub target; sub target { 1 } target(); external();\n",
+    ] {
+        assert_relationship_sources(
+            "perl",
+            "calls.pm",
+            source,
+            &[("target", "function", "target")],
+            "calls",
+        );
+    }
+}
+
+#[test]
+fn perl_qualified_function_calls_cross_mcp_with_exact_sources() {
+    for (source, written) in [
+        (
+            "package Harbor; sub Cove::target { 1 } Cove::target(); external();\n",
+            "Cove::target",
+        ),
+        (
+            "package Cove; sub target; package Harbor; sub Cove::target { 1 } Cove::target(); external();\n",
+            "Cove::target",
+        ),
+        (
+            "package Harbor; sub ::target { 1 } main::target(); external();\n",
+            "main::target",
+        ),
+        (
+            "package Cove; sub target { 1 } package main::Cove; ::main::Cove::target(); external();\n",
+            "::main::Cove::target",
+        ),
+        (
+            "sub main::main::Cove::target { 1 } ::Cove::target(); external();\n",
+            "::Cove::target",
+        ),
+    ] {
+        assert_relationship_sources(
+            "perl",
+            "calls.pm",
+            source,
+            &[("target", "function", written)],
+            "calls",
+        );
+    }
+}
+
+#[test]
+fn perl_bare_function_calls_cross_mcp_with_exact_sources() {
+    for source in [
+        "package Harbor; sub target { 1 } my $result = target; external();\n",
+        "package Harbor; use subs ('target'); my $result = target; sub target { 1 } external();\n",
+        "package Harbor; sub target { 1 } my $result = target 3; external();\n",
+    ] {
+        assert_relationship_sources(
+            "perl",
+            "calls.pm",
+            source,
+            &[("target", "function", "target")],
+            "calls",
+        );
+    }
+}
+
+#[test]
+fn perl_imported_and_ampersand_calls_cross_mcp_with_exact_sources() {
+    assert_relationship_sources(
+        "perl",
+        "calls.pm",
+        "package Harbor; use subs qw(reverse); sub reverse { 29 } reverse('abc'); external();\n",
+        &[("reverse", "function", "reverse")],
+        "calls",
+    );
+    let source =
+        "package Harbor; my sub target { 1 } &target(); my $ref = \\&target; external();\n";
+    for predicate in ["calls", "references"] {
+        assert_relationship_sources(
+            "perl",
+            "calls.pm",
+            source,
+            &[("target", "function", "&target")],
+            predicate,
+        );
+    }
 }
 
 #[test]
@@ -1121,6 +1211,38 @@ fn source_entities_with_signatures_cross_process_boundaries(
     queries: &[(&str, &str, usize)],
     signatures: &[(&str, &str)],
 ) {
+    let unsupported = matches!(
+        language,
+        "sql"
+            | "r"
+            | "solidity"
+            | "scala"
+            | "dart"
+            | "powershell"
+            | "markdown"
+            | "objective-c"
+            | "nix"
+            | "perl"
+    )
+    .then_some(true);
+    source_entities_with_coverage_cross_process_boundaries(
+        language,
+        path,
+        source,
+        queries,
+        signatures,
+        unsupported,
+    );
+}
+
+fn source_entities_with_coverage_cross_process_boundaries(
+    language: &str,
+    path: &str,
+    source: &str,
+    queries: &[(&str, &str, usize)],
+    signatures: &[(&str, &str)],
+    unsupported: Option<bool>,
+) {
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, expected_kind, count) in queries {
@@ -1171,20 +1293,8 @@ fn source_entities_with_signatures_cross_process_boundaries(
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         assert_eq!(output["schema_version"], "1.5");
-        if matches!(
-            language,
-            "sql"
-                | "r"
-                | "solidity"
-                | "scala"
-                | "dart"
-                | "powershell"
-                | "markdown"
-                | "objective-c"
-                | "nix"
-                | "perl"
-        ) {
-            assert!(
+        if let Some(unsupported) = unsupported {
+            assert_eq!(
                 output["warnings"]
                     .as_array()
                     .unwrap()
@@ -1195,8 +1305,25 @@ fn source_entities_with_signatures_cross_process_boundaries(
                                 message.ends_with(&format!("language {language}"))
                             })
                     }),
-                "Source retrieval must not imply complete language semantics: {output:#}"
+                unsupported,
+                "Coverage warnings describe the selected source, not a blanket language label: {output:#}"
             );
+            if !unsupported {
+                let language_coverage: Vec<_> = output["coverage"]["languages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|entry| entry["language"] == language)
+                    .collect();
+                assert_eq!(language_coverage.len(), 1);
+                assert_eq!(language_coverage[0]["status"], "complete");
+                // Complete structural coverage of this source is not a semantic-provider claim.
+                assert_eq!(
+                    output["data"]["query_interpretation"]["semantic_available"],
+                    false
+                );
+                assert_ne!(output["generation"]["semantic_freshness"], "current");
+            }
         }
         let matches: Vec<_> = output["data"]["matches"]
             .as_array()
