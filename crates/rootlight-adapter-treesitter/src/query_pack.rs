@@ -605,7 +605,7 @@ impl QueryPack {
                 }
                 let mut capture = *capture;
                 if input.family == GrammarFamily::Matlab
-                    && !matlab::retain_capture(capture.node, role)
+                    && !matlab::retain_capture(capture.node, role, input.cancellation)?
                 {
                     continue;
                 }
@@ -950,8 +950,10 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
-        _ if family == GrammarFamily::Matlab => matlab::syntax(capture.node, role, source)
-            .ok_or_else(|| query_failure("query-matlab-kind"))?,
+        _ if family == GrammarFamily::Matlab => {
+            matlab::syntax(capture.node, role, source, cancellation)?
+                .ok_or_else(|| query_failure("query-matlab-kind"))?
+        }
         _ if family == GrammarFamily::Nix => nix::syntax(capture.node, role, source, cancellation)?
             .ok_or_else(|| query_failure("query-nix-kind"))?,
         _ if family == GrammarFamily::ObjectiveC => objective_c::capture_syntax(capture.node, role)

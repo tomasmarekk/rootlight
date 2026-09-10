@@ -36,8 +36,8 @@ modifications = "scanner reset/frame validation, CRLF continuation backport, ite
 test_corpus = "12 isolated native syntax and scanner regressions plus public analyzer source-identity contracts"
 msrv = "native syntax and scanner verified with Rootlight MSRV 1.90"
 offline_behavior = "compiles vendored C sources with cached Cargo dependencies; never executes MATLAB, shell commands or workspace loading"
-capabilities = ["written-definitions", "function-parameters", "source-ranges", "incremental-edits"]
-semantic_depth = "written source occurrences only; repeated assignments are not merged runtime bindings; call versus indexing resolution, runtime workspaces, dispatch and live-script container extraction remain incomplete"
+  capabilities = ["written-definitions", "function-parameters", "lexical-references", "variable-write-sites", "source-ranges", "incremental-edits"]
+  semantic_depth = "source-backed lexical workspaces merge repeated variable writes and distinguish nested captures, parameter shadowing and local functions; call versus indexing resolution, runtime values, cross-workspace global storage, member dispatch and live-script container extraction remain incomplete"
 audit_notes = ["published archive and generated parser pinned", "reset, CRLF, native comment stack and long-token regressions fail before scanner fixes", "plain .m analysis does not imply .mlx container support"]
 [grammars.vendored]
 manifest_path = "third_party/tree-sitter-matlab-1.3.0/Cargo.toml"

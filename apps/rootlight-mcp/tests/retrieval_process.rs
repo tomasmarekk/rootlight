@@ -546,6 +546,20 @@ fn objective_c_selectors_and_properties_cross_real_process_boundaries() {
 }
 
 #[test]
+fn matlab_lexical_relationships_cross_mcp_with_exact_read_sources() {
+    assert_lexical_relationship_sources(
+        "matlab",
+        "inspect.m",
+        "function result = inspect(input)\nlocal = input;\nlocal = 2;\nresult = local;\ndisp(result);\nend\n",
+        &[
+            ("input", "variable", "input"),
+            ("local", "variable", "local"),
+            ("result", "variable", "result"),
+        ],
+    );
+}
+
+#[test]
 fn matlab_definitions_and_headers_cross_real_process_boundaries() {
     source_entities_with_signatures_cross_process_boundaries(
         "matlab",
@@ -729,14 +743,23 @@ fn nix_inherit_from_fields_cross_mcp_as_distinct_source_and_local_symbols() {
 }
 
 fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &str)]) {
+    assert_lexical_relationship_sources("nix", "module.nix", source, names);
+}
+
+fn assert_lexical_relationship_sources(
+    language: &str,
+    path: &str,
+    source: &str,
+    names: &[(&str, &str, &str)],
+) {
     let mut fixture =
-        RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);
+        RetrievalFixture::spawn_with_layout(Some((path, source)), FixtureLayout::Data);
     for &(name, kind, written) in names {
         let located = fixture.standalone(
-            &format!("nix-binding-{name}"),
+            &format!("lexical-binding-{name}"),
             "code.locate",
-            json!({"query": name, "search_modes": ["exact"], "languages": ["nix"],
-                "scope": {"paths": ["module.nix"]}, "response_profile": "evidence"}),
+            json!({"query": name, "search_modes": ["exact"], "languages": [language],
+                "scope": {"paths": [path]}, "response_profile": "evidence"}),
         );
         assert_success(&located, "code.locate");
         let matches: Vec<_> = located["result"]["structuredContent"]["data"]["matches"]
@@ -751,13 +774,13 @@ fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &
         let arguments = json!({"symbol_ids": [symbol.clone()], "relations": ["references"],
             "direction": "inbound", "include_candidates": false, "response_profile": "evidence"});
         let response = fixture.standalone(
-            &format!("nix-references-{name}"),
+            &format!("lexical-references-{name}"),
             "symbol.relationships",
             arguments.clone(),
         );
         assert_success(&response, "symbol.relationships");
         let batch = fixture.batch(
-            &format!("nix-references-batch-{name}"),
+            &format!("lexical-references-batch-{name}"),
             "symbol.relationships",
             arguments,
             "evidence",
@@ -791,7 +814,7 @@ fn assert_nix_lexical_relationship_sources(source: &str, names: &[(&str, &str, &
             let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
             assert_eq!(source.get(start..end), Some(written));
             let read = fixture.standalone(
-                &format!("nix-reference-read-{name}-{index}"),
+                &format!("lexical-reference-read-{name}-{index}"),
                 "source.read",
                 json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
                     "context_lines_after": 0, "response_profile": "evidence"}),
@@ -1055,7 +1078,6 @@ fn source_entities_with_signatures_cross_process_boundaries(
                 | "markdown"
                 | "objective-c"
                 | "nix"
-                | "matlab"
         ) {
             assert!(
                 output["warnings"]

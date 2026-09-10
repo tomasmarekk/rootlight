@@ -27,6 +27,71 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_matlab_bindings_keep_host_spans_and_separate_examples() {
+    let source = "# Variables λ😀\r\n```matlab\r\nvalue = 1;\r\nvalue = value + 1;\r\n```\r\n```matlab\r\nvalue = 2;\r\nvalue = value + 2;\r\n```\r\n```matlab\r\nresult = value;\r\n```\r\n";
+    let result = output(source);
+    let variables: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "matlab" && entity.canonical_name == "value")
+        .collect();
+    assert_eq!(variables.len(), 2);
+    assert_ne!(variables[0].id, variables[1].id);
+    for variable in variables {
+        let sites: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.target
+                    == OccurrenceTarget::Resolved {
+                        symbol: variable.id,
+                    }
+            })
+            .collect();
+        assert_eq!(sites.len(), 3);
+        for role in [
+            OccurrenceRole::Definition,
+            OccurrenceRole::Write,
+            OccurrenceRole::Reference,
+        ] {
+            assert_eq!(sites.iter().filter(|site| site.role == role).count(), 1);
+        }
+        let definition = sites
+            .iter()
+            .find(|site| site.role == OccurrenceRole::Definition)
+            .unwrap()
+            .source
+            .span()
+            .start_byte();
+        for site in sites {
+            let span = site.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some("value")
+            );
+            assert!(span.start_byte() >= definition);
+            assert!(span.start_byte() - definition < 32);
+        }
+    }
+    let offset = source.find("result = value").unwrap() + "result = ".len();
+    let read = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == u64::try_from(offset).unwrap()
+        })
+        .unwrap();
+    assert!(matches!(read.target, OccurrenceTarget::Unresolved { .. }));
+}
+
+#[test]
 fn markdown_nix_merged_sets_preserve_recursion_and_host_definition_sites() {
     let source = "# Sets λ😀\r\n```nix\r\nlet a = rec { field = 1; }; a.added = field; in a\r\n```\r\n```nix\r\nlet a = rec { field = 2; }; a.added = field; in a\r\n```\r\n";
     let result = output(source);

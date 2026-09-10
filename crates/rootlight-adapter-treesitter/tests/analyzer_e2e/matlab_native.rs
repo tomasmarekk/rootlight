@@ -30,6 +30,424 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+fn reference_in<'a>(
+    result: &'a AnalysisOutput,
+    source: &str,
+    fragment: &str,
+    name: &str,
+) -> &'a rootlight_ir::OccurrenceRecord {
+    let offset = source.find(fragment).unwrap() + fragment.find(name).unwrap();
+    result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == u64::try_from(offset).unwrap()
+                && site.source.span().end_byte() == u64::try_from(offset + name.len()).unwrap()
+        })
+        .unwrap_or_else(|| panic!("missing reference {fragment}"))
+}
+
+#[test]
+fn matlab_duplicate_formal_parameters_do_not_create_exact_bindings() {
+    let source = "function result = invalid(value, value)\nresult = value;\nend\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_in(&result, source, "result = value", "value").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "value")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn matlab_bounded_capture_plans_do_not_guess_lexical_targets() {
+    let source = format!(
+        "function result = sum_values(value)\nresult = {};\nend\n",
+        vec!["value"; 80].join(" + ")
+    );
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(MATLAB, source.as_bytes());
+    let budget = limits_with_syntax_records(64);
+    let result = analyze(
+        &analyzer(&provider, MATLAB),
+        &request(&fixture.snapshot, &fixture.source, MATLAB, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    let reads: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Reference)
+        .collect();
+    assert!(!reads.is_empty());
+    assert!(
+        reads
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+}
+
+#[test]
+fn matlab_binding_identities_survive_trivia_and_unrelated_sibling_insertions() {
+    let source = "function result = accumulate(value)\nlocal = value;\nlocal = local + 1;\nresult = local;\nend\n";
+    let original = output(source);
+    let changed = format!(
+        "% λ😀\nfunction other = unrelated(input)\nother = input;\nend\n{}",
+        source.replace("+ 1", "+ 2")
+    );
+    let updated = output(&changed);
+    for entity in &original.document().entities {
+        if !matches!(
+            entity.canonical_name.as_str(),
+            "accumulate" | "result" | "value" | "local"
+        ) {
+            continue;
+        }
+        let counterpart = updated
+            .document()
+            .entities
+            .iter()
+            .find(|candidate| candidate.canonical_name == entity.canonical_name)
+            .unwrap();
+        assert_eq!(entity.id, counterpart.id, "{}", entity.canonical_name);
+        for site in updated.document().occurrences.iter().filter(|site| {
+            site.target
+                == OccurrenceTarget::Resolved {
+                    symbol: counterpart.id,
+                }
+        }) {
+            let span = site.source.span();
+            assert_eq!(
+                changed.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(entity.canonical_name.as_str())
+            );
+        }
+    }
+}
+
+#[test]
+fn matlab_anonymous_functions_capture_outer_names_and_shadow_inputs() {
+    let source = "function result = factory(value)\nscale = value;\ncallback = @(value) value + scale;\nresult = callback(value);\nend\n";
+    let result = output(source);
+    let outer = reference_in(&result, source, "scale = value", "value");
+    let inner = reference_in(&result, source, "value + scale", "value");
+    assert!(matches!(outer.target, OccurrenceTarget::Resolved { .. }));
+    assert!(matches!(inner.target, OccurrenceTarget::Resolved { .. }));
+    assert_ne!(outer.target, inner.target);
+    assert_eq!(
+        outer.target,
+        reference_in(&result, source, "callback(value)", "value").target
+    );
+    let scale = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "scale")
+        .unwrap();
+    assert_eq!(
+        reference_in(&result, source, "+ scale", "scale").target,
+        OccurrenceTarget::Resolved { symbol: scale.id }
+    );
+}
+
+#[test]
+fn matlab_script_variables_are_not_captured_by_local_functions() {
+    let source =
+        "value = 1;\ncallback = @() value;\nfunction result = isolated\nresult = value;\nend\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_in(&result, source, "@() value", "value").target,
+        OccurrenceTarget::Resolved { .. }
+    ));
+    assert!(matches!(
+        reference_in(&result, source, "result = value", "value").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn matlab_loop_and_catch_names_keep_function_workspace_identity() {
+    let source = "function result = accumulate(values)\nresult = 0;\nfor item = values\nresult = result + item;\nend\ntry\nresult = result + 1;\ncatch problem\nresult = problem.message;\nend\nend\n";
+    let result = output(source);
+    for (name, fragment) in [("item", "+ item"), ("problem", "problem.message")] {
+        let entities: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), 1, "{name}");
+        assert_eq!(entities[0].kind, EntityKind::Variable);
+        assert_eq!(
+            reference_in(&result, source, fragment, name).target,
+            OccurrenceTarget::Resolved {
+                symbol: entities[0].id
+            }
+        );
+    }
+}
+
+#[test]
+fn matlab_persistent_and_global_declarations_keep_local_source_bindings() {
+    let source = "function result = first\npersistent cache\nglobal shared\ncache = 1;\nresult = cache + shared;\nend\nfunction result = second\npersistent cache\nglobal shared\ncache = 2;\nresult = shared + cache;\nend\n";
+    let result = output(source);
+    for name in ["cache", "shared"] {
+        let entities: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), 2, "{name}");
+        let first = reference_in(&result, source, "cache + shared", name);
+        let second = reference_in(&result, source, "shared + cache", name);
+        assert!(matches!(first.target, OccurrenceTarget::Resolved { .. }));
+        assert!(matches!(second.target, OccurrenceTarget::Resolved { .. }));
+        assert_ne!(first.target, second.target);
+    }
+}
+
+#[test]
+fn matlab_repeated_assignments_share_one_variable_and_keep_every_write() {
+    let source = "function result = accumulate(value)\nresult = value;\nresult = result + 1;\nvalue = result;\nend\n";
+    let result = output(source);
+    for (name, kind, writes) in [
+        ("result", EntityKind::Variable, 2),
+        ("value", EntityKind::Parameter, 1),
+    ] {
+        let entities: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), 1, "{name}");
+        assert_eq!(entities[0].kind, kind);
+        let sites: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.target
+                    == OccurrenceTarget::Resolved {
+                        symbol: entities[0].id,
+                    }
+            })
+            .collect();
+        assert_eq!(
+            sites
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Definition)
+                .count(),
+            1
+        );
+        assert_eq!(
+            sites
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Write)
+                .count(),
+            writes
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Reference)
+        );
+        for site in sites {
+            let span = site.source.span();
+            assert_eq!(
+                &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                name
+            );
+        }
+    }
+}
+
+#[test]
+fn matlab_local_functions_keep_same_named_parameters_separate() {
+    let source = "function result = first(value)\nresult = value;\nend\nfunction result = second(value)\nresult = value;\nend\n";
+    let result = output(source);
+    let parameters: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "value")
+        .collect();
+    assert_eq!(parameters.len(), 2);
+    assert_ne!(parameters[0].id, parameters[1].id);
+    for parameter in parameters {
+        let reads: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: parameter.id,
+                        }
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let Some(rootlight_ir::ContainerRef::Entity(owner)) = parameter.container else {
+            panic!("parameter requires a function owner")
+        };
+        assert_eq!(reads[0].enclosing, Some(owner));
+    }
+}
+
+#[test]
+fn matlab_member_and_function_handle_names_do_not_bind_local_namesakes() {
+    let source = "function result = inspect(object)\nmember = 1;\nresult = object.member + member;\ncallback = @member;\nend\n";
+    let result = output(source);
+    for (fragment, name, should_resolve) in [
+        ("object.member", "object", true),
+        (".member", "member", false),
+        ("+ member", "member", true),
+        ("@member", "member", false),
+    ] {
+        let offset = source.find(fragment).unwrap() + fragment.find(name).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == u64::try_from(offset).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            should_resolve,
+            "{fragment}"
+        );
+    }
+}
+
+#[test]
+fn matlab_nested_workspaces_share_outer_writes_but_isolate_parameters_and_siblings() {
+    let source = "function result = outer(value)\nshared = value;\nresult = inner(value);\nfunction result = inner(value)\nshared = shared + value;\nresult = shared;\nend\nfunction first\nprivate = 1;\ndisp(private);\nend\nfunction second\nprivate = 2;\ndisp(private);\nend\nend\n";
+    let result = output(source);
+    for (name, count) in [("shared", 1), ("value", 2), ("result", 2), ("private", 2)] {
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == name)
+                .count(),
+            count,
+            "{name}"
+        );
+    }
+    let shared = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "shared")
+        .unwrap();
+    let inner = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "inner")
+        .unwrap();
+    let writes: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Write
+                && site.target == OccurrenceTarget::Resolved { symbol: shared.id }
+        })
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].enclosing, Some(inner.id));
+    let reads: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.target == OccurrenceTarget::Resolved { symbol: shared.id }
+        })
+        .collect();
+    assert_eq!(reads.len(), 2);
+    assert!(reads.iter().all(|site| site.enclosing == Some(inner.id)));
+}
+
+#[test]
+fn matlab_indexed_and_multiple_assignment_roots_are_variables_not_member_names() {
+    let source = "function result = collect(index, input)\n[first, second] = split(input);\nitems(index).value = first;\nitems(index).value = second;\nresult = items(index).value;\nend\n";
+    let result = output(source);
+    for name in ["first", "second", "items"] {
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(
+                    |entity| entity.kind == EntityKind::Variable && entity.canonical_name == name
+                )
+                .count(),
+            1,
+            "{name}"
+        );
+    }
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "value")
+    );
+    let index = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "index")
+        .unwrap();
+    assert_eq!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference
+                && site.target == OccurrenceTarget::Resolved { symbol: index.id })
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn matlab_shared_input_output_name_remains_one_parameter_binding() {
+    let source = "function value = update(value)\nvalue = value + 1;\nend\n";
+    let result = output(source);
+    let variables: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "value")
+        .collect();
+    assert_eq!(variables.len(), 1);
+    assert_eq!(variables[0].kind, EntityKind::Parameter);
+}
+
 #[test]
 fn matlab_functions_and_parameters_have_real_definition_sources() {
     let result = output(MATLAB.source);
@@ -273,7 +691,11 @@ fn matlab_applications_do_not_claim_calls_without_binding_evidence() {
 
 #[test]
 fn matlab_artifact_replay_matches_fresh_ir_in_the_new_generation() {
-    for source in [FUNCTIONS, CLASS] {
+    for source in [
+        FUNCTIONS,
+        CLASS,
+        "function result = outer(value)\nshared = value;\nresult = inner(value);\nfunction result = inner(value)\nshared = shared + value;\nresult = shared;\nend\nend\n",
+    ] {
         let provider = Arc::new(provider());
         let budget = limits();
         let fixture = Fixture::new(MATLAB, source.as_bytes());

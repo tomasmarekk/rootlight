@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/89";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/90";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/7";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23392,6 +23392,147 @@ mod tests {
             .index_repository(fixture.path(), &deadline())
             .expect("Objective-C no-op indexing succeeds");
         assert_eq!(repeated, receipt);
+    }
+
+    #[test]
+    fn matlab_bindings_survive_noop_incremental_clean_rebuild_and_restart() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("update.m");
+        let source = "function result = update(value)\nlocal = value;\nlocal = local + 1;\nresult = local;\nend\n";
+        fs::write(&path, source).unwrap();
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 2);
+        let noop = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(noop, initial);
+        let changed = source.replace("+ 1", "+ 2");
+        fs::write(&path, &changed).unwrap();
+        let updated = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(updated.generation, initial.generation);
+        let evidence = service.incremental_evidence(updated.generation).unwrap();
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 1);
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        let clean = committed.receipt();
+        assert!(updated.logical_snapshot.is_some());
+        assert_eq!(clean.logical_snapshot, updated.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut initial_ids = None;
+        for (receipt, expected) in [
+            (&initial, source),
+            (&updated, changed.as_str()),
+            (clean, changed.as_str()),
+        ] {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let variables: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == "matlab"
+                        && matches!(entity.canonical_name.as_str(), "value" | "local" | "result")
+                })
+                .collect();
+            assert_eq!(variables.len(), 3);
+            let ids: BTreeSet<_> = variables.iter().map(|entity| entity.id).collect();
+            if let Some(previous) = &initial_ids {
+                assert_eq!(&ids, previous);
+            } else {
+                initial_ids = Some(ids);
+            }
+            let mut reads = 0;
+            let mut writes = 0;
+            for variable in variables {
+                let located = restored
+                    .code_locate(
+                        receipt.generation,
+                        variable.canonical_name.clone(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(
+                    located
+                        .data
+                        .hits
+                        .iter()
+                        .any(|hit| hit.symbol == Some(variable.id))
+                );
+                for site in document.occurrences.iter().filter(|site| {
+                    site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: variable.id,
+                        }
+                }) {
+                    if site.role == OccurrenceRole::Reference {
+                        reads += 1;
+                        assert!(
+                            document
+                                .relations
+                                .iter()
+                                .any(|relation| relation.predicate == RelationPredicate::RefersTo
+                                    && relation.subject == RelationEndpoint::Occurrence(site.id)
+                                    && relation.object == RelationEndpoint::Entity(variable.id))
+                        );
+                    }
+                    writes += usize::from(site.role == OccurrenceRole::Write);
+                    assert_eq!(site.source.generation(), receipt.generation);
+                    let span = site.source.span();
+                    let written = expected
+                        .get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(written, variable.canonical_name);
+                    let read = restored
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![site.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+                }
+            }
+            assert_eq!((reads, writes), (3, 2));
+        }
     }
 
     #[test]

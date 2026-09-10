@@ -4,6 +4,7 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 mod embedded;
+mod matlab;
 mod nix_paths;
 mod toml;
 mod yaml;
@@ -1425,7 +1426,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .get(&definition_local_id)
                         .copied()
                         .unwrap_or(definition_fact.span());
-                    let occurrence = declaration_occurrence(
+                    let mut occurrence = declaration_occurrence(
                         definition_fact,
                         entity,
                         provenance_id,
@@ -1433,6 +1434,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         &source_for_span(self.full_source, definition_span),
                         content_hash(self.text_for_span(definition_span)?.as_bytes()),
                     )?;
+                    if let Some(owner) = entity_plan.matlab.writes.get(&fact.local_id()) {
+                        occurrence.role = OccurrenceRole::Write;
+                        occurrence.enclosing = owner
+                            .and_then(|local| materialized.get(&local))
+                            .map(|entity| entity.record.id);
+                        occurrence.id = derive_occurrence_record_id(&occurrence)
+                            .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    }
                     occurrences.insert(occurrence.id, occurrence);
                 }
                 let relation = containment_relation(
@@ -1578,6 +1587,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(target) = entity_plan
+                    .matlab
+                    .references
+                    .get(&fact.local_id())
+                    .and_then(|local| materialized.get(local))
+                {
+                    occurrence.target = OccurrenceTarget::Resolved {
+                        symbol: target.record.id,
+                    };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, target.record.id)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(detail) = source_reference_gap(fact)
@@ -1948,6 +1971,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut ecmascript_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_scopes = HashMap::<Option<u64>, u64>::new();
+        let matlab_scope_names = matlab::named_scopes(
+            self.parse_output.facts(),
+            &captures,
+            self.source_text,
+            self.request.limits().ir().max_string_bytes,
+            cancellation,
+        )?;
+        let mut matlab_named_scopes = HashMap::<(Option<u64>, &str, &str), u64>::new();
         let mut anonymous_scopes = HashMap::<Option<u64>, u64>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
@@ -2041,17 +2072,35 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     language_for_fact(self.request, fact),
                     "r" | "powershell" | "nix" | "matlab"
                 ) {
-                    let next = written_scopes.entry(fact.parent()).or_default();
+                    // Named MATLAB workspaces survive unrelated sibling insertion;
+                    // only indistinguishable same-name siblings need an ordinal.
+                    let name = matlab_scope_names.get(&fact.span()).copied().flatten();
+                    let next = if let Some(name) = name {
+                        matlab_named_scopes
+                            .entry((fact.parent(), fact.syntax_kind().as_str(), name))
+                            .or_default()
+                    } else {
+                        written_scopes.entry(fact.parent()).or_default()
+                    };
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                    Some(written_source_identity(
+                    let identity = written_source_identity(
                         language_for_fact(self.request, fact),
                         parent_scope
                             .as_ref()
                             .and_then(|scope| scope.stable_identity),
                         fact.syntax_kind().as_str(),
                         position,
-                    ))
+                    );
+                    Some(if let Some(name) = name {
+                        let mut hash =
+                            blake3::Hasher::new_derive_key("rootlight.matlab-named-workspace/1");
+                        hash.update(&identity);
+                        hash.update(name.as_bytes());
+                        *hash.finalize().as_bytes()
+                    } else {
+                        identity
+                    })
                 } else {
                     None
                 };
@@ -2633,6 +2682,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
             self.request.limits().ir(),
             cancellation,
         )?;
+        let matlab = matlab::resolve(
+            self.parse_output.facts(),
+            self.source_text,
+            &mut drafts,
+            self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+            self.request.limits().ir().max_string_bytes,
+            cancellation,
+        )?;
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -2653,6 +2710,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            matlab,
             drafts,
             nix_path_gaps,
             nearest_entity_ancestor,
@@ -2795,6 +2853,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    matlab: matlab::Plan,
     nix_path_gaps: BTreeSet<u64>,
     drafts: Vec<EntityDraft>,
     nearest_entity_ancestor: HashMap<u64, Option<u64>>,
@@ -4370,6 +4429,13 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "matlab.member_name.reference" => Some("matlab-member-target-unavailable"),
+        "matlab.function_handle_name.reference" => {
+            Some("matlab-function-handle-target-unavailable")
+        }
+        "matlab.type_or_attribute_name.reference" => {
+            Some("matlab-type-or-attribute-target-unavailable")
+        }
         "matlab.identifier.reference" => Some("matlab-binding-target-unavailable"),
         "matlab.application.reference" => Some("matlab-call-or-index-target-unavailable"),
         "matlab.command.reference" => Some("matlab-command-target-unavailable"),
