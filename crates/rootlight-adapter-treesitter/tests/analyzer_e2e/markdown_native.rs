@@ -341,6 +341,57 @@ fn markdown_perl_direct_coderef_calls_keep_embedded_identity_and_sources() {
 }
 
 #[test]
+fn markdown_perl_variable_coderef_values_and_effects_stay_inside_their_example() {
+    let source = "# Calls λ😀\r\n```perl\r\nsub value { 13 } my $call = \\&value; my $copy = $call; $copy->();\r\n```\r\n```perl\r\nsub value { 29 } my $call = \\&value; eval '1'; $call->();\r\n```\r\n```perl\r\n$call->();\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let definition = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.syntactic_text_hash == content_hash(b"value")
+        })
+        .unwrap();
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "perl.coderef_application.reference")
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 3);
+    for (index, call) in calls.into_iter().enumerate() {
+        let written = if index == 0 { "$copy->()" } else { "$call->()" };
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+        assert_eq!(call.syntactic_text_hash, content_hash(written.as_bytes()));
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(call.id)
+                    && edge.predicate == RelationPredicate::Calls
+            })
+            .collect();
+        if index == 0 {
+            assert_eq!(call.target, definition.target);
+            assert_eq!(call.role, OccurrenceRole::CallSite);
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&call.source));
+        } else {
+            assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(edges.is_empty());
+        }
+    }
+}
+
+#[test]
 fn markdown_perl_function_imports_and_storage_stay_inside_their_example() {
     let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; use subs qw(reverse); sub reverse { 29 } reverse('abc');\r\n```\r\n```perl\r\npackage Harbor; sub reverse { 41 } reverse('abc'); &reverse();\r\n```\r\n";
     assert_perl_function_example_isolation(source);

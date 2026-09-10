@@ -9,6 +9,12 @@
 [(block) (block_statement)] @scope
 ; Statement extents delimit my/state visibility; control scopes outlive conditions.
 (expression_statement) @scope
+; Native assignment fields preserve value provenance without treating text as executable syntax.
+(assignment_expression) @scope
+(assignment_expression left: (_) @expression right: (_) @expression)
+(coderef_call_expression) @expression
+(function_call_expression function: (function (varname (scalar))) @expression)
+[(eval_expression) (goto_expression) (substitution_regexp)] @expression
 [(conditional_statement) (loop_statement) (cstyle_for_statement) (for_statement)] @scope
 [(conditional_statement condition: (_) @scope)
  (loop_statement condition: (_) @scope)

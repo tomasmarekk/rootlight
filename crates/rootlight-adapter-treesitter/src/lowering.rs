@@ -1318,6 +1318,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let perl_code_values = if let Some(bindings) = &perl_bindings {
+            crate::perl_code_values::resolve(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                bindings,
+                &materialized
+                    .values()
+                    .filter_map(|entity| {
+                        entity.definition_local_id.map(|id| (id, entity.record.id))
+                    })
+                    .collect(),
+                &entity_plan
+                    .perl
+                    .references
+                    .iter()
+                    .filter_map(|(&id, target)| {
+                        materialized
+                            .get(target)
+                            .map(|entity| (id, entity.record.id))
+                    })
+                    .collect(),
+                cancellation,
+            )?
+        } else {
+            BTreeMap::new()
+        };
+
         let markdown_bindings = if self.request.language().as_str() == "markdown"
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -1660,6 +1687,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         relation.id = derive_relation_record_id(&relation)
                             .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     }
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(&symbol) = perl_code_values.get(&fact.local_id()) {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.role = OccurrenceRole::CallSite;
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relation.predicate = RelationPredicate::Calls;
+                    relation.id = derive_relation_record_id(&relation)
+                        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(target) = entity_plan

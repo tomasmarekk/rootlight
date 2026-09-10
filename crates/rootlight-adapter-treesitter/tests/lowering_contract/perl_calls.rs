@@ -5,6 +5,203 @@
 use super::*;
 
 #[test]
+fn perl_variable_coderef_edges_reserve_quotas_before_materialization() {
+    let perl = "sub entry { 1 } my $ref = \\&entry; $ref->();";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(perl, "src/module.pm", b"perl-code-value-quotas");
+    let facts: Vec<_> = [
+        (1, None, SyntaxFactKind::Root, perl, 0, 0, "perl.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            perl,
+            0,
+            1,
+            "perl.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            perl,
+            0,
+            2,
+            "perl.file.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "sub entry { 1 }",
+            0,
+            3,
+            "perl.function.scope",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Declaration,
+            "sub entry { 1 }",
+            0,
+            4,
+            "perl.function.declaration",
+        ),
+        (
+            6,
+            Some(5),
+            SyntaxFactKind::Occurrence,
+            "entry",
+            0,
+            5,
+            "perl.identifier.definition",
+        ),
+        (
+            7,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "my $ref = \\&entry",
+            0,
+            3,
+            "perl.assignment.scope",
+        ),
+        (
+            8,
+            Some(16),
+            SyntaxFactKind::Declaration,
+            "$ref",
+            0,
+            4,
+            "perl.lexical_variable.declaration",
+        ),
+        (
+            9,
+            Some(8),
+            SyntaxFactKind::Occurrence,
+            "$ref",
+            0,
+            5,
+            "perl.variable_name.definition",
+        ),
+        (
+            10,
+            Some(7),
+            SyntaxFactKind::Signature,
+            "my $ref",
+            0,
+            4,
+            "perl.lexical_code_target.expression",
+        ),
+        (
+            11,
+            Some(7),
+            SyntaxFactKind::Signature,
+            "\\&entry",
+            0,
+            4,
+            "perl.literal_code_value.expression",
+        ),
+        (
+            12,
+            Some(7),
+            SyntaxFactKind::Occurrence,
+            "&entry",
+            0,
+            4,
+            "perl.code_function_name.reference",
+        ),
+        (
+            13,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "$ref->()",
+            0,
+            3,
+            "perl.coderef_application.reference",
+        ),
+        (
+            14,
+            Some(3),
+            SyntaxFactKind::Signature,
+            "$ref->()",
+            0,
+            3,
+            "perl.scalar_coderef.expression",
+        ),
+        (
+            15,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "$ref",
+            1,
+            3,
+            "perl.variable_name.reference",
+        ),
+        (
+            16,
+            Some(3),
+            SyntaxFactKind::Scope,
+            "my $ref = \\&entry",
+            0,
+            3,
+            "perl.statement.scope",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(perl, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect();
+    for host in ["perl", "markdown"] {
+        let language = LanguageId::new(host).unwrap();
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(IrLimits::default()),
+            facts.clone(),
+        )
+        .unwrap();
+        let calls: Vec<_> = output
+            .document()
+            .relations
+            .iter()
+            .filter(|edge| edge.predicate == RelationPredicate::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].evidence.source.as_ref().unwrap().span(),
+            span_in(perl, &source, "$ref->()", 0)
+        );
+        let total = output.document().relations.len();
+        let mut ir = IrLimits::default();
+        ir.max_relations = total;
+        analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(ir.clone()),
+            facts.clone(),
+        )
+        .expect("exact reserved quota must fit materialized records");
+        ir.max_relations = total - 1;
+        let error = analyze_custom(&snapshot, &source, language, &limits(ir), facts.clone())
+            .expect_err("CODE value calls must not bypass quota admission");
+        assert!(
+            matches!(error, AdapterError::Sink(SinkError::StreamLimit { resource: rootlight_adapter_sdk::ResourceKind::Records, observed, limit }) if observed >= total && limit == total - 1),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn perl_callable_edges_reserve_quotas_before_materialization() {
     assert_callable_edge_quotas(
         "sub entry { 1 } entry(); my $ref = \\&entry;",

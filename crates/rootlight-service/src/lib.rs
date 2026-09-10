@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/97";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/98";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23877,6 +23877,54 @@ mod tests {
         written_names: &[(&str, &str)],
         edit: (&str, &str),
     ) {
+        assert_perl_durable_sources_with_reads(
+            source,
+            declaration_count,
+            call_count,
+            written_names,
+            edit,
+            2,
+        );
+    }
+
+    #[test]
+    fn perl_variable_coderef_calls_survive_noop_edit_clean_rebuild_and_restart() {
+        for (source, declarations, reads) in [
+            (
+                include_str!("../../../tests/fixtures/perl-bindings/coderef_lexical.pl"),
+                2,
+                2,
+            ),
+            (
+                include_str!("../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"),
+                4,
+                4,
+            ),
+            (
+                include_str!("../../../tests/fixtures/perl-bindings/coderef_shadow.pl"),
+                4,
+                2,
+            ),
+        ] {
+            assert_perl_durable_sources_with_reads(
+                source,
+                declarations,
+                2,
+                &[],
+                ("13", "17"),
+                reads,
+            );
+        }
+    }
+
+    fn assert_perl_durable_sources_with_reads(
+        source: &str,
+        declaration_count: usize,
+        call_count: usize,
+        written_names: &[(&str, &str)],
+        edit: (&str, &str),
+        variable_reads: usize,
+    ) {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
         let storage = durable_test_tempdir();
@@ -24057,7 +24105,7 @@ mod tests {
                         || site.role == OccurrenceRole::CallSite
                 })
                 .collect();
-            assert_eq!(reads.len(), 2 + call_count);
+            assert_eq!(reads.len(), variable_reads + call_count);
             assert_eq!(
                 reads
                     .iter()

@@ -106,6 +106,9 @@ pub(super) fn syntax(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<&'static str>, AdapterError> {
+    if role == StructuralRole::Expression {
+        return value_expression(node, source, cancellation).map(Some);
+    }
     if role == StructuralRole::Reference
         && node.parent().is_some_and(|parent| {
             matches!(
@@ -144,6 +147,13 @@ pub(super) fn syntax(
                 return Ok(Some("perl.package_switch"));
             }
             "expression_statement" => return Ok(Some("perl.statement")),
+            "assignment_expression" => {
+                return Ok(Some(if linear_assignment(node, cancellation)? {
+                    "perl.assignment"
+                } else {
+                    "perl.non_linear_assignment"
+                }));
+            }
             "for_statement" => {
                 return Ok(Some(match declaration_keyword(node, cancellation)? {
                     Some("my" | "state") => "perl.lexical_for",
@@ -305,6 +315,128 @@ pub(super) fn syntax(
         "string_literal" | "interpolated_string_literal" | "command_string" => "perl.string",
         _ => return Ok(None),
     }))
+}
+
+fn linear_assignment(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    let mut parent = node.parent();
+    while let Some(owner) = parent {
+        cancellation.check()?;
+        match owner.kind() {
+            "source_file"
+            | "subroutine_declaration_statement"
+            | "method_declaration_statement"
+            | "anonymous_subroutine_expression"
+            | "anonymous_method_expression"
+            | "phaser_statement" => return Ok(true),
+            "expression_statement"
+            | "block"
+            | "block_statement"
+            | "parenthesized_expression"
+            | "package_statement" => {}
+            // Callback bodies and unmodeled control operators are not necessarily
+            // evaluated once, even when the assignment has an ordinary block parent.
+            _ => return Ok(false),
+        }
+        parent = owner.parent();
+    }
+    Ok(false)
+}
+
+fn value_expression(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    cancellation.check()?;
+    if matches!(node.kind(), "eval_expression" | "goto_expression")
+        || (node.kind() == "substitution_regexp"
+            && node
+                .child_by_field_name("modifiers")
+                .is_some_and(|modifiers| {
+                    source
+                        .get(modifiers.byte_range())
+                        .is_some_and(|flags| flags.contains(&b'e'))
+                }))
+    {
+        return Ok("perl.code_flow_barrier");
+    }
+    if node.kind() == "coderef_call_expression"
+        && !node.has_error()
+        && explicit_group_end(node, source, cancellation)?
+        && node.named_child(0).is_some_and(scalar_name)
+    {
+        return Ok("perl.scalar_coderef");
+    }
+    if let Some(parent) = node.parent()
+        && parent.kind() == "assignment_expression"
+    {
+        if parent.child_by_field_name("left") == Some(node) {
+            return Ok(if scalar_name(node) {
+                "perl.code_target"
+            } else if node.kind() == "variable_declaration"
+                && declaration_keyword(node, cancellation)? == Some("my")
+                && node
+                    .child_by_field_name("variable")
+                    .is_some_and(scalar_name)
+                && node.child_by_field_name("attributes").is_none()
+            {
+                "perl.lexical_code_target"
+            } else {
+                "perl.unproven_code_target"
+            });
+        }
+        if parent.child_by_field_name("right") == Some(node) {
+            let mut plain = false;
+            for child in parent.children(&mut parent.walk()) {
+                cancellation.check()?;
+                plain |= child.kind() == "=" && source.get(child.byte_range()) == Some(b"=");
+            }
+            if !plain || parent.has_error() {
+                return Ok("perl.unknown_code_value");
+            }
+            let mut value = node;
+            while value.kind() == "parenthesized_expression" {
+                if !explicit_group_end(value, source, cancellation)? {
+                    return Ok("perl.unknown_code_value");
+                }
+                let Some(inner) = single_operand(value, cancellation)? else {
+                    return Ok("perl.unknown_code_value");
+                };
+                value = inner;
+            }
+            if scalar_name(value) {
+                return Ok("perl.copied_code_value");
+            }
+            if value.kind() == "refgen_expression"
+                && let Some(function) = single_operand(value, cancellation)?
+                && function.kind() == "function"
+                && function
+                    .named_child(0)
+                    .is_some_and(|name| name.kind() == "varname" && name.named_child_count() == 0)
+            {
+                return Ok("perl.literal_code_value");
+            }
+            return Ok("perl.unknown_code_value");
+        }
+    }
+    Ok(match node.kind() {
+        "function"
+            if node
+                .named_child(0)
+                .and_then(|name| name.named_child(0))
+                .is_some_and(scalar_name) =>
+        {
+            "perl.scalar_amper"
+        }
+        _ => "perl.unknown_code_expression",
+    })
+}
+
+fn scalar_name(node: Node<'_>) -> bool {
+    node.kind() == "scalar"
+        && node
+            .named_child(0)
+            .is_some_and(|name| name.kind() == "varname" && name.named_child_count() == 0)
 }
 
 fn direct_coderef_operand<'tree>(

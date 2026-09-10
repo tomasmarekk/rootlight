@@ -460,6 +460,183 @@ fn perl_native_function_calls_ampersands_and_invoked_references_share_targets() 
 }
 
 #[test]
+fn perl_native_variable_coderef_regexp_evaluation_invalidates_exact_values() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/coderef_regexp_eval.pl");
+    let result = output(source);
+    let document = result.document();
+    let call = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntactic_text_hash == content_hash(b"$call->()"))
+        .unwrap();
+    assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+    }));
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_preserve_transparent_values_and_local_lifetimes() {
+    for source in [
+        "sub value { 13 } my $call = ((\\&value)); my $copy = (($call)); $copy->();",
+        "sub value { 13 } sub invoke { my $call = \\&value; $call->(); } invoke();",
+        "sub value { 13 } my $call = \\&value; my $text = 'x'; $text =~ s/x/y/g; $call->();",
+    ] {
+        let written = if source.contains("$copy->()") {
+            "$copy->()"
+        } else {
+            "$call->()"
+        };
+        assert_variable_coderef_calls(source, &[(written, "value")]);
+    }
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_do_not_guess_through_effects_or_unknown_values() {
+    for source in [
+        "sub first { 13 } sub second { 29 } my $call = \\&first; $call = unknown(); $call->();",
+        "sub first { 13 } sub second { 29 } my $call = \\&first; if ($condition) { $call = \\&second; } $call->();",
+        "sub first { 13 } sub second { 29 } my $call = \\&first; 0 && ($call = \\&second); $call->();",
+        "sub first { 13 } my $call = \\&first; mutate(\\$call); $call->();",
+        "sub first { 13 } my $call = \\&first; mutate($call); $call->();",
+        "sub first { 13 } my $call = \\&first; $call++; $call->();",
+        "sub first { 13 } my $call = \\&first; eval $input; $call->();",
+        "sub first { 13 } my $call = \\&first; my $result = eval $input; $call->();",
+        "sub first { 13 } my $call = \\&first; $call .= 'suffix'; $call->();",
+        "sub first { 13 } state $call = \\&first; $call->();",
+        "sub first { 13 } sub second { 29 } my $call = \\&first; map { $call = \\&second } (); $call->();",
+        "sub first { 13 } sub second { 29 } my $call = \\&first; sort { $call = \\&second; 0 } (); $call->();",
+    ] {
+        let result = output(source);
+        let document = result.document();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntactic_text_hash == content_hash(b"$call->()"))
+            .unwrap();
+        assert!(
+            matches!(call.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            !document.relations.iter().any(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(call.id)
+                    && edge.predicate == RelationPredicate::Calls
+            }),
+            "{source}"
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+            }),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_in_assignment_values_keep_receiver_identity() {
+    assert_variable_coderef_calls(
+        "sub value { 13 } my $call = \\&value; my $result = $call->(); print $result;",
+        &[("$call->()", "value")],
+    );
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_preserve_lexical_values() {
+    assert_variable_coderef_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/coderef_lexical.pl"),
+        &[("$call->()", "value"), ("&$call", "value")],
+    );
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_copy_values_before_reassignment() {
+    assert_variable_coderef_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"),
+        &[("$copy->()", "first"), ("$call->()", "second")],
+    );
+}
+
+#[test]
+fn perl_native_variable_coderef_calls_keep_shadowed_storage_distinct() {
+    assert_variable_coderef_calls(
+        include_str!("../../../../tests/fixtures/perl-bindings/coderef_shadow.pl"),
+        &[("$call->()", "second"), ("$call->()", "first")],
+    );
+}
+
+#[test]
+fn perl_native_variable_coderef_captured_mutation_has_no_single_exact_target() {
+    let source =
+        include_str!("../../../../tests/fixtures/perl-bindings/coderef_captured_mutation.pl");
+    let result = output(source);
+    let document = result.document();
+    let call = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntactic_text_hash == content_hash(b"$call->()"))
+        .unwrap();
+    assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(!document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(call.id)
+            && edge.predicate == RelationPredicate::Calls
+    }));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+    }));
+}
+
+fn assert_variable_coderef_calls(source: &str, expected: &[(&str, &str)]) {
+    let result = output(source);
+    let document = result.document();
+    let mut sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            expected
+                .iter()
+                .any(|(written, _)| site.syntactic_text_hash == content_hash(written.as_bytes()))
+        })
+        .collect();
+    sites.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(sites.len(), expected.len());
+    for (site, &(written, name)) in sites.iter().zip(expected) {
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(site.syntactic_text_hash, content_hash(written.as_bytes()));
+        assert_eq!(site.role, OccurrenceRole::CallSite, "{written}");
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{written}"
+        );
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::Calls
+            })
+            .collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].object, RelationEndpoint::Entity(target.id));
+        assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+        let span = site.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+    }
+}
+
+#[test]
 fn perl_native_direct_coderef_invocations_use_exact_callable_targets() {
     let source = include_str!("../../../../tests/fixtures/perl-bindings/coderef_direct_bounded.pl");
     assert_function_calls(source, &[("&value", Some(0)), ("&value", Some(0))]);
@@ -549,7 +726,7 @@ fn perl_native_direct_coderef_does_not_search_arbitrary_callee_descendants() {
 }
 
 #[test]
-fn perl_native_function_calls_ampersands_reject_dynamic_targets() {
+fn perl_native_function_calls_ampersands_separate_proven_and_unproven_values() {
     let source =
         "sub value { 13 } &value(); &$value(); &{\"value\"}(); my $ref = \\&value; $ref->();\n";
     assert_function_sites(
@@ -568,21 +745,31 @@ fn perl_native_function_calls_ampersands_reject_dynamic_targets() {
         .iter()
         .find(|site| site.syntax_kind == "perl.coderef_application.reference")
         .unwrap();
-    assert!(matches!(
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "value")
+        .unwrap();
+    assert_eq!(
         invocation.target,
-        OccurrenceTarget::Unresolved { .. }
-    ));
-    assert_eq!(invocation.syntactic_text_hash, content_hash(b"$ref->()"));
-    assert!(
-        document
-            .skipped_regions
-            .iter()
-            .any(|gap| gap.detail == "perl-function-target-unavailable"
-                && gap.source == invocation.source)
+        OccurrenceTarget::Resolved { symbol: target.id }
     );
-    assert!(!document.relations.iter().any(|edge| edge.subject
-        == RelationEndpoint::Occurrence(invocation.id)
-        && edge.predicate == RelationPredicate::Calls));
+    assert_eq!(invocation.role, OccurrenceRole::CallSite);
+    assert_eq!(invocation.syntactic_text_hash, content_hash(b"$ref->()"));
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.detail == "perl-function-target-unavailable" && gap.source == invocation.source
+    }));
+    let edges: Vec<_> = document
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.subject == RelationEndpoint::Occurrence(invocation.id)
+                && edge.predicate == RelationPredicate::Calls
+        })
+        .collect();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].object, RelationEndpoint::Entity(target.id));
+    assert_eq!(edges[0].evidence.source.as_ref(), Some(&invocation.source));
 }
 
 #[test]
@@ -1246,7 +1433,10 @@ fn perl_native_callable_headers_exclude_bodies() {
     let headers: Vec<_> = result
         .facts()
         .iter()
-        .filter(|fact| fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature)
+        .filter(|fact| {
+            fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str().ends_with(".signature")
+        })
         .map(|fact| {
             let span = fact.span();
             &PERL.source[usize::try_from(span.start_byte()).unwrap()
@@ -1254,6 +1444,29 @@ fn perl_native_callable_headers_exclude_bodies() {
         })
         .collect();
     assert_eq!(headers, ["sub adjust ($value)"]);
+    let values: Vec<_> = result
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str().ends_with(".expression")
+        })
+        .map(|fact| {
+            let span = fact.span();
+            (
+                fact.syntax_kind().as_str(),
+                &PERL.source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+            )
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            ("perl.lexical_code_target.expression", "my $result"),
+            ("perl.unknown_code_value.expression", "$value + 1")
+        ]
+    );
 }
 
 #[test]
@@ -1397,6 +1610,13 @@ fn perl_native_function_ownership_gaps_require_unproven_declarations() {
 #[test]
 fn perl_native_artifact_replay_matches_fresh_generation() {
     assert_perl_artifact_replay(PERL.source);
+}
+
+#[test]
+fn perl_native_variable_coderef_artifacts_rebind_generation() {
+    assert_perl_artifact_replay(include_str!(
+        "../../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"
+    ));
 }
 
 #[test]

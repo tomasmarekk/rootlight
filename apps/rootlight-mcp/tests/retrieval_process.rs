@@ -696,6 +696,20 @@ fn perl_direct_coderef_calls_cross_mcp_with_both_exact_sources() {
 }
 
 #[test]
+fn perl_variable_coderef_copies_cross_mcp_with_exact_targets_and_sources() {
+    assert_relationship_sources(
+        "perl",
+        "calls.pm",
+        include_str!("../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"),
+        &[
+            ("first", "function", "$copy->()"),
+            ("second", "function", "$call->()"),
+        ],
+        "calls",
+    );
+}
+
+#[test]
 fn perl_qualified_function_calls_cross_mcp_with_exact_sources() {
     for (source, written) in [
         (

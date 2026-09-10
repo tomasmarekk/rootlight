@@ -373,6 +373,9 @@ impl QueryPack {
             if family == GrammarFamily::Nix {
                 expected.extend(["definition_part", "expression"]);
             }
+            if family == GrammarFamily::Perl {
+                expected.push("expression");
+            }
             if supports_terminal_call_name(family) {
                 expected.push(TERMINAL_CALL_NAME_CAPTURE);
             }
@@ -2117,6 +2120,9 @@ mod tests {
                 }
                 if family == GrammarFamily::Nix {
                     expected.extend(["definition_part", "expression"]);
+                }
+                if family == GrammarFamily::Perl {
+                    expected.push("expression");
                 }
                 if supports_terminal_call_name(family) {
                     expected.push(TERMINAL_CALL_NAME_CAPTURE);

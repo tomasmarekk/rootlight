@@ -13,6 +13,7 @@ mod markdown_bindings;
 mod nix_attributes;
 mod nix_bindings;
 mod perl_bindings;
+mod perl_code_values;
 mod pool;
 mod query_pack;
 mod registry;

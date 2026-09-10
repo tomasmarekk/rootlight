@@ -150,6 +150,13 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
     let bare_calls = "sub entry { 1 } my $result = entry;\n".repeat(40);
     let qualified_calls = "sub main::Cove::entry { 1 } ::Cove::entry();\n".repeat(40);
     let direct_coderef_calls = "sub entry { 1 } (\\&entry)->();\n".repeat(40);
+    let variable_coderef_calls =
+        "sub entry { 1 } my $call = \\&entry; my $copy = $call; $copy->();\n".repeat(40);
+    let nested_code_values = format!(
+        "sub entry {{ 1 }} my $call = {}\\&entry{}; $call->();",
+        "(".repeat(256),
+        ")".repeat(256)
+    );
     let grouped_coderef = format!(
         "sub entry {{ 1 }} {}\\&entry{}->();",
         "(# grouping\n".repeat(256),
@@ -174,6 +181,8 @@ fn perl_hostile_sources_keep_budgets_cancellation_and_reusable_scanner_state() {
         bare_calls.as_bytes(),
         qualified_calls.as_bytes(),
         direct_coderef_calls.as_bytes(),
+        variable_coderef_calls.as_bytes(),
+        nested_code_values.as_bytes(),
         grouped_coderef.as_bytes(),
         root_alias.as_bytes(),
         heredocs.as_bytes(),
