@@ -27,6 +27,43 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn markdown_nix_merged_sets_preserve_recursion_and_host_definition_sites() {
+    let source = "# Sets λ😀\r\n```nix\r\nlet a = rec { field = 1; }; a.added = field; in a\r\n```\r\n```nix\r\nlet a = rec { field = 2; }; a.added = field; in a\r\n```\r\n";
+    let result = output(source);
+    let fields: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "nix" && entity.canonical_name == "field")
+        .collect();
+    assert_eq!(fields.len(), 2);
+    assert_ne!(fields[0].id, fields[1].id);
+    for field in fields {
+        let span = field.evidence.source.as_ref().unwrap().span();
+        let reads: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.target == (OccurrenceTarget::Resolved { symbol: field.id })
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(read.start_byte()).unwrap()
+                    ..usize::try_from(read.end_byte()).unwrap()
+            ),
+            Some("field")
+        );
+        assert!(read.start_byte() > span.end_byte());
+        assert!(read.start_byte() - span.end_byte() < 24);
+    }
+}
+
+#[test]
 fn markdown_nix_implicit_path_roots_keep_host_sources_and_separate_examples() {
     let source = "# Roots λ😀\r\n```nix\r\nlet a.b = 1; a.c = 2; in a\r\n```\r\n```nix\r\nlet a.d = 3; in a\r\n```\r\n";
     let result = output(source);

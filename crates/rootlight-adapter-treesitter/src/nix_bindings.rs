@@ -12,6 +12,7 @@ use rootlight_ids::SymbolId;
 
 pub(super) struct NixBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
+    attributes: crate::nix_attributes::Attributes,
     bindings: BTreeMap<(u64, Cow<'a, str>), Option<SymbolId>>,
     unmodeled_scopes: BTreeSet<u64>,
     maximum_name_bytes: usize,
@@ -28,6 +29,12 @@ impl<'a> NixBindings<'a> {
         cancellation.check()?;
         let mut result = Self {
             facts: BTreeMap::new(),
+            attributes: crate::nix_attributes::Attributes::build(
+                facts,
+                source,
+                maximum_name_bytes,
+                cancellation,
+            )?,
             bindings: BTreeMap::new(),
             unmodeled_scopes: BTreeSet::new(),
             maximum_name_bytes,
@@ -38,62 +45,37 @@ impl<'a> NixBindings<'a> {
                 return Err(invalid_capture());
             }
         }
-        let mut paths = BTreeMap::<u64, Vec<&SyntaxFact>>::new();
-        for fact in facts {
+        result
+            .unmodeled_scopes
+            .extend(result.attributes.unknown.iter().copied());
+        for (&id, group) in &result.attributes.groups {
             cancellation.check()?;
-            if matches!(
-                fact.syntax_kind().as_str(),
-                "nix.path_segment.definition_part" | "nix.dynamic_segment.definition_part"
-            ) && let Some(owner) = fact.parent()
-            {
-                paths.entry(owner).or_default().push(fact);
+            if !group.valid {
+                result.unmodeled_scopes.insert(id);
             }
-        }
-        let mut path_owners = BTreeSet::new();
-        for (owner, mut parts) in paths {
-            cancellation.check()?;
-            if parts.len() < 2 {
+            if !result.binding_scope(group.parent)? {
                 continue;
             }
-            path_owners.insert(owner);
-            let Some(scope) = result.nearest_boundary(Some(owner), cancellation)? else {
-                continue;
+            let mut targets = group
+                .members
+                .iter()
+                .map(|member| symbols.get(&member.definition).copied());
+            let first = targets.next().flatten();
+            let target = if group.valid && targets.all(|target| target == first) {
+                first
+            } else {
+                None
             };
-            if !introduces_bindings(result.fact(scope)?) {
-                continue;
-            }
-            crate::runtime::sort_cancellable_by(&mut parts, cancellation, |left, right| {
-                (left.span().start_byte(), left.span().end_byte())
-                    .cmp(&(right.span().start_byte(), right.span().end_byte()))
-            })?;
-            let root = parts.first().ok_or_else(invalid_capture)?;
-            let start = usize::try_from(root.span().start_byte()).map_err(|_| invalid_capture())?;
-            let end = usize::try_from(root.span().end_byte()).map_err(|_| invalid_capture())?;
-            let written = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
-                .map_err(|_| invalid_capture())?;
-            let Some(name) = static_binding_name(written, maximum_name_bytes, cancellation)? else {
-                result.unmodeled_scopes.insert(scope);
-                continue;
-            };
-            let symbol = symbols.get(&root.local_id()).copied();
-            // Multiple paths can define the same implicit root. Missing or
-            // conflicting identities still shadow outer names rather than merge.
             result
                 .bindings
-                .entry((scope, name))
-                .and_modify(|binding| {
-                    if *binding != symbol {
-                        *binding = None;
-                    }
-                })
-                .or_insert(symbol);
+                .insert((group.parent, Cow::Owned(group.name.clone())), target);
         }
         for fact in facts {
             cancellation.check()?;
-            if path_owners.contains(&fact.local_id())
+            if result.attributes.owners.contains(&fact.local_id())
                 || fact
                     .parent()
-                    .is_some_and(|owner| path_owners.contains(&owner))
+                    .is_some_and(|owner| result.attributes.owners.contains(&owner))
             {
                 continue;
             }
@@ -105,7 +87,7 @@ impl<'a> NixBindings<'a> {
                 // Without a root identity, a computed suffix must not expose an
                 // enclosing namesake.
                 if let Some(scope) = result.nearest_boundary(fact.parent(), cancellation)?
-                    && introduces_bindings(result.fact(scope)?)
+                    && result.binding_scope(scope)?
                 {
                     result.unmodeled_scopes.insert(scope);
                 }
@@ -117,7 +99,7 @@ impl<'a> NixBindings<'a> {
             let Some(scope) = result.nearest_boundary(fact.parent(), cancellation)? else {
                 continue;
             };
-            if !introduces_bindings(result.fact(scope)?) {
+            if !result.binding_scope(scope)? {
                 continue;
             }
             let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
@@ -161,7 +143,7 @@ impl<'a> NixBindings<'a> {
         {
             // Bare inherit reads the environment outside the containing set/let,
             // whereas inherit (expr) evaluates expr in the ordinary environment.
-            scope = self.nearest_boundary(self.fact(owner)?.parent(), cancellation)?;
+            scope = self.outer_boundary(owner, cancellation)?;
         }
         for _ in 0..self.facts.len() {
             cancellation.check()?;
@@ -174,14 +156,35 @@ impl<'a> NixBindings<'a> {
             if let Some(binding) = self.bindings.get(&(current, Cow::Borrowed(name.as_ref()))) {
                 return Ok(*binding);
             }
-            let owner = self.fact(current)?;
-            if owner.syntax_kind().as_str() == "nix.file.module" {
+            if self
+                .facts
+                .get(&current)
+                .is_some_and(|owner| owner.syntax_kind().as_str() == "nix.file.module")
+            {
                 // Embedded examples are separate Nix units, not one shared scope.
                 return Ok(None);
             }
-            scope = self.nearest_boundary(owner.parent(), cancellation)?;
+            scope = self.outer_boundary(current, cancellation)?;
         }
         Err(invalid_capture())
+    }
+
+    fn binding_scope(&self, id: u64) -> Result<bool, AdapterError> {
+        if let Some(group) = self.attributes.groups.get(&id) {
+            return Ok(group.recursive && group.valid);
+        }
+        Ok(introduces_bindings(self.fact(id)?))
+    }
+
+    fn outer_boundary(
+        &self,
+        id: u64,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        if let Some(group) = self.attributes.groups.get(&id) {
+            return Ok(Some(group.parent));
+        }
+        self.nearest_boundary(self.fact(id)?.parent(), cancellation)
     }
 
     fn nearest_boundary(
@@ -194,11 +197,19 @@ impl<'a> NixBindings<'a> {
             let Some(id) = parent else {
                 return Ok(None);
             };
+            if let Some(&scope) = self
+                .attributes
+                .scopes
+                .get(&id)
+                .or_else(|| self.attributes.values.get(&id))
+            {
+                return Ok(Some(scope));
+            }
             let fact = self.fact(id)?;
             if introduces_bindings(fact)
                 || matches!(
                     fact.syntax_kind().as_str(),
-                    "nix.attrset.scope" | "nix.file.module"
+                    "nix.attrset.scope" | "nix.bound_attrset.scope" | "nix.file.module"
                 )
             {
                 return Ok(Some(id));
@@ -216,7 +227,10 @@ impl<'a> NixBindings<'a> {
 fn introduces_bindings(fact: &SyntaxFact) -> bool {
     matches!(
         fact.syntax_kind().as_str(),
-        "nix.function.scope" | "nix.let.scope" | "nix.rec_attrset.scope"
+        "nix.function.scope"
+            | "nix.let.scope"
+            | "nix.rec_attrset.scope"
+            | "nix.bound_rec_attrset.scope"
     )
 }
 

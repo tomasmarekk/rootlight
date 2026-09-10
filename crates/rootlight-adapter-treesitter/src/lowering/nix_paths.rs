@@ -24,6 +24,12 @@ pub(super) fn resolve(
 ) -> Result<BTreeSet<u64>, AdapterError> {
     cancellation.check()?;
     let mut unavailable = BTreeSet::new();
+    if !facts
+        .iter()
+        .any(|fact| fact.syntax_kind().as_str().starts_with("nix."))
+    {
+        return Ok(unavailable);
+    }
     let mut paths = BTreeMap::<u64, Vec<&SyntaxFact>>::new();
     for fact in facts {
         cancellation.check()?;
@@ -32,9 +38,6 @@ pub(super) fn resolve(
         {
             paths.entry(owner).or_default().push(fact);
         }
-    }
-    if paths.values().all(|parts| parts.len() < 2) {
-        return Ok(unavailable);
     }
     let mut original_names = HashMap::new();
     for &owner in paths.keys() {
@@ -176,8 +179,127 @@ pub(super) fn resolve(
             leaf.data_qualified_name = Some(original.clone());
         }
     }
+    merge_attributes(facts, source, drafts, strings, limits, cancellation)?;
     restore_depths(drafts, cancellation)?;
     Ok(unavailable)
+}
+
+fn merge_attributes(
+    facts: &[SyntaxFact],
+    source: &str,
+    drafts: &mut HashMap<u64, EntityDraft>,
+    strings: &mut usize,
+    limits: &IrLimits,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let attributes = crate::nix_attributes::Attributes::build(
+        facts,
+        source.as_bytes(),
+        limits.max_string_bytes,
+        cancellation,
+    )?;
+    if !attributes
+        .groups
+        .values()
+        .any(|group| group.valid && group.is_set && group.members.len() > 1)
+    {
+        return Ok(());
+    }
+    let mut merged = HashMap::new();
+    let mut before: HashMap<_, _> = drafts
+        .iter()
+        .map(|(&id, draft)| {
+            let length = draft
+                .name
+                .len()
+                .checked_mul(2)
+                .and_then(|length| length.checked_add(draft.qualified_length))
+                .ok_or(SinkError::AccountingOverflow)?;
+            Ok((id, length))
+        })
+        .collect::<Result<_, SinkError>>()?;
+    for group in attributes
+        .groups
+        .values()
+        .filter(|group| group.valid && group.is_set && group.members.len() > 1)
+    {
+        cancellation.check()?;
+        let Some(first) = group
+            .members
+            .first()
+            .and_then(|member| drafts.get(&member.draft))
+            .cloned()
+        else {
+            continue;
+        };
+        if group
+            .members
+            .iter()
+            .any(|member| !drafts.contains_key(&member.draft))
+        {
+            continue;
+        }
+        for member in &group.members {
+            cancellation.check()?;
+            let draft = drafts.get_mut(&member.draft).ok_or_else(invalid)?;
+            let replacement = first
+                .name
+                .len()
+                .checked_mul(2)
+                .and_then(|length| length.checked_add(first.qualified_length))
+                .ok_or(SinkError::AccountingOverflow)?;
+            let reserved = before.get_mut(&member.draft).ok_or_else(invalid)?;
+            if replacement > *reserved {
+                account_string(strings, replacement - *reserved, limits)?;
+                *reserved = replacement;
+            }
+            // Identity follows one written owner while each definition keeps its
+            // own exact source site. Children are rebound to that shared owner.
+            draft.name.clone_from(&first.name);
+            draft.parent_entity = first.parent_entity;
+            draft.scope_identity = first.scope_identity;
+            draft.scope_collision_guard = first.scope_collision_guard;
+            draft.data_identity = first.data_identity;
+            draft.data_root_entity = first.data_root_entity;
+            draft
+                .data_qualified_name
+                .clone_from(&first.data_qualified_name);
+            draft.qualified_length = first.qualified_length;
+            merged.insert(member.draft, first.local_id);
+        }
+    }
+    if merged.is_empty() {
+        return Ok(());
+    }
+    for draft in drafts.values_mut() {
+        cancellation.check()?;
+        if let Some(parent) = draft.parent_entity.and_then(|id| merged.get(&id)) {
+            draft.parent_entity = Some(*parent);
+        }
+        if let Some(root) = draft.data_root_entity.and_then(|id| merged.get(&id)) {
+            draft.data_root_entity = Some(*root);
+        }
+    }
+    let mut lengths = Vec::new();
+    for (&id, draft) in drafts.iter().filter(|(_, draft)| draft.language == "nix") {
+        cancellation.check()?;
+        lengths.push((id, qualified(draft, drafts, limits, cancellation)?.len()));
+    }
+    for (id, length) in lengths {
+        let draft = drafts.get_mut(&id).ok_or_else(invalid)?;
+        draft.qualified_length = length;
+        let current = draft
+            .name
+            .len()
+            .checked_mul(2)
+            .and_then(|size| size.checked_add(length))
+            .ok_or(SinkError::AccountingOverflow)?;
+        let original = before.get(&id).copied().ok_or_else(invalid)?;
+        if current > original {
+            account_string(strings, current - original, limits)?;
+        }
+    }
+    Ok(())
 }
 
 fn text(source: &str, span: SourceSpan) -> Result<&str, AdapterError> {
@@ -209,6 +331,7 @@ fn qualified(
         return Ok(name.clone());
     }
     let mut chain = Vec::new();
+    let mut output = String::new();
     let mut current = Some(draft.local_id);
     for _ in 0..=drafts.len() {
         cancellation.check()?;
@@ -216,13 +339,22 @@ fn qualified(
             break;
         };
         let node = drafts.get(&id).ok_or_else(invalid)?;
+        if let Some(name) = &node.data_qualified_name {
+            append(&mut output, name, limits)?;
+            current = None;
+            break;
+        }
+        if node.parent_entity.is_none()
+            && let Some(prefix) = &node.qualified_prefix
+        {
+            append(&mut output, prefix, limits)?;
+        }
         chain.push(node);
         current = node.parent_entity;
     }
     if current.is_some() {
         return Err(invalid());
     }
-    let mut output = String::new();
     for node in chain.into_iter().rev() {
         if !output.is_empty() {
             append(&mut output, "::", limits)?;

@@ -10,6 +10,7 @@ mod incremental;
 mod lowering;
 mod lua_bindings;
 mod markdown_bindings;
+mod nix_attributes;
 mod nix_bindings;
 mod pool;
 mod query_pack;

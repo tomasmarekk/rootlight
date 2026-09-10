@@ -26,6 +26,20 @@ fn is_bound_function(node: Node<'_>) -> bool {
         == Some(node)
 }
 
+fn is_binding_value(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let mut value = node;
+    while let Some(parent) = value.parent()
+        && parent.kind() == "parenthesized_expression"
+    {
+        cancellation.check()?;
+        value = parent;
+    }
+    Ok(value.parent().is_some_and(|parent| {
+        parent.kind() == "binding" && parent.child_by_field_name("expression") == Some(value)
+    }))
+}
+
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
     if node.kind() == "function_expression" && is_bound_function(node) {
         return !matches!(
@@ -136,6 +150,10 @@ pub(super) fn syntax(
         (_, "source_code") => "nix.file",
         (_, "function_expression") => "nix.function",
         (_, "let_expression") => "nix.let",
+        (_, "attrset_expression") if is_binding_value(node, cancellation)? => "nix.bound_attrset",
+        (_, "rec_attrset_expression") if is_binding_value(node, cancellation)? => {
+            "nix.bound_rec_attrset"
+        }
         (_, "attrset_expression") => "nix.attrset",
         (_, "rec_attrset_expression" | "let_attrset_expression") => "nix.rec_attrset",
         (_, "with_expression") => "nix.with",

@@ -590,6 +590,19 @@ fn nix_quoted_lexical_relationships_preserve_authored_mcp_sources() {
 }
 
 #[test]
+fn nix_merged_rec_sets_cross_mcp_with_source_proven_added_field_reads() {
+    assert_nix_lexical_relationship_sources(
+        "{ system ? \"portable\" }@args: let identity = rec { part = value: value; }; identity.other = part; in { inherit system; result = [ identity args ]; }",
+        &[
+            ("identity", "variable", "identity"),
+            ("part", "function", "part"),
+            ("value", "variable", "value"),
+            ("args", "variable", "args"),
+        ],
+    );
+}
+
+#[test]
 fn nix_implicit_path_owners_cross_mcp_as_noncallable_lexical_targets() {
     assert_nix_lexical_relationship_sources(
         "{ system ? \"portable\" }@args: let identity.part = value: value; identity.other = 2; in { inherit system; result = [ identity args ]; }",

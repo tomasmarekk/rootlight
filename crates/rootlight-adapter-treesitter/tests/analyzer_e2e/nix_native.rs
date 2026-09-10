@@ -84,6 +84,76 @@ fn assert_bindings(source: &str, cases: &[(&str, &str, Option<&str>)]) {
 }
 
 #[test]
+fn nix_merged_attribute_sets_follow_the_first_sets_recursion_mode() {
+    for source in [
+        "let a = { b = 1; }; a.c = 2; in a",
+        "let a.b = 1; a = { c = 2; }; in a",
+        "let a = { b = 1; }; a = { c = 2; }; in a",
+    ] {
+        let result = output(source);
+        let roots: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "a")
+            .collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "merged root in {source}: {:?}",
+            result.document().entities
+        );
+        let reference = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|item| {
+                item.role == OccurrenceRole::Reference
+                    && item.source.span().end_byte() == u64::try_from(source.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved {
+                symbol: roots[0].id
+            }
+        );
+    }
+    assert_bindings(
+        "let x = 0; a = rec { x = 1; }; a.y = x; in a",
+        &[("y = x", "x", Some("x = 1"))],
+    );
+    assert_bindings(
+        "let x = 0; a.y = x; a = rec { x = 1; z = x; }; in a",
+        &[("y = x", "x", Some("x = 0")), ("z = x", "x", Some("x = 0"))],
+    );
+}
+
+#[test]
+fn nix_nested_set_merges_preserve_inheritance_and_reject_scalar_conflicts() {
+    for source in [
+        "let x = 0; a = rec { nested = rec { x = 1; }; }; a.nested.y = x; in a",
+        "let x = 0; a.nested = rec { x = 1; }; a = { nested.y = x; }; in a",
+        "let x = 0; a = ((rec { x = 1; })); a.y = x; in a",
+        "let x = 0; a = rec { x = 1; }; a = { y = x; }; in a",
+    ] {
+        assert_bindings(source, &[("y = x", "x", Some("x = 1"))]);
+        assert_nix_artifact_replay(source);
+    }
+    assert_bindings(
+        "let x = 0; a = rec { z = 1; }; a = { inherit x; }; in a",
+        &[("inherit x", "x", Some("x = 0"))],
+    );
+    for source in [
+        "let x = 0; a = 1; a.x = 2; in a",
+        "let x = 0; a.x = 2; a = 1; in a",
+        "let x = 0; a = (let local = 1; in { x = local; }); a.y = 2; in a",
+    ] {
+        assert_bindings(source, &[("in a", "a", None)]);
+    }
+}
+
+#[test]
 fn nix_attribute_path_roots_merge_written_sites_without_becoming_callable_leaves() {
     let source = "let a.b = value: value; a.c = 2; in a";
     let result = output(source);
