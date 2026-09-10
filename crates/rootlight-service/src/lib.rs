@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/80";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/5";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/81";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/6";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -27076,6 +27076,43 @@ mod tests {
                 .unwrap();
             let document = snapshot.document();
             assert_eq!(document.entities.len(), 8, "{:?}", document.entities);
+            let reads: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == rootlight_ir::OccurrenceRole::Reference)
+                .collect();
+            assert_eq!(reads.len(), 4, "{reads:?}");
+            for read in reads {
+                let rootlight_ir::OccurrenceTarget::Resolved { symbol } = read.target else {
+                    panic!("source-proven lexical read lost its target: {read:?}");
+                };
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                let span = read.source.span();
+                assert_eq!(
+                    expected.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap()
+                    ),
+                    Some(target.canonical_name.as_str())
+                );
+                assert_eq!(
+                    target.kind,
+                    if target.canonical_name == "identity" {
+                        rootlight_ir::EntityKind::Function
+                    } else {
+                        rootlight_ir::EntityKind::Parameter
+                    }
+                );
+                assert!(document.relations.iter().any(|relation| {
+                    relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                        && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(read.id)
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+                }));
+            }
             let ids: BTreeSet<_> = document.entities.iter().map(|entity| entity.id).collect();
             if let Some(initial_ids) = &initial_ids {
                 assert_eq!(initial_ids, &ids);
@@ -27108,10 +27145,8 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
             }
-            assert!(
-                document.skipped_regions.iter().any(|gap| gap.detail
-                    == "nix-lexical-import-and-runtime-binding-resolution-unavailable")
-            );
+            assert!(document.skipped_regions.iter().any(|gap| gap.detail
+                == "nix-attribute-import-and-runtime-binding-resolution-unavailable"));
         }
     }
 

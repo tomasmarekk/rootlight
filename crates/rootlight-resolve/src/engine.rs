@@ -750,6 +750,12 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("markdown.") {
         return false;
     }
+    // Nix lexical identity belongs to the adapter's recursive environments.
+    // Remaining reads, attribute selections and calls need evidence that a
+    // spelling-only score cannot supply, including correct inherit visibility.
+    if occurrence.syntax_kind.starts_with("nix.") {
+        return false;
+    }
     // ECMAScript member leaves require their receiver's module/type evidence.
     // Re-scoring a source-backed adapter gap by spelling would invent a target.
     if matches!(

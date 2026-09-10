@@ -1156,6 +1156,124 @@ fn lua_reference_relations_are_reserved_in_relation_and_total_record_quotas() {
 }
 
 #[test]
+fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
+    const NIX: &str = "let value = 1; in value";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(NIX, "src/module.nix", b"nix-lexical-quota-fixture");
+    let facts = [
+        (1, None, SyntaxFactKind::Root, NIX, 0, 0, "nix.file.root"),
+        (
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            NIX,
+            0,
+            1,
+            "nix.file.module",
+        ),
+        (
+            3,
+            Some(2),
+            SyntaxFactKind::Scope,
+            NIX,
+            0,
+            2,
+            "nix.let.scope",
+        ),
+        (
+            4,
+            Some(3),
+            SyntaxFactKind::Declaration,
+            "value = 1;",
+            0,
+            3,
+            "nix.variable.declaration",
+        ),
+        (
+            5,
+            Some(4),
+            SyntaxFactKind::Occurrence,
+            "value",
+            0,
+            4,
+            "nix.binding_name.definition",
+        ),
+        (
+            6,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            "value",
+            1,
+            3,
+            "nix.identifier.reference",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, parent, kind, text, nth, depth, syntax)| {
+        SyntaxFact::new(
+            id,
+            parent,
+            kind,
+            span_in(NIX, &source, text, nth),
+            depth,
+            label(syntax),
+        )
+    })
+    .collect::<Vec<_>>();
+    for host in ["nix", "markdown"] {
+        let language = LanguageId::new(host).unwrap();
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(IrLimits::default()),
+            facts.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+                .count(),
+            1
+        );
+        for quota in ["relations", "gaps", "total"] {
+            let mut ir = IrLimits::default();
+            let (observed, limit) = match quota {
+                "relations" => {
+                    ir.max_relations = 2;
+                    (3, 2)
+                }
+                "gaps" => {
+                    ir.max_skipped_regions = 3;
+                    (4, 3)
+                }
+                _ => {
+                    ir.max_total_records = 24;
+                    (25, 24)
+                }
+            };
+            let error = analyze_custom(
+                &snapshot,
+                &source,
+                language.clone(),
+                &limits(ir),
+                facts.clone(),
+            )
+            .expect_err("Nix relation and uncertainty require preflight reservations");
+            assert!(
+                matches!(error, AdapterError::Sink(SinkError::StreamLimit {
+                resource: rootlight_adapter_sdk::ResourceKind::Records, observed: actual, limit: maximum,
+            }) if actual == observed && maximum == limit),
+                "{quota}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rust_impl_without_reviewed_owner_capture_becomes_an_explicit_gap() {
     const RUST: &str = "impl A { fn same(&self) {} }\n";
     let (_temporary, snapshot, source) =

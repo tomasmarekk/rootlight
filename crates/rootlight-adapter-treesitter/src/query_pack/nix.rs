@@ -99,10 +99,20 @@ pub(super) fn syntax(
                 "nix.parameter"
             }
             _ if definition_node(node, cancellation)?.is_none() => {
-                if node.kind() == "binding" && function_value(node).is_some() {
-                    "nix.dynamic_function"
-                } else {
-                    "nix.dynamic_variable"
+                let static_root = node
+                    .child_by_field_name("attrpath")
+                    .and_then(|path| path.child_by_field_name("attr"))
+                    .map(|root| static_name(root, cancellation))
+                    .transpose()?
+                    .unwrap_or(false);
+                match (
+                    static_root,
+                    node.kind() == "binding" && function_value(node).is_some(),
+                ) {
+                    (true, true) => "nix.dynamic_path_function",
+                    (true, false) => "nix.dynamic_path_variable",
+                    (false, true) => "nix.dynamic_function",
+                    (false, false) => "nix.dynamic_variable",
                 }
             }
             "binding" if function_value(node).is_some() => "nix.function",
@@ -110,6 +120,9 @@ pub(super) fn syntax(
         }));
     }
     Ok(Some(match (role, node.kind()) {
+        (StructuralRole::Reference, "identifier" | "string_expression" | "interpolation") => {
+            "nix.inherited_name"
+        }
         (StructuralRole::Signature, _) => "nix.function_header",
         (StructuralRole::Call, _) => "nix.call",
         (StructuralRole::CallName, _) => "nix.call_name",

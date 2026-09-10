@@ -26,6 +26,197 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+fn assert_bindings(source: &str, cases: &[(&str, &str, Option<&str>)]) {
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    for &(context, name, definition_context) in cases {
+        let start = source.find(context).unwrap() + context.find(name).unwrap();
+        let reference = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && occurrence.source.span().end_byte()
+                        == u64::try_from(start + name.len()).unwrap()
+            })
+            .unwrap_or_else(|| panic!("missing read {context}: {:?}", document.occurrences));
+        if let Some(definition_context) = definition_context {
+            let start =
+                source.find(definition_context).unwrap() + definition_context.find(name).unwrap();
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.source.span().start_byte() == u64::try_from(start).unwrap()
+                })
+                .unwrap_or_else(|| panic!("missing definition {definition_context}"));
+            let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                panic!("definition must have a source-backed identity");
+            };
+            assert_eq!(
+                reference.target,
+                OccurrenceTarget::Resolved { symbol },
+                "{context}"
+            );
+            assert!(
+                document.relations.iter().any(|relation| {
+                    relation.predicate == rootlight_ir::RelationPredicate::RefersTo
+                        && relation.subject
+                            == rootlight_ir::RelationEndpoint::Occurrence(reference.id)
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+                }),
+                "missing exact relation for {context}"
+            );
+        } else {
+            assert!(
+                matches!(reference.target, OccurrenceTarget::Unresolved { .. }),
+                "{context}: {reference:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nix_lexical_bindings_follow_recursive_scope_and_plain_attribute_boundaries() {
+    let source = "let x = 1; forward = later; later = 2; in { x = 3; plain = x; nested = rec { x = 4; own = x; }; shadow = let x = 5; in x; old = let { body = x; x = 6; }; }";
+    assert_bindings(
+        source,
+        &[
+            ("forward = later", "later", Some("later = 2")),
+            ("plain = x", "x", Some("x = 1")),
+            ("own = x", "x", Some("x = 4")),
+            ("in x;", "x", Some("x = 5")),
+            ("body = x", "x", Some("x = 6")),
+        ],
+    );
+}
+
+#[test]
+fn nix_lexical_bindings_cover_defaults_at_patterns_and_shadowed_parameters() {
+    let source = "let x = 0; in args@{ x ? y, y ? args }: [ (x: x + 1) x y args ]";
+    assert_bindings(
+        source,
+        &[
+            ("x ? y", "y", Some("y ? args")),
+            ("y ? args", "args", Some("args@")),
+            ("x + 1", "x", Some("x: x")),
+            (") x y", "x", Some("x ? y")),
+            ("y args ]", "y", Some("y ? args")),
+            ("args ]", "args", Some("args@")),
+        ],
+    );
+}
+
+#[test]
+fn nix_lexical_bindings_distinguish_inherit_reads_from_attribute_selection() {
+    let source = "let x = 1; in let inherit x; inherit (provider) member; in rec { inherit x; result = x; selected = member; }";
+    assert_bindings(
+        source,
+        &[
+            ("inherit x; inherit", "x", Some("x = 1")),
+            ("inherit x; result", "x", Some("inherit x; inherit")),
+            ("result = x", "x", Some("inherit x; result")),
+            ("selected = member", "member", Some("member; in")),
+            ("provider)", "provider", None),
+        ],
+    );
+}
+
+#[test]
+fn nix_lexical_bindings_dominate_with_without_inventing_dynamic_targets() {
+    let source = "let x = 1; in with { x = 2; dynamic = 3; }; [ x dynamic missing ]";
+    assert_bindings(
+        source,
+        &[
+            ("[ x", "x", Some("x = 1")),
+            ("dynamic missing", "dynamic", None),
+            ("missing ]", "missing", None),
+        ],
+    );
+}
+
+#[test]
+fn nix_lexical_bindings_never_fall_through_unmodeled_static_attribute_names() {
+    for source in [
+        "let x = 1; in let \"x\" = 2; in x",
+        "let x = 1; in let x.part = 2; in x",
+        "let x = 1; in rec { \"x\" = 2; result = x; }",
+        "let x = 1; in rec { x.${key} = 2; result = x; }",
+    ] {
+        let context = if source.ends_with('x') {
+            "in x"
+        } else {
+            "result = x"
+        };
+        assert_bindings(source, &[(context, "x", None)]);
+    }
+}
+
+#[test]
+fn nix_bounded_capture_plans_keep_reads_without_claiming_exact_bindings() {
+    let source = format!("let x = 1; in [ {} ]", "x ".repeat(80));
+    let provider = Arc::new(provider());
+    let budget = limits_with_syntax_records(32);
+    let fixture = Fixture::new(NIX, source.as_bytes());
+    let result = analyze(
+        &analyzer(&provider, NIX),
+        &request(&fixture.snapshot, &fixture.source, NIX, &budget),
+        &ExtensionSupport::default(),
+    );
+    let reads: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect();
+    assert!(!reads.is_empty());
+    assert!(
+        reads
+            .iter()
+            .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "nix-lexical-binding-target-unavailable")
+    );
+}
+
+#[test]
+fn nix_dynamic_keys_and_callee_reads_preserve_lexical_identity_not_runtime_values() {
+    let source = "let key = \"outer\"; import = input: input; in rec { key = \"inner\"; ${key} = import ./module.nix; }";
+    assert_bindings(
+        source,
+        &[
+            ("${key}", "key", Some("key = \"inner\"")),
+            ("import ./", "import", Some("import = input")),
+            ("input;", "input", Some("input: input")),
+        ],
+    );
+    let result = output(source);
+    let calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        calls[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
 #[test]
 fn nix_native_retains_authored_bindings_and_parameters_without_string_phantoms() {
     let result = output(NIX.source);
@@ -186,7 +377,7 @@ fn nix_source_owners_survive_body_and_trivia_edits_with_distinct_sibling_binding
 }
 
 #[test]
-fn nix_unresolved_expressions_do_not_invent_lexical_or_attribute_relations() {
+fn nix_source_bindings_do_not_invent_attribute_or_runtime_call_targets() {
     let source = "let outer = 1; inherit (builtins) map; in with environment; { outer = 2; plain = outer; recursive = rec { value = value; }; \"quoted.key\" = outer; quoted.key = outer; selected = object.member; applied = map (x: x) []; }";
     let result = output(source);
     let document = result.document();
@@ -203,10 +394,8 @@ fn nix_unresolved_expressions_do_not_invent_lexical_or_attribute_relations() {
             .any(|entity| entity.canonical_name == "quoted.key")
     );
     for occurrence in document.occurrences.iter().filter(|occurrence| {
-        matches!(
-            occurrence.role,
-            OccurrenceRole::Reference | OccurrenceRole::CallSite
-        )
+        occurrence.role == OccurrenceRole::CallSite
+            || occurrence.syntax_kind == "nix.member_name.reference"
     }) {
         assert!(matches!(
             occurrence.target,
@@ -214,9 +403,20 @@ fn nix_unresolved_expressions_do_not_invent_lexical_or_attribute_relations() {
         ));
     }
     assert!(
-        document.skipped_regions.iter().any(
-            |gap| gap.detail == "nix-lexical-import-and-runtime-binding-resolution-unavailable"
-        )
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail
+                == "nix-attribute-import-and-runtime-binding-resolution-unavailable")
+    );
+    assert_bindings(
+        source,
+        &[
+            ("plain = outer", "outer", Some("outer = 1")),
+            ("= value;", "value", Some("value = value")),
+            ("map (x", "map", Some("map; in")),
+            ("object.member", "object", None),
+        ],
     );
     assert_ne!(
         result.report().coverage().status(),

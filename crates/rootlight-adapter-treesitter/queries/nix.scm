@@ -6,6 +6,7 @@
 (function_expression universal: (identifier) @declaration @definition)
 (formal) @declaration @definition
 (inherited_attrs attr: (_) @declaration @definition)
+(inherit attrs: (inherited_attrs attr: (_) @reference))
 [(let_expression) (attrset_expression) (rec_attrset_expression) (let_attrset_expression) (with_expression)] @scope
 (apply_expression) @call
 (apply_expression function: (variable_expression) @call_name)

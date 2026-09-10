@@ -584,73 +584,84 @@ fn markdown_references_are_not_promoted_by_code_symbol_scoring() {
 }
 
 #[test]
-fn yaml_serialization_aliases_are_not_promoted_by_name_scoring() {
-    for resolved in [false, true] {
-        let mut fixture = Fixture::new();
-        fixture.document.files[0].language = "yaml".to_owned();
-        let target = fixture.add_entity(
-            10,
-            "anchor",
-            fixture.primary_file,
-            EntityKind::Variable,
-            None,
-        );
-        fixture.add_occurrence(
-            20,
-            "anchor",
-            fixture.primary_file,
-            OccurrenceRole::Reference,
-            None,
-        );
-        let alias = fixture.document.occurrences.last_mut().unwrap();
-        alias.syntax_kind = "yaml.alias.reference".to_owned();
-        if resolved {
-            alias.target = OccurrenceTarget::Resolved { symbol: target };
+fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
+    for (language, syntax) in [
+        ("yaml", "yaml.alias.reference"),
+        ("nix", "nix.identifier.reference"),
+        ("nix", "nix.inherited_name.reference"),
+        ("nix", "nix.member_name.reference"),
+        ("nix", "nix.call.call"),
+    ] {
+        for resolved in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture.document.files[0].language = language.to_owned();
+            let target = fixture.add_entity(
+                10,
+                "anchor",
+                fixture.primary_file,
+                EntityKind::Variable,
+                None,
+            );
+            fixture.add_occurrence(
+                20,
+                "anchor",
+                fixture.primary_file,
+                OccurrenceRole::Reference,
+                None,
+            );
+            let alias = fixture.document.occurrences.last_mut().unwrap();
+            alias.syntax_kind = syntax.to_owned();
+            if syntax.ends_with(".call") {
+                alias.role = OccurrenceRole::CallSite;
+            }
+            if resolved {
+                alias.target = OccurrenceTarget::Resolved { symbol: target };
+            }
+            let alias = alias.clone();
+            fixture.validate();
+            let engine = ResolutionEngine::default();
+            let cancellation = Cancellation::new();
+            assert_eq!(
+                engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap()
+                    .required,
+                0
+            );
+            assert!(
+                engine
+                    .resolve(&fixture.document, &cancellation)
+                    .unwrap()
+                    .decisions
+                    .is_empty()
+            );
+            let applied = engine
+                .apply(
+                    fixture.document.clone(),
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            let streamed = engine
+                .apply_document(
+                    fixture.document.clone(),
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            let (bounded, estimate) = engine
+                .apply_document_bounded(
+                    fixture.document,
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            assert_eq!(estimate.required, 0);
+            assert_eq!(streamed, applied.document);
+            assert_eq!(bounded, streamed);
+            assert_eq!(bounded.occurrences, [alias]);
+            assert!(bounded.relations.is_empty());
         }
-        let alias = alias.clone();
-        fixture.validate();
-        let engine = ResolutionEngine::default();
-        let cancellation = Cancellation::new();
-        assert_eq!(
-            engine
-                .estimate_work(&fixture.document, &cancellation)
-                .unwrap()
-                .required,
-            0
-        );
-        assert!(
-            engine
-                .resolve(&fixture.document, &cancellation)
-                .unwrap()
-                .decisions
-                .is_empty()
-        );
-        let applied = engine
-            .apply(
-                fixture.document.clone(),
-                ResolverFactContext::new(fixture.content_hash),
-                &cancellation,
-            )
-            .unwrap();
-        let streamed = engine
-            .apply_document(
-                fixture.document.clone(),
-                ResolverFactContext::new(fixture.content_hash),
-                &cancellation,
-            )
-            .unwrap();
-        let (bounded, estimate) = engine
-            .apply_document_bounded(
-                fixture.document,
-                ResolverFactContext::new(fixture.content_hash),
-                &cancellation,
-            )
-            .unwrap();
-        assert_eq!(estimate.required, 0);
-        assert_eq!(streamed, applied.document);
-        assert_eq!(bounded, streamed);
-        assert_eq!(bounded.occurrences, [alias]);
-        assert!(bounded.relations.is_empty());
     }
 }
 

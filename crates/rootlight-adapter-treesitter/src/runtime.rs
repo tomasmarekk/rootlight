@@ -1812,9 +1812,9 @@ fn remove_shadowed_candidates(
     candidates: &mut Vec<QueryCandidate>,
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
-    // Definition/reference and documentation/comment captures at an identical
-    // span represent one occurrence. Eliminate the weaker role before charging
-    // output capacity, or discarded duplicates can displace real references.
+    // Most definition/reference and documentation/comment captures at one span
+    // are redundant. Nix inherit instead both defines an attribute and reads an
+    // outer binding; those roles must survive independently with the same span.
     cancellation.check()?;
     let mut group_start = 0usize;
     let mut write = 0usize;
@@ -1844,7 +1844,9 @@ fn remove_shadowed_candidates(
             let candidate = *candidates
                 .get(read)
                 .ok_or_else(|| provider_failure("query-shadow-invariant"))?;
-            if !(has_definition && candidate.role == StructuralRole::Reference
+            if !(has_definition
+                && candidate.role == StructuralRole::Reference
+                && candidate.syntax != "nix.inherited_name"
                 || has_documentation && candidate.role == StructuralRole::Comment)
             {
                 *candidates

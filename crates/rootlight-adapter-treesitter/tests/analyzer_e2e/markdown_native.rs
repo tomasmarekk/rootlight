@@ -66,6 +66,43 @@ fn markdown_nix_bindings_retain_host_coordinates_and_separate_example_owners() {
 }
 
 #[test]
+fn markdown_nix_lexical_bindings_do_not_cross_example_boundaries() {
+    let source = "# Examples λ😀\r\n\r\n```nix\r\nlet value = 1; in value\r\n```\r\n\r\n```nix\r\nvalue\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "value")
+        .unwrap();
+    let mut reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "nix.identifier.reference")
+        .collect();
+    reads.sort_by_key(|occurrence| occurrence.source.span().start_byte());
+    assert_eq!(reads.len(), 2);
+    assert_eq!(
+        reads[0].target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert!(matches!(
+        reads[1].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    for read in reads {
+        let span = read.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("value")
+        );
+    }
+}
+
+#[test]
 fn markdown_objective_c_generic_bindings_retain_host_sources_and_distinct_owners() {
     let fixture = include_str!("../../../../tests/fixtures/objective-c/generics.m");
     let source = format!(

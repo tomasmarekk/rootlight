@@ -563,6 +563,91 @@ fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
 }
 
 #[test]
+fn nix_lexical_relationships_cross_mcp_with_exact_generation_bound_read_sources() {
+    let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("module.nix", source)), FixtureLayout::Data);
+    for (name, kind) in [
+        ("identity", "function"),
+        ("value", "variable"),
+        ("args", "variable"),
+    ] {
+        let located = fixture.standalone(
+            &format!("nix-binding-{name}"),
+            "code.locate",
+            json!({"query": name, "search_modes": ["exact"], "languages": ["nix"],
+                "scope": {"paths": ["module.nix"]}, "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let matches: Vec<_> = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == kind)
+            .collect();
+        assert_eq!(matches.len(), 1, "{located:#}");
+        let symbol = matches[0]["symbol_id"].clone();
+        let generation = matches[0]["source_ref"]["generation"].clone();
+        let arguments = json!({"symbol_ids": [symbol.clone()], "relations": ["references"],
+            "direction": "inbound", "include_candidates": false, "response_profile": "evidence"});
+        let response = fixture.standalone(
+            &format!("nix-references-{name}"),
+            "symbol.relationships",
+            arguments.clone(),
+        );
+        assert_success(&response, "symbol.relationships");
+        let batch = fixture.batch(
+            &format!("nix-references-batch-{name}"),
+            "symbol.relationships",
+            arguments,
+            "evidence",
+        );
+        assert_standalone_batch_parity(&response, &batch, "symbol.relationships");
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        // Source-proven edges do not make the language's incomplete relation
+        // coverage exhaustive; the API must retain its lower-bound warning.
+        assert_eq!(output["data"]["totals"]["exact"], false);
+        assert!(
+            output["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| { warning["code"] == "negative_claims_inconclusive" })
+        );
+        assert_eq!(output["data"]["totals"]["total_edges"], 1, "{output:#}");
+        assert_eq!(output["data"]["totals"]["returned_edges"], 1);
+        let groups = output["data"]["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["seed"], symbol);
+        assert_eq!(groups[0]["relation"], "references");
+        let items = groups[0]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        let references = items[0]["source_refs"].as_array().unwrap();
+        assert!(!references.is_empty());
+        for (index, reference) in references.iter().enumerate() {
+            assert_eq!(reference["generation"], generation);
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+            assert_eq!(source.get(start..end), Some(name));
+            let read = fixture.standalone(
+                &format!("nix-reference-read-{name}-{index}"),
+                "source.read",
+                json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                    "context_lines_after": 0, "response_profile": "evidence"}),
+            );
+            assert_success(&read, "source.read");
+            let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+            assert_eq!(chunk["content"], name);
+            for key in ["repository", "generation", "content_hash", "span"] {
+                assert_eq!(chunk["source_ref"][key], reference[key]);
+            }
+        }
+    }
+    fixture.finish();
+}
+
+#[test]
 fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp() {
     let source = include_str!("../../../tests/fixtures/objective-c/forwards.m");
     let mut fixture =
