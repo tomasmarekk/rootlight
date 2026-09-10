@@ -589,6 +589,28 @@ fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
 }
 
 #[test]
+fn matlab_script_bindings_cross_mcp_without_function_headers() {
+    assert_lexical_relationship_sources(
+        "matlab",
+        "measure.m",
+        "% @interface Phantom\nvalue = 1;\nresult = value + 1;\ndisp(result);\n",
+        &[
+            ("value", "variable", "value"),
+            ("result", "variable", "result"),
+        ],
+    );
+    assert_lexical_relationship_sources(
+        "matlab",
+        "matrix.m",
+        "values = [1 2; 3 4];\nresult = values;\ndisp(result);\n",
+        &[
+            ("values", "variable", "values"),
+            ("result", "variable", "result"),
+        ],
+    );
+}
+
+#[test]
 fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
     let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
     source_entities_with_signatures_cross_process_boundaries(

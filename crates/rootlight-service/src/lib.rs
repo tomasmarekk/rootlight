@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/91";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/92";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/7";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -23646,6 +23646,151 @@ mod tests {
             .index_repository(fixture.path(), &deadline())
             .expect("mixed-language no-op succeeds");
         assert_eq!(repeated, receipt);
+    }
+
+    #[test]
+    fn matlab_script_routing_survives_reconcile_language_changes_and_restart() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("measure.m");
+        let script = "% @interface Phantom\nvalue = 1;\nresult = value + 1;\n";
+        let edited = script.replace("+ 1", "+ 2");
+        let objc = "@interface Meter\n- (int)read:(int)value;\n@end\n";
+        fs::write(&path, script).unwrap();
+        fs::write(
+            fixture.path().join("companion.rs"),
+            "pub fn companion() {}\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 2);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            initial
+        );
+        let mut receipts = vec![initial];
+        for content in [edited.as_str(), objc] {
+            fs::write(&path, content).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(receipt.generation, receipts.last().unwrap().generation);
+            let evidence = service.incremental_evidence(receipt.generation).unwrap();
+            assert_eq!(evidence.parsed_files(), 1);
+            assert_eq!(evidence.reused_parser_artifacts(), 1);
+            receipts.push(receipt);
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let committed = service
+            .publish_prepared_with_metrics(prepared, &deadline())
+            .unwrap();
+        assert!(committed.receipt().logical_snapshot.is_some());
+        assert_eq!(
+            committed.receipt().logical_snapshot,
+            receipts.last().unwrap().logical_snapshot
+        );
+        receipts.push(committed.receipt().clone());
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let mut variable_identity = None;
+        for (receipt, (content, language)) in receipts.iter().zip([
+            (script, "matlab"),
+            (edited.as_str(), "matlab"),
+            (objc, "objective-c"),
+            (objc, "objective-c"),
+        ]) {
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "measure.m")
+                .unwrap();
+            assert_eq!(file.language, language);
+            let coverage = restored
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.reason, None);
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = restored
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
+            assert!(
+                !document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == "Phantom")
+            );
+            let query = if language == "matlab" {
+                "value"
+            } else {
+                "read:"
+            };
+            let located = restored
+                .code_locate(
+                    receipt.generation,
+                    query.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(located.data.hits.iter().any(|hit| hit.path == "measure.m"
+                && hit.language == language
+                && hit.symbol.is_some()));
+            if language == "matlab" {
+                let variable = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.language == "matlab" && entity.canonical_name == "value")
+                    .unwrap();
+                if let Some(previous) = variable_identity {
+                    assert_eq!(variable.id, previous);
+                }
+                variable_identity = Some(variable.id);
+                let reads: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Reference
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: variable.id,
+                                }
+                    })
+                    .collect();
+                assert_eq!(reads.len(), 1);
+            } else {
+                assert!(
+                    !document
+                        .entities
+                        .iter()
+                        .any(|entity| entity.language == "matlab")
+                );
+            }
+        }
     }
 
     #[test]

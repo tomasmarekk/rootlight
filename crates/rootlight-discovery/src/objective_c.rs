@@ -46,7 +46,7 @@ pub(super) fn has_content_hint(mut source: &[u8]) -> bool {
     false
 }
 
-fn after_number(mut source: &[u8]) -> &[u8] {
+pub(super) fn after_number(mut source: &[u8]) -> &[u8] {
     while let Some((&first, rest)) = source.split_first() {
         // C++ digit separators are part of the number, not character literals.
         if first.is_ascii_alphanumeric()
@@ -61,7 +61,7 @@ fn after_number(mut source: &[u8]) -> &[u8] {
     source
 }
 
-fn after_line_comment(mut source: &[u8]) -> &[u8] {
+pub(super) fn after_line_comment(mut source: &[u8]) -> &[u8] {
     while let Some(newline) = source.iter().position(|byte| *byte == b'\n') {
         let line = source.get(..newline).unwrap_or_default();
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -75,7 +75,7 @@ fn after_line_comment(mut source: &[u8]) -> &[u8] {
     &[]
 }
 
-fn after_quoted(mut source: &[u8], delimiter: u8) -> &[u8] {
+pub(super) fn after_quoted(mut source: &[u8], delimiter: u8) -> &[u8] {
     while let Some((&first, rest)) = source.split_first() {
         if first == delimiter {
             return rest;

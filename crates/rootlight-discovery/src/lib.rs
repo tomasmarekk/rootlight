@@ -26,6 +26,7 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 mod incremental;
+mod matlab;
 mod objective_c;
 
 pub use incremental::{
@@ -1426,7 +1427,8 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
     };
 
     let mut signals = BTreeSet::new();
-    if let Some(language) = extension_language(&normalized) {
+    let extension = extension_language(&normalized);
+    if let Some(language) = extension {
         signals.insert(LanguageSignal {
             language: language.to_owned(),
             evidence: LanguageEvidence::Extension,
@@ -1444,7 +1446,12 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
             evidence: LanguageEvidence::Shebang,
         });
     }
-    if let Some(language) = content_language(content) {
+    let content_hint = if extension == Some("objective-c") {
+        content_language_with_scripts(content, true)
+    } else {
+        content_language(content)
+    };
+    if let Some(language) = content_hint {
         signals.insert(LanguageSignal {
             language: language.to_owned(),
             evidence: LanguageEvidence::Content,
@@ -1844,16 +1851,17 @@ fn shebang_language(content: &[u8]) -> Option<&'static str> {
 }
 
 fn content_language(content: &[u8]) -> Option<&'static str> {
+    content_language_with_scripts(content, false)
+}
+
+fn content_language_with_scripts(content: &[u8], matlab_scripts: bool) -> Option<&'static str> {
     let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES))?;
     let text = String::from_utf8_lossy(sample);
-    if objective_c::has_content_hint(sample) {
-        Some("objective-c")
-    } else if text.contains("classdef ")
-        || text
-            .lines()
-            .any(|line| line.trim_start().starts_with("function "))
-    {
+    let matlab = matlab::hints(sample);
+    if matlab.declaration || matlab_scripts && matlab.script {
         Some("matlab")
+    } else if objective_c::has_content_hint(sample) {
+        Some("objective-c")
     } else if text.contains("fn main(") || text.contains("pub struct ") {
         Some("rust")
     } else if text.contains("package main") && text.contains("func ") {
@@ -2494,6 +2502,135 @@ max_source_file_bytes = 2097152
         let mut truncated = vec![b' '; MAX_CLASSIFICATION_BYTES - 1];
         truncated.extend_from_slice("É@interface Example".as_bytes());
         assert_eq!(content_language(&truncated), None);
+    }
+
+    #[test]
+    fn matlab_content_hints_ignore_literal_and_comment_markers() {
+        for source in [
+            "/* classdef Phantom\nfunction out = phantom()\n*/\nint read_item(void);",
+            "// classdef Phantom\nint read_item(void);",
+            "const char *text = \"classdef Phantom\";",
+            "text = 'classdef Phantom';",
+            "text = \"classdef Phantom\";",
+            "% classdef Phantom\n% function out = phantom()\n",
+            "%{\nclassdef Phantom\nfunction out = phantom()\n%}\n",
+            "object.classdef = 1;",
+        ] {
+            assert_ne!(
+                content_language(source.as_bytes()),
+                Some("matlab"),
+                "{source}"
+            );
+        }
+        for source in [
+            "function\tout = measure(value)\nout = value;\nend\n",
+            "classdef\tMeter\nend\n",
+            "function ... output\nresult = measure(value)\nresult = value;\nend\n",
+            "classdef ... declaration\nMeter\nend\n",
+        ] {
+            assert_eq!(
+                content_language(source.as_bytes()),
+                Some("matlab"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn matlab_scripts_have_content_evidence_without_function_declarations() {
+        let path = RelativePath::parse(Path::new("measure.m")).unwrap();
+        for source in [
+            "% Measurements\nvalue = 1;\nresult = value + 1;\n",
+            "% @interface Phantom\nvalue = 1;\n",
+            "%{\n@interface Phantom\n%}\nvalue = 1;\n",
+            "for index = 1:3\nvalue(index) = index;\nend\n",
+            "values = input .* weights;\n",
+            "values = 1.*weights;\n",
+            "values = [1 2; 3 4];\n",
+            "value = 1;\n% Measurement\nresult = value;\n",
+            "\u{feff}%% Measurements\r\nvalue = 1;\r\n",
+        ] {
+            let (_, signals) = classify(&path, source.as_bytes());
+            let content: Vec<_> = signals
+                .iter()
+                .filter(|signal| signal.evidence == LanguageEvidence::Content)
+                .map(|signal| signal.language.as_str())
+                .collect();
+            assert_eq!(content, ["matlab"], "{source}");
+        }
+    }
+
+    #[test]
+    fn matlab_script_hints_do_not_override_objc_or_known_suffixes() {
+        for source in [
+            "/* % example\nclassdef Phantom\n*/\n@interface Meter\n@end\n",
+            "const char *text = \"escaped \\\";\\\nfunction phantom()\";\n@interface Meter\n@end\n",
+            "#import \"Meter.h\"\n@implementation Meter\n@end\n",
+            "@interface Meter\n@end\n",
+            "@interface/* header */Meter\n@end\n",
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new("meter.m")).unwrap(),
+                source.as_bytes(),
+            );
+            let content: Vec<_> = signals
+                .iter()
+                .filter(|signal| signal.evidence == LanguageEvidence::Content)
+                .map(|signal| signal.language.as_str())
+                .collect();
+            assert_eq!(content, ["objective-c"], "{source}");
+        }
+        for source in [
+            "int values[] = {1, 2};\nint result = values[1];\n",
+            "int value = 10\n% 3;\n",
+            "result = [object read:value];\n",
+            "text = 'can''t; classdef Phantom';\n",
+            "const char *text = R\"tag(\nfunction phantom()\n)tag\";\n",
+            "... function phantom()\nvalue = 1;\n",
+        ] {
+            assert_ne!(
+                content_language_with_scripts(source.as_bytes(), true),
+                Some("matlab"),
+                "{source}"
+            );
+        }
+        for path in ["measure.c", "measure.mm", "measure.txt"] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"% example\nvalue = 1;\n",
+            );
+            assert!(
+                !signals.iter().any(|signal| signal.language == "matlab"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn matlab_block_comment_nesting_does_not_expose_fake_code() {
+        let source = b"%{\r\n%{\r\n%}\r\nclassdef Phantom\r\n%}\r\nvalue = 1;\r\n";
+        assert_eq!(content_language(source), None);
+        assert_eq!(content_language_with_scripts(source, true), Some("matlab"));
+        assert_eq!(
+            content_language(b"%{ inline text\nfunction out = actual()\nout = 1;\nend\n"),
+            Some("matlab")
+        );
+        assert_eq!(
+            content_language(b"%{\n%} trailing text\nclassdef Phantom\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn matlab_hints_respect_the_existing_byte_prefix_bound() {
+        let mut source = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        source.extend_from_slice(b"function out = measure(value)\nend\n");
+        assert_eq!(content_language_with_scripts(&source, true), None);
+        for byte in 0..=u8::MAX {
+            let mut source = vec![byte; MAX_CLASSIFICATION_BYTES - 1];
+            source.extend_from_slice(b"\xf0\x9f\x98\x80 classdef Phantom");
+            let _ = content_language_with_scripts(&source, true);
+        }
     }
 
     #[test]
