@@ -271,11 +271,11 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                         imported: Some(imported),
                         type_only,
                     });
-                } else if !self
+                } else if self
                     .exports
                     .get(&file)
                     .and_then(|exports| exports.get(&key.1))
-                    .is_some_and(|targets| !targets.is_empty())
+                    .is_none_or(|targets| targets.is_empty())
                 {
                     for import in self.imports.iter().filter(|import| import.file == file) {
                         for binding in &import.bindings {

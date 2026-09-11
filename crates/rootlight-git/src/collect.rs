@@ -1595,10 +1595,7 @@ fn parse_hex<const N: usize>(
         return Err(GitCollectError::InvalidOutput { operation });
     }
     let mut parsed = [0_u8; N];
-    for (target, pair) in parsed.iter_mut().zip(value.chunks_exact(2)) {
-        let [high, low] = pair else {
-            return Err(GitCollectError::InvalidOutput { operation });
-        };
+    for (target, [high, low]) in parsed.iter_mut().zip(value.as_chunks::<2>().0) {
         let high = hex_nibble(*high, operation)?;
         let low = hex_nibble(*low, operation)?;
         *target = high
@@ -1631,6 +1628,19 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_object_bytes_require_complete_valid_pairs() {
+        let operation = GitCollectOperation::Revision;
+        assert_eq!(parse_hex::<2>(b"00aF", operation).unwrap(), [0x00, 0xaf]);
+        assert_eq!(parse_hex::<2>(b"Ff10", operation).unwrap(), [0xff, 0x10]);
+        for invalid in [b"".as_slice(), b"0", b"000", b"00000", b"00gg", b"\xff0aa"] {
+            assert!(matches!(
+                parse_hex::<2>(invalid, operation),
+                Err(GitCollectError::InvalidOutput { .. })
+            ));
+        }
+    }
 
     #[test]
     fn tracked_path_records_preserve_regular_files_and_reject_partial_output() {

@@ -177,9 +177,9 @@ pub(super) fn export_signature_syntax(
             malformed |= child.has_error() || child.is_missing();
         }
         let unsupported = malformed
-            || !node
+            || node
                 .parent()
-                .is_some_and(|parent| parent.kind() == "program");
+                .is_none_or(|parent| parent.kind() != "program");
         let type_only = has_type_modifier(node, cancellation)?;
         if namespace && !unsupported {
             return Ok(Some(
@@ -234,9 +234,9 @@ pub(super) fn export_signature_syntax(
             } else {
                 "alias"
             }
-        } else if !statement
+        } else if statement
             .parent()
-            .is_some_and(|parent| parent.kind() == "program")
+            .is_none_or(|parent| parent.kind() != "program")
         {
             "unsupported"
         } else if statement.child_by_field_name("source").is_some() {
