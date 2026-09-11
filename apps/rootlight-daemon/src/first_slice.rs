@@ -7683,9 +7683,13 @@ fn semantic_refinement_worker(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         let cancelled = command.context.cancellation.check().is_err();
-        let superseded = read_service(&lanes.service).map_or(true, |service| {
-            service.active_generation_for(command.repository) != Some(command.structural_generation)
-        });
+        // A cancelled command can settle from journal state alone; waiting for
+        // a service writer here would delay shutdown without validating work.
+        let superseded = !cancelled
+            && read_service(&lanes.service).map_or(true, |service| {
+                service.active_generation_for(command.repository)
+                    != Some(command.structural_generation)
+            });
         if cancelled || superseded {
             let error = command
                 .context
@@ -21603,6 +21607,15 @@ mod tests {
 
     #[test]
     fn superseded_semantic_worker_terminalizes_the_durable_queue_entry() {
+        assert_rejected_semantic_queue_entry(false);
+    }
+
+    #[test]
+    fn cancelled_semantic_worker_does_not_wait_for_service_access() {
+        assert_rejected_semantic_queue_entry(true);
+    }
+
+    fn assert_rejected_semantic_queue_entry(cancelled: bool) {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
         fs::write(
@@ -21649,14 +21662,22 @@ mod tests {
         let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
         let handle = actor.handle();
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cancellation = Cancellation::with_deadline(deadline);
+        if cancelled {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+        }
         register_semantic_refinement(
             &semantic_refinements,
             semantic_operation,
             indexed.repository,
-            Cancellation::new(),
+            cancellation.clone(),
         )
         .expect("semantic refinement registers");
         let (unused_refinement, unused_receiver) = mpsc::sync_channel(1);
+        let shared_service = Arc::clone(&service);
+        // Cancellation must settle without waiting for unrelated service work.
+        let service_guard = cancelled.then(|| shared_service.write().expect("service locks"));
         let lanes = FirstSliceServiceLanes {
             service,
             index_serialization: Arc::new(Mutex::new(())),
@@ -21688,7 +21709,6 @@ mod tests {
                 command_receiver,
             );
         });
-        let deadline = Instant::now() + Duration::from_secs(5);
         let (admitted, admission) = mpsc::sync_channel(1);
         commands
             .send(SemanticRefinementCommand {
@@ -21696,7 +21716,7 @@ mod tests {
                 context: FirstSliceIpcContext {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
-                    cancellation: Cancellation::with_deadline(deadline),
+                    cancellation,
                     deadline,
                     effective_budget: None,
                     index_admission: None,
@@ -21708,11 +21728,28 @@ mod tests {
             })
             .expect("semantic command sends");
 
-        let admission_error = admission
-            .recv_timeout(Duration::from_secs(2))
+        let admission_result = admission.recv_timeout(Duration::from_secs(2));
+        drop(service_guard);
+        stopping.store(true, Ordering::Release);
+        drop(commands);
+        worker.join().expect("semantic worker joins");
+        drop(unused_receiver);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+
+        let admission_error = admission_result
             .expect("worker reports the terminal admission")
-            .expect_err("superseded refinement is rejected");
-        assert_eq!(admission_error.code(), ErrorCode::StaleGeneration);
+            .expect_err("cancelled or superseded refinement is rejected");
+        let expected_code = if cancelled {
+            ErrorCode::Busy
+        } else {
+            ErrorCode::StaleGeneration
+        };
+        assert_eq!(admission_error.code(), expected_code);
+        if cancelled {
+            assert!(admission_error.retryable());
+            assert_eq!(admission_error.next_actions(), &[NextAction::Retry]);
+        }
         let terminal = journal
             .status(semantic_operation)
             .expect("semantic operation remains queryable");
@@ -21721,9 +21758,9 @@ mod tests {
             terminal
                 .error
                 .as_ref()
-                .expect("supersession reason persists")
+                .expect("rejection reason persists")
                 .code(),
-            ErrorCode::StaleGeneration
+            expected_code
         );
         assert!(
             semantic_refinements
@@ -21731,13 +21768,6 @@ mod tests {
                 .expect("refinement registry locks")
                 .is_empty()
         );
-
-        stopping.store(true, Ordering::Release);
-        drop(commands);
-        worker.join().expect("semantic worker joins");
-        drop(unused_receiver);
-        drop(handle);
-        actor.join().expect("journal actor joins");
     }
 
     #[test]
