@@ -215,15 +215,32 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
 
 #[test]
 fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
-    assert_incremental_sequence(false);
+    assert_incremental_sequence(None);
 }
 
 #[test]
 fn incremental_sequence_accounts_for_background_reedit_publication() {
-    assert_incremental_sequence(true);
+    assert_incremental_sequence(Some(MutationStage::Reedit));
 }
 
-fn assert_incremental_sequence(wait_for_background_reedit: bool) {
+#[test]
+fn incremental_sequence_accounts_for_background_edit_publication() {
+    assert_incremental_sequence(Some(MutationStage::Edit));
+}
+
+#[test]
+fn incremental_sequence_accounts_for_background_revert_publication() {
+    assert_incremental_sequence(Some(MutationStage::Revert));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MutationStage {
+    Edit,
+    Revert,
+    Reedit,
+}
+
+fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     let fixture = process_support::private_process_tempdir("rl-incremental-sequence-");
     let repository_root = fixture.path().join("repository");
     write_repository(&repository_root, 1);
@@ -237,6 +254,10 @@ fn assert_incremental_sequence(wait_for_background_reedit: bool) {
 
     let initial = index_repository(&mut mcp, "incremental-initial", &repository_root);
     let initial_generation = published_generation(&initial);
+    let repository_id = required_text(
+        &initial,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
 
     let unchanged = index_repository(&mut mcp, "incremental-unchanged", &repository_root);
     assert_eq!(published_generation(&unchanged), initial_generation);
@@ -256,17 +277,24 @@ fn assert_incremental_sequence(wait_for_background_reedit: bool) {
     );
 
     write_repository(&repository_root, 2);
+    if background_stage == Some(MutationStage::Edit) {
+        wait_for_background_publication(&mut mcp, &repository_id, &initial_generation);
+    }
     let edited = index_repository(&mut mcp, "incremental-edit", &repository_root);
     let edited_generation = published_generation(&edited);
     assert_ne!(edited_generation, initial_generation);
     let edited_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-edit-status", &edited);
+    if background_stage == Some(MutationStage::Edit) {
+        assert_retained_generation(edited_evidence.clone());
+    }
+    let edited_work = assert_mutation_work(&mut mcp, &edited, edited_evidence.clone());
     assert!(
-        edited_evidence["invalidation_trace"]["total_entries"]
+        edited_work["invalidation_trace"]["total_entries"]
             .as_u64()
             .is_some_and(|count| count > 0)
     );
-    assert_single_file_rebuild(edited_evidence.clone());
+    assert_generation_source(&mut mcp, &edited, "pub fn answer() -> u32 { 2 }\n");
 
     let edited_noop = index_repository(&mut mcp, "incremental-edit-noop", &repository_root);
     assert_eq!(published_generation(&edited_noop), edited_generation);
@@ -280,63 +308,68 @@ fn assert_incremental_sequence(wait_for_background_reedit: bool) {
     );
 
     write_repository(&repository_root, 1);
+    if background_stage == Some(MutationStage::Revert) {
+        wait_for_background_publication(&mut mcp, &repository_id, &edited_generation);
+    }
     let reverted = index_repository(&mut mcp, "incremental-revert", &repository_root);
     let reverted_generation = published_generation(&reverted);
     assert_ne!(reverted_generation, edited_generation);
-    assert_single_file_rebuild(operation_incremental_evidence(
-        &mut mcp,
-        "incremental-revert-status",
-        &reverted,
-    ));
+    let reverted_evidence =
+        operation_incremental_evidence(&mut mcp, "incremental-revert-status", &reverted);
+    if background_stage == Some(MutationStage::Revert) {
+        assert_retained_generation(reverted_evidence.clone());
+    }
+    assert_mutation_work(&mut mcp, &reverted, reverted_evidence);
+    assert_generation_source(&mut mcp, &reverted, "pub fn answer() -> u32 { 1 }\n");
 
     write_repository(&repository_root, 2);
-    let repository_id = required_text(
-        &initial,
-        &["result", "structuredContent", "data", "repository_id"],
-    );
-    if wait_for_background_reedit {
-        let observation_deadline = Instant::now() + STARTUP_TIMEOUT;
-        loop {
-            let listed = mcp.call("observe-reedit-publication", "repo.list", json!({}));
-            assert_success(&listed, "repo.list");
-            let repository = listed["result"]["structuredContent"]["data"]["repositories"]
-                .as_array()
-                .expect("repository list is an array")
-                .iter()
-                .find(|repository| repository["repository_id"] == repository_id)
-                .expect("indexed repository remains registered");
-            if repository["active_generation"]
-                .as_str()
-                .is_some_and(|generation| generation != reverted_generation)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < observation_deadline,
-                "background publication was not observed"
-            );
-            thread::sleep(Duration::from_millis(100));
-        }
+    if background_stage == Some(MutationStage::Reedit) {
+        wait_for_background_publication(&mut mcp, &repository_id, &reverted_generation);
     }
     let reedited = index_repository(&mut mcp, "incremental-reedit", &repository_root);
     let reedited_generation = published_generation(&reedited);
     assert_ne!(reedited_generation, reverted_generation);
     let reedited_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-reedit-status", &reedited);
-    if wait_for_background_reedit {
+    if background_stage == Some(MutationStage::Reedit) {
         assert_retained_generation(reedited_evidence.clone());
     }
-    assert_reedit_work(&mut mcp, &reedited, reedited_evidence);
+    assert_mutation_work(&mut mcp, &reedited, reedited_evidence);
     assert_generation_source(&mut mcp, &reedited, "pub fn answer() -> u32 { 2 }\n");
 
     mcp.finish();
     daemon.finish();
 }
 
-fn assert_reedit_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) {
+fn wait_for_background_publication(mcp: &mut McpProcess, repository_id: &str, previous: &str) {
+    let observation_deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        let listed = mcp.call("observe-mutation-publication", "repo.list", json!({}));
+        assert_success(&listed, "repo.list");
+        let repository = listed["result"]["structuredContent"]["data"]["repositories"]
+            .as_array()
+            .expect("repository list is an array")
+            .iter()
+            .find(|repository| repository["repository_id"] == repository_id)
+            .expect("indexed repository remains registered");
+        if repository["active_generation"]
+            .as_str()
+            .is_some_and(|generation| generation != previous)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "background publication was not observed"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn assert_mutation_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) -> Value {
     if evidence["build_strategy"] != "retained_generation" {
-        assert_single_file_rebuild(evidence);
-        return;
+        assert_single_file_rebuild(evidence.clone());
+        return evidence;
     }
     assert_retained_generation(evidence);
     let repository_id = required_text(
@@ -344,11 +377,11 @@ fn assert_reedit_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) {
         &["result", "structuredContent", "data", "repository_id"],
     );
     let generation = published_generation(indexed);
-    // The watcher can publish a re-edit before the manual request. Its parent
-    // changes generation identity, so bind rebuild evidence to the producer
-    // of the returned generation instead of the first edit's generation ID.
+    // The watcher can publish any mutation before the manual request. Bind
+    // rebuild evidence to the exact returned generation's producer while the
+    // manual retaining operation must independently report zero rebuilt work.
     let status = mcp.call(
-        "reedit-producing-operations",
+        "mutation-producing-operations",
         "repo.status",
         json!({"repository": {"repository_id": repository_id}, "include_operations": true}),
     );
@@ -358,7 +391,7 @@ fn assert_reedit_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) {
         .expect("repository operations are listed")
     {
         let detail = mcp.call(
-            "reedit-producing-operation",
+            "mutation-producing-operation",
             "operation.status",
             json!({"operation_id": operation["operation_id"]}),
         );
@@ -369,11 +402,12 @@ fn assert_reedit_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) {
         {
             assert_eq!(data["operation"]["state"], "published");
             assert_eq!(data["operation"]["kind"], "repository_index");
-            assert_single_file_rebuild(data["incremental"].clone());
-            return;
+            let producing_evidence = data["incremental"].clone();
+            assert_single_file_rebuild(producing_evidence.clone());
+            return producing_evidence;
         }
     }
-    panic!("retained re-edit generation has no single-file producing operation: {status:#}");
+    panic!("retained mutation generation has no single-file producing operation: {status:#}");
 }
 
 fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &str) {
@@ -383,7 +417,7 @@ fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &st
     );
     let generation = published_generation(indexed);
     let located = mcp.call(
-        "reedit-source-locate",
+        "mutation-source-locate",
         "code.locate",
         json!({"repository": {"repository_id": repository_id}, "generation": generation,
             "query": "src/lib.rs", "search_modes": ["path"], "kinds": ["file"],
@@ -400,7 +434,7 @@ fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &st
     assert_eq!(source_ref["generation"], generation);
     assert_eq!(source_ref["repository"], repository_id);
     let source = mcp.call(
-        "reedit-source-read",
+        "mutation-source-read",
         "source.read",
         json!({"repository": {"repository_id": repository_id}, "generation": generation,
             "references": [{"source_ref": source_ref}], "encoding": "utf8_lossless_when_valid"}),
