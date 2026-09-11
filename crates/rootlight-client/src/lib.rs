@@ -116,6 +116,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
 // remediation set must remain decodable by the last pre-action contract.
 const PRE_NEGOTIATION_PUBLIC_ERROR_MINOR: u32 = 14;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_RELATIONSHIP_RESULTS: u16 = 50;
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
@@ -9141,7 +9142,11 @@ fn build_symbol_relationships_request(
             relations: relations.to_vec(),
             direction: direction.map(str::to_owned),
             min_confidence: min_confidence.map(u32::from),
-            max_results: max_results.map(u32::from),
+            // Pin the decoder's page size instead of inheriting a peer's
+            // potentially different default for an omitted optional field.
+            max_results: Some(u32::from(
+                max_results.unwrap_or(DEFAULT_RELATIONSHIP_RESULTS),
+            )),
             page_offset,
         },
     ))
@@ -10891,7 +10896,7 @@ fn parse_symbol_relationships(
         .checked_add(returned_edges)
         .ok_or(ClientError::InvalidResponseCorrelation)?;
     if returned_edges != response.returned_edges
-        || returned_edges > u64::from(max_results.unwrap_or(50))
+        || returned_edges > u64::from(max_results.unwrap_or(DEFAULT_RELATIONSHIP_RESULTS))
         || response.returned_edges > response.total_edges
         || (!response.truncated
             && (response.next_page_offset.is_some() || returned_end != response.total_edges))
@@ -15104,6 +15109,27 @@ mod tests {
 
     fn wire_source(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
         source_reference_to_wire(reference)
+    }
+
+    #[test]
+    fn relationship_requests_pin_the_validated_default_page_size() {
+        for (requested, expected) in [(None, 50), (Some(1), 1), (Some(50), 50), (Some(500), 500)] {
+            let request = build_symbol_relationships_request(
+                test_repository(),
+                GenerationSelector::Active,
+                &[SymbolId::from_bytes([9; 20])],
+                &["references".to_owned()],
+                Some("outbound"),
+                None,
+                requested,
+                0,
+            )
+            .expect("relationship request validates");
+            let daemon::request_envelope::Request::SymbolRelationships(request) = request else {
+                panic!("expected relationship request");
+            };
+            assert_eq!(request.max_results, Some(expected));
+        }
     }
 
     #[test]
