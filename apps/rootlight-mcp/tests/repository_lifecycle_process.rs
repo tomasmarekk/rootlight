@@ -215,6 +215,15 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
 
 #[test]
 fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
+    assert_incremental_sequence(false);
+}
+
+#[test]
+fn incremental_sequence_accounts_for_background_reedit_publication() {
+    assert_incremental_sequence(true);
+}
+
+fn assert_incremental_sequence(wait_for_background_reedit: bool) {
     let fixture = process_support::private_process_tempdir("rl-incremental-sequence-");
     let repository_root = fixture.path().join("repository");
     write_repository(&repository_root, 1);
@@ -281,21 +290,127 @@ fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
     ));
 
     write_repository(&repository_root, 2);
+    let repository_id = required_text(
+        &initial,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
+    if wait_for_background_reedit {
+        let observation_deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            let listed = mcp.call("observe-reedit-publication", "repo.list", json!({}));
+            assert_success(&listed, "repo.list");
+            let repository = listed["result"]["structuredContent"]["data"]["repositories"]
+                .as_array()
+                .expect("repository list is an array")
+                .iter()
+                .find(|repository| repository["repository_id"] == repository_id)
+                .expect("indexed repository remains registered");
+            if repository["active_generation"]
+                .as_str()
+                .is_some_and(|generation| generation != reverted_generation)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < observation_deadline,
+                "background publication was not observed"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     let reedited = index_repository(&mut mcp, "incremental-reedit", &repository_root);
     let reedited_generation = published_generation(&reedited);
     assert_ne!(reedited_generation, reverted_generation);
     let reedited_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-reedit-status", &reedited);
-    if reedited_generation == edited_generation {
-        // A still-retained generation can satisfy an exact content re-edit
-        // without rebuilding the file.
-        assert_retained_generation(reedited_evidence);
-    } else {
-        assert_single_file_rebuild(reedited_evidence);
+    if wait_for_background_reedit {
+        assert_retained_generation(reedited_evidence.clone());
     }
+    assert_reedit_work(&mut mcp, &reedited, reedited_evidence);
+    assert_generation_source(&mut mcp, &reedited, "pub fn answer() -> u32 { 2 }\n");
 
     mcp.finish();
     daemon.finish();
+}
+
+fn assert_reedit_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) {
+    if evidence["build_strategy"] != "retained_generation" {
+        assert_single_file_rebuild(evidence);
+        return;
+    }
+    assert_retained_generation(evidence);
+    let repository_id = required_text(
+        indexed,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
+    let generation = published_generation(indexed);
+    // The watcher can publish a re-edit before the manual request. Its parent
+    // changes generation identity, so bind rebuild evidence to the producer
+    // of the returned generation instead of the first edit's generation ID.
+    let status = mcp.call(
+        "reedit-producing-operations",
+        "repo.status",
+        json!({"repository": {"repository_id": repository_id}, "include_operations": true}),
+    );
+    assert_success(&status, "repo.status");
+    for operation in status["result"]["structuredContent"]["data"]["operations"]
+        .as_array()
+        .expect("repository operations are listed")
+    {
+        let detail = mcp.call(
+            "reedit-producing-operation",
+            "operation.status",
+            json!({"operation_id": operation["operation_id"]}),
+        );
+        assert_success(&detail, "operation.status");
+        let data = &detail["result"]["structuredContent"]["data"];
+        if data["published_generation"] == generation
+            && data["incremental"]["build_strategy"] == "dependency_directed"
+        {
+            assert_eq!(data["operation"]["state"], "published");
+            assert_eq!(data["operation"]["kind"], "repository_index");
+            assert_single_file_rebuild(data["incremental"].clone());
+            return;
+        }
+    }
+    panic!("retained re-edit generation has no single-file producing operation: {status:#}");
+}
+
+fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &str) {
+    let repository_id = required_text(
+        indexed,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
+    let generation = published_generation(indexed);
+    let located = mcp.call(
+        "reedit-source-locate",
+        "code.locate",
+        json!({"repository": {"repository_id": repository_id}, "generation": generation,
+            "query": "src/lib.rs", "search_modes": ["path"], "kinds": ["file"],
+            "scope": {"paths": ["src/lib.rs"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let matches = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .expect("generation source matches are listed");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["path"], "src/lib.rs");
+    assert_eq!(matches[0]["kind"], "file");
+    let source_ref = &matches[0]["source_ref"];
+    assert_eq!(source_ref["generation"], generation);
+    assert_eq!(source_ref["repository"], repository_id);
+    let source = mcp.call(
+        "reedit-source-read",
+        "source.read",
+        json!({"repository": {"repository_id": repository_id}, "generation": generation,
+            "references": [{"source_ref": source_ref}], "encoding": "utf8_lossless_when_valid"}),
+    );
+    assert_success(&source, "source.read");
+    let chunks = source["result"]["structuredContent"]["data"]["chunks"]
+        .as_array()
+        .expect("source chunks are returned");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0]["content"], expected);
 }
 
 #[test]
