@@ -64,6 +64,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- package-check
           python scripts/test-validate-package-lifecycle.py
           python scripts/test_generate_release_sboms.py
+          python scripts/test_download_osv_database.py
           python scripts/test_orchestrate_release.py
           python scripts/test_release_signing_workflow.py
           python scripts/test_prepare_npm_packages.py
