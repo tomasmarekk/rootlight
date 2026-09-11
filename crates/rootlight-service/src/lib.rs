@@ -2479,6 +2479,31 @@ pub struct FirstSliceCoverageGap {
     pub files: u64,
 }
 
+/// Query-domain coverage gaps with deduplicated affected-input accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceCoverageGapSummary {
+    /// Bounded, deterministically ordered reasons, including freshness warnings.
+    pub gaps: Vec<FirstSliceCoverageGap>,
+    /// Distinct affected source files plus disjoint discovery exclusions.
+    pub skipped_inputs: u64,
+    /// Whether analysis or discovery is incomplete, independently of freshness.
+    pub incomplete: bool,
+}
+
+fn coverage_gap_file_count(
+    grouped: &BTreeMap<(FirstSliceCoverageGapReason, Option<String>), BTreeSet<FileId>>,
+    cancellation: &Cancellation,
+) -> Result<u64, FirstSliceError> {
+    let mut skipped_files = BTreeSet::new();
+    for files in grouped.values() {
+        for file in files {
+            check_cancellation(cancellation)?;
+            skipped_files.insert(*file);
+        }
+    }
+    u64::try_from(skipped_files.len()).map_err(|_| FirstSliceError::Limits)
+}
+
 /// Analysis coverage attached to one retained source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSourceCoverage {
@@ -12711,6 +12736,28 @@ impl FirstSliceService {
         generation: GenerationId,
         cancellation: &Cancellation,
     ) -> Result<Vec<FirstSliceCoverageGap>, FirstSliceError> {
+        self.coverage_gap_summary_until(repository, generation, &[], cancellation)
+            .map(|summary| summary.gaps)
+    }
+
+    /// Summarizes gaps for a canonical language union under caller cancellation.
+    ///
+    /// An empty union selects every language. Repository-wide exclusions stay
+    /// visible in every union. A source file affected by multiple reasons is
+    /// counted once; freshness alone does not count as an omitted input. Counts
+    /// and incompleteness are computed before the bounded reason projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns generation-selection, durable-hydration, cancellation, or
+    /// checked input-accounting failures.
+    pub fn coverage_gap_summary_until(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        languages: &[String],
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceCoverageGapSummary, FirstSliceError> {
         let context = self.resolve_generation(repository, Some(generation))?;
         let lease = self.generation_lease(context.generation, cancellation)?;
         let snapshot = lease.generation();
@@ -12855,6 +12902,24 @@ impl FirstSliceService {
                 }
             }
         }
+        let relevant_language = |language: &Option<String>| {
+            languages.is_empty()
+                || language
+                    .as_ref()
+                    .is_none_or(|language| languages.contains(language))
+        };
+        grouped.retain(|(_, language), _| relevant_language(language));
+        fallback_counts.retain(|(_, language), _| relevant_language(language));
+        let mut skipped_inputs = coverage_gap_file_count(&grouped, cancellation)?;
+        // File-only snapshots count each source once under Truncated; generated
+        // reasons describe the same files and must not inflate the denominator.
+        for ((reason, _), files) in &fallback_counts {
+            if *reason == FirstSliceCoverageGapReason::Truncated {
+                skipped_inputs = skipped_inputs
+                    .checked_add(*files)
+                    .ok_or(FirstSliceError::Limits)?;
+            }
+        }
         let receipt = &context.receipt;
         let excluded = receipt.policy_excluded_inputs;
         let mut gaps = grouped
@@ -12883,6 +12948,9 @@ impl FirstSliceService {
             (FirstSliceCoverageGapReason::Binary, receipt.binary_inputs),
         ] {
             if files > 0 {
+                skipped_inputs = skipped_inputs
+                    .checked_add(files)
+                    .ok_or(FirstSliceError::Limits)?;
                 gaps.push(FirstSliceCoverageGap {
                     reason,
                     language: None,
@@ -12897,6 +12965,7 @@ impl FirstSliceService {
                 files: 0,
             });
         }
+        let incomplete = !gaps.is_empty();
         let freshness = self.generation_freshness(repository, generation)?;
         if !matches!(
             freshness.structural,
@@ -12915,7 +12984,11 @@ impl FirstSliceService {
             (left.reason, left.language.as_deref()).cmp(&(right.reason, right.language.as_deref()))
         });
         gaps.truncate(64);
-        Ok(gaps)
+        Ok(FirstSliceCoverageGapSummary {
+            gaps,
+            skipped_inputs,
+            incomplete,
+        })
     }
 
     /// Lists every repository known to this daemon process.
@@ -31964,6 +32037,37 @@ mod tests {
     }
 
     #[test]
+    fn coverage_gap_accounting_counts_overlapping_reasons_once() {
+        let first = FileId::from_bytes([1; 20]);
+        let second = FileId::from_bytes([2; 20]);
+        let grouped = BTreeMap::from([
+            (
+                (
+                    FirstSliceCoverageGapReason::ParseError,
+                    Some("rust".to_owned()),
+                ),
+                BTreeSet::from([first, second]),
+            ),
+            (
+                (
+                    FirstSliceCoverageGapReason::Generated,
+                    Some("rust".to_owned()),
+                ),
+                BTreeSet::from([first]),
+            ),
+        ]);
+        assert_eq!(coverage_gap_file_count(&grouped, &deadline()).unwrap(), 2);
+        let cancelled = Cancellation::new();
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            coverage_gap_file_count(&grouped, &cancelled),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        ));
+    }
+
+    #[test]
     fn generated_mapping_policy_reports_an_exact_coverage_gap() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
@@ -32530,11 +32634,37 @@ mod tests {
             let gaps = service
                 .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
                 .expect("file-only coverage gaps resolve");
+            let summary = service
+                .coverage_gap_summary_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &[],
+                    &deadline(),
+                )
+                .expect("file-only coverage summary resolves");
+            assert_eq!(summary.gaps, gaps);
+            assert_eq!(summary.skipped_inputs, sources.len() as u64);
+            assert!(summary.incomplete);
             for (_, _, language, _) in sources {
                 assert!(gaps.iter().any(|gap| {
                     gap.reason == FirstSliceCoverageGapReason::Truncated
                         && gap.language.as_deref() == Some(*language)
                         && gap.files == 1
+                }));
+                let scoped = service
+                    .coverage_gap_summary_until(
+                        receipt.repository,
+                        receipt.generation,
+                        &[(*language).to_owned()],
+                        &deadline(),
+                    )
+                    .expect("language-scoped file-only coverage resolves");
+                assert_eq!(scoped.skipped_inputs, 1);
+                assert!(scoped.incomplete);
+                assert!(scoped.gaps.iter().all(|gap| {
+                    gap.language
+                        .as_deref()
+                        .is_none_or(|value| value == *language)
                 }));
             }
         }
@@ -37272,6 +37402,21 @@ mod tests {
             .coverage_gaps_until(partial.repository, partial.generation, &cancellation)
             .expect("partial coverage gaps resolve");
         assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::DiscoveryIncomplete
+                && gap.language.is_none()
+                && gap.files == 0
+        }));
+        let summary = partial_service
+            .coverage_gap_summary_until(
+                partial.repository,
+                partial.generation,
+                &["javascript".to_owned()],
+                &cancellation,
+            )
+            .expect("discovery incompleteness remains visible outside the indexed language");
+        assert!(summary.incomplete);
+        assert_eq!(summary.skipped_inputs, 0);
+        assert!(summary.gaps.iter().any(|gap| {
             gap.reason == FirstSliceCoverageGapReason::DiscoveryIncomplete
                 && gap.language.is_none()
                 && gap.files == 0

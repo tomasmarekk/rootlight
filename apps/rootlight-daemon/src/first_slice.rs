@@ -11201,22 +11201,14 @@ fn code_locate(
             source: hit.source.as_ref().map(source_ref_to_wire),
         });
     }
-    let mut metadata = query_context(
+    let metadata = query_context_with_languages(
         service,
         generation,
         &response.usage,
         &response.data.coverage,
+        &coverage_languages,
         &context.cancellation,
     )?;
-    if !coverage_languages.is_empty() {
-        // Filter by the requested domain, not returned hits: an empty result
-        // still needs its language's gaps. Unscoped repository gaps remain visible.
-        metadata.coverage_gaps.retain(|gap| {
-            gap.language
-                .as_ref()
-                .is_none_or(|language| coverage_languages.binary_search(language).is_ok())
-        });
-    }
     Ok(daemon::CodeLocateResponse {
         schema_version: Some(schema_version()),
         context: Some(metadata),
@@ -14140,13 +14132,36 @@ fn query_context(
     coverage: &[CoverageRecord],
     cancellation: &Cancellation,
 ) -> Result<daemon::FirstSliceQueryContext, PublicError> {
-    let (tier, status, skipped) = aggregate_coverage(coverage, &generation.receipt);
+    query_context_with_languages(service, generation, usage, coverage, &[], cancellation)
+}
+
+fn query_context_with_languages(
+    service: &FirstSliceService,
+    generation: FirstSliceGenerationContext,
+    usage: &QueryUsage,
+    coverage: &[CoverageRecord],
+    languages: &[String],
+    cancellation: &Cancellation,
+) -> Result<daemon::FirstSliceQueryContext, PublicError> {
+    let (tier, mut status) = aggregate_coverage(coverage, &generation.receipt);
     let freshness = service
         .generation_freshness(generation.repository, generation.generation)
         .map_err(service_error)?;
-    let coverage_gaps = service
-        .coverage_gaps_until(generation.repository, generation.generation, cancellation)
-        .map_err(service_error)?
+    let summary = service
+        .coverage_gap_summary_until(
+            generation.repository,
+            generation.generation,
+            languages,
+            cancellation,
+        )
+        .map_err(service_error)?;
+    // Positive hits do not establish exhaustive coverage of the searched domain.
+    // Keep the aggregate claim bound to the same scoped gaps as its warnings.
+    if summary.incomplete {
+        status = weaker_coverage(status, CoverageStatus::Bounded);
+    }
+    let coverage_gaps = summary
+        .gaps
         .into_iter()
         .map(|gap| daemon::FirstSliceCoverageGap {
             reason: coverage_gap_label(gap.reason).to_owned(),
@@ -14161,7 +14176,7 @@ fn query_context(
         active_generation: generation.active,
         tier: analysis_tier_to_wire(tier) as i32,
         coverage_status: coverage_status_to_wire(status) as i32,
-        skipped_inputs: skipped,
+        skipped_inputs: summary.skipped_inputs,
         usage: Some(daemon::FirstSliceQueryUsage {
             rows: usage.rows,
             edges: usage.edges,
@@ -14297,32 +14312,23 @@ const fn limiting_resource_to_wire(
 fn aggregate_coverage(
     coverage: &[CoverageRecord],
     receipt: &FirstSliceIndexReceipt,
-) -> (AnalysisTier, CoverageStatus, u64) {
+) -> (AnalysisTier, CoverageStatus) {
     if coverage.is_empty() {
-        return (
-            AnalysisTier::TierD,
-            CoverageStatus::Unknown,
-            receipt
-                .discovered_inputs
-                .saturating_sub(receipt.indexed_files),
-        );
+        return (AnalysisTier::TierD, CoverageStatus::Unknown);
     }
     let mut tier = AnalysisTier::TierA;
     let mut status = CoverageStatus::Complete;
-    let mut skipped = 0_u64;
     for record in coverage {
         tier = weaker_tier(tier, record.tier);
         status = weaker_coverage(status, record.status);
-        skipped = skipped.saturating_add(record.skipped);
     }
     if receipt.oversized_inputs > 0 {
         status = weaker_coverage(status, CoverageStatus::Bounded);
-        skipped = skipped.saturating_add(receipt.oversized_inputs);
     }
     if !receipt.discovery_complete {
         status = weaker_coverage(status, CoverageStatus::Bounded);
     }
-    (tier, status, skipped)
+    (tier, status)
 }
 
 const fn weaker_tier(left: AnalysisTier, right: AnalysisTier) -> AnalysisTier {
@@ -16130,6 +16136,93 @@ mod tests {
     use tempfile::TempDir;
 
     static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
+
+    #[test]
+    fn locate_coverage_reconciles_scoped_gaps_and_positive_hits() {
+        let fixture = TempDir::new().unwrap();
+        for (path, source) in [
+            ("lib.rs", "pub fn selected_answer() -> u32 { 7 }\n"),
+            ("broken.rs", "pub fn unfinished( {\n"),
+            ("lib.js", "function selected_answer() { return 7; }\n"),
+            ("opaque.sourceblob", "opaque source content\n"),
+        ] {
+            fs::write(fixture.path().join(path), source).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .unwrap();
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        for (languages, expected_skipped, expected_status) in [
+            (
+                vec![],
+                2,
+                daemon::FirstSliceCoverageStatus::FirstSliceCoverageBounded,
+            ),
+            (
+                vec!["rust".to_owned()],
+                1,
+                daemon::FirstSliceCoverageStatus::FirstSliceCoverageBounded,
+            ),
+            (
+                vec!["javascript".to_owned()],
+                0,
+                daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete,
+            ),
+        ] {
+            let response = code_locate(
+                &service,
+                daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Active(true)),
+                    }),
+                    query: "selected_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 10,
+                    languages: languages.clone(),
+                    ..Default::default()
+                },
+                &context,
+            )
+            .unwrap();
+            assert!(!response.hits.is_empty());
+            let metadata = response.context.unwrap();
+            assert_eq!(
+                metadata.coverage_status, expected_status as i32,
+                "{languages:?}"
+            );
+            assert_eq!(metadata.skipped_inputs, expected_skipped, "{languages:?}");
+            assert!(metadata.coverage_gaps.iter().all(|gap| {
+                languages.is_empty()
+                    || gap
+                        .language
+                        .as_ref()
+                        .is_none_or(|language| languages.contains(language))
+            }));
+            assert_eq!(
+                metadata
+                    .coverage_gaps
+                    .iter()
+                    .any(|gap| gap.reason == "parse-error"),
+                languages.is_empty() || languages == ["rust"]
+            );
+        }
+    }
 
     #[test]
     fn locate_wire_kind_filters_preserve_source_identity_and_candidate_counts() {
@@ -21470,7 +21563,7 @@ mod tests {
 
         assert_eq!(
             aggregate_coverage(&[], &receipt),
-            (AnalysisTier::TierD, CoverageStatus::Unknown, 1)
+            (AnalysisTier::TierD, CoverageStatus::Unknown)
         );
     }
 

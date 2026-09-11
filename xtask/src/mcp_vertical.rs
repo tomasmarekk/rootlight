@@ -3364,7 +3364,8 @@ fn exercise_nested_ignore_policy(
     require_trust_labels(&kept.structured)?;
     assert_control_value_omits_sentinels(&kept.structured)?;
     assert_read_correlation(&kept.structured, repository, generation)?;
-    assert_complete_tier_b_rust_coverage(&kept.structured)?;
+    // The reincluded source still belongs to the same mixed-coverage generation.
+    assert_mixed_fixture_coverage(&kept.structured)?;
     let kept_matches = expected_function_matches(&kept.structured, "kept_after_negation", 1)?;
     if kept_matches[0]["path"] != "nested/ignored/kept.rs" {
         return Err(VerticalError::Invariant(
