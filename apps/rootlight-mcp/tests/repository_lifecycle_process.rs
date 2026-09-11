@@ -278,7 +278,12 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
 
     write_repository(&repository_root, 2);
     if background_stage == Some(MutationStage::Edit) {
-        wait_for_background_publication(&mut mcp, &repository_id, &initial_generation);
+        wait_for_background_publication(
+            &mut mcp,
+            &repository_id,
+            &initial_generation,
+            "pub fn answer() -> u32 { 2 }\n",
+        );
     }
     let edited = index_repository(&mut mcp, "incremental-edit", &repository_root);
     let edited_generation = published_generation(&edited);
@@ -309,7 +314,12 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
 
     write_repository(&repository_root, 1);
     if background_stage == Some(MutationStage::Revert) {
-        wait_for_background_publication(&mut mcp, &repository_id, &edited_generation);
+        wait_for_background_publication(
+            &mut mcp,
+            &repository_id,
+            &edited_generation,
+            "pub fn answer() -> u32 { 1 }\n",
+        );
     }
     let reverted = index_repository(&mut mcp, "incremental-revert", &repository_root);
     let reverted_generation = published_generation(&reverted);
@@ -324,7 +334,12 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
 
     write_repository(&repository_root, 2);
     if background_stage == Some(MutationStage::Reedit) {
-        wait_for_background_publication(&mut mcp, &repository_id, &reverted_generation);
+        wait_for_background_publication(
+            &mut mcp,
+            &repository_id,
+            &reverted_generation,
+            "pub fn answer() -> u32 { 2 }\n",
+        );
     }
     let reedited = index_repository(&mut mcp, "incremental-reedit", &repository_root);
     let reedited_generation = published_generation(&reedited);
@@ -341,7 +356,12 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     daemon.finish();
 }
 
-fn wait_for_background_publication(mcp: &mut McpProcess, repository_id: &str, previous: &str) {
+fn wait_for_background_publication(
+    mcp: &mut McpProcess,
+    repository_id: &str,
+    previous: &str,
+    expected_source: &str,
+) {
     let observation_deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         let listed = mcp.call("observe-mutation-publication", "repo.list", json!({}));
@@ -352,15 +372,17 @@ fn wait_for_background_publication(mcp: &mut McpProcess, repository_id: &str, pr
             .iter()
             .find(|repository| repository["repository_id"] == repository_id)
             .expect("indexed repository remains registered");
-        if repository["active_generation"]
-            .as_str()
-            .is_some_and(|generation| generation != previous)
+        // Semantic refinement can publish a successor without changing source.
+        // Only the exact mutation bytes prove that the watcher observed the edit.
+        if let Some(generation) = repository["active_generation"].as_str()
+            && generation != previous
+            && read_generation_source(mcp, repository_id, generation) == expected_source
         {
             return;
         }
         assert!(
             Instant::now() < observation_deadline,
-            "background publication was not observed"
+            "background publication of the expected source was not observed"
         );
         thread::sleep(Duration::from_millis(100));
     }
@@ -416,6 +438,13 @@ fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &st
         &["result", "structuredContent", "data", "repository_id"],
     );
     let generation = published_generation(indexed);
+    assert_eq!(
+        read_generation_source(mcp, &repository_id, &generation),
+        expected
+    );
+}
+
+fn read_generation_source(mcp: &mut McpProcess, repository_id: &str, generation: &str) -> String {
     let located = mcp.call(
         "mutation-source-locate",
         "code.locate",
@@ -444,7 +473,10 @@ fn assert_generation_source(mcp: &mut McpProcess, indexed: &Value, expected: &st
         .as_array()
         .expect("source chunks are returned");
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0]["content"], expected);
+    chunks[0]["content"]
+        .as_str()
+        .expect("source content is lossless text")
+        .to_owned()
 }
 
 #[test]
@@ -682,16 +714,7 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
 
     fs::remove_file(repository_root.join("src").join("lib.rs"))
         .expect("indexed source is removed before the metadata-only update");
-    let metadata_index = mcp.call(
-        "index-metadata",
-        "repo.index",
-        json!({
-            "root": repository_root,
-            "mode": "structural",
-            "detached": false
-        }),
-    );
-    assert_success(&metadata_index, "repo.index");
+    let metadata_index = index_repository(&mut mcp, "index-metadata", &repository_root);
     let metadata_content = &metadata_index["result"]["structuredContent"];
     assert_eq!(metadata_content["data"]["state"], "published");
     assert!(
