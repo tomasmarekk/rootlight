@@ -1863,10 +1863,7 @@ fn decode_lower_hex(encoded: &str) -> Result<Vec<u8>, VfsError> {
     decoded
         .try_reserve_exact(encoded.len() / 2)
         .map_err(|_| VfsError::MemoryUnavailable)?;
-    for pair in encoded.as_bytes().chunks_exact(2) {
-        let [high, low] = pair else {
-            return Err(VfsError::InvalidRelativePath);
-        };
+    for [high, low] in encoded.as_bytes().as_chunks::<2>().0 {
         let high = decode_lower_hex_nibble(*high).ok_or(VfsError::InvalidRelativePath)?;
         let low = decode_lower_hex_nibble(*low).ok_or(VfsError::InvalidRelativePath)?;
         decoded.push((high << 4) | low);
@@ -1960,11 +1957,8 @@ fn platform_os_string(raw: Vec<u8>) -> Result<OsString, VfsError> {
     let mut wide = Vec::new();
     wide.try_reserve_exact(raw.len() / 2)
         .map_err(|_| VfsError::MemoryUnavailable)?;
-    for pair in raw.chunks_exact(2) {
-        let [low, high] = pair else {
-            return Err(VfsError::InvalidRelativePath);
-        };
-        wide.push(u16::from_le_bytes([*low, *high]));
+    for pair in raw.as_chunks::<2>().0 {
+        wide.push(u16::from_le_bytes(*pair));
     }
     Ok(OsString::from_wide(&wide))
 }

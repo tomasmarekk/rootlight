@@ -411,7 +411,7 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, Sem
             };
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
-        let take = newline.map_or(available.len(), |position| position);
+        let take = newline.unwrap_or(available.len());
         let next_len = frame
             .len()
             .checked_add(take)
@@ -464,7 +464,24 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{MAX_FRAME_BYTES, SemanticHostError, serve};
+    use super::{MAX_FRAME_BYTES, SemanticHostError, read_bounded_frame, serve};
+
+    #[test]
+    fn bounded_frames_preserve_line_endings_and_eof_across_buffer_boundaries() {
+        for capacity in [1, 2, 32] {
+            let mut reader = std::io::BufReader::with_capacity(
+                capacity,
+                Cursor::new(b"first\r\n\nsecond\nlast"),
+            );
+            for expected in [b"first".as_slice(), b"", b"second", b"last"] {
+                assert_eq!(
+                    read_bounded_frame(&mut reader).unwrap().as_deref(),
+                    Some(expected)
+                );
+            }
+            assert_eq!(read_bounded_frame(&mut reader).unwrap(), None);
+        }
+    }
 
     #[test]
     fn hostile_json_and_unknown_fields_fail_closed() {
