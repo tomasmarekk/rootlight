@@ -190,6 +190,11 @@ tree-sitter-typescript = { path = "third_party/tree-sitter-typescript-0.23.2" }
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Adapter authentication hashes large executables under the sandbox CPU grant.
+# Keep the portable implementation optimized in debug tests without relaxing limits.
+[profile.dev.package.blake3]
+opt-level = 3
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
