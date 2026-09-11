@@ -41,11 +41,11 @@ const EXPECTED_DATASET_RECORD_SHA256: &str =
     "990f996b75507cd26bef61dbaeace8975bb7e5b81113de74a623448f926dc074";
 const EXPECTED_SAMPLE_RECORD_BYTES: u64 = 7_200;
 const EXPECTED_SAMPLE_RECORD_SHA256: &str =
-    "eb98d07b2bd81e2918fe465424060768b49f72b31133d6434d25f29aa25127cc";
+    "d933da8d64ff5d6350dd4bc7257a4527115dd7d555edee7be41e740ae8828c3d";
 const EXPECTED_TOTAL_SOURCE_BYTES: u64 = 2_497;
 const EXPECTED_TOTAL_PHYSICAL_LINES: u64 = 121;
-const EXPECTED_TOTAL_SYNTAX_NODES: u64 = 1_265;
-const EXPECTED_TOTAL_SYNTAX_FACTS: u64 = 473;
+const EXPECTED_TOTAL_SYNTAX_NODES: u64 = 1_287;
+const EXPECTED_TOTAL_SYNTAX_FACTS: u64 = 517;
 
 const EXPECTED_DATASET: [ExpectedDatasetRecord; EXPECTED_DATASET_RECORDS] = [
     ExpectedDatasetRecord {
@@ -1005,7 +1005,7 @@ mod tests {
                 let dataset = EXPECTED_DATASET[dataset_index];
                 let (syntax_nodes, syntax_facts) = match dataset_index {
                     0 => (37, 11),
-                    1 => (22, 10),
+                    1 => (24, 14),
                     2 => (29, 13),
                     3 => (27, 9),
                     _ => unreachable!("the fixed schedule uses four datasets"),

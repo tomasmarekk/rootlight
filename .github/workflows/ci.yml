@@ -934,8 +934,8 @@ jobs:
               "sample_record_count": 44,
               "sample_record_bytes": 7200,
               "sample_record_sha256": (
-                  "eb98d07b2bd81e2918fe465424060768"
-                  "b49f72b31133d6434d25f29aa25127cc"
+                  "d933da8d64ff5d6350dd4bc7257a452"
+                  "7115dd7d555edee7be41e740ae8828c3d"
               ),
           }
           observed = {key: envelope.get(key) for key in expected}

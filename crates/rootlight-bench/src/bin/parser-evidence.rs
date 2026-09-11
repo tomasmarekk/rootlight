@@ -25,9 +25,9 @@ use rootlight_adapter_treesitter::{
 use rootlight_bench::{
     Availability, BenchmarkCommand, BuildProvenance, BundleLimits, DatasetEntry, DatasetManifest,
     EnvironmentEvidence, EvidenceValue, PARSER_CI_MAX_ENVELOPE_BYTES, ParserBenchmarkConfig,
-    ParserDatasetInput, RESULT_BUNDLE_SCHEMA_VERSION, UnavailableProcessTreeSampler,
-    UnavailableSemanticFacts, build_parser_ci_evidence, encode_parser_ci_evidence,
-    run_parser_benchmark, verify_parser_ci_evidence,
+    ParserBenchmarkEvidence, ParserDatasetInput, RESULT_BUNDLE_SCHEMA_VERSION,
+    UnavailableProcessTreeSampler, UnavailableSemanticFacts, build_parser_ci_evidence,
+    encode_parser_ci_evidence, run_parser_benchmark, verify_parser_ci_evidence,
 };
 use rootlight_ids::{GenerationId, derive_repository};
 use rootlight_ir::{IrLimits, SourceRef, SourceSpan};
@@ -94,9 +94,9 @@ fn run() -> Result<(), EvidenceError> {
     }
 }
 
-fn emit(source_revision: &str) -> Result<(), EvidenceError> {
+fn benchmark_embedded_fixtures() -> Result<(DatasetManifest, ParserBenchmarkEvidence), EvidenceError>
+{
     let manifest = embedded_manifest()?;
-    let command = benchmark_command();
     let fixture_directory = create_fixture_directory()?;
     materialize_fixtures(fixture_directory.path())?;
 
@@ -145,7 +145,12 @@ fn emit(source_revision: &str) -> Result<(), EvidenceError> {
     drop(inputs);
     drop(repository);
     cleanup_fixture_directory(fixture_directory)?;
+    Ok((manifest, benchmark))
+}
 
+fn emit(source_revision: &str) -> Result<(), EvidenceError> {
+    let (manifest, benchmark) = benchmark_embedded_fixtures()?;
+    let command = benchmark_command();
     let executable = env::current_exe().map_err(|source| EvidenceError::Io {
         operation: "locate evidence executable",
         source,
@@ -584,6 +589,46 @@ enum EvidenceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_parser_samples_match_the_fixed_evidence_contract() {
+        let (manifest, benchmark) =
+            benchmark_embedded_fixtures().expect("embedded parser run succeeds");
+        let observed = benchmark
+            .raw_samples
+            .iter()
+            .take(4)
+            .map(|sample| {
+                (
+                    sample.dataset_entry_id.as_str(),
+                    sample.syntax_nodes,
+                    sample.syntax_facts,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [
+                ("python-basic", 29, 13),
+                ("rust-basic", 27, 9),
+                ("java-basic", 37, 11),
+                ("javascript-basic", 24, 14),
+            ]
+        );
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let digest = "00".repeat(32);
+        let envelope = build_parser_ci_evidence(
+            revision,
+            &environment(&digest).expect("environment is valid"),
+            &manifest,
+            &build_provenance(revision, &digest),
+            &benchmark_command(),
+            &benchmark,
+        )
+        .expect("live parser samples match the fixed envelope identity");
+        verify_parser_ci_evidence(&encode_parser_ci_evidence(&envelope).expect("envelope encodes"))
+            .expect("live evidence verifies");
+    }
 
     #[test]
     fn manifest_and_command_are_deterministic_and_source_free() {
