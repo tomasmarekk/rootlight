@@ -69,7 +69,7 @@ static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct TreeSitterProvider {
     provider_id: u64,
     registry: GrammarRegistry,
-    query_packs: QueryPackRegistry,
+    query_packs: &'static QueryPackRegistry,
     capabilities: ParseCapabilities,
     config: RuntimeConfig,
     pool: ParserPool,
@@ -78,6 +78,9 @@ pub struct TreeSitterProvider {
 
 impl TreeSitterProvider {
     /// Creates a provider with explicit parser, pool, and cache capacities.
+    ///
+    /// Compiled built-in queries are shared across the process; parser pools,
+    /// source caches, capacities and incremental identities remain independent.
     ///
     /// # Errors
     ///
@@ -2697,6 +2700,77 @@ fn require_provider_limit(
 mod tests {
     use super::*;
     use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn providers_share_immutable_queries_but_keep_runtime_state_private() {
+        let barrier = std::sync::Barrier::new(4);
+        let barrier = &barrier;
+        let providers = std::thread::scope(|scope| {
+            let handles = (1usize..=4)
+                .map(|capacity| {
+                    scope.spawn(move || {
+                        let config = RuntimeConfig::new(
+                            4096,
+                            1024,
+                            64,
+                            8,
+                            8,
+                            capacity,
+                            capacity * 4096,
+                            ParserSettings::new(256).expect("valid input chunk"),
+                        )
+                        .expect("valid provider configuration");
+                        barrier.wait();
+                        TreeSitterProvider::new(config).expect("audited provider initializes")
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("provider initializer completes"))
+                .collect::<Vec<_>>()
+        });
+        let first = providers.first().expect("four providers initialized");
+        let lease = first.pool.acquire(&Cancellation::new()).unwrap();
+        assert_eq!(first.stats().checked_out_parsers, 1);
+        let previous = PreviousParse {
+            provider_id: first.provider_id,
+            entry_id: 1,
+        };
+        for (slot, provider) in providers.iter().enumerate().skip(1) {
+            assert_ne!(first.provider_id, provider.provider_id);
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+            assert_eq!(provider.stats().cache.capacity_bytes, (slot + 1) * 4096);
+            assert_eq!(provider.config.max_concurrent_parses(), slot + 1);
+            assert_eq!(
+                provider
+                    .resolve_previous(Some(&previous), &Cancellation::new())
+                    .unwrap()
+                    .unwrap()
+                    .invalidation,
+                Some(ReuseInvalidation::Provider)
+            );
+            for descriptor in first.registry.descriptors() {
+                assert!(std::ptr::eq(
+                    first.query_packs.get(descriptor.family()).unwrap(),
+                    provider.query_packs.get(descriptor.family()).unwrap(),
+                ));
+            }
+            assert!(std::ptr::eq(
+                first
+                    .query_packs
+                    .get_for_source(GrammarFamily::TypeScript, "source.tsx")
+                    .unwrap(),
+                provider
+                    .query_packs
+                    .get_for_source(GrammarFamily::TypeScript, "source.tsx")
+                    .unwrap(),
+            ));
+        }
+        drop(lease);
+        assert_eq!(first.stats().checked_out_parsers, 0);
+    }
 
     #[test]
     fn shadowed_captures_do_not_displace_distinct_facts_at_capacity() {

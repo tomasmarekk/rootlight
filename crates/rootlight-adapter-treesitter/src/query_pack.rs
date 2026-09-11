@@ -3,7 +3,7 @@
 //! Native queries and capture indices stay private; runtime extraction sees
 //! only the closed, parser-independent role mapping defined here.
 
-use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow};
+use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow, sync::OnceLock};
 
 use rootlight_adapter_sdk::{
     AdapterError, DiagnosticCode, ResourceKind, SinkError, SyntaxFactKind,
@@ -1917,7 +1917,19 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 }
 
 impl QueryPackRegistry {
-    pub(crate) fn audited() -> Result<Self, GrammarFamily> {
+    pub(crate) fn audited() -> Result<&'static Self, GrammarFamily> {
+        // Native query analysis is expensive (see benches/provider_startup.rs).
+        // Only the fixed built-in queries are shared: source trees, cursors and
+        // caller budgets remain request- or provider-owned. Static inputs also
+        // make a compilation failure deterministic for the process lifetime.
+        static AUDITED: OnceLock<Result<QueryPackRegistry, GrammarFamily>> = OnceLock::new();
+        AUDITED
+            .get_or_init(Self::compile_audited)
+            .as_ref()
+            .map_err(|family| *family)
+    }
+
+    fn compile_audited() -> Result<Self, GrammarFamily> {
         let mut packs = Vec::with_capacity(32);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),

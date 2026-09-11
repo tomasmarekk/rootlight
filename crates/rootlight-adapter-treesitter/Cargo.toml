@@ -57,3 +57,7 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "provider_startup"
+harness = false
