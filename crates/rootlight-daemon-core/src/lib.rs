@@ -16734,14 +16734,26 @@ mod tests {
                 },
             )),
         };
-        let context = test_dispatch_context(
+        let mut context = test_dispatch_context(
             &service,
             &envelope,
             ClientInstanceId::new([9; 16]).expect("client identity is valid"),
         );
+        // Synchronous fixture setup advances std time while Tokio is paused.
+        // Model that skew without sleeping, preserving the request's duration.
+        let setup_skew = Duration::from_secs(1);
+        context.timing.started += setup_skew;
+        context.timing.deadline = context
+            .timing
+            .deadline
+            .map(|deadline| deadline + setup_skew);
 
-        let response = tokio::time::timeout(
-            Duration::from_millis(100),
+        // Both deadlines must use the request's clock origin, not the earlier
+        // frozen Tokio instant at test entry.
+        let guard_deadline =
+            tokio::time::Instant::from_std(context.timing.started) + Duration::from_millis(100);
+        let response = tokio::time::timeout_at(
+            guard_deadline,
             dispatch_async(
                 &service,
                 &journal,
