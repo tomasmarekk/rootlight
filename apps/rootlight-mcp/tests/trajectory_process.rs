@@ -347,42 +347,89 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
     ]);
     let second = index_repository(&mut mcp, &repository_root, "trajectory-index-v2");
     let consumer = index_repository(&mut mcp, &consumer_root, "trajectory-consumer-index-v1");
-    let entry = locate(&mut mcp, &second, "budget_entry", "trajectory-entry");
-    let helper = locate(&mut mcp, &second, "budget_helper", "trajectory-helper");
-    let unused = locate(&mut mcp, &second, "budget_unused", "trajectory-unused");
-    let added = locate(&mut mcp, &second, "trajectory_added", "trajectory-added");
-    let transform = locate(&mut mcp, &second, "transform", "trajectory-transform");
+    let entry = locate(
+        &mut mcp,
+        &second,
+        "budget_entry",
+        "trajectory-entry",
+        &["src/lib.rs", "tests/integration.rs"],
+    );
+    let helper = locate(
+        &mut mcp,
+        &second,
+        "budget_helper",
+        "trajectory-helper",
+        &["src/lib.rs"],
+    );
+    let unused = locate(
+        &mut mcp,
+        &second,
+        "budget_unused",
+        "trajectory-unused",
+        &["src/lib.rs"],
+    );
+    let added = locate(
+        &mut mcp,
+        &second,
+        "trajectory_added",
+        "trajectory-added",
+        &["src/lib.rs"],
+    );
+    let transform = locate(
+        &mut mcp,
+        &second,
+        "transform",
+        "trajectory-transform",
+        &["src/service.rs", "src/lib.rs", "src/worker.rs"],
+    );
     let gateway = locate(
         &mut mcp,
         &second,
         "submit_budget_request",
         "trajectory-gateway",
+        &["src/gateway.rs"],
     );
     let worker = locate(
         &mut mcp,
         &second,
         "handle_budget_message",
         "trajectory-worker",
+        &["src/worker.rs", "src/gateway.rs"],
     );
-    let cycle_alpha = locate(&mut mcp, &second, "cycle_alpha", "trajectory-cycle-alpha");
-    let cycle_beta = locate(&mut mcp, &second, "cycle_beta", "trajectory-cycle-beta");
+    let cycle_alpha = locate(
+        &mut mcp,
+        &second,
+        "cycle_alpha",
+        "trajectory-cycle-alpha",
+        &["src/cycle.rs"],
+    );
+    let cycle_beta = locate(
+        &mut mcp,
+        &second,
+        "cycle_beta",
+        "trajectory-cycle-beta",
+        &["src/cycle.rs"],
+    );
     let unit_test = locate(
         &mut mcp,
         &second,
         "entry_combines_bounded_helpers",
         "trajectory-unit-test",
+        &["src/lib.rs"],
     );
     let consumer_migration = locate(
         &mut mcp,
         &consumer,
         "migrate_budget_api",
         "trajectory-consumer-migration",
+        &["src/lib.rs"],
     );
     let consumer_helper = locate(
         &mut mcp,
         &consumer,
         "client_transform",
         "trajectory-consumer-helper",
+        &["src/lib.rs"],
     );
 
     let protocol = preregistered_trajectory_protocol(fixture_sha256)
@@ -427,7 +474,21 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
         &mut bounded_files,
         &tokenizer,
     )
-    .expect("complete trajectory package validates");
+    .unwrap_or_else(|error| {
+        let last = rootlight.workflow_observations.last().map(|execution| {
+            let calls = execution.calls.iter().map(|call| {
+                let frame = serde_json::to_vec(&call.response).expect("response serializes");
+                (
+                    call.tool.as_str(),
+                    result_items(&call.response),
+                    call.source_frame.len(),
+                    tokenizer.count(&frame).expect("response tokenizes"),
+                )
+            }).collect::<Vec<_>>();
+            (execution.task.workflow_id.as_str(), execution.attempt_index, calls)
+        });
+        panic!("complete trajectory package validates: {error:?}; last workflow and call (tool, items, source bytes, response tokens): {last:?}")
+    });
     let bounded_observations = bounded_files.take_observations();
     let unsuccessful_rootlight = package
         .attempts
@@ -3477,7 +3538,13 @@ fn wait_for_publication(mcp: &mut McpProcess, operation_id: &str) -> String {
     panic!("fixture indexing did not publish within the bounded wait");
 }
 
-fn locate(mcp: &mut McpProcess, index: &IndexReceipt, query: &str, id: &str) -> LocatedSymbol {
+fn locate(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    query: &str,
+    id: &str,
+    expected_files: &[&str],
+) -> LocatedSymbol {
     let response = mcp.call(
         id,
         "code.locate",
@@ -3486,17 +3553,201 @@ fn locate(mcp: &mut McpProcess, index: &IndexReceipt, query: &str, id: &str) -> 
             "generation": index.generation_id,
             "query": query,
             "search_modes": ["exact"],
-            "max_results": 2
+            "max_results": 20
         }),
     );
     assert_success(&response, "code.locate");
     let matches = response["result"]["structuredContent"]["data"]["matches"]
         .as_array()
         .expect("code.locate returns matches");
-    assert_eq!(matches.len(), 1, "setup locate returns one exact symbol");
+    located_function(matches, index, query, expected_files)
+}
+
+fn located_function(
+    matches: &[Value],
+    index: &IndexReceipt,
+    query: &str,
+    expected_files: &[&str],
+) -> LocatedSymbol {
+    // The first expected path owns the declaration; the rest are references.
+    // Source vocabulary also finds files that reference the name. Require the
+    // complete fixture-specific set, without assuming a result ordering.
+    assert_eq!(matches.len(), expected_files.len() + 1);
+    let mut paths = BTreeSet::new();
+    let mut file_ids = BTreeSet::new();
+    for file in matches.iter().filter(|entry| entry["kind"] == "file") {
+        let path = required_string(&file["path"], "file path");
+        assert_eq!(file["display_name"].as_str(), path.rsplit('/').next());
+        assert!(paths.insert(path));
+        assert_eq!(file.get("symbol_id"), Some(&Value::Null));
+        let file_id = required_string(&file["file_id"], "file identity");
+        assert!(!file_id.is_empty());
+        assert!(file_ids.insert(file_id.clone()));
+        let source = &file["source_ref"];
+        assert_eq!(source["repository"], index.repository_id);
+        assert_eq!(source["generation"], index.generation_id);
+        assert!(!required_string(&source["content_hash"], "file content hash").is_empty());
+        assert_eq!(source["span"]["file"], file_id);
+        assert_eq!(source["span"]["start_byte"], 0);
+        assert!(
+            source["span"]["end_byte"]
+                .as_u64()
+                .is_some_and(|end| end > 0)
+        );
+    }
+    assert_eq!(
+        paths,
+        expected_files.iter().map(ToString::to_string).collect()
+    );
+    let function = matches
+        .iter()
+        .find(|entry| entry["kind"] == "function")
+        .expect("setup locate includes a function");
+    let file = matches
+        .iter()
+        .find(|entry| entry["kind"] == "file" && entry["path"] == function["path"])
+        .expect("setup locate includes a source file");
+    assert_eq!(function["display_name"], query);
+    assert_eq!(file.get("symbol_id"), Some(&Value::Null));
+    assert_eq!(function["path"], expected_files[0]);
+    assert_eq!(file["path"], function["path"]);
+    let file_id = required_string(&function["file_id"], "function file identity");
+    assert!(!file_id.is_empty());
+    assert_eq!(file["file_id"], file_id);
+    let source = &function["source_ref"];
+    let file_source = &file["source_ref"];
+    assert_eq!(source["repository"], index.repository_id);
+    assert_eq!(source["generation"], index.generation_id);
+    for field in ["repository", "generation", "content_hash"] {
+        assert!(!required_string(&source[field], field).is_empty());
+        assert_eq!(source[field], file_source[field]);
+    }
+    assert_eq!(source["span"]["file"], file_id);
+    assert_eq!(file_source["span"]["file"], file_id);
+    assert_eq!(file_source["span"]["start_byte"], 0);
+    let start = source["span"]["start_byte"]
+        .as_u64()
+        .expect("function start");
+    let end = source["span"]["end_byte"].as_u64().expect("function end");
+    let file_end = file_source["span"]["end_byte"].as_u64().expect("file end");
+    assert!(start < end && end <= file_end);
+    let symbol_id = required_string(&function["symbol_id"], "symbol identity");
+    assert!(!symbol_id.is_empty());
     LocatedSymbol {
-        symbol_id: required_string(&matches[0]["symbol_id"], "symbol identity"),
-        source_ref: matches[0]["source_ref"].clone(),
+        symbol_id,
+        source_ref: source.clone(),
+    }
+}
+
+#[test]
+fn trajectory_setup_locate_validates_declaration_and_file_provenance_in_either_order() {
+    let index = IndexReceipt {
+        repository_id: "repository".to_owned(),
+        generation_id: "generation".to_owned(),
+    };
+    let function = json!({
+        "kind": "function", "display_name": "entry", "symbol_id": "symbol",
+        "file_id": "file", "path": "src/implementation.rs",
+        "source_ref": {
+            "repository": index.repository_id, "generation": index.generation_id,
+            "content_hash": "hash", "span": {"file": "file", "start_byte": 10, "end_byte": 20}
+        }
+    });
+    let file = json!({
+        "kind": "file", "display_name": "implementation.rs", "symbol_id": null,
+        "file_id": "file", "path": "src/implementation.rs",
+        "source_ref": {
+            "repository": index.repository_id, "generation": index.generation_id,
+            "content_hash": "hash", "span": {"file": "file", "start_byte": 0, "end_byte": 30}
+        }
+    });
+    for matches in [
+        vec![function.clone(), file.clone()],
+        vec![file.clone(), function.clone()],
+    ] {
+        let located = located_function(&matches, &index, "entry", &["src/implementation.rs"]);
+        assert_eq!(located.symbol_id, "symbol");
+        assert_eq!(located.source_ref, function["source_ref"]);
+    }
+    let mut referencing_file = file.clone();
+    referencing_file["path"] = json!("tests/integration.rs");
+    referencing_file["display_name"] = json!("integration.rs");
+    referencing_file["file_id"] = json!("test-file");
+    referencing_file["source_ref"]["span"]["file"] = json!("test-file");
+    referencing_file["source_ref"]["content_hash"] = json!("test-hash");
+    let located = located_function(
+        &[referencing_file.clone(), function.clone(), file.clone()],
+        &index,
+        "entry",
+        &["src/implementation.rs", "tests/integration.rs"],
+    );
+    assert_eq!(located.symbol_id, "symbol");
+    for (pointer, value) in [
+        ("/symbol_id", json!("unexpected-symbol")),
+        ("/file_id", json!("file")),
+        ("/path", json!("other.rs")),
+        ("/source_ref/repository", json!("other")),
+        ("/source_ref/generation", json!("old")),
+        ("/source_ref/content_hash", json!("")),
+        ("/source_ref/span/file", json!("other")),
+        ("/source_ref/span/start_byte", json!(1)),
+        ("/source_ref/span/end_byte", json!(0)),
+    ] {
+        let mut changed = referencing_file.clone();
+        *changed.pointer_mut(pointer).expect("fixture field exists") = value;
+        assert!(
+            std::panic::catch_unwind(|| located_function(
+                &[changed, function.clone(), file.clone()],
+                &index,
+                "entry",
+                &["src/implementation.rs", "tests/integration.rs"]
+            ))
+            .is_err(),
+            "invalid referencing-file field was accepted: {pointer}"
+        );
+    }
+    for (pointer, value) in [
+        ("/kind", json!("file")),
+        ("/display_name", json!("unrelated")),
+        ("/symbol_id", json!(null)),
+        ("/symbol_id", json!("")),
+        ("/file_id", json!("unrelated")),
+        ("/path", json!("other.rs")),
+        ("/source_ref/repository", json!("other")),
+        ("/source_ref/generation", json!("old")),
+        ("/source_ref/content_hash", json!("other")),
+        ("/source_ref/span/file", json!("other")),
+        ("/source_ref/span/start_byte", json!(20)),
+        ("/source_ref/span/end_byte", json!(31)),
+    ] {
+        let mut changed = function.clone();
+        *changed.pointer_mut(pointer).expect("fixture field exists") = value;
+        assert!(
+            std::panic::catch_unwind(|| located_function(
+                &[changed, file.clone()],
+                &index,
+                "entry",
+                &["src/implementation.rs"]
+            ))
+            .is_err(),
+            "invalid declaration field was accepted: {pointer}"
+        );
+    }
+    for matches in [
+        vec![function.clone()],
+        vec![function.clone(), function.clone()],
+        vec![file.clone(), file.clone()],
+        vec![function, file.clone(), file],
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| located_function(
+                &matches,
+                &index,
+                "entry",
+                &["src/implementation.rs"]
+            ))
+            .is_err()
+        );
     }
 }
 
