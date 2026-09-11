@@ -26,8 +26,8 @@ use crate::{
     artifact::{ArtifactBudget, LexicalArtifactManifest, VerifiedLexicalArtifact, create_manifest},
     model::{
         BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, QueryViolation,
-        SearchBudget, SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
-        SourceLexicalCoverage, SourceTermProjection,
+        SearchBudget, SearchError, SearchFilters, SearchHit, SearchMode, SearchOutcome,
+        SearchRequest, SourceLexicalCoverage, SourceTermProjection,
     },
     tokenizer::{CodeTokenizer, has_oversized_term, is_mark, normalize_text, token_texts},
 };
@@ -183,6 +183,34 @@ pub trait LexicalSearch: Send + Sync {
         Err(SearchError::InvalidPathFilter)
     }
 
+    /// Executes a query with filters applied before candidate accounting and paging.
+    ///
+    /// The default rejects explicit kind filters without querying the backend;
+    /// implementors must not emulate support by filtering an already limited page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError::InvalidKindFilter`] for unsupported kind filtering,
+    /// or the same errors as [`LexicalSearch::search_with_filters_and_stats`].
+    fn search_with_entity_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        filters: SearchFilters<'_>,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        if filters.kinds.is_some() {
+            return Err(SearchError::InvalidKindFilter);
+        }
+        self.search_with_filters_and_stats(
+            request,
+            filters.languages,
+            filters.path_prefixes,
+            budget,
+            cancellation,
+        )
+    }
+
     /// Executes one bounded domain query and returns only its ordered hits.
     ///
     /// # Errors
@@ -262,6 +290,38 @@ pub fn validate_search_request_with_filters(
     validate_request(request, budget)?;
     validate_language_filter(languages)?;
     validate_path_filter(path_prefixes)
+}
+
+/// Validates one query, canonical entity filters, and lexical budget.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for invalid filters, query bounds, or resource limits.
+pub fn validate_search_request_with_entity_filters(
+    request: &SearchRequest,
+    filters: SearchFilters<'_>,
+    budget: SearchBudget,
+) -> Result<(), SearchError> {
+    validate_search_request_with_filters(
+        request,
+        filters.languages,
+        filters.path_prefixes,
+        budget,
+    )?;
+    if filters.kinds.is_some_and(|kinds| {
+        kinds.len() > 64
+            || kinds.windows(2).any(|pair| pair[0] >= pair[1])
+            || kinds.iter().any(|kind| {
+                kind.is_empty()
+                    || kind.len() > MAX_LABEL_BYTES
+                    || !kind
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            })
+    }) {
+        return Err(SearchError::InvalidKindFilter);
+    }
+    Ok(())
 }
 
 /// A read-only lexical index pinned to one immutable generation.
@@ -554,20 +614,41 @@ impl LexicalIndex {
         budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_entity_filters_and_stats(
+            request,
+            SearchFilters {
+                languages,
+                path_prefixes,
+                kinds: None,
+            },
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes a query with raw kind, language, and path unions intersected in the index.
+    ///
+    /// Kind filtering precedes stored-document reads, candidate counts, ranking,
+    /// and pagination. An explicitly empty kind union matches no documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid input, cancellation, exceeded budgets,
+    /// incompatible stored data, or redacted backend failures.
+    pub fn search_with_entity_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        filters: SearchFilters<'_>,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
         let control = SearchControl::new(cancellation, budget.max_duration);
         control.check()?;
-        validate_request(request, budget)?;
-        validate_language_filter(languages)?;
-        validate_path_filter(path_prefixes)?;
+        validate_search_request_with_entity_filters(request, filters, budget)?;
         let searcher = self.reader.searcher();
-        let query = self.fields.query(
-            request,
-            languages,
-            path_prefixes,
-            &searcher,
-            budget,
-            &control,
-        )?;
+        let query = self
+            .fields
+            .query(request, filters, &searcher, budget, &control)?;
         control.check()?;
         let weight = query
             .weight(EnableScoring::enabled_from_searcher(&searcher))
@@ -592,7 +673,7 @@ impl LexicalIndex {
                     .doc::<TantivyDocument>(DocAddress::new(segment_ord, document_id))
                     .map_err(|_| operation("stored_document"))?;
                 let (hit, hit_text_bytes) = self.fields.decode(document, score)?;
-                if !path_matches_prefixes(&hit.path, path_prefixes) {
+                if !path_matches_prefixes(&hit.path, filters.path_prefixes) {
                     document_id = scorer.advance();
                     continue;
                 }
@@ -698,6 +779,16 @@ impl LexicalSearch for LexicalIndex {
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
         self.search_with_filters_and_stats(request, languages, path_prefixes, budget, cancellation)
+    }
+
+    fn search_with_entity_filters_and_stats(
+        &self,
+        request: &SearchRequest,
+        filters: SearchFilters<'_>,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_entity_filters_and_stats(request, filters, budget, cancellation)
     }
 
     fn document_count(&self) -> u64 {
@@ -1129,8 +1220,7 @@ impl Fields {
     fn query(
         &self,
         request: &SearchRequest,
-        languages: &[String],
-        path_prefixes: &[String],
+        filters: SearchFilters<'_>,
         searcher: &tantivy::Searcher,
         budget: SearchBudget,
         control: &SearchControl<'_>,
@@ -1146,7 +1236,24 @@ impl Fields {
             }
             SearchMode::Glob => self.pattern_query(&compile_safe_glob(&normalized)?, &mut work)?,
         };
-        let mut intersections = Vec::with_capacity(2);
+        let SearchFilters {
+            languages,
+            path_prefixes,
+            kinds,
+        } = filters;
+        let mut intersections = Vec::with_capacity(3);
+        if let Some(kinds) = kinds {
+            if kinds.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            let kind_clauses = kinds
+                .iter()
+                .map(|kind| {
+                    intersection_filter_clause(self.kind, kind, IndexRecordOption::Basic, 1.0)
+                })
+                .collect();
+            intersections.push(Box::new(BooleanQuery::new(kind_clauses)) as Box<dyn Query>);
+        }
         if !languages.is_empty() {
             let mut language_clauses = Vec::with_capacity(languages.len());
             for language in languages {
@@ -3468,6 +3575,352 @@ mod tests {
     }
 
     #[test]
+    fn kind_unions_filter_before_counts_and_paging_in_all_search_modes() {
+        let mut file = document(1, "shared_name", "src/shared.rs");
+        file.kind = "file".to_owned();
+        file.symbol_id = None;
+        let function = document(2, "shared_name", "src/function.rs");
+        let mut method = document(3, "shared_name", "src/method.rs");
+        method.kind = "method".to_owned();
+        let mut other_language = document(4, "shared_name", "src/other.py");
+        other_language.language = "python".to_owned();
+        let outside = document(5, "shared_name", "tests/outside.rs");
+        let (_directory, _manifest, index) =
+            build(vec![file, function, method, other_language, outside]);
+        let backend: &dyn LexicalSearch = &index;
+        for mode in [
+            SearchMode::Exact,
+            SearchMode::Prefix,
+            SearchMode::Text,
+            SearchMode::SafeRegex,
+            SearchMode::Glob,
+        ] {
+            for selected in [
+                vec!["file"],
+                vec!["function"],
+                vec!["method"],
+                vec!["file", "function"],
+                vec![],
+            ] {
+                let kinds: Vec<String> = selected.iter().map(|kind| (*kind).to_owned()).collect();
+                let filters = SearchFilters {
+                    languages: &["rust".to_owned()],
+                    path_prefixes: &["src".to_owned()],
+                    kinds: Some(&kinds),
+                };
+                let mut seen = BTreeSet::new();
+                for page_offset in 0..=selected.len() {
+                    let outcome = backend
+                        .search_with_entity_filters_and_stats(
+                            &SearchRequest {
+                                query: "shared_name".to_owned(),
+                                mode,
+                                max_results: 1,
+                                page_offset,
+                            },
+                            filters,
+                            SearchBudget::default(),
+                            &Cancellation::new(),
+                        )
+                        .expect("canonical kind union searches");
+                    assert_eq!(
+                        outcome.matched_candidates,
+                        u64::try_from(selected.len()).unwrap()
+                    );
+                    if page_offset == selected.len() {
+                        assert!(outcome.hits.is_empty());
+                    } else {
+                        assert_eq!(outcome.hits.len(), 1);
+                        let hit = &outcome.hits[0];
+                        assert!(selected.contains(&hit.kind.as_str()));
+                        assert_eq!(hit.language, "rust");
+                        assert!(hit.path.starts_with("src/"));
+                        assert!(seen.insert(hit.kind.clone()), "pages must not repeat a hit");
+                        assert_eq!(hit.symbol_id.is_none(), hit.kind == "file");
+                    }
+                }
+                assert_eq!(seen.len(), selected.len());
+            }
+        }
+    }
+
+    #[test]
+    fn kind_filter_intersects_backend_before_materialization_and_candidate_budget() {
+        let mut selected = document(3, "shared_name", "src/selected.rs");
+        selected.kind = "method".to_owned();
+        let (_directory, _manifest, index) = build(vec![
+            document(1, "shared_name", "src/first.rs"),
+            document(2, "shared_name", "src/second.rs"),
+            selected,
+        ]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        let filters = SearchFilters {
+            kinds: Some(&["method".to_owned()]),
+            ..SearchFilters::default()
+        };
+        let budget = SearchBudget {
+            max_candidates: 1,
+            ..SearchBudget::default()
+        };
+        let cancellation = Cancellation::new();
+        let control = SearchControl::new(&cancellation, budget.max_duration);
+        let searcher = index.reader.searcher();
+        let query = index
+            .fields
+            .query(&request, filters, &searcher, budget, &control)
+            .unwrap();
+        let weight = query
+            .weight(EnableScoring::enabled_from_searcher(&searcher))
+            .unwrap();
+        let mut count = 0;
+        for segment in searcher.segment_readers() {
+            let mut scorer = weight.scorer(segment, 1.0).unwrap();
+            while scorer.doc() != TERMINATED {
+                count += 1;
+                scorer.advance();
+            }
+        }
+        assert_eq!(
+            count, 1,
+            "nonmatching documents must never reach stored reads"
+        );
+        let outcome = index
+            .search_with_entity_filters_and_stats(&request, filters, budget, &cancellation)
+            .unwrap();
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits[0].path, "src/selected.rs");
+        assert!(matches!(
+            index.search_with_stats(&request, budget, &cancellation),
+            Err(SearchError::CandidateBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn absent_kind_filter_preserves_scores_order_and_accounting() {
+        let (_directory, _manifest, index) = build(vec![
+            document(1, "shared_name", "src/one.rs"),
+            document(2, "shared_name", "src/two.rs"),
+        ]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 10,
+            page_offset: 0,
+        };
+        let cancellation = Cancellation::new();
+        let old = index
+            .search_with_filters_and_stats(
+                &request,
+                &[],
+                &[],
+                SearchBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        let new = index
+            .search_with_entity_filters_and_stats(
+                &request,
+                SearchFilters::default(),
+                SearchBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(old, new);
+        let empty = index
+            .search_with_entity_filters_and_stats(
+                &request,
+                SearchFilters {
+                    kinds: Some(&[]),
+                    ..SearchFilters::default()
+                },
+                SearchBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(empty.matched_candidates, 0);
+        assert_eq!(empty.materialized_text_bytes, 0);
+        assert!(empty.hits.is_empty());
+        let unknown = index
+            .search_with_entity_filters_and_stats(
+                &request,
+                SearchFilters {
+                    kinds: Some(&["future_kind".to_owned()]),
+                    ..SearchFilters::default()
+                },
+                SearchBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(empty, unknown);
+    }
+
+    #[test]
+    fn kind_filter_validation_rejects_noncanonical_or_unbounded_unions() {
+        let request = SearchRequest {
+            query: "name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        let mut invalid = vec![
+            vec!["".to_owned()],
+            vec!["Function".to_owned()],
+            vec!["function\n".to_owned()],
+            vec!["méthod".to_owned()],
+            vec!["a".repeat(129)],
+            vec!["method".to_owned(), "function".to_owned()],
+            vec!["file".to_owned(), "file".to_owned()],
+        ];
+        invalid.push((1..=65).map(|length| "a".repeat(length)).collect());
+        for kinds in invalid {
+            assert_eq!(
+                validate_search_request_with_entity_filters(
+                    &request,
+                    SearchFilters {
+                        kinds: Some(&kinds),
+                        ..SearchFilters::default()
+                    },
+                    SearchBudget::default()
+                ),
+                Err(SearchError::InvalidKindFilter)
+            );
+        }
+        let maximum: Vec<String> = (1..=64).map(|length| "a".repeat(length)).collect();
+        assert!(
+            validate_search_request_with_entity_filters(
+                &request,
+                SearchFilters {
+                    kinds: Some(&maximum),
+                    ..SearchFilters::default()
+                },
+                SearchBudget::default()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn empty_kind_union_does_not_bypass_invalid_patterns_or_cancellation() {
+        let (_directory, _manifest, index) = build(vec![document(1, "shared_name", "src/one.rs")]);
+        let request = SearchRequest {
+            query: "[".to_owned(),
+            mode: SearchMode::SafeRegex,
+            max_results: 1,
+            page_offset: 0,
+        };
+        let filters = SearchFilters {
+            kinds: Some(&[]),
+            ..SearchFilters::default()
+        };
+        assert!(matches!(
+            index.search_with_entity_filters_and_stats(
+                &request,
+                filters,
+                SearchBudget::default(),
+                &Cancellation::new()
+            ),
+            Err(SearchError::InvalidQuery(_))
+        ));
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            index.search_with_entity_filters_and_stats(
+                &request,
+                filters,
+                SearchBudget::default(),
+                &cancellation
+            ),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        ));
+    }
+
+    #[test]
+    fn backend_without_kind_support_rejects_filters_before_executing_search() {
+        struct LegacyBackend {
+            index: LexicalIndex,
+            queried: std::sync::atomic::AtomicBool,
+        }
+        impl LexicalSearch for LegacyBackend {
+            fn generation(&self) -> GenerationId {
+                self.index.generation()
+            }
+
+            fn search_with_stats(
+                &self,
+                request: &SearchRequest,
+                budget: SearchBudget,
+                cancellation: &Cancellation,
+            ) -> Result<SearchOutcome, SearchError> {
+                self.queried
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.index.search_with_stats(request, budget, cancellation)
+            }
+
+            fn search_with_language_filter_and_stats(
+                &self,
+                request: &SearchRequest,
+                languages: &[String],
+                budget: SearchBudget,
+                cancellation: &Cancellation,
+            ) -> Result<SearchOutcome, SearchError> {
+                self.queried
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.index.search_with_language_filter_and_stats(
+                    request,
+                    languages,
+                    budget,
+                    cancellation,
+                )
+            }
+
+            fn document_count(&self) -> u64 {
+                self.index.document_count()
+            }
+        }
+        let (_directory, _manifest, index) = build(vec![document(1, "shared_name", "src/one.rs")]);
+        let backend = LegacyBackend {
+            index,
+            queried: std::sync::atomic::AtomicBool::new(false),
+        };
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        for kinds in [vec![], vec!["function".to_owned()]] {
+            assert_eq!(
+                backend.search_with_entity_filters_and_stats(
+                    &request,
+                    SearchFilters {
+                        kinds: Some(&kinds),
+                        ..SearchFilters::default()
+                    },
+                    SearchBudget::default(),
+                    &Cancellation::new()
+                ),
+                Err(SearchError::InvalidKindFilter)
+            );
+            assert!(!backend.queried.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        let outcome = backend
+            .search_with_entity_filters_and_stats(
+                &request,
+                SearchFilters::default(),
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert_eq!(outcome.matched_candidates, 1);
+        assert!(backend.queried.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
     fn path_prefixes_intersect_the_backend_query_before_materialization() {
         let outside_first = document(1, "shared_name", "a/outside.rs");
         let outside_second = document(2, "shared_name", "b/outside.rs");
@@ -3486,8 +3939,10 @@ mod tests {
                     max_results: 10,
                     page_offset: 0,
                 },
-                &[],
-                &["src".to_owned()],
+                SearchFilters {
+                    path_prefixes: &["src".to_owned()],
+                    ..SearchFilters::default()
+                },
                 &searcher,
                 budget,
                 &control,

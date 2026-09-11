@@ -15,12 +15,13 @@ pub use index::{
     EPHEMERAL_MAX_TEXT_BYTES, EphemeralLexicalIndexBuilder, LexicalIndex, LexicalIndexBuilder,
     LexicalSearch, project_source_term_chunks, project_source_terms_with_coverage,
     select_query_source_text, validate_build_admission, validate_search_request,
-    validate_search_request_with_filters, validate_search_request_with_languages,
+    validate_search_request_with_entity_filters, validate_search_request_with_filters,
+    validate_search_request_with_languages,
 };
 pub use model::{
     BuildBudget, BuildStats, DocumentField, LexicalDocument, QueryViolation, SearchBudget,
-    SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest, SourceLexicalCoverage,
-    SourceTermProjection,
+    SearchError, SearchFilters, SearchHit, SearchMode, SearchOutcome, SearchRequest,
+    SourceLexicalCoverage, SourceTermProjection,
 };
 
 fn require_private_file_boundary(test_scaffold: bool) -> Result<(), SearchError> {

@@ -291,6 +291,22 @@ pub enum QueryViolation {
     LeadingWildcard,
 }
 
+/// Borrowed unions intersected before lexical candidate accounting and paging.
+///
+/// Empty language/path unions are unrestricted. Kind labels use the index's raw
+/// vocabulary, not presentation-layer groups: `None` is unrestricted, whereas
+/// `Some(&[])` matches nothing. Labels must be sorted, unique, lowercase ASCII
+/// letters/underscores, at most 128 bytes each, with at most 64 kind labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchFilters<'a> {
+    /// Canonical language union, using the existing language-filter contract.
+    pub languages: &'a [String],
+    /// Canonical repository-relative path-prefix union.
+    pub path_prefixes: &'a [String],
+    /// Optional exact raw entity-kind union; unknown labels match no documents.
+    pub kinds: Option<&'a [String]>,
+}
+
 /// Closed, source-redacted lexical failure taxonomy.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -334,6 +350,9 @@ pub enum SearchError {
     /// A repository-relative path filter was empty, noncanonical, or oversized.
     #[error("lexical path filter is invalid")]
     InvalidPathFilter,
+    /// A kind union was noncanonical, oversized, or unsupported by the backend.
+    #[error("lexical kind filter is invalid or unsupported")]
+    InvalidKindFilter,
     /// More matches existed than the deterministic materialization budget.
     #[error("lexical candidate budget exceeded")]
     CandidateBudgetExceeded,
