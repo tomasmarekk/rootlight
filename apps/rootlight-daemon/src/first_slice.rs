@@ -46,9 +46,10 @@ use rootlight_ir::{
     SourceRef, SourceSpan,
 };
 use rootlight_observability::{
-    SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
-    SupportLanguageCapabilityInventory, SupportRepositoryCapacityInventory,
-    SupportRepositoryInventory, SupportStorageAccountingState,
+    ShutdownPhase, SpanGuard, SpanKind, SupportAdapterInventory, SupportChecksumStatus,
+    SupportGenerationInventory, SupportLanguageCapabilityInventory,
+    SupportRepositoryCapacityInventory, SupportRepositoryInventory, SupportStorageAccountingState,
+    Telemetry, TelemetryOutcome,
 };
 #[cfg(test)]
 use rootlight_operations::RecoveryClass;
@@ -4714,6 +4715,7 @@ impl FirstSliceDaemon {
             None
         };
         let metadata = Arc::new(Mutex::new(operation_metadata));
+        let shutdown_telemetry = support_state.as_ref().map(|state| state.telemetry());
         let stopping = Arc::new(AtomicBool::new(false));
         let service = Arc::new(RwLock::new(service));
         let index_serialization = Arc::new(Mutex::new(()));
@@ -4960,6 +4962,7 @@ impl FirstSliceDaemon {
         Ok((
             daemon,
             FirstSliceWorkers {
+                telemetry: shutdown_telemetry,
                 work: Some(work),
                 read: Some(read),
                 control: Some(control),
@@ -5142,6 +5145,7 @@ fn operation_status_observation(
 
 /// Join owner for the process-lifetime first-slice workers.
 pub(crate) struct FirstSliceWorkers {
+    telemetry: Option<Arc<Telemetry>>,
     work: Option<SyncSender<WorkerCommand>>,
     read: Option<SyncSender<WorkerCommand>>,
     control: Option<SyncSender<WorkerCommand>>,
@@ -5183,10 +5187,18 @@ impl FirstSliceWorkers {
         // This runs only during global daemon shutdown. Interrupting the full
         // bounded journal batch is intentional: no operation kind may outlive
         // the process-wide worker drain.
-        tokio::time::timeout_at(deadline, self.journal.interrupt(DEFAULT_OPERATION_METADATA))
-            .await
-            .map_err(|_| FirstSliceHostError::ShutdownTimedOut)?
-            .map_err(FirstSliceHostError::Journal)?;
+        let span = self.telemetry.as_ref().map(|telemetry| {
+            telemetry.start_span(SpanKind::DaemonShutdownPhase {
+                phase: ShutdownPhase::ServiceJournalInterrupt,
+            })
+        });
+        let interruption =
+            tokio::time::timeout_at(deadline, self.journal.interrupt(DEFAULT_OPERATION_METADATA))
+                .await
+                .map_err(|_| FirstSliceHostError::ShutdownTimedOut)
+                .and_then(|result| result.map(|_| ()).map_err(FirstSliceHostError::Journal));
+        finish_worker_shutdown_span(span, &interruption);
+        interruption?;
         self.work.take();
         self.read.take();
         self.control.take();
@@ -5197,26 +5209,42 @@ impl FirstSliceWorkers {
         let refinement = self.refinement_thread.take();
         let recovery = self.recovery_thread.take();
         let watcher = self.watcher_thread.take();
+        let telemetry = self.telemetry.take();
         let (joined, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-first-slice-join".to_owned())
             .spawn(move || {
-                let mut result = [control, read, work, refinement]
-                    .into_iter()
-                    .flatten()
-                    .try_for_each(|thread| {
+                let mut result = [
+                    (ShutdownPhase::ServiceControlJoin, control),
+                    (ShutdownPhase::ServiceReadJoin, read),
+                    (ShutdownPhase::ServiceIndexJoin, work),
+                    (ShutdownPhase::ServiceRefinementJoin, refinement),
+                ]
+                .into_iter()
+                .filter_map(|(phase, thread)| thread.map(|thread| (phase, thread)))
+                .try_for_each(|(phase, thread)| {
+                    observe_worker_shutdown(telemetry.as_ref(), phase, || {
                         thread
                             .join()
                             .map_err(|_| FirstSliceHostError::ThreadPanicked)
-                    });
-                for lifecycle in [recovery, watcher].into_iter().flatten() {
+                    })
+                });
+                for (phase, lifecycle) in [
+                    (ShutdownPhase::ServiceRecoveryJoin, recovery),
+                    (ShutdownPhase::ServiceWatcherJoin, watcher),
+                ]
+                .into_iter()
+                .filter_map(|(phase, thread)| thread.map(|thread| (phase, thread)))
+                {
                     if result.is_err() {
                         break;
                     }
-                    result = lifecycle
-                        .join()
-                        .map_err(|_| FirstSliceHostError::ThreadPanicked)
-                        .and_then(std::convert::identity);
+                    result = observe_worker_shutdown(telemetry.as_ref(), phase, || {
+                        lifecycle
+                            .join()
+                            .map_err(|_| FirstSliceHostError::ThreadPanicked)
+                            .and_then(std::convert::identity)
+                    });
                 }
                 let _ = joined.send(result);
             })
@@ -5226,6 +5254,29 @@ impl FirstSliceWorkers {
             .map_err(|_| FirstSliceHostError::ShutdownTimedOut)?
             .map_err(|_| FirstSliceHostError::ThreadPanicked)??;
         Ok(())
+    }
+}
+
+fn observe_worker_shutdown(
+    telemetry: Option<&Arc<Telemetry>>,
+    phase: ShutdownPhase,
+    work: impl FnOnce() -> Result<(), FirstSliceHostError>,
+) -> Result<(), FirstSliceHostError> {
+    let span =
+        telemetry.map(|telemetry| telemetry.start_span(SpanKind::DaemonShutdownPhase { phase }));
+    let result = work();
+    finish_worker_shutdown_span(span, &result);
+    result
+}
+
+fn finish_worker_shutdown_span(span: Option<SpanGuard>, result: &Result<(), FirstSliceHostError>) {
+    if let Some(span) = span {
+        let outcome = match result {
+            Ok(()) => TelemetryOutcome::Succeeded,
+            Err(FirstSliceHostError::ShutdownTimedOut) => TelemetryOutcome::TimedOut,
+            Err(_) => TelemetryOutcome::Failed,
+        };
+        span.finish(outcome, None);
     }
 }
 
@@ -27563,6 +27614,100 @@ mod tests {
         assert_eq!(persisted.state, OperationState::Succeeded);
         assert_eq!(persisted.peak_rss_bytes, terminal.peak_rss_bytes);
         assert_eq!(persisted.written_bytes, terminal.written_bytes);
+    }
+
+    #[test]
+    fn worker_shutdown_observation_distinguishes_a_live_join_from_completion() {
+        let telemetry = Arc::new(Telemetry::default());
+        let observed = Arc::clone(&telemetry);
+        let (release, released) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || released.recv().expect("worker is released"));
+        let (entered, entering) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            observe_worker_shutdown(Some(&observed), ShutdownPhase::ServiceIndexJoin, || {
+                entered.send(()).expect("join entry is observed");
+                worker
+                    .join()
+                    .map_err(|_| FirstSliceHostError::ThreadPanicked)
+            })
+        });
+        entering
+            .recv_timeout(Duration::from_secs(5))
+            .expect("join starts");
+        let pending = telemetry.snapshot();
+        release.send(()).expect("worker is released");
+        waiter.join().expect("waiter joins").expect("worker joins");
+        assert!(pending.traces.is_empty());
+        assert_eq!(pending.logs.len(), 1);
+        assert_eq!(
+            pending.logs[0].event,
+            rootlight_observability::LogEvent::ShutdownPhaseStarted {
+                phase: ShutdownPhase::ServiceIndexJoin,
+            }
+        );
+        let completed = telemetry.snapshot();
+        assert_eq!(completed.logs.len(), 2);
+        assert_eq!(completed.traces.len(), 1);
+        assert_eq!(completed.traces[0].outcome, TelemetryOutcome::Succeeded);
+    }
+
+    #[test]
+    fn worker_shutdown_observation_preserves_errors() {
+        for (error, outcome) in [
+            (
+                FirstSliceHostError::ThreadPanicked,
+                TelemetryOutcome::Failed,
+            ),
+            (
+                FirstSliceHostError::ShutdownTimedOut,
+                TelemetryOutcome::TimedOut,
+            ),
+        ] {
+            let telemetry = Arc::new(Telemetry::default());
+            let original = error.to_string();
+            let result = observe_worker_shutdown(
+                Some(&telemetry),
+                ShutdownPhase::ServiceRecoveryJoin,
+                || Err(error),
+            );
+            assert_eq!(
+                result.expect_err("failure is preserved").to_string(),
+                original
+            );
+            assert_eq!(telemetry.snapshot().traces[0].outcome, outcome);
+        }
+    }
+
+    #[test]
+    fn service_worker_shutdown_reports_interrupt_and_owned_joins_in_order() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 16, 16).expect("journal actor starts");
+        let (daemon, mut workers) = FirstSliceDaemon::start(actor.handle()).expect("host starts");
+        let telemetry = Arc::new(Telemetry::default());
+        workers.telemetry = Some(Arc::clone(&telemetry));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(2)))
+            .expect("owned workers stop");
+        drop(daemon);
+        drop(actor);
+        let snapshot = telemetry.snapshot();
+        let phases = [
+            ShutdownPhase::ServiceJournalInterrupt,
+            ShutdownPhase::ServiceControlJoin,
+            ShutdownPhase::ServiceReadJoin,
+            ShutdownPhase::ServiceIndexJoin,
+            ShutdownPhase::ServiceRefinementJoin,
+        ];
+        assert_eq!(snapshot.traces.len(), phases.len());
+        assert_eq!(snapshot.logs.len(), phases.len() * 2);
+        for (trace, phase) in snapshot.traces.iter().zip(phases) {
+            assert_eq!(trace.kind, SpanKind::DaemonShutdownPhase { phase });
+            assert_eq!(trace.outcome, TelemetryOutcome::Succeeded);
+        }
     }
 
     #[test]

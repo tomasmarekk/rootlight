@@ -561,7 +561,7 @@ mod tests {
             assert_eq!(observed.as_ref().err().map(ToString::to_string), original);
             let snapshot = telemetry.snapshot();
             assert_eq!(snapshot.traces.len(), 1);
-            assert_eq!(snapshot.logs.len(), 1);
+            assert_eq!(snapshot.logs.len(), 2);
             assert_eq!(snapshot.traces[0].outcome, expected);
         }
     }
@@ -578,7 +578,7 @@ mod tests {
         }
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.traces.len(), 1);
-        assert_eq!(snapshot.logs.len(), 1);
+        assert_eq!(snapshot.logs.len(), 2);
         assert_eq!(
             snapshot.traces[0].kind,
             SpanKind::DaemonShutdownPhase {

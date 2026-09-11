@@ -1207,6 +1207,11 @@ pub enum LogEvent {
         /// Stable source-free failure code.
         error_code: ErrorCode,
     },
+    /// One owned shutdown wait began; completion is recorded separately.
+    ShutdownPhaseStarted {
+        /// Closed shutdown responsibility, without thread or repository names.
+        phase: ShutdownPhase,
+    },
     /// One owned shutdown phase completed or its waiter was abandoned.
     ShutdownPhaseCompleted {
         /// Closed shutdown responsibility, without thread or repository names.
@@ -1261,6 +1266,20 @@ pub enum ShutdownPhase {
     ControlDrain,
     /// The durable operation journal actor thread.
     Journal,
+    /// Interrupting nonterminal operations before joining service workers.
+    ServiceJournalInterrupt,
+    /// Joining the first-slice control lane.
+    ServiceControlJoin,
+    /// Joining the first-slice read lane.
+    ServiceReadJoin,
+    /// Joining the first-slice indexing lane.
+    ServiceIndexJoin,
+    /// Joining the semantic-refinement lane.
+    ServiceRefinementJoin,
+    /// Joining the durable-recovery worker.
+    ServiceRecoveryJoin,
+    /// Joining the repository watcher.
+    ServiceWatcherJoin,
 }
 
 /// Closed completed-span kind retained for local diagnostics.
@@ -1644,12 +1663,19 @@ impl Telemetry {
     }
 
     /// Starts one local span guard without holding a lock across its lifetime.
+    /// Shutdown phases also emit a bounded start record before returning.
     #[must_use]
     pub fn start_span(self: &Arc<Self>, kind: SpanKind) -> SpanGuard {
+        let started = Instant::now();
+        if let SpanKind::DaemonShutdownPhase { phase } = kind {
+            // A process may exit while its join thread is still waiting, so a
+            // completion-only log cannot identify the unfinished responsibility.
+            self.record_log(LogEvent::ShutdownPhaseStarted { phase });
+        }
         SpanGuard {
             telemetry: Arc::clone(self),
             kind,
-            started: Instant::now(),
+            started,
             completed: false,
         }
     }
@@ -1906,6 +1932,7 @@ fn classify_log_event(event: LogEvent) -> (LogSeverity, TelemetryTarget) {
         }
         | LogEvent::ConnectionTaskFailed { .. } => (LogSeverity::Error, TelemetryTarget::Ipc),
         LogEvent::DaemonFailed { .. } => (LogSeverity::Error, TelemetryTarget::Daemon),
+        LogEvent::ShutdownPhaseStarted { .. } => (LogSeverity::Info, TelemetryTarget::Daemon),
         LogEvent::ShutdownPhaseCompleted {
             outcome: TelemetryOutcome::Succeeded,
             ..
@@ -2796,7 +2823,9 @@ const fn log_event_supported_by_v2(event: LogEvent) -> bool {
         | LogEvent::ConnectionRejected { .. }
         | LogEvent::ConnectionTaskFailed { .. }
         | LogEvent::DaemonFailed { .. } => true,
-        LogEvent::CancellationAttempt { .. } | LogEvent::ShutdownPhaseCompleted { .. } => false,
+        LogEvent::CancellationAttempt { .. }
+        | LogEvent::ShutdownPhaseStarted { .. }
+        | LogEvent::ShutdownPhaseCompleted { .. } => false,
     }
 }
 
@@ -3662,6 +3691,13 @@ mod tests {
             ShutdownPhase::ServiceWorkers,
             ShutdownPhase::ControlDrain,
             ShutdownPhase::Journal,
+            ShutdownPhase::ServiceJournalInterrupt,
+            ShutdownPhase::ServiceControlJoin,
+            ShutdownPhase::ServiceReadJoin,
+            ShutdownPhase::ServiceIndexJoin,
+            ShutdownPhase::ServiceRefinementJoin,
+            ShutdownPhase::ServiceRecoveryJoin,
+            ShutdownPhase::ServiceWatcherJoin,
         ] {
             for outcome in [
                 TelemetryOutcome::Succeeded,
@@ -3671,16 +3707,34 @@ mod tests {
             ] {
                 let telemetry = Arc::new(Telemetry::default());
                 let span = telemetry.start_span(SpanKind::DaemonShutdownPhase { phase });
+                let pending = telemetry.snapshot();
+                assert!(pending.traces.is_empty());
+                assert_eq!(pending.logs.len(), 1);
+                assert_eq!(
+                    pending.logs[0].event,
+                    LogEvent::ShutdownPhaseStarted { phase }
+                );
+                assert_eq!(pending.logs[0].severity, LogSeverity::Info);
+                let started_bytes =
+                    serde_json::to_vec(&pending.logs[0]).expect("shutdown start record serializes");
+                assert!(started_bytes.len() < MAX_STRUCTURED_LOG_LINE_BYTES);
+                assert_eq!(
+                    serde_json::from_slice::<StructuredLogRecord>(&started_bytes)
+                        .expect("shutdown start record round trips"),
+                    pending.logs[0]
+                );
+                assert!(project_telemetry_v2(&pending).logs.is_empty());
                 if outcome == TelemetryOutcome::Abandoned {
                     drop(span);
                 } else {
                     span.finish(outcome, None);
                 }
                 let snapshot = telemetry.snapshot();
-                assert_eq!(snapshot.logs.len(), 1);
+                assert_eq!(snapshot.logs.len(), 2);
                 assert_eq!(snapshot.traces.len(), 1);
                 let trace = &snapshot.traces[0];
-                let record = &snapshot.logs[0];
+                let record = &snapshot.logs[1];
+                assert!(pending.logs[0].sequence < trace.sequence);
                 assert_eq!(trace.kind, SpanKind::DaemonShutdownPhase { phase });
                 assert_eq!(trace.outcome, outcome);
                 assert_eq!(record.target, TelemetryTarget::Daemon);
