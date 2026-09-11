@@ -10940,8 +10940,48 @@ impl FirstSliceService {
         generation: GenerationId,
         query: String,
         mode: LocateMode,
+        languages: Vec<String>,
+        path_prefixes: Vec<String>,
+        maximum_results: usize,
+        page_offset: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
+        self.code_locate_with_entity_filters_and_budget(
+            generation,
+            query,
+            mode,
+            languages,
+            path_prefixes,
+            None,
+            maximum_results,
+            page_offset,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes a generation-pinned locate with raw kind, language, and path unions.
+    ///
+    /// Both persisted lexical search and exact-file source fallback honor kinds
+    /// before pagination. `None` is unrestricted; `Some(Vec::new())` matches none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for invalid filters, an unknown generation,
+    /// cancellation, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "independent filters accompany the existing generation-pinned budget contract"
+    )]
+    pub fn code_locate_with_entity_filters_and_budget(
+        &self,
+        generation: GenerationId,
+        query: String,
+        mode: LocateMode,
         mut languages: Vec<String>,
         path_prefixes: Vec<String>,
+        kinds: Option<Vec<String>>,
         maximum_results: usize,
         page_offset: usize,
         budget: FirstSliceBudget,
@@ -10976,6 +11016,28 @@ impl FirstSliceService {
         }
         let exact_path_query =
             mode == LocateMode::Prefix && path_prefixes.first().is_some_and(|path| path == &query);
+        // Reject malformed unions before the source fallback reads or builds an
+        // ephemeral index, under the same admission rules as persisted search.
+        rootlight_search::validate_search_request_with_entity_filters(
+            &rootlight_search::SearchRequest {
+                query: query.clone(),
+                mode: if exact_path_query {
+                    LocateMode::Exact
+                } else {
+                    mode
+                }
+                .into(),
+                max_results: effective_maximum_results,
+                page_offset,
+            },
+            rootlight_search::SearchFilters {
+                languages: &languages,
+                path_prefixes: &path_prefixes,
+                kinds: kinds.as_deref(),
+            },
+            search_budget,
+        )
+        .map_err(|error| map_search_error(error, cancellation))?;
         if (mode == LocateMode::Text || exact_path_query) && path_prefixes.len() == 1 {
             let started = Instant::now();
             search_budget.max_duration =
@@ -11014,11 +11076,12 @@ impl FirstSliceService {
                     mode
                 };
                 let plan = source_service
-                    .plan_code_locate_with_filters(
+                    .plan_code_locate_with_entity_filters(
                         query,
                         mode,
                         languages,
                         path_prefixes,
+                        kinds,
                         effective_maximum_results,
                         page_offset,
                         search_budget,
@@ -11031,11 +11094,12 @@ impl FirstSliceService {
             }
         }
         let plan = service
-            .plan_code_locate_with_filters(
+            .plan_code_locate_with_entity_filters(
                 query,
                 mode,
                 languages,
                 path_prefixes,
+                kinds,
                 effective_maximum_results,
                 page_offset,
                 search_budget,
@@ -31191,6 +31255,152 @@ mod tests {
                 && gap.language.as_deref() == Some("yaml")
                 && gap.files == 1
         }));
+    }
+
+    #[test]
+    fn kind_filters_preserve_source_identity_in_global_and_scoped_search_after_restore() {
+        assert_kind_filtered_source_identity(false);
+    }
+
+    #[test]
+    fn kind_filters_preserve_file_only_source_fallback_after_restore() {
+        assert_kind_filtered_source_identity(true);
+    }
+
+    fn assert_kind_filtered_source_identity(file_only: bool) {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = TempDir::new().unwrap();
+        let rust = "pub fn shared_kind_marker() -> u32 { 7 }\n";
+        let yaml = "# shared_kind_marker\n";
+        fs::write(fixture.path().join("source.rs"), rust).unwrap();
+        fs::write(fixture.path().join("config.yaml"), yaml).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        if file_only {
+            let mut limits = service.analysis_limits.ir().clone();
+            limits.max_files = 1;
+            replace_service_ir_limits(&mut service, limits);
+        }
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .unwrap();
+        if file_only {
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            assert!(!snapshot.source_files().is_empty());
+            assert!(snapshot.document().entities.is_empty());
+        }
+        for restored in [false, true] {
+            if restored {
+                drop(service);
+                service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            }
+            for (mode, query, scope, file_count, function_count) in [
+                (LocateMode::Exact, "shared_kind_marker", None, 2, 1),
+                (
+                    LocateMode::Text,
+                    "shared_kind_marker",
+                    Some("source.rs"),
+                    1,
+                    1,
+                ),
+                (
+                    LocateMode::Text,
+                    "shared_kind_marker",
+                    Some("config.yaml"),
+                    1,
+                    0,
+                ),
+                (LocateMode::Prefix, "config.yaml", Some("config.yaml"), 1, 0),
+            ] {
+                let function_count = if file_only { 0 } else { function_count };
+                let module_count = usize::from(!file_only && mode == LocateMode::Prefix);
+                for (kinds, expected) in [
+                    (Some(vec!["file".to_owned()]), file_count),
+                    (Some(vec!["function".to_owned()]), function_count),
+                    (Some(vec!["module".to_owned()]), module_count),
+                    (
+                        Some(vec!["file".to_owned(), "function".to_owned()]),
+                        file_count + function_count,
+                    ),
+                    (Some(vec![]), 0),
+                    (None, file_count + function_count + module_count),
+                ] {
+                    let located = service
+                        .code_locate_with_entity_filters_and_budget(
+                            receipt.generation,
+                            query.to_owned(),
+                            mode,
+                            vec![],
+                            scope.map(str::to_owned).into_iter().collect(),
+                            kinds.clone(),
+                            10,
+                            0,
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        located.data.hits.len(),
+                        expected,
+                        "restored={restored} mode={mode:?} scope={scope:?} kinds={kinds:?} hits={:?}",
+                        located
+                            .data
+                            .hits
+                            .iter()
+                            .map(|hit| (&hit.kind, &hit.identifier))
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(
+                        located.data.matched_candidates,
+                        u64::try_from(expected).unwrap()
+                    );
+                    assert!(!located.data.truncated);
+                    for hit in &located.data.hits {
+                        let reference = hit
+                            .source
+                            .clone()
+                            .expect("all kinds retain source provenance");
+                        assert_eq!(reference.repository(), receipt.repository);
+                        assert_eq!(reference.generation(), receipt.generation);
+                        let source = if hit.path == "source.rs" {
+                            rust
+                        } else {
+                            assert_eq!(hit.path, "config.yaml");
+                            yaml
+                        };
+                        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                        let read = service
+                            .source_read_with_options_and_budget(
+                                receipt.generation,
+                                vec![reference.clone()],
+                                SourceReadOptions::new()
+                                    .with_context_lines_before(0)
+                                    .with_context_lines_after(0),
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert_eq!(read.data.chunks.len(), 1);
+                        let start = usize::try_from(reference.span().start_byte()).unwrap();
+                        let end = usize::try_from(reference.span().end_byte()).unwrap();
+                        assert_eq!(read.data.chunks[0].bytes, &source.as_bytes()[start..end]);
+                        if hit.symbol.is_none() {
+                            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

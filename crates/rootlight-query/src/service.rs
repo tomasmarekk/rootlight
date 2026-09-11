@@ -13,7 +13,8 @@ use rootlight_ir::{
     RelationEndpoint, RelationPredicate, SourceRef,
 };
 use rootlight_search::{
-    LexicalSearch, SearchBudget, SearchRequest, validate_search_request_with_filters,
+    LexicalSearch, SearchBudget, SearchFilters, SearchRequest,
+    validate_search_request_with_entity_filters,
 };
 use rootlight_source::{
     SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError, SourceReadOptions,
@@ -154,6 +155,44 @@ where
         path_prefixes: Vec<String>,
         max_results: usize,
         page_offset: usize,
+        search_budget: SearchBudget,
+        budget: QueryBudget,
+    ) -> Result<CodeLocatePlan, QueryError> {
+        self.plan_code_locate_with_entity_filters(
+            query,
+            mode,
+            languages,
+            path_prefixes,
+            None,
+            max_results,
+            page_offset,
+            search_budget,
+            budget,
+        )
+    }
+
+    /// Builds a bounded locate plan with canonical raw kind, language, and path unions.
+    ///
+    /// An absent kind union is unrestricted; an explicit empty union matches
+    /// nothing. Kinds are retained in the plan and applied by the search backend
+    /// before result counting and pagination, never by discarding returned hits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid filters, budgets, or rejected estimates.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "independent locate dimensions preserve the existing owned planning API"
+    )]
+    pub fn plan_code_locate_with_entity_filters(
+        &self,
+        query: String,
+        mode: LocateMode,
+        languages: Vec<String>,
+        path_prefixes: Vec<String>,
+        kinds: Option<Vec<String>>,
+        max_results: usize,
+        page_offset: usize,
         mut search_budget: SearchBudget,
         budget: QueryBudget,
     ) -> Result<CodeLocatePlan, QueryError> {
@@ -173,7 +212,15 @@ where
             max_results,
             page_offset,
         };
-        validate_search_request_with_filters(&request, &languages, &path_prefixes, search_budget)?;
+        validate_search_request_with_entity_filters(
+            &request,
+            SearchFilters {
+                languages: &languages,
+                path_prefixes: &path_prefixes,
+                kinds: kinds.as_deref(),
+            },
+            search_budget,
+        )?;
         let mandatory_rows = checked_add(
             checked_usize_to_u64(search_budget.max_candidates)?,
             checked_usize_to_u64(max_results)?,
@@ -215,6 +262,7 @@ where
             mode,
             languages,
             path_prefixes,
+            kinds,
             max_results,
             page_offset,
             search_budget,
@@ -244,10 +292,13 @@ where
             max_results: plan.max_results,
             page_offset: plan.page_offset,
         };
-        let outcome = self.search.search_with_filters_and_stats(
+        let outcome = self.search.search_with_entity_filters_and_stats(
             &request,
-            &plan.languages,
-            &plan.path_prefixes,
+            SearchFilters {
+                languages: &plan.languages,
+                path_prefixes: &plan.path_prefixes,
+                kinds: plan.kinds.as_deref(),
+            },
             plan.search_budget,
             cancellation,
         )?;
@@ -279,7 +330,12 @@ where
         let mut files = BTreeSet::new();
         for hit in outcome.hits {
             control.check()?;
-            if !hit.relevance_score.is_finite() {
+            if !hit.relevance_score.is_finite()
+                || plan
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.binary_search(&hit.kind).is_err())
+            {
                 return Err(QueryError::IndexDrift);
             }
             let file = self

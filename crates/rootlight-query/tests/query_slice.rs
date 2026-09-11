@@ -872,6 +872,176 @@ fn locate_and_explain_use_deterministic_typed_plans() {
 }
 
 #[test]
+fn locate_kind_plans_filter_real_backend_and_preserve_source_evidence() {
+    let snapshot = fixture_snapshot();
+    let cancellation = Cancellation::new();
+    let documents =
+        project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation).unwrap();
+    let identifier = documents[0].identifier.clone();
+    let kind = documents[0].kind.clone();
+    let index = rootlight_search::LexicalIndex::build_ephemeral(
+        snapshot.metadata().generation(),
+        documents,
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .unwrap();
+    let service = QueryService::new(&snapshot, &index).unwrap();
+    for (kinds, expected) in [
+        (None, 1),
+        (Some(vec![kind.clone()]), 1),
+        (Some(vec![]), 0),
+        (Some(vec!["future_kind".to_owned()]), 0),
+    ] {
+        let plan = service
+            .plan_code_locate_with_entity_filters(
+                identifier.clone(),
+                LocateMode::Exact,
+                vec![],
+                vec![],
+                kinds,
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let located = service.execute_code_locate(&plan, &cancellation).unwrap();
+        assert_eq!(located.data.hits.len(), expected);
+        assert_eq!(
+            located.data.matched_candidates,
+            u64::try_from(expected).unwrap()
+        );
+        assert!(!located.data.truncated);
+        assert_exact_response_accounting(&located);
+        if let Some(hit) = located.data.hits.first() {
+            assert_eq!(hit.source, snapshot.document().entities[0].evidence.source);
+        }
+    }
+    let final_page = service
+        .plan_code_locate_with_entity_filters(
+            identifier.clone(),
+            LocateMode::Exact,
+            vec![],
+            vec![],
+            Some(vec![kind.clone()]),
+            1,
+            1,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let final_page = service
+        .execute_code_locate(&final_page, &cancellation)
+        .unwrap();
+    assert!(final_page.data.hits.is_empty());
+    assert_eq!(final_page.data.matched_candidates, 1);
+    assert!(!final_page.data.truncated);
+    assert!(matches!(
+        service.plan_code_locate_with_entity_filters(
+            identifier,
+            LocateMode::Exact,
+            vec![],
+            vec![],
+            Some(vec![kind.clone(), kind]),
+            1,
+            0,
+            SearchBudget::default(),
+            QueryBudget::new()
+        ),
+        Err(QueryError::Search(SearchError::InvalidKindFilter))
+    ));
+}
+
+#[test]
+fn locate_kind_plan_fails_closed_with_legacy_backend() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for kinds in [vec![], vec![search.hits[0].kind.clone()]] {
+        let plan = service
+            .plan_code_locate_with_entity_filters(
+                search.hits[0].identifier.clone(),
+                LocateMode::Exact,
+                vec![],
+                vec![],
+                Some(kinds),
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.execute_code_locate(&plan, &Cancellation::new()),
+            Err(QueryError::Search(SearchError::InvalidKindFilter))
+        ));
+    }
+}
+
+#[test]
+fn locate_rejects_a_backend_that_ignores_the_requested_kind_union() {
+    struct IgnoringKinds(FakeSearch);
+    impl LexicalSearch for IgnoringKinds {
+        fn generation(&self) -> rootlight_ids::GenerationId {
+            self.0.generation
+        }
+        fn document_count(&self) -> u64 {
+            self.0.document_count()
+        }
+        fn search_with_stats(
+            &self,
+            request: &SearchRequest,
+            budget: SearchBudget,
+            cancellation: &Cancellation,
+        ) -> Result<SearchOutcome, SearchError> {
+            self.0.search_with_stats(request, budget, cancellation)
+        }
+        fn search_with_language_filter_and_stats(
+            &self,
+            request: &SearchRequest,
+            languages: &[String],
+            budget: SearchBudget,
+            cancellation: &Cancellation,
+        ) -> Result<SearchOutcome, SearchError> {
+            self.0
+                .search_with_language_filter_and_stats(request, languages, budget, cancellation)
+        }
+        fn search_with_entity_filters_and_stats(
+            &self,
+            request: &SearchRequest,
+            _filters: rootlight_search::SearchFilters<'_>,
+            budget: SearchBudget,
+            cancellation: &Cancellation,
+        ) -> Result<SearchOutcome, SearchError> {
+            self.0.search_with_stats(request, budget, cancellation)
+        }
+    }
+    let snapshot = fixture_snapshot();
+    let search = IgnoringKinds(fixture_search(&snapshot));
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for kinds in [vec![], vec!["future_kind".to_owned()]] {
+        let plan = service
+            .plan_code_locate_with_entity_filters(
+                search.0.hits[0].identifier.clone(),
+                LocateMode::Exact,
+                vec![],
+                vec![],
+                Some(kinds),
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.execute_code_locate(&plan, &Cancellation::new()),
+            Err(QueryError::IndexDrift)
+        ));
+    }
+}
+
+#[test]
 fn locate_rejects_canonical_aliases_not_proven_by_the_durable_entity() {
     let snapshot = fixture_snapshot();
     let mut search = fixture_search(&snapshot);

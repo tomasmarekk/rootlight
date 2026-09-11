@@ -524,6 +524,7 @@ pub struct CodeLocatePlan {
     pub(crate) mode: LocateMode,
     pub(crate) languages: Vec<String>,
     pub(crate) path_prefixes: Vec<String>,
+    pub(crate) kinds: Option<Vec<String>>,
     pub(crate) max_results: usize,
     pub(crate) page_offset: usize,
     pub(crate) search_budget: SearchBudget,
