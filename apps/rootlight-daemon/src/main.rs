@@ -23,7 +23,9 @@ use rootlight_daemon_core::{
     OrchestratorSenders, handle_connection_async_with_first_slice,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
-use rootlight_observability::{Telemetry, TelemetryOutput};
+use rootlight_observability::{
+    ShutdownPhase, SpanKind, Telemetry, TelemetryOutcome, TelemetryOutput,
+};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
 use rootlight_runtime::{
     COORDINATED_START_SIGNAL_ENV, COORDINATED_START_SIGNAL_VERSION, CoordinatedStartupSignal,
@@ -254,23 +256,56 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     };
     let drain_connections = async { drain.await.map_err(DaemonError::from) };
     let drain_result = tokio::time::timeout_at(shutdown_deadline, async {
-        tokio::try_join!(stop_workers, drain_connections)?;
+        tokio::try_join!(
+            observe_shutdown_phase(
+                state.telemetry(),
+                ShutdownPhase::ServiceWorkers,
+                stop_workers
+            ),
+            observe_shutdown_phase(
+                state.telemetry(),
+                ShutdownPhase::ControlDrain,
+                drain_connections
+            ),
+        )?;
         Ok::<(), DaemonError>(())
     })
     .await
     .map_err(|_| DaemonError::ShutdownTimedOut)
     .and_then(std::convert::identity);
-    let actor_result = match actor.join_until(shutdown_deadline).await {
-        Err(rootlight_daemon_core::ServiceError::RequestTimedOut) => {
-            Err(DaemonError::ShutdownTimedOut)
+    let actor_result = observe_shutdown_phase(state.telemetry(), ShutdownPhase::Journal, async {
+        match actor.join_until(shutdown_deadline).await {
+            Err(rootlight_daemon_core::ServiceError::RequestTimedOut) => {
+                Err(DaemonError::ShutdownTimedOut)
+            }
+            result => result.map_err(DaemonError::from),
         }
-        result => result.map_err(DaemonError::from),
-    };
+    })
+    .await;
     actor_result?;
     if let Some(error) = run_failure {
         return Err(error);
     }
     drain_result
+}
+
+async fn observe_shutdown_phase(
+    telemetry: Arc<Telemetry>,
+    phase: ShutdownPhase,
+    work: impl std::future::Future<Output = Result<(), DaemonError>>,
+) -> Result<(), DaemonError> {
+    let span = telemetry.start_span(SpanKind::DaemonShutdownPhase { phase });
+    let result = work.await;
+    let outcome = match &result {
+        Ok(()) => TelemetryOutcome::Succeeded,
+        Err(
+            DaemonError::ShutdownTimedOut
+            | DaemonError::FirstSlice(first_slice::FirstSliceHostError::ShutdownTimedOut),
+        ) => TelemetryOutcome::TimedOut,
+        Err(_) => TelemetryOutcome::Failed,
+    };
+    span.finish(outcome, None);
+    result
 }
 
 fn load_storage_policy(paths: &RuntimePaths) -> Result<FirstSliceStoragePolicy, DaemonError> {
@@ -497,6 +532,60 @@ mod tests {
         assert_ne!(DaemonMode::Normal, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::CoordinatedSupervised);
+    }
+
+    #[tokio::test]
+    async fn shutdown_observation_preserves_results_and_classifies_timeouts() {
+        for (result, expected) in [
+            (Ok(()), TelemetryOutcome::Succeeded),
+            (Err(DaemonError::Configuration), TelemetryOutcome::Failed),
+            (
+                Err(DaemonError::ShutdownTimedOut),
+                TelemetryOutcome::TimedOut,
+            ),
+            (
+                Err(DaemonError::FirstSlice(
+                    first_slice::FirstSliceHostError::ShutdownTimedOut,
+                )),
+                TelemetryOutcome::TimedOut,
+            ),
+        ] {
+            let telemetry = Arc::new(Telemetry::default());
+            let original = result.as_ref().err().map(ToString::to_string);
+            let observed = observe_shutdown_phase(
+                Arc::clone(&telemetry),
+                ShutdownPhase::ServiceWorkers,
+                std::future::ready(result),
+            )
+            .await;
+            assert_eq!(observed.as_ref().err().map(ToString::to_string), original);
+            let snapshot = telemetry.snapshot();
+            assert_eq!(snapshot.traces.len(), 1);
+            assert_eq!(snapshot.logs.len(), 1);
+            assert_eq!(snapshot.traces[0].outcome, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_observation_records_a_dropped_pending_waiter() {
+        let telemetry = Arc::new(Telemetry::default());
+        tokio::select! {
+            biased;
+            _ = observe_shutdown_phase(Arc::clone(&telemetry), ShutdownPhase::Journal, std::future::pending()) => {
+                panic!("pending journal wait cannot complete");
+            }
+            () = std::future::ready(()) => {}
+        }
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.traces.len(), 1);
+        assert_eq!(snapshot.logs.len(), 1);
+        assert_eq!(
+            snapshot.traces[0].kind,
+            SpanKind::DaemonShutdownPhase {
+                phase: ShutdownPhase::Journal
+            }
+        );
+        assert_eq!(snapshot.traces[0].outcome, TelemetryOutcome::Abandoned);
     }
 
     #[test]

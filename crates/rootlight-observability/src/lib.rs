@@ -1207,6 +1207,15 @@ pub enum LogEvent {
         /// Stable source-free failure code.
         error_code: ErrorCode,
     },
+    /// One owned shutdown phase completed or its waiter was abandoned.
+    ShutdownPhaseCompleted {
+        /// Closed shutdown responsibility, without thread or repository names.
+        phase: ShutdownPhase,
+        /// Completion of the waiter, not necessarily of an abandoned worker.
+        outcome: TelemetryOutcome,
+        /// Monotonic elapsed microseconds.
+        duration_us: u64,
+    },
     /// One cancellation authorization and lifecycle decision completed.
     CancellationAttempt {
         /// Domain-separated truncated SHA-256 of the operation identifier.
@@ -1242,6 +1251,18 @@ pub struct StructuredLogRecord {
     pub event: LogEvent,
 }
 
+/// Closed responsibilities drained during daemon shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownPhase {
+    /// First-slice service and background worker threads.
+    ServiceWorkers,
+    /// Accepted connections, admitted submissions, and orchestration workers.
+    ControlDrain,
+    /// The durable operation journal actor thread.
+    Journal,
+}
+
 /// Closed completed-span kind retained for local diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1250,6 +1271,11 @@ pub enum SpanKind {
     DaemonStartup,
     /// Daemon graceful shutdown.
     DaemonShutdown,
+    /// One daemon shutdown responsibility, also emitted as a structured log.
+    DaemonShutdownPhase {
+        /// Closed shutdown responsibility.
+        phase: ShutdownPhase,
+    },
     /// Authenticated local negotiation.
     IpcNegotiation,
     /// One local control request.
@@ -1807,6 +1833,16 @@ impl Telemetry {
             outcome,
             error_code,
         });
+        drop(traces);
+        if let SpanKind::DaemonShutdownPhase { phase } = kind {
+            // Shutdown can terminate before a support snapshot is collected.
+            // Keep its bounded phase outcome in the ordinary stderr log too.
+            self.record_log(LogEvent::ShutdownPhaseCompleted {
+                phase,
+                outcome,
+                duration_us: elapsed_us,
+            });
+        }
     }
 
     fn next_sequence(&self) -> Option<u64> {
@@ -1870,6 +1906,11 @@ fn classify_log_event(event: LogEvent) -> (LogSeverity, TelemetryTarget) {
         }
         | LogEvent::ConnectionTaskFailed { .. } => (LogSeverity::Error, TelemetryTarget::Ipc),
         LogEvent::DaemonFailed { .. } => (LogSeverity::Error, TelemetryTarget::Daemon),
+        LogEvent::ShutdownPhaseCompleted {
+            outcome: TelemetryOutcome::Succeeded,
+            ..
+        } => (LogSeverity::Info, TelemetryTarget::Daemon),
+        LogEvent::ShutdownPhaseCompleted { .. } => (LogSeverity::Warn, TelemetryTarget::Daemon),
         LogEvent::CancellationAttempt {
             outcome: CancellationAuditOutcome::Accepted | CancellationAuditOutcome::Replayed,
             ..
@@ -2755,12 +2796,13 @@ const fn log_event_supported_by_v2(event: LogEvent) -> bool {
         | LogEvent::ConnectionRejected { .. }
         | LogEvent::ConnectionTaskFailed { .. }
         | LogEvent::DaemonFailed { .. } => true,
-        LogEvent::CancellationAttempt { .. } => false,
+        LogEvent::CancellationAttempt { .. } | LogEvent::ShutdownPhaseCompleted { .. } => false,
     }
 }
 
 const fn span_kind_supported_by_v2(kind: SpanKind) -> bool {
     match kind {
+        SpanKind::DaemonShutdownPhase { .. } => false,
         SpanKind::IpcRequest { method } => control_method_supported_by_v2(method),
         SpanKind::DaemonStartup
         | SpanKind::DaemonShutdown
@@ -3612,6 +3654,65 @@ mod tests {
         assert_eq!(snapshot.traces.len(), 2);
         assert_eq!(snapshot.traces[0].outcome, TelemetryOutcome::Succeeded);
         assert_eq!(snapshot.traces[1].outcome, TelemetryOutcome::Abandoned);
+    }
+
+    #[test]
+    fn shutdown_phase_spans_retain_source_free_completion_and_abandonment() {
+        for phase in [
+            ShutdownPhase::ServiceWorkers,
+            ShutdownPhase::ControlDrain,
+            ShutdownPhase::Journal,
+        ] {
+            for outcome in [
+                TelemetryOutcome::Succeeded,
+                TelemetryOutcome::Failed,
+                TelemetryOutcome::TimedOut,
+                TelemetryOutcome::Abandoned,
+            ] {
+                let telemetry = Arc::new(Telemetry::default());
+                let span = telemetry.start_span(SpanKind::DaemonShutdownPhase { phase });
+                if outcome == TelemetryOutcome::Abandoned {
+                    drop(span);
+                } else {
+                    span.finish(outcome, None);
+                }
+                let snapshot = telemetry.snapshot();
+                assert_eq!(snapshot.logs.len(), 1);
+                assert_eq!(snapshot.traces.len(), 1);
+                let trace = &snapshot.traces[0];
+                let record = &snapshot.logs[0];
+                assert_eq!(trace.kind, SpanKind::DaemonShutdownPhase { phase });
+                assert_eq!(trace.outcome, outcome);
+                assert_eq!(record.target, TelemetryTarget::Daemon);
+                assert_eq!(
+                    record.severity,
+                    if outcome == TelemetryOutcome::Succeeded {
+                        LogSeverity::Info
+                    } else {
+                        LogSeverity::Warn
+                    }
+                );
+                assert_eq!(
+                    record.event,
+                    LogEvent::ShutdownPhaseCompleted {
+                        phase,
+                        outcome,
+                        duration_us: trace.duration_us
+                    }
+                );
+                assert!(record.sequence > trace.sequence);
+                let bytes = serde_json::to_vec(record).expect("shutdown record serializes");
+                assert!(bytes.len() < MAX_STRUCTURED_LOG_LINE_BYTES);
+                assert_eq!(
+                    serde_json::from_slice::<StructuredLogRecord>(&bytes)
+                        .expect("shutdown record round trips"),
+                    *record
+                );
+                let projected = project_telemetry_v2(&snapshot);
+                assert!(projected.logs.is_empty());
+                assert!(projected.traces.is_empty());
+            }
+        }
     }
 
     #[test]
