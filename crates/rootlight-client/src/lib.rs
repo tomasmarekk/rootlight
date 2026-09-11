@@ -7296,6 +7296,7 @@ fn coordinate_start(
     readiness: StartupReadiness,
 ) -> Result<StartupConnection, ClientError> {
     let mut deadlines = StartupDeadlines::new(Instant::now())?;
+    let mut contention_interval = START_POLL_INTERVAL;
     loop {
         match paths.acquire_launch_lock() {
             Ok(launch) => {
@@ -7317,7 +7318,7 @@ fn coordinate_start(
                     Ok(ProbeOutcome::Recovering(_)) => {
                         deadlines.authorize_recovery(Instant::now())?;
                         drop(launch);
-                        wait_before_startup_probe(deadlines)?;
+                        wait_before_startup_probe(deadlines, &mut contention_interval)?;
                         continue;
                     }
                     Ok(ProbeOutcome::Unavailable) => {}
@@ -7357,7 +7358,7 @@ fn coordinate_start(
                     }
                     ProbeOutcome::Unavailable => {}
                 }
-                wait_before_startup_probe(deadlines)?;
+                wait_before_startup_probe(deadlines, &mut contention_interval)?;
             }
             Err(error) => return Err(ClientError::Runtime(error)),
         }
@@ -7828,7 +7829,10 @@ fn classify_health_probe(
     }
 }
 
-fn wait_before_startup_probe(deadlines: StartupDeadlines) -> Result<(), ClientError> {
+fn wait_before_startup_probe(
+    deadlines: StartupDeadlines,
+    contention_interval: &mut Duration,
+) -> Result<(), ClientError> {
     let now = Instant::now();
     if deadlines.expired(now) {
         return Err(ClientError::DaemonStartTimedOut);
@@ -7837,8 +7841,20 @@ fn wait_before_startup_probe(deadlines: StartupDeadlines) -> Result<(), ClientEr
         .recovery
         .unwrap_or(deadlines.initial)
         .saturating_duration_since(now);
-    std::thread::sleep(deadlines.poll_interval().min(remaining));
+    // Contenders must leave CPU for the launch owner's child instead of
+    // saturating a constrained host with filesystem and health probes.
+    std::thread::sleep(
+        deadlines
+            .poll_interval()
+            .max(*contention_interval)
+            .min(remaining),
+    );
+    *contention_interval = next_startup_contention_interval(*contention_interval);
     Ok(())
+}
+
+fn next_startup_contention_interval(current: Duration) -> Duration {
+    current.saturating_mul(2).min(START_RECOVERY_POLL_INTERVAL)
 }
 
 #[cfg(windows)]
@@ -16795,6 +16811,24 @@ mod tests {
         );
         assert_eq!(START_RECOVERY_POLL_INTERVAL, Duration::from_secs(1));
         assert_eq!(COORDINATED_SHUTDOWN_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn startup_contention_backoff_preserves_owner_polling_and_deadlines() {
+        let started = Instant::now();
+        let deadlines = StartupDeadlines::new(started).unwrap();
+        let mut interval = START_POLL_INTERVAL;
+        for expected_ms in [25, 50, 100, 200, 400, 800, 1_000, 1_000] {
+            assert_eq!(interval, Duration::from_millis(expected_ms));
+            interval = next_startup_contention_interval(interval);
+        }
+        assert_eq!(deadlines.poll_interval(), START_POLL_INTERVAL);
+        assert_eq!(deadlines.initial, initial_start_deadline(started).unwrap());
+        assert!(deadlines.recovery.is_none());
+        assert_eq!(
+            next_startup_contention_interval(Duration::MAX),
+            START_RECOVERY_POLL_INTERVAL
+        );
     }
 
     #[test]
