@@ -337,6 +337,45 @@ fn markdown_perl_qualified_storage_and_root_aliases_stay_inside_their_example() 
 }
 
 #[test]
+fn markdown_perl_evaluated_replacements_keep_separate_call_targets() {
+    let source = "# Calls λ😀\r\n```perl\r\nsub adjust { 13 } my $text = 'x'; $text =~ s/x/adjust()/e;\r\n```\r\n```perl\r\nsub adjust { 29 } my $text = 'y'; $text =~ s/y/adjust()/e;\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let mut definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.syntactic_text_hash == content_hash(b"adjust")
+        })
+        .collect();
+    definitions.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(definitions.len(), 2);
+    assert_ne!(definitions[0].target, definitions[1].target);
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::CallSite
+                && site.syntactic_text_hash == content_hash(b"adjust")
+        })
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 2);
+    for (call, definition) in calls.into_iter().zip(definitions) {
+        assert_eq!(call.target, definition.target);
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("adjust")
+        );
+    }
+}
+
+#[test]
 fn markdown_perl_direct_coderef_calls_keep_embedded_identity_and_sources() {
     let source = "# Calls λ😀\r\n```perl\r\nsub value { 13 } (\\&value)->();\r\n```\r\n```perl\r\nsub value { 29 } ((\\&value))->();\r\n```\r\n";
     let result = output(source);

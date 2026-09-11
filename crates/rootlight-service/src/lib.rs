@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/102";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/103";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/11";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -24062,6 +24062,77 @@ mod tests {
     }
 
     #[test]
+    fn perl_project_replacement_calls_retain_owner_and_exact_source() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("Measure.pm"),
+            "package Measure; sub adjust { $_[0] + 1 }",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("client.pl"),
+            "use Measure (); sub consume { my $text = 'x'; $text =~ s/x/Measure::adjust(3)/e; }",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == rootlight_ir::EntityKind::Function
+                    && entity.canonical_name == "adjust"
+            })
+            .unwrap();
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "consume")
+            .unwrap();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == rootlight_ids::content_hash(b"Measure::adjust")
+            })
+            .unwrap();
+        assert_eq!(call.enclosing, Some(owner.id));
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.subject == RelationEndpoint::Occurrence(call.id)
+                    && edge.predicate == RelationPredicate::Calls
+                    && edge.object == RelationEndpoint::Entity(target.id))
+        );
+        let source = call.source.clone();
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![source],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"Measure::adjust");
+    }
+
+    #[test]
     fn perl_project_block_eval_distinguishes_parsed_and_dynamic_effects() {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
@@ -24072,7 +24143,13 @@ mod tests {
             ("eval { *{$name} = sub { 31 }; };", false),
             ("eval { eval $input; };", false),
             ("eval { do $path; };", false),
-            ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", false),
+            ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", true),
+            ("eval { my $text = 'x'; $text =~ s/x/value()/ee; };", false),
+            ("my $text = 'x'; $text =~ s/x/eval $program/e;", false),
+            (
+                "my $text = 'x'; $text =~ s{x}{do { *Measure::adjust = sub { 31 }; 3 }}e;",
+                false,
+            ),
         ] {
             for effect_path in ["client.pl", "helper.pl"] {
                 let fixture = durable_test_tempdir();

@@ -17,6 +17,8 @@
 (coderef_call_expression . (_) @expression)
 (function_call_expression function: (function (varname (scalar))) @expression)
 [(eval_expression) (goto_expression) (substitution_regexp)] @expression
+; Evaluated replacement bodies participate in bounded identity admission.
+(substitution_regexp) @scope
 [(conditional_statement) (loop_statement) (cstyle_for_statement) (for_statement)] @scope
 [(conditional_statement condition: (_) @scope)
  (loop_statement condition: (_) @scope)

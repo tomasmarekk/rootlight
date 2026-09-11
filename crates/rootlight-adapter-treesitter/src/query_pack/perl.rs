@@ -7,6 +7,21 @@ use tree_sitter::Node;
 
 use super::StructuralRole;
 
+pub(super) fn native_depth(
+    mut node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    let mut depth = 0usize;
+    while let Some(parent) = node.parent() {
+        cancellation.check()?;
+        depth = depth
+            .checked_add(1)
+            .ok_or_else(|| super::query_failure("query-perl-depth"))?;
+        node = parent;
+    }
+    Ok(depth)
+}
+
 fn variable_kind(node: Node<'_>) -> bool {
     matches!(node.kind(), "scalar" | "array" | "hash")
 }
@@ -55,6 +70,16 @@ pub(super) fn retain_capture(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    if role == StructuralRole::Scope && node.kind() == "substitution_regexp" {
+        cancellation.check()?;
+        return Ok(node
+            .child_by_field_name("modifiers")
+            .is_some_and(|modifiers| {
+                source
+                    .get(modifiers.byte_range())
+                    .is_some_and(|flags| flags.contains(&b'e'))
+            }));
+    }
     if role == StructuralRole::Expression && node.kind() == "glob" {
         return glob_write(node, cancellation);
     }
@@ -132,6 +157,7 @@ pub(super) fn syntax(
             return Ok(Some("perl.statement"));
         }
         match node.kind() {
+            "substitution_regexp" => return Ok(Some("perl.substitution")),
             "subroutine_declaration_statement" => {
                 return Ok(Some(match declaration_keyword(node, cancellation)? {
                     Some("my" | "state") => "perl.lexical_function",

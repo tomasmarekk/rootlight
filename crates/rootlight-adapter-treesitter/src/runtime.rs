@@ -8,6 +8,7 @@
 mod embedded;
 mod expression;
 mod markdown;
+mod perl;
 
 #[cfg(test)]
 mod native_context_tests;

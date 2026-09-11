@@ -214,7 +214,7 @@ pub(crate) struct QueryCandidate {
     pub(crate) role: StructuralRole,
     pub(crate) syntax: &'static str,
     pub(crate) required: bool,
-    // Native nesting disambiguates YAML nodes with identical byte ranges.
+    // Native nesting disambiguates containers with identical byte ranges.
     pub(crate) native_depth: usize,
 }
 
@@ -1299,7 +1299,11 @@ fn candidate_for_capture(
         role,
         syntax,
         required: false,
-        native_depth: 0,
+        native_depth: if family == GrammarFamily::Perl {
+            perl::native_depth(capture.node, cancellation)?
+        } else {
+            0
+        },
     })
 }
 

@@ -151,6 +151,18 @@ impl TreeSitterProvider {
                     cancellation,
                 )?
             };
+            if child.family == GrammarFamily::Perl {
+                limited |= self.extract_perl_replacements(
+                    &child.tree,
+                    &child_request,
+                    request.limits(),
+                    traversal,
+                    &mut captures,
+                    max_facts.map(|maximum| maximum.saturating_sub(candidates.len())),
+                    &mut used_ranges,
+                    cancellation,
+                )?;
+            }
             captures.retain(|capture| capture.role != StructuralRole::Root);
             for capture in &mut captures {
                 cancellation.check()?;

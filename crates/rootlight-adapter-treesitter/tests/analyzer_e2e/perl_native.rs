@@ -27,6 +27,224 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn perl_native_evaluated_replacements_retain_calls_and_original_sources() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+
+    for replacement in [
+        "s/x/adjust(3)/e",
+        "s{x}{adjust(3)}ge",
+        "s'x'adjust(3)'e",
+        "s|x|$values{$1} // adjust(3)|e",
+    ] {
+        let source = format!(
+            "# λ😀\r\npackage Measure; sub adjust {{ $_[0] }} sub consume {{ my $text = 'x'; $text =~ {replacement}; }}\r\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let offset = u64::try_from(source.rfind("adjust").unwrap()).unwrap();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::CallSite && site.source.span().start_byte() == offset
+            })
+            .expect("evaluated replacement retains its written call");
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "adjust")
+            .unwrap();
+        let caller = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "consume")
+            .unwrap();
+        assert_eq!(call.enclosing, Some(caller.id), "{replacement}");
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{replacement}"
+        );
+        assert_eq!(call.source.span().end_byte(), offset + 6);
+        assert_eq!(call.syntactic_text_hash, content_hash(b"adjust"));
+        assert!(document.relations.iter().any(|edge| {
+            edge.subject == RelationEndpoint::Occurrence(call.id)
+                && edge.predicate == RelationPredicate::Calls
+                && edge.object == RelationEndpoint::Entity(target.id)
+        }));
+        let claims: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == PERL_BINDING_NAMESPACE)
+            .map(|envelope| decode_perl_binding_envelope(envelope).unwrap().binding())
+            .collect();
+        assert!(claims.contains(&PerlBinding::ModuleContext));
+        assert!(
+            !claims.contains(&PerlBinding::DynamicWrite),
+            "{replacement}"
+        );
+    }
+}
+
+#[test]
+fn perl_native_evaluated_replacements_preserve_unknown_and_written_effects() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+
+    for (replacement, dynamic, writes) in [
+        ("s/x/adjust(3)/ee", 1, 0),
+        ("s/x/eval $program/e", 1, 0),
+        ("s{x}{do { *adjust = sub { 31 }; adjust(3) }}e", 0, 1),
+        ("s{x}{do { *{$name} = sub { 31 }; adjust(3) }}e", 1, 0),
+        (
+            "s{x}{do { $text =~ s/y/eval $program/e; adjust(3) }}e",
+            1,
+            0,
+        ),
+        ("s{x}{do { $text =~ s/y/adjust(3)/e; adjust(3) }}e", 0, 0),
+        ("s/x/adjust(3)/g", 0, 0),
+    ] {
+        let source =
+            format!("package Measure; sub adjust {{ 3 }} my $text = 'x'; $text =~ {replacement};");
+        let result = output(&source);
+        let claims: Vec<_> = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == PERL_BINDING_NAMESPACE)
+            .map(|envelope| decode_perl_binding_envelope(envelope).unwrap().binding())
+            .collect();
+        assert!(
+            claims.contains(&PerlBinding::ModuleContext),
+            "{replacement}"
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| **claim == PerlBinding::DynamicWrite)
+                .count(),
+            dynamic,
+            "{replacement}"
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, PerlBinding::Write { .. }))
+                .count(),
+            writes,
+            "{replacement}"
+        );
+        if replacement == "s/x/adjust(3)/g" {
+            assert!(
+                !result
+                    .document()
+                    .occurrences
+                    .iter()
+                    .any(|site| site.role == OccurrenceRole::CallSite)
+            );
+        }
+    }
+}
+
+#[test]
+fn perl_native_whole_file_callable_retains_module_ancestry() {
+    let source = "sub consume { my $value = 13; return $value; }";
+    let result = output(source);
+    assert!(
+        result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "consume")
+    );
+    assert_perl_artifact_replay(source);
+}
+
+#[test]
+fn perl_native_evaluated_replacements_keep_lexical_scope_and_replay() {
+    let source = "sub consume { my $text = 'x'; $text =~ s{x}{do { my sub helper { 13 } helper() }}e; helper(); }";
+    let result = output(source);
+    let mut calls: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::CallSite
+                && site.syntactic_text_hash == content_hash(b"helper")
+        })
+        .collect();
+    calls.sort_by_key(|call| call.source.span().start_byte());
+    assert_eq!(calls.len(), 2);
+    assert!(matches!(calls[0].target, OccurrenceTarget::Resolved { .. }));
+    assert!(matches!(
+        calls[1].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_perl_artifact_replay(source);
+}
+
+#[test]
+fn perl_native_evaluated_replacements_exhaust_shared_ranges_without_context_proof() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+    let source = "package Measure; sub adjust { 3 } my $text = 'x'; $text =~ s/x/adjust()/e; $text =~ s{x}{do { *adjust = sub { 31 }; 3 }}e;";
+    let base = limits();
+    let budget = AnalysisLimits::new(
+        base.max_source_bytes(),
+        base.max_syntax_nodes(),
+        base.max_syntax_depth(),
+        1,
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        base.ir().clone(),
+    )
+    .unwrap();
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(PERL, source.as_bytes());
+    let result = analyze(
+        &analyzer(&provider, PERL),
+        &request(&fixture.snapshot, &fixture.source, PERL, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    for envelope in &result.document().extensions {
+        if envelope.namespace == PERL_BINDING_NAMESPACE {
+            assert_ne!(
+                decode_perl_binding_envelope(envelope).unwrap().binding(),
+                PerlBinding::ModuleContext
+            );
+        }
+    }
+}
+
+#[test]
+fn perl_native_evaluated_replacements_report_invalid_child_syntax() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+    let result = output("sub adjust { 3 } my $text = 'x'; $text =~ s/x/adjust(3) +/e;");
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::CallSite)
+    );
+    for envelope in &result.document().extensions {
+        if envelope.namespace == PERL_BINDING_NAMESPACE {
+            assert_ne!(
+                decode_perl_binding_envelope(envelope).unwrap().binding(),
+                PerlBinding::ModuleContext
+            );
+        }
+    }
+}
+
+#[test]
 fn perl_native_project_context_includes_leading_trivia() {
     use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
 
@@ -64,7 +282,8 @@ fn perl_native_block_eval_preserves_nested_storage_effects() {
         ("eval $input;", 1, 0),
         ("eval;", 1, 0),
         ("do $path;", 1, 0),
-        ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", 1, 0),
+        ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", 0, 0),
+        ("eval { my $text = 'x'; $text =~ s/x/value()/ee; };", 1, 0),
     ] {
         let result = output(source);
         let claims: Vec<_> = result

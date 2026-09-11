@@ -17,6 +17,19 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
+        if request.language().as_str() == "perl" {
+            let mut used_ranges = 0;
+            return self.extract_perl_replacements(
+                tree,
+                request,
+                request.limits(),
+                traversal,
+                candidates,
+                max_facts,
+                &mut used_ranges,
+                cancellation,
+            );
+        }
         if request.language().as_str() == "markdown" {
             return self.extract_markdown(
                 tree,

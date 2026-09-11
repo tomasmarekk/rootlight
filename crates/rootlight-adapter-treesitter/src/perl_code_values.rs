@@ -167,7 +167,9 @@ pub(super) fn resolve(
         }
         if matches!(
             kind,
-            "perl.code_flow_barrier.expression" | "perl.block_eval_barrier.expression"
+            "perl.code_flow_barrier.expression"
+                | "perl.block_eval_barrier.expression"
+                | "perl.parsed_substitution.expression"
         ) {
             barriers.insert(context.enclosing(fact, cancellation)?.0);
         }
@@ -182,8 +184,8 @@ pub(super) fn resolve(
             kind,
             "perl.assignment.scope" | "perl.non_linear_assignment.scope"
         ) {
-            // Equal-span statement and assignment scopes are siblings in the SDK.
-            // Join native field evidence by its written interval, requiring one target.
+            // Join native fields by their written interval rather than incidental
+            // scope-parent links, requiring one assignment target.
             let mut parts = Vec::new();
             for ((_, end), &part) in
                 fields.range((fact.span().start_byte(), 0)..=(fact.span().end_byte(), u64::MAX))
