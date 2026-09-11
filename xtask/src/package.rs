@@ -2116,8 +2116,6 @@ pub(crate) enum PackageError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
-
     use tempfile::tempdir;
     use zip::ZipArchive;
 

@@ -704,9 +704,9 @@ fn decode_path_identity(encoded: &str) -> Result<Vec<u8>, FirstSliceError> {
     decoded
         .try_reserve_exact(encoded.len() / 2)
         .map_err(|_| FirstSliceError::Limits)?;
-    for pair in encoded.as_bytes().chunks_exact(2) {
-        let high = decode_lower_hex_nibble(pair[0]).ok_or(FirstSliceError::CatalogCorrupt)?;
-        let low = decode_lower_hex_nibble(pair[1]).ok_or(FirstSliceError::CatalogCorrupt)?;
+    for [high, low] in encoded.as_bytes().as_chunks::<2>().0 {
+        let high = decode_lower_hex_nibble(*high).ok_or(FirstSliceError::CatalogCorrupt)?;
+        let low = decode_lower_hex_nibble(*low).ok_or(FirstSliceError::CatalogCorrupt)?;
         decoded.push((high << 4) | low);
     }
     Ok(decoded)

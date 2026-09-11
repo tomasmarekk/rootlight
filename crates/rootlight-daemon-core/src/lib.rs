@@ -4747,7 +4747,7 @@ impl SyntheticWorkerPool {
         if self.workers.is_empty() {
             return Ok(());
         }
-        let workers = self.workers.drain(..).collect::<Vec<_>>();
+        let workers = std::mem::take(&mut self.workers);
         let (completed, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-workers-join".to_owned())

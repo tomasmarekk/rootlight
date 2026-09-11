@@ -1059,9 +1059,9 @@ fn decode_hex_array<const N: usize>(value: &str, expected_length: usize) -> Opti
         return None;
     }
     let mut decoded = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = decode_hex_nibble(pair[0])?;
-        let low = decode_hex_nibble(pair[1])?;
+    for (index, [high, low]) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let high = decode_hex_nibble(*high)?;
+        let low = decode_hex_nibble(*low)?;
         decoded[index] = high.checked_mul(16)?.checked_add(low)?;
     }
     Some(decoded)
@@ -1236,6 +1236,16 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::*;
+
+    #[test]
+    fn hex_arrays_require_exact_lowercase_byte_pairs() {
+        assert_eq!(decode_hex_array::<2>("00af", 4), Some([0, 175]));
+        assert_eq!(decode_hex_array::<0>("", 0), Some([]));
+        for value in ["", "0", "000", "00000", "00AF", "00ag", "\u{00e9}00"] {
+            assert_eq!(decode_hex_array::<2>(value, 4), None, "{value}");
+        }
+        assert_eq!(decode_hex_array::<2>("00af", 2), None);
+    }
 
     fn context() -> UpdateContext {
         UpdateContext {

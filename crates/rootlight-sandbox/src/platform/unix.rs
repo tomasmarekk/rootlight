@@ -1117,7 +1117,7 @@ fn stdio(mode: StdioMode) -> Stdio {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read as _, os::unix::fs::symlink};
+    use std::os::unix::fs::symlink;
 
     #[cfg(target_os = "macos")]
     use std::io::Write as _;
