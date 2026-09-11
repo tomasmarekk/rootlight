@@ -256,18 +256,18 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
     let expected = [
         (
             ExposureProfile::Scout,
-            231_313,
-            "c35b9d3071eabf1a472543ce32086ffddf024472b485959960e3b21909728e9b",
+            231_181,
+            "fa5ffd714dafefb142a952035080c2a6e43d8db09414cf3204c316382b4c8251",
         ),
         (
             ExposureProfile::Analysis,
-            500_910,
-            "c0ff9b47af83b2c048bcbdbfc03faa3e1461dcfca283bcfa96c4e8460ded0075",
+            500_778,
+            "6fb9c2121780adec9fd7c27686387e66d5df0ce311196023f8663826389e8778",
         ),
         (
             ExposureProfile::Developer,
-            704_269,
-            "3c4eb5d388418007f4b2b089fa51a676ef0403b3c667149f8529ea952e287995",
+            704_137,
+            "ab9ed731fcdc174aff492eb53ebffe79f73fcd6224a98823a96c51a84d0926dd",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {
