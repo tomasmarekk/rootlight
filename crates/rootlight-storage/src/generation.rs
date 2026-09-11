@@ -18,10 +18,11 @@ use rootlight_ir::{
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, FileRecord, IdentityClaimError,
     IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    NormalizedRebindError, OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
+    NormalizedRebindError, OccurrenceTarget, PERL_BINDING_NAMESPACE,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
     decode_file_identity_claim_envelope_with_checkpoint,
     decode_normalized_ir_document_messagepack_reader_with_checkpoint,
-    decode_normalized_ir_document_with_checkpoint,
+    decode_normalized_ir_document_with_checkpoint, decode_perl_binding_envelope,
     decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
     derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
@@ -1421,6 +1422,16 @@ fn verify_snapshot_identities(
                             IdentityMismatchComponent::LexicalEvidence,
                         )
                     })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
+            PERL_BINDING_NAMESPACE => {
+                decode_perl_binding_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
                 context
                     .check()
                     .map_err(IdentityVerificationError::Control)?;

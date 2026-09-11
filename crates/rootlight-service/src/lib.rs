@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/99";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/8";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/101";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/11";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -23927,6 +23927,530 @@ mod tests {
             ("13", "17"),
             4,
         );
+    }
+
+    #[test]
+    fn perl_qualified_project_calls_distinguish_local_namesakes() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+
+        let fixture = durable_test_tempdir();
+        let client = include_str!("../../../tests/fixtures/perl-bindings/cross-file/client.pl");
+        let module =
+            include_str!("../../../tests/fixtures/perl-bindings/cross-file/module/Measure.pm");
+        fs::create_dir(fixture.path().join("module")).unwrap();
+        fs::write(fixture.path().join("client.pl"), client).unwrap();
+        fs::write(fixture.path().join("module/Measure.pm"), module).unwrap();
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let module_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "module/Measure.pm")
+            .unwrap();
+        let client_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "client.pl")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == rootlight_ir::EntityKind::Function
+                    && entity.canonical_name == "adjust"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == module_file.id)
+            })
+            .unwrap();
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == rootlight_ir::EntityKind::Function
+                    && entity.canonical_name == "adjust"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == client_file.id)
+            })
+            .unwrap();
+        assert_ne!(target.id, local.id);
+        let local_call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == client_file.id
+                    && site.role == OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == rootlight_ids::content_hash(b"adjust")
+            })
+            .unwrap();
+        assert_eq!(
+            local_call.target,
+            OccurrenceTarget::Resolved { symbol: local.id }
+        );
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.subject == RelationEndpoint::Occurrence(local_call.id)
+                && relation.object == RelationEndpoint::Entity(local.id)
+        }));
+        let caller = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "consume")
+            .unwrap();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == client_file.id
+                    && site.syntactic_text_hash == rootlight_ids::content_hash(b"Measure::adjust")
+            })
+            .unwrap();
+        assert_eq!(call.enclosing, Some(caller.id));
+        assert_eq!(call.role, OccurrenceRole::CallSite);
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        let provenance = document
+            .provenance
+            .iter()
+            .find(|record| record.id == call.provenance)
+            .unwrap();
+        assert_eq!(
+            provenance.rule.as_deref(),
+            Some("perl-package-storage-v1.indexed_snapshot")
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == call.source
+                    && gap.detail == "perl-runtime-code-value-unverified")
+        );
+        assert!(!document.skipped_regions.iter().any(
+            |gap| gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+        ));
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.subject == RelationEndpoint::Occurrence(call.id)
+                && relation.object == RelationEndpoint::Entity(target.id)
+        }));
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![call.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"Measure::adjust");
+    }
+
+    #[test]
+    fn perl_project_calls_reject_missing_load_duplicate_and_mutated_storage() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+        let client = include_str!("../../../tests/fixtures/perl-bindings/cross-file/client.pl");
+        let module =
+            include_str!("../../../tests/fixtures/perl-bindings/cross-file/module/Measure.pm");
+        for (client, module, duplicate) in [
+            (
+                client.replace("use Measure ();", ""),
+                module.to_owned(),
+                false,
+            ),
+            (client.to_owned(), module.to_owned(), true),
+            (
+                client.to_owned(),
+                format!("{module}\n*adjust = sub {{ 31 }};\n"),
+                false,
+            ),
+            (
+                client.to_owned(),
+                format!("{module}\n*{{$name}} = sub {{ 31 }};\n"),
+                false,
+            ),
+        ] {
+            let fixture = durable_test_tempdir();
+            fs::create_dir(fixture.path().join("module")).unwrap();
+            fs::write(fixture.path().join("client.pl"), &client).unwrap();
+            fs::write(fixture.path().join("module/Measure.pm"), &module).unwrap();
+            if duplicate {
+                fs::write(fixture.path().join("alternative.pm"), &module).unwrap();
+            }
+            let mut service = FirstSliceService::new(4).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let call = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntactic_text_hash == rootlight_ids::content_hash(b"Measure::adjust")
+                        && site.role == OccurrenceRole::CallSite
+                })
+                .unwrap();
+            assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(
+                !document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.subject == RelationEndpoint::Occurrence(call.id))
+            );
+        }
+    }
+
+    #[test]
+    fn perl_project_writes_invalidate_previously_resolved_local_package_calls() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("module")).unwrap();
+        for (path, source) in [
+            (
+                "client.pl",
+                include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/client.pl"
+                ),
+            ),
+            (
+                "module/Measure.pm",
+                include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/module/Measure.pm"
+                ),
+            ),
+            (
+                "module/Rebind.pm",
+                include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/module/Rebind.pm"
+                ),
+            ),
+        ] {
+            fs::write(fixture.path().join(path), source).unwrap();
+        }
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let client_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "client.pl")
+            .unwrap();
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "adjust"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == client_file.id)
+            })
+            .unwrap();
+        let local_call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == client_file.id
+                    && site.role == OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == rootlight_ids::content_hash(b"adjust")
+            })
+            .unwrap();
+        // The imported module replaces main::adjust after its declaration has
+        // compiled. A per-file target cannot survive that project-owned write.
+        assert_ne!(
+            local_call.target,
+            OccurrenceTarget::Resolved { symbol: local.id }
+        );
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(local_call.id)
+                && edge.object == RelationEndpoint::Entity(local.id)
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.source == local_call.source && gap.detail == "perl-project-code-storage-write"
+        }));
+        assert!(document.provenance.iter().any(|record| {
+            record.id == local_call.provenance
+                && record.rule.as_deref() == Some("perl-package-storage-v1.conflicting_write")
+        }));
+        let module_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "module/Measure.pm")
+            .unwrap();
+        let unaffected = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "adjust"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == module_file.id)
+            })
+            .unwrap();
+        let external = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == client_file.id
+                    && site.role == OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == rootlight_ids::content_hash(b"Measure::adjust")
+            })
+            .unwrap();
+        assert_eq!(
+            external.target,
+            OccurrenceTarget::Resolved {
+                symbol: unaffected.id
+            }
+        );
+    }
+
+    #[test]
+    fn perl_project_bindings_survive_incremental_rebuild_and_restart() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+        for with_write in [false, true] {
+            let client = if with_write {
+                include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/client.pl"
+                )
+            } else {
+                include_str!("../../../tests/fixtures/perl-bindings/cross-file/client.pl")
+            };
+            let module =
+                include_str!("../../../tests/fixtures/perl-bindings/cross-file/module/Measure.pm");
+            let fixture = durable_test_tempdir();
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            fs::create_dir(fixture.path().join("module")).unwrap();
+            let client = if with_write {
+                format!("{client}\nuse Measure ();\n")
+            } else {
+                client.to_owned()
+            };
+            fs::write(fixture.path().join("client.pl"), client).unwrap();
+            fs::write(fixture.path().join("module/Measure.pm"), module).unwrap();
+            if with_write {
+                let writer = include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/module/Rebind.pm"
+                );
+                // Equivalent repeated evidence must not change the selected
+                // source merely because fresh-generation fact hashes differ.
+                fs::write(
+                    fixture.path().join("module/Rebind.pm"),
+                    format!("{writer}\n*main::adjust = sub {{ return $_[0] + 31; }};\n"),
+                )
+                .unwrap();
+            }
+            let assert_target = |document: &NormalizedIrDocument| {
+                let target_file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == "module/Measure.pm")
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "adjust"
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == target_file.id)
+                    })
+                    .unwrap();
+                let call = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::CallSite
+                            && site.syntactic_text_hash == content_hash(b"Measure::adjust")
+                    })
+                    .unwrap();
+                assert_eq!(
+                    call.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+                assert_eq!(call.source.generation(), document.generation);
+                if with_write {
+                    let client_file = document
+                        .files
+                        .iter()
+                        .find(|file| file.path == "client.pl")
+                        .unwrap();
+                    let local_call = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.file == client_file.id
+                                && site.role == OccurrenceRole::CallSite
+                                && site.syntactic_text_hash == content_hash(b"adjust")
+                        })
+                        .unwrap();
+                    assert!(matches!(
+                        local_call.target,
+                        OccurrenceTarget::Unresolved { .. }
+                    ));
+                    assert_eq!(local_call.source.generation(), document.generation);
+                    assert!(document.skipped_regions.iter().any(|gap| {
+                        gap.source == local_call.source
+                            && gap.detail == "perl-project-code-storage-write"
+                    }));
+                }
+                assert!(
+                    document
+                        .relations
+                        .iter()
+                        .any(|edge| edge.predicate == RelationPredicate::Calls
+                            && edge.subject == RelationEndpoint::Occurrence(call.id)
+                            && edge.object == RelationEndpoint::Entity(target.id))
+                );
+            };
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let first = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_target(
+                service
+                    .loaded_generation_snapshot(first.generation)
+                    .unwrap()
+                    .document(),
+            );
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                first
+            );
+            let edited = module.replace("+ 7", "+ 11");
+            assert_ne!(edited, module);
+            fs::write(fixture.path().join("module/Measure.pm"), edited).unwrap();
+            let changed = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_target(
+                service
+                    .loaded_generation_snapshot(changed.generation)
+                    .unwrap()
+                    .document(),
+            );
+            let work = service.incremental_evidence(changed.generation).unwrap();
+            assert_eq!(work.parsed_files(), 1);
+            assert_eq!(
+                work.reused_parser_artifacts(),
+                if with_write { 2 } else { 1 }
+            );
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let published = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            let clean = published.receipt();
+            assert_eq!(changed.logical_snapshot, clean.logical_snapshot);
+            assert!(changed.logical_snapshot.is_some());
+            assert_target(
+                service
+                    .loaded_generation_snapshot(clean.generation)
+                    .unwrap()
+                    .document(),
+            );
+            if with_write {
+                fs::write(
+                    fixture.path().join("module/Rebind.pm"),
+                    "package Rebind;\n1;\n",
+                )
+                .unwrap();
+                let recovered = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                let work = service.incremental_evidence(recovered.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert_eq!(work.reused_parser_artifacts(), 2);
+                let snapshot = service
+                    .loaded_generation_snapshot(recovered.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == "client.pl")
+                    .unwrap();
+                let local = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "adjust"
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == file.id)
+                    })
+                    .unwrap();
+                let call = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.role == OccurrenceRole::CallSite
+                            && site.syntactic_text_hash == content_hash(b"adjust")
+                    })
+                    .unwrap();
+                assert_eq!(call.target, OccurrenceTarget::Resolved { symbol: local.id });
+                assert!(document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(call.id)
+                        && edge.object == RelationEndpoint::Entity(local.id)
+                }));
+                assert!(!document.skipped_regions.iter().any(|gap| {
+                    gap.source == call.source && gap.detail == "perl-project-code-storage-write"
+                }));
+            }
+            drop(service);
+            let restored =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            assert_target(
+                restored
+                    .loaded_generation_snapshot(clean.generation)
+                    .unwrap()
+                    .document(),
+            );
+        }
     }
 
     fn assert_perl_durable_sources_with_reads(

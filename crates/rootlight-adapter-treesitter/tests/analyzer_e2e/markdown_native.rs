@@ -177,6 +177,49 @@ fn markdown_perl_package_storage_does_not_escape_its_example() {
 }
 
 #[test]
+fn markdown_perl_glob_mutations_stay_inside_their_example() {
+    let source = "# Storage λ😀\r\n```perl\r\npackage Harbor; sub value { 13 } *value = sub { 29 }; value();\r\n```\r\n```perl\r\npackage Harbor; sub value { 17 } value();\r\n```\r\n";
+    let result = output(source);
+    let document = result.document();
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::CallSite
+                && site.syntax_kind == "perl.static_function_name.reference"
+        })
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 2);
+    assert!(matches!(
+        calls[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    let OccurrenceTarget::Resolved { symbol } = calls[1].target else {
+        panic!("the independent example must retain its callable target")
+    };
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == symbol)
+        .unwrap();
+    assert!(
+        target.evidence.source.as_ref().unwrap().span().start_byte()
+            > calls[0].source.span().end_byte()
+    );
+    for call in calls {
+        let span = call.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("value")
+        );
+    }
+}
+
+#[test]
 fn markdown_perl_bare_calls_do_not_borrow_later_or_neighbor_declarations() {
     let source = "# Functions λ😀\r\n```perl\r\npackage Harbor; sub value { 13 } my $result = value;\r\n```\r\n```perl\r\npackage Harbor; my $before = value; sub value { 29 } my $after = value;\r\n```\r\n";
     let result = output(source);

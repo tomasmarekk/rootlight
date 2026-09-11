@@ -25,6 +25,7 @@ use crate::{
     derive_source_mapping_record_id, new_file_identity_claim_envelope,
     new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
+use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 
 const GENERATION_NEUTRAL_ID: GenerationId = GenerationId::from_bytes([0; 20]);
 const CHUNK_DIGEST_DOMAIN: &str = "rootlight.normalized-file-chunk/v1";
@@ -684,6 +685,7 @@ fn require_supported_extensions_with_checkpoint(
             FILE_IDENTITY_CLAIM_NAMESPACE
                 | SYMBOL_IDENTITY_CLAIM_NAMESPACE
                 | LEXICAL_EXTENSION_NAMESPACE
+                | PERL_BINDING_NAMESPACE
         ) {
             return Err(NormalizedRebindError::UnsupportedExtension);
         }
@@ -1224,6 +1226,12 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        PERL_BINDING_NAMESPACE => {
+            let evidence = decode_perl_binding_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_perl_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         FILE_IDENTITY_CLAIM_NAMESPACE => {
             let claim = decode_file_identity_claim_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -1549,6 +1557,73 @@ mod tests {
                 assert!(!previous_ids.contains(id));
             }
         }
+    }
+
+    #[test]
+    fn perl_binding_evidence_rebinds_without_hidden_occurrence_identities() {
+        use crate::{PerlBinding, PerlBindingEvidence, PerlCallableStorage};
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let source = file.evidence.source.clone().unwrap();
+        let storage = PerlCallableStorage {
+            package: rootlight_ids::content_hash(b"Harbor"),
+            name: rootlight_ids::content_hash(b"value"),
+        };
+        let bindings = [
+            PerlBinding::ModuleContext,
+            PerlBinding::Definition {
+                storage,
+                symbol: document.entities[0].id,
+            },
+            PerlBinding::Call { storage },
+            PerlBinding::Write { storage },
+            PerlBinding::DynamicWrite,
+            PerlBinding::ModuleLoad {
+                package: storage.package,
+            },
+        ];
+        for binding in bindings {
+            document.extensions.push(
+                new_perl_binding_envelope(
+                    document.repository,
+                    document.generation,
+                    file.provenance,
+                    source.clone(),
+                    PerlBindingEvidence::new(source.span(), binding),
+                )
+                .unwrap(),
+            );
+        }
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let next = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(next, &limits, &support).unwrap();
+        assert_eq!(rebound.extensions.len(), bindings.len());
+        for envelope in &rebound.extensions {
+            let evidence = decode_perl_binding_envelope(envelope).unwrap();
+            assert_eq!(evidence.module(), source.span());
+            assert!(bindings.contains(&evidence.binding()));
+            assert_eq!(envelope.generation, next);
+            assert_eq!(
+                envelope.evidence.source.as_ref().unwrap().generation(),
+                next
+            );
+            assert!(
+                !document
+                    .extensions
+                    .iter()
+                    .any(|original| original.id == envelope.id)
+            );
+        }
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        validate_ir_document(&rebound, &limits, &support).unwrap();
     }
 
     #[test]

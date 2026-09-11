@@ -79,15 +79,14 @@ impl ResolutionEngine {
             &document.files,
             &document.entities,
             &document.provenance,
+            &document.extensions,
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
         let mut decisions = Vec::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
-            if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                || !resolvable_occurrence(occurrence)
-            {
+            if index.occurrence_work(occurrence)?.is_none() {
                 continue;
             }
             work.consume()?;
@@ -119,6 +118,31 @@ impl ResolutionEngine {
         cancellation.check()?;
         validate_ir_document(document, &IrLimits::default(), &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
+
+        if document
+            .extensions
+            .iter()
+            .any(|extension| extension.namespace == rootlight_ir::PERL_BINDING_NAMESPACE)
+        {
+            let index = CandidateIndex::build(
+                &document.files,
+                &document.entities,
+                &document.provenance,
+                &document.extensions,
+                cancellation,
+            )?;
+            let mut required = 0_usize;
+            for occurrence in &document.occurrences {
+                cancellation.check()?;
+                required = required
+                    .checked_add(index.occurrence_work(occurrence)?.unwrap_or(0))
+                    .ok_or(ResolutionError::CountOverflow)?;
+            }
+            return Ok(ResolutionWorkEstimate {
+                required,
+                limit: self.limits.work_limit(),
+            });
+        }
 
         let mut entities_by_name = BTreeMap::<ContentHash, BTreeSet<SymbolId>>::new();
         for entity in &document.entities {
@@ -167,6 +191,9 @@ impl ResolutionEngine {
         work: &mut ResolutionWorkBudget,
         cancellation: &Cancellation,
     ) -> Result<ResolutionDecision, ResolutionError> {
+        if let Some(decision) = index.perl.resolve(occurrence) {
+            return Ok(decision);
+        }
         let file_language = index
             .files
             .get(&occurrence.file)
@@ -451,6 +478,7 @@ impl Default for ResolutionEngine {
 }
 
 pub(crate) struct CandidateIndex<'a> {
+    pub(crate) perl: crate::perl::PerlIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
     pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
@@ -475,6 +503,7 @@ impl<'a> CandidateIndex<'a> {
         file_records: &'a [FileRecord],
         entity_records: &'a [EntityRecord],
         provenance_records: &'a [ProvenanceRecord],
+        extension_records: &'a [rootlight_ir::ExtensionEnvelope],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
@@ -516,6 +545,13 @@ impl<'a> CandidateIndex<'a> {
             entries.dedup_by_key(|entry| entry.entity.id);
         }
         Ok(Self {
+            perl: crate::perl::PerlIndex::build(
+                &files,
+                &entities,
+                &provenance,
+                extension_records,
+                cancellation,
+            )?,
             by_name_hash,
             entities,
             files,
@@ -527,6 +563,11 @@ impl<'a> CandidateIndex<'a> {
         &self,
         occurrence: &OccurrenceRecord,
     ) -> Result<Option<usize>, ResolutionError> {
+        if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            && self.perl.eligible(occurrence)
+        {
+            return Ok(Some(1));
+        }
         if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
             || !resolvable_occurrence(occurrence)
         {

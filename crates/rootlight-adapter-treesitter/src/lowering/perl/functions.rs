@@ -137,7 +137,15 @@ pub(super) fn resolve<'a>(
             draft.name = original.name;
         }
         plan.owned_functions.insert(fact.local_id());
+        if let Storage::Package(root, package, name) = storage {
+            plan.project.push(ProjectEvidence {
+                module: context.fact(root)?.span(),
+                source: fact.span(),
+                binding: ProjectBinding::Definition(first, callable_storage(package, name)),
+            });
+        }
     }
+    let mutations = callable_mutations(context, source, plan, limits, cancellation)?;
     let mut imports = BTreeMap::<(u64, &str, &str), u64>::new();
     for fact in context.facts.values() {
         cancellation.check()?;
@@ -259,6 +267,11 @@ pub(super) fn resolve<'a>(
         } else {
             None
         };
+        // A native direct invocation is a call even when its storage is defined
+        // in another source. Bare terms and CODE references do not prove that role.
+        if !builtin && !bare && !code_reference && storage.is_some() {
+            plan.calls.insert(fact.local_id());
+        }
         if let Some(storage) = storage
             && let Some(target) = canonical.get(&storage)
         {
@@ -275,13 +288,103 @@ pub(super) fn resolve<'a>(
                     continue;
                 }
             }
-            plan.references.insert(fact.local_id(), *target);
             if !code_reference {
                 plan.calls.insert(fact.local_id());
             }
+            if !mutations.contains(storage) {
+                plan.references.insert(fact.local_id(), *target);
+            }
+        }
+        if let Some(Storage::Package(root, package, name)) = storage
+            && plan.calls.contains(&fact.local_id())
+        {
+            plan.project.push(ProjectEvidence {
+                module: context.fact(root)?.span(),
+                source: fact.span(),
+                binding: ProjectBinding::Claim(PerlBinding::Call {
+                    storage: callable_storage(package, name),
+                }),
+            });
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct CallableMutations<'a> {
+    slots: BTreeSet<Storage<'a>>,
+    dynamic_modules: BTreeSet<u64>,
+}
+
+impl CallableMutations<'_> {
+    fn contains(&self, storage: Storage<'_>) -> bool {
+        match storage {
+            Storage::Package(root, _, _) => {
+                self.dynamic_modules.contains(&root) || self.slots.contains(&storage)
+            }
+            Storage::Lexical(_) => false,
+        }
+    }
+}
+
+fn callable_mutations<'a>(
+    context: &Context<'a>,
+    source: &'a str,
+    plan: &mut Plan,
+    limits: &IrLimits,
+    cancellation: &Cancellation,
+) -> Result<CallableMutations<'a>, AdapterError> {
+    let mut mutations = CallableMutations::default();
+    for fact in context.facts.values() {
+        cancellation.check()?;
+        let kind = fact.syntax_kind().as_str();
+        if !matches!(
+            kind,
+            "perl.static_glob_write.expression" | "perl.dynamic_glob_write.expression"
+        ) {
+            continue;
+        }
+        let Some(root) = context.module(fact, cancellation)? else {
+            continue;
+        };
+        let name = if kind == "perl.static_glob_write.expression" {
+            text(source, fact, limits.max_string_bytes)?
+                .and_then(|text| text.strip_prefix('*'))
+                .map(|name| {
+                    name.strip_prefix('{')
+                        .and_then(|inner| inner.strip_suffix('}'))
+                        .unwrap_or(name)
+                })
+        } else {
+            None
+        };
+        let slot = match name {
+            Some(name) if name.contains("::") => qualified_name(name, cancellation)?,
+            Some(name) if identifier(name) => context
+                .package(fact, cancellation)?
+                .map(|package| (package, name)),
+            _ => None,
+        };
+        // A function body may execute after any written assignment. Source order
+        // alone cannot prove which CODE slot is active at an arbitrary call site.
+        let binding = if let Some((package, name)) = slot {
+            mutations
+                .slots
+                .insert(Storage::Package(root, package, name));
+            PerlBinding::Write {
+                storage: callable_storage(package, name),
+            }
+        } else {
+            mutations.dynamic_modules.insert(root);
+            PerlBinding::DynamicWrite
+        };
+        plan.project.push(ProjectEvidence {
+            module: context.fact(root)?.span(),
+            source: fact.span(),
+            binding: ProjectBinding::Claim(binding),
+        });
+    }
+    Ok(mutations)
 }
 
 fn qualified_name<'a>(

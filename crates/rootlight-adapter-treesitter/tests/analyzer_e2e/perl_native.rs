@@ -26,6 +26,331 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+#[test]
+fn perl_native_bounded_project_evidence_never_claims_a_complete_context() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+    let source = "package Harbor; sub value { 7 } *value = sub { 31 }; value();\n";
+    let reference = output(source);
+    for extra in 0..=2 {
+        let base = limits();
+        let mut ir = base.ir().clone();
+        ir.max_extensions = reference.document().entities.len() + 1 + extra;
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            base.max_embedded_ranges(),
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            ir,
+        )
+        .unwrap();
+        let provider = Arc::new(provider());
+        let fixture = Fixture::new(PERL, source.as_bytes());
+        let result = analyze(
+            &analyzer(&provider, PERL),
+            &request(&fixture.snapshot, &fixture.source, PERL, &budget),
+            &ExtensionSupport::default(),
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "perl-project-evidence-resource-limit")
+        );
+        for envelope in result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == PERL_BINDING_NAMESPACE)
+        {
+            assert_ne!(
+                decode_perl_binding_envelope(envelope).unwrap().binding(),
+                PerlBinding::ModuleContext
+            );
+        }
+    }
+}
+
+#[test]
+fn perl_native_project_evidence_retains_storage_and_exact_sources() {
+    use rootlight_ir::{
+        PERL_BINDING_NAMESPACE, PerlBinding, PerlCallableStorage, decode_perl_binding_envelope,
+    };
+    let client = include_str!("../../../../tests/fixtures/perl-bindings/cross-file/client.pl");
+    let module =
+        include_str!("../../../../tests/fixtures/perl-bindings/cross-file/module/Measure.pm");
+    let storage = PerlCallableStorage {
+        package: content_hash(b"Measure"),
+        name: content_hash(b"adjust"),
+    };
+    for (source, is_client) in [(client, true), (module, false)] {
+        let result = output(source);
+        let document = result.document();
+        let claims: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == PERL_BINDING_NAMESPACE)
+            .map(|envelope| (envelope, decode_perl_binding_envelope(envelope).unwrap()))
+            .collect();
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|(_, claim)| claim.binding() == PerlBinding::ModuleContext)
+                .count(),
+            1
+        );
+        if is_client {
+            let (envelope, _) = claims
+                .iter()
+                .find(|(_, claim)| claim.binding() == PerlBinding::Call { storage })
+                .unwrap();
+            let span = envelope.evidence.source.as_ref().unwrap().span();
+            assert_eq!(
+                &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                "Measure::adjust"
+            );
+            assert!(claims.iter().any(|(_, claim)| claim.binding()
+                == PerlBinding::ModuleLoad {
+                    package: storage.package
+                }));
+            assert!(!claims.iter().any(|(_, claim)| matches!(claim.binding(), PerlBinding::Definition { storage: found, .. } if found == storage)));
+        } else {
+            let (_, definition) = claims.iter().find(|(_, claim)| matches!(claim.binding(), PerlBinding::Definition { storage: found, .. } if found == storage)).unwrap();
+            let PerlBinding::Definition { symbol, .. } = definition.binding() else {
+                unreachable!()
+            };
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.id == symbol && entity.canonical_name == "adjust")
+            );
+        }
+        let chunk = rootlight_ir::CanonicalNormalizedFileChunk::new(
+            document,
+            limits().ir(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let rebound = chunk
+            .rebind(
+                GenerationId::from_bytes([88; 20]),
+                limits().ir(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            chunk.digest(),
+            rootlight_ir::CanonicalNormalizedFileChunk::new(
+                &rebound,
+                limits().ir(),
+                &ExtensionSupport::default()
+            )
+            .unwrap()
+            .digest()
+        );
+    }
+}
+
+#[test]
+fn perl_native_external_calls_preserve_invocation_and_load_evidence() {
+    let source = include_str!("../../../../tests/fixtures/perl-bindings/cross-file/client.pl");
+    let result = output(source);
+    let document = result.document();
+    let caller = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "consume")
+        .unwrap();
+    let call = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntactic_text_hash == content_hash(b"Measure::adjust"))
+        .unwrap();
+    assert_eq!(call.role, OccurrenceRole::CallSite);
+    assert_eq!(call.enclosing, Some(caller.id));
+    assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|edge| edge.evidence.source.as_ref() != Some(&call.source))
+    );
+    let module = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntactic_text_hash == content_hash(b"Measure")
+                && site.syntax_kind == "perl.use_module_name.reference"
+        })
+        .unwrap();
+    assert_eq!(module.role, OccurrenceRole::ImportUse);
+    assert!(matches!(module.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+    }));
+}
+
+#[test]
+fn perl_native_external_calls_do_not_promote_bare_terms_or_code_values() {
+    let source = "use Loaded (); no Disabled; require Runtime;\nsub caller { external(); &Other::value; my $code = \\&Other::value; bare_term; }\n";
+    let result = output(source);
+    let document = result.document();
+    let mut sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind.ends_with("function_name.reference")
+                && [b"external".as_slice(), b"&Other::value", b"bare_term"]
+                    .iter()
+                    .any(|name| site.syntactic_text_hash == content_hash(name))
+        })
+        .collect();
+    sites.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(sites.len(), 4);
+    for (site, role) in sites.iter().zip([
+        OccurrenceRole::CallSite,
+        OccurrenceRole::CallSite,
+        OccurrenceRole::Reference,
+        OccurrenceRole::Reference,
+    ]) {
+        assert_eq!(site.role, role);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.evidence.source.as_ref() != Some(&site.source))
+        );
+    }
+    let imports: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::ImportUse)
+        .collect();
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].syntactic_text_hash, content_hash(b"Loaded"));
+    assert_eq!(imports[0].syntax_kind, "perl.use_module_name.reference");
+}
+
+#[test]
+fn perl_native_external_call_evidence_replays_with_fresh_generation() {
+    assert_perl_artifact_replay(include_str!(
+        "../../../../tests/fixtures/perl-bindings/cross-file/client.pl"
+    ));
+}
+
+#[test]
+fn perl_native_glob_writes_do_not_resolve_replaced_callable_bodies() {
+    let source = "package Measure; sub adjust { 7 } sub stable { 19 }\n*adjust = sub { 31 }; adjust(); stable();\n";
+    assert_function_calls(source, &[("adjust", None), ("stable", Some(1))]);
+    let result = output(source);
+    let document = result.document();
+    let call = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::CallSite
+                && site.syntactic_text_hash == content_hash(b"adjust")
+        })
+        .unwrap();
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.source == call.source && gap.detail == "perl-function-target-unavailable"
+    }));
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|relation| { relation.subject != RelationEndpoint::Occurrence(call.id) })
+    );
+}
+
+#[test]
+fn perl_native_glob_mutations_follow_package_storage_not_leaf_spelling() {
+    for written in [
+        "*Measure::adjust",
+        "*main::Measure::adjust",
+        "*{Measure::adjust}",
+    ] {
+        let source = format!(
+            "package Measure; sub adjust {{ 7 }} package main; sub adjust {{ 19 }}\n{written} = sub {{ 31 }}; Measure::adjust(); adjust();\n"
+        );
+        assert_function_calls(&source, &[("Measure::adjust", None), ("adjust", Some(1))]);
+    }
+}
+
+#[test]
+fn perl_native_grouped_local_and_conditional_glob_writes_are_barriers() {
+    for mutation in [
+        "(*adjust) = sub { 31 };",
+        "(*adjust, *other) = (sub { 31 }, sub { 41 });",
+        "{ local *adjust; }",
+        "{ local *adjust = sub { 31 }; }",
+        "if ($condition) { *adjust = sub { 31 }; }",
+        "sub replace { *adjust = sub { 31 }; }",
+    ] {
+        let source = format!("package Measure; sub adjust {{ 7 }} {mutation} adjust();\n");
+        assert_function_calls(&source, &[("adjust", None)]);
+    }
+}
+
+#[test]
+fn perl_native_dynamic_glob_writes_preserve_lexical_callable_identity() {
+    for target in ["*$name", "*{$name}", "*{'Measure::' . $name}"] {
+        let source = format!(
+            "package Measure; sub adjust {{ 7 }} my sub local_value {{ 19 }}\n{target} = sub {{ 31 }}; adjust(); local_value();\n"
+        );
+        assert_function_calls(&source, &[("adjust", None), ("local_value", Some(1))]);
+    }
+}
+
+#[test]
+fn perl_native_glob_reads_and_quoted_writes_do_not_replace_code_storage() {
+    for expression in [
+        "my $glob = *adjust;",
+        "my $glob = \\*adjust;",
+        "my $code = *adjust{CODE};",
+        "my $text = '*adjust = sub { 31 }';",
+        "# *adjust = sub { 31 };\n",
+    ] {
+        let source = format!("package Measure; sub adjust {{ 7 }} {expression} adjust();\n");
+        assert_function_calls(&source, &[("adjust", Some(0))]);
+    }
+}
+
+#[test]
+fn perl_native_glob_write_barriers_replay_from_artifacts() {
+    assert_perl_artifact_replay(
+        "package Measure; sub adjust { 7 } *adjust = sub { 31 }; adjust();\n",
+    );
+}
+
+#[test]
+fn perl_native_replaced_slots_keep_proven_call_and_code_reference_roles() {
+    let source = "sub adjust { 7 } *adjust = sub { 31 }; adjust; &adjust; my $code = \\&adjust;\n";
+    let result = output(source);
+    let document = result.document();
+    let mut sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind.ends_with("function_name.reference"))
+        .collect();
+    sites.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(sites.len(), 3);
+    for (site, role) in sites.iter().zip([
+        OccurrenceRole::CallSite,
+        OccurrenceRole::CallSite,
+        OccurrenceRole::Reference,
+    ]) {
+        assert_eq!(site.role, role);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
 fn assert_function_calls(source: &str, expected: &[(&str, Option<usize>)]) {
     let sites: Vec<_> = expected
         .iter()
@@ -1566,7 +1891,7 @@ fn perl_native_unresolved_uses_keep_scoped_source_evidence() {
     );
     assert_function_calls(source, &[("helper", Some(0))]);
     for kind in [
-        "perl.identifier.reference",
+        "perl.use_module_name.reference",
         "perl.method_application.reference",
     ] {
         let sites: Vec<_> = result

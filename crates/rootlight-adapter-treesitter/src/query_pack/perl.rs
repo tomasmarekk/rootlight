@@ -55,6 +55,9 @@ pub(super) fn retain_capture(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    if role == StructuralRole::Expression && node.kind() == "glob" {
+        return glob_write(node, cancellation);
+    }
     if role == StructuralRole::Reference
         && node.kind() == "coderef_call_expression"
         && direct_coderef_operand(node, source, cancellation)?.is_some()
@@ -177,6 +180,19 @@ pub(super) fn syntax(
     }
     Ok(Some(match node.kind() {
         "source_file" => "perl.file",
+        "package"
+            if role == StructuralRole::Reference
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "use_statement"
+                        && parent.child_by_field_name("module") == Some(node)
+                        && !parent.has_error()
+                        && parent
+                            .child(0)
+                            .is_some_and(|keyword| source.get(keyword.byte_range()) == Some(b"use"))
+                }) =>
+        {
+            "perl.use_module_name"
+        }
         "package"
             if role == StructuralRole::Reference
                 && node.parent().is_some_and(|parent| {
@@ -348,6 +364,19 @@ fn value_expression(
     cancellation: &Cancellation,
 ) -> Result<&'static str, AdapterError> {
     cancellation.check()?;
+    if node.kind() == "glob" && glob_write(node, cancellation)? {
+        return Ok(
+            if !node.has_error()
+                && node
+                    .named_child(0)
+                    .is_some_and(|name| name.kind() == "varname" && name.named_child_count() == 0)
+            {
+                "perl.static_glob_write"
+            } else {
+                "perl.dynamic_glob_write"
+            },
+        );
+    }
     if matches!(node.kind(), "eval_expression" | "goto_expression")
         || (node.kind() == "substitution_regexp"
             && node
@@ -433,6 +462,23 @@ fn value_expression(
         }
         _ => "perl.unknown_code_expression",
     })
+}
+
+fn glob_write(mut node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    while let Some(parent) = node.parent() {
+        cancellation.check()?;
+        match parent.kind() {
+            "assignment_expression" => {
+                return Ok(parent.child_by_field_name("left") == Some(node));
+            }
+            // Localization replaces storage for its dynamic lifetime, including
+            // a declaration without an assignment. List/group wrappers preserve lvalues.
+            "localization_expression" => return Ok(true),
+            "parenthesized_expression" | "list_expression" => node = parent,
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 fn scalar_name(node: Node<'_>) -> bool {

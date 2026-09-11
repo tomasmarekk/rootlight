@@ -12,6 +12,7 @@
 ; Native assignment fields preserve value provenance without treating text as executable syntax.
 (assignment_expression) @scope
 (assignment_expression left: (_) @expression right: (_) @expression)
+(glob) @expression
 (coderef_call_expression) @expression
 (coderef_call_expression . (_) @expression)
 (function_call_expression function: (function (varname (scalar))) @expression)

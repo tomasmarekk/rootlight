@@ -6,12 +6,26 @@ use super::*;
 
 mod functions;
 
+use rootlight_ir::{PerlBinding, PerlCallableStorage};
+
+pub(super) enum ProjectBinding {
+    Definition(u64, PerlCallableStorage),
+    Claim(PerlBinding),
+}
+
+pub(super) struct ProjectEvidence {
+    pub(super) module: SourceSpan,
+    pub(super) source: SourceSpan,
+    pub(super) binding: ProjectBinding,
+}
+
 #[derive(Default)]
 pub(super) struct Plan {
     pub(super) aliases: HashMap<u64, u64>,
     pub(super) references: HashMap<u64, u64>,
     pub(super) calls: BTreeSet<u64>,
     pub(super) owned_functions: BTreeSet<u64>,
+    pub(super) project: Vec<ProjectEvidence>,
 }
 
 struct Context<'a> {
@@ -163,6 +177,34 @@ pub(super) fn resolve(
         limits,
         cancellation,
     )?;
+    for fact in facts {
+        cancellation.check()?;
+        let Some(root) = context.module(fact, cancellation)? else {
+            continue;
+        };
+        let binding = match fact.syntax_kind().as_str() {
+            "perl.file.module" => Some(PerlBinding::ModuleContext),
+            "perl.code_flow_barrier.expression" => Some(PerlBinding::DynamicWrite),
+            "perl.use_module_name.reference" => {
+                match text(source, fact, limits.max_string_bytes)? {
+                    Some(name) => canonical_package(name, cancellation)?.map(|package| {
+                        PerlBinding::ModuleLoad {
+                            package: content_hash(package.as_bytes()),
+                        }
+                    }),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(binding) = binding {
+            plan.project.push(ProjectEvidence {
+                module: context.fact(root)?.span(),
+                source: fact.span(),
+                binding: ProjectBinding::Claim(binding),
+            });
+        }
+    }
     refresh_layout(drafts, strings, limits, cancellation)?;
     for fact in facts {
         cancellation.check()?;
@@ -213,6 +255,29 @@ fn package_owner(draft: &mut EntityDraft, owner: u64) {
     draft.lexical_module = None;
     draft.qualified_prefix = None;
     draft.signature.clear();
+}
+
+pub(super) fn project_candidate(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "perl.file.module"
+            | "perl.function.declaration"
+            | "perl.use_module_name.reference"
+            | "perl.static_glob_write.expression"
+            | "perl.dynamic_glob_write.expression"
+            | "perl.code_flow_barrier.expression"
+    ) || fact
+        .syntax_kind()
+        .as_str()
+        .ends_with("function_name.reference")
+        && fact.syntax_kind().as_str().starts_with("perl.")
+}
+
+fn callable_storage(package: &str, name: &str) -> PerlCallableStorage {
+    PerlCallableStorage {
+        package: content_hash(package.as_bytes()),
+        name: content_hash(name.as_bytes()),
+    }
 }
 
 fn refresh_layout(

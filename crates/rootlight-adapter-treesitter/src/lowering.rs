@@ -973,6 +973,15 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
+        if perl::project_candidate(fact) {
+            extension_candidates = checked_add(extension_candidates, 1)?;
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "perl-project-evidence-resource-limit".len(),
+                limits,
+            )?;
+        }
         if is_signature_capture(fact) {
             extension_candidates = checked_add(extension_candidates, 1)?;
             skipped_candidates = checked_add(skipped_candidates, 1)?;
@@ -1583,6 +1592,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
 
             if let Some(role) = occurrence_role(fact) {
+                let role = if entity_plan.perl.calls.contains(&fact.local_id()) {
+                    OccurrenceRole::CallSite
+                } else {
+                    role
+                };
                 let text = self.text_for_span(fact.span())?;
                 let terminal_call_name = terminal_call_names
                     .get(&fact.local_id())
@@ -1872,6 +1886,86 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     provenance_id,
                 )?;
                 skipped.insert(region.id, region);
+            }
+        }
+
+        // Publish a native-context marker only after every binding claim for that
+        // root has been admitted. A dropped write must never look like no write.
+        let mut project_complete = BTreeMap::new();
+        for item in &entity_plan.perl.project {
+            cancellation.check()?;
+            project_complete.entry(item.module).or_insert(true);
+            let binding = match item.binding {
+                perl::ProjectBinding::Definition(local, storage) => {
+                    rootlight_ir::PerlBinding::Definition {
+                        storage,
+                        symbol: materialized
+                            .get(&local)
+                            .ok_or_else(|| provider_failure("perl-project-definition"))?
+                            .record
+                            .id,
+                    }
+                }
+                perl::ProjectBinding::Claim(rootlight_ir::PerlBinding::ModuleContext) => continue,
+                perl::ProjectBinding::Claim(binding) => binding,
+            };
+            let envelope = rootlight_ir::new_perl_binding_envelope(
+                self.full_source.repository(),
+                self.full_source.generation(),
+                provenance_id,
+                source_for_span(self.full_source, item.source),
+                rootlight_ir::PerlBindingEvidence::new(item.module, binding),
+            )
+            .map_err(|_| provider_failure("perl-project-evidence"))?;
+            if !insert_optional_extension(
+                envelope,
+                &mut extensions,
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )? {
+                project_complete.insert(item.module, false);
+                let gap = skipped_region(
+                    self.full_source,
+                    item.source,
+                    FactDomain::Extensions,
+                    SkippedRegionReason::ResourceLimit,
+                    "perl-project-evidence-resource-limit",
+                    provenance_id,
+                )?;
+                skipped.insert(gap.id, gap);
+            }
+        }
+        for (module, complete) in project_complete {
+            cancellation.check()?;
+            if !complete {
+                continue;
+            }
+            let envelope = rootlight_ir::new_perl_binding_envelope(
+                self.full_source.repository(),
+                self.full_source.generation(),
+                provenance_id,
+                source_for_span(self.full_source, module),
+                rootlight_ir::PerlBindingEvidence::new(
+                    module,
+                    rootlight_ir::PerlBinding::ModuleContext,
+                ),
+            )
+            .map_err(|_| provider_failure("perl-project-context"))?;
+            if !insert_optional_extension(
+                envelope,
+                &mut extensions,
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )? {
+                let gap = skipped_region(
+                    self.full_source,
+                    module,
+                    FactDomain::Extensions,
+                    SkippedRegionReason::ResourceLimit,
+                    "perl-project-evidence-resource-limit",
+                    provenance_id,
+                )?;
+                skipped.insert(gap.id, gap);
             }
         }
 
@@ -4584,9 +4678,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "perl.direct_coderef_function_name.reference"
         | "perl.coderef_application.reference" => Some("perl-function-target-unavailable"),
         "perl.method_application.reference" => Some("perl-method-target-unavailable"),
-        "perl.identifier.reference" | "perl.module_name.reference" => {
-            Some("perl-import-target-unavailable")
-        }
+        "perl.identifier.reference"
+        | "perl.module_name.reference"
+        | "perl.use_module_name.reference" => Some("perl-import-target-unavailable"),
         "perl.subs_import.reference" | "perl.subs_word_list.reference" => {
             Some("perl-import-target-unavailable")
         }
@@ -4622,6 +4716,11 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     }
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "perl.use_module_name.reference" =>
+        {
+            Some(OccurrenceRole::ImportUse)
+        }
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,
         SyntaxFactKind::Occurrence
             if fact.syntax_kind().as_str() == "objective_c.selector.definition_part" =>

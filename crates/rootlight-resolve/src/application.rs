@@ -20,7 +20,7 @@ use rootlight_ir::{
 use crate::{
     AppliedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
     ResolutionEngine, ResolutionError, ResolutionOutcome, ResolutionRule, ResolverFactContext,
-    engine::{CandidateIndex, ResolutionWorkBudget, resolvable_occurrence},
+    engine::{CandidateIndex, ResolutionWorkBudget},
 };
 
 impl ResolutionEngine {
@@ -43,12 +43,14 @@ impl ResolutionEngine {
         let ir_limits = IrLimits::default();
         validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
+        self.invalidate_perl_package_targets(&mut document, context, cancellation)?;
         let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
         let batch = self.resolve(&document, cancellation)?;
         let lookup = CandidateIndex::build(
             &document.files,
             &document.entities,
             &document.provenance,
+            &document.extensions,
             cancellation,
         )?;
         let occurrence_indexes = document
@@ -114,6 +116,7 @@ impl ResolutionEngine {
         let relation_remap =
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
+        reconcile_perl_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
@@ -174,12 +177,14 @@ impl ResolutionEngine {
         let ir_limits = IrLimits::default();
         validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
+        self.invalidate_perl_package_targets(&mut document, context, cancellation)?;
         let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
 
         let lookup = CandidateIndex::build(
             &document.files,
             &document.entities,
             &document.provenance,
+            &document.extensions,
             cancellation,
         )?;
         let mut required = 0_usize;
@@ -231,9 +236,7 @@ impl ResolutionEngine {
 
         for occurrence in &mut document.occurrences {
             cancellation.check()?;
-            if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                || !resolvable_occurrence(occurrence)
-            {
+            if lookup.occurrence_work(occurrence)?.is_none() {
                 continue;
             }
             if selected
@@ -277,10 +280,215 @@ impl ResolutionEngine {
         let relation_remap =
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
+        reconcile_perl_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
         Ok((document, estimate))
     }
+
+    fn invalidate_perl_package_targets(
+        &self,
+        document: &mut NormalizedIrDocument,
+        context: ResolverFactContext,
+        cancellation: &Cancellation,
+    ) -> Result<(), ResolutionError> {
+        if !document
+            .extensions
+            .iter()
+            .any(|record| record.namespace == rootlight_ir::PERL_BINDING_NAMESPACE)
+        {
+            return Ok(());
+        }
+        let lookup = CandidateIndex::build(
+            &document.files,
+            &document.entities,
+            &document.provenance,
+            &document.extensions,
+            cancellation,
+        )?;
+        let producer = resolver_producer(self.limits, &self.policy)?;
+        let mut invalidations = BTreeMap::new();
+        for occurrence in &document.occurrences {
+            cancellation.check()?;
+            let Some(evidence) = lookup.perl.conflicting_write(occurrence) else {
+                continue;
+            };
+            let mut provenance = (*lookup
+                .provenance
+                .get(&occurrence.provenance)
+                .copied()
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?)
+            .clone();
+            let mut contexts = Vec::new();
+            let mut sources = vec![occurrence.source.clone()];
+            let mut parents = Vec::new();
+            for envelope in evidence {
+                let parent = lookup
+                    .provenance
+                    .get(&envelope.provenance)
+                    .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+                contexts.push(parent.build_context.digest());
+                provenance.tier = lower_tier(provenance.tier, parent.tier);
+                sources.push(
+                    envelope
+                        .evidence
+                        .source
+                        .clone()
+                        .ok_or(ResolutionError::UnsupportedIdentityRemap)?,
+                );
+                parents.push(FactRef::Fact(envelope.id));
+            }
+            contexts.sort_unstable();
+            contexts.dedup();
+            let context_bytes: Vec<_> = contexts
+                .iter()
+                .flat_map(|hash| hash.as_bytes().iter().copied())
+                .collect();
+            sources.sort_unstable();
+            sources.dedup();
+            parents.sort_unstable();
+            parents.dedup();
+            provenance.producer_kind = ProducerKind::Rule;
+            provenance.producer = producer.clone();
+            provenance.binary_digest = context.binary_digest();
+            provenance.frontend_version = Some(RESOLVER_PROVIDER_VERSION.to_owned());
+            provenance.build_context = BuildContextIdentity::new(content_hash(&context_bytes));
+            provenance.input_sources = sources.clone();
+            provenance.evidence_sources = sources;
+            provenance.derivation_parents = parents;
+            provenance.rule = Some("perl-package-storage-v1.conflicting_write".to_owned());
+            provenance.id =
+                derive_provenance_record_id(&provenance).map_err(ResolutionError::FactIdentity)?;
+            invalidations.insert(occurrence.id, provenance);
+        }
+        drop(lookup);
+        if invalidations.is_empty() {
+            return Ok(());
+        }
+
+        // Retracting contradicted certainty is mandatory, not a candidate search
+        // that can be skipped when the bounded semantic work allowance runs out.
+        let limits = IrLimits::default();
+        let mut budget = OutputRecordBudget::from_document(document, &limits);
+        let mut known_provenance: BTreeSet<_> =
+            document.provenance.iter().map(|record| record.id).collect();
+        let mut remap = BTreeMap::new();
+        for occurrence in &mut document.occurrences {
+            cancellation.check()?;
+            let Some(provenance) = invalidations.remove(&occurrence.id) else {
+                continue;
+            };
+            if known_provenance.insert(provenance.id) {
+                budget.reserve_provenance()?;
+                document.provenance.push(provenance.clone());
+            }
+            let old = occurrence.id;
+            if let OccurrenceTarget::Resolved { symbol } = occurrence.target {
+                occurrence
+                    .evidence
+                    .derivation
+                    .retain(|parent| *parent != FactRef::Entity(symbol));
+            }
+            occurrence.target = OccurrenceTarget::Unresolved {
+                text_hash: occurrence.syntactic_text_hash,
+            };
+            occurrence.confidence = Confidence::new(0).expect("zero confidence is valid");
+            occurrence.provenance = provenance.id;
+            occurrence.id =
+                derive_occurrence_record_id(occurrence).map_err(ResolutionError::FactIdentity)?;
+            remap.insert(old, occurrence.id);
+            budget.reserve_skipped_region(document.skipped_regions.len(), &limits)?;
+            let mut gap = rootlight_ir::SkippedRegion {
+                id: FactId::from_bytes([0; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                source: occurrence.source.clone(),
+                domain: rootlight_ir::FactDomain::Relations,
+                reason: rootlight_ir::SkippedRegionReason::UnsupportedConstruct,
+                detail: "perl-project-code-storage-write".to_owned(),
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(occurrence.source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            gap.id = rootlight_ir::derive_skipped_region_id(&gap)
+                .map_err(ResolutionError::FactIdentity)?;
+            document.skipped_regions.push(gap);
+        }
+        let mut removed = BTreeMap::new();
+        for relation in &document.relations {
+            cancellation.check()?;
+            if matches!(relation.subject, RelationEndpoint::Occurrence(id) if remap.contains_key(&id))
+                && matches!(
+                    relation.predicate,
+                    RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+                )
+            {
+                removed.insert(relation.id, relation.id);
+            }
+        }
+        document
+            .relations
+            .retain(|relation| !removed.contains_key(&relation.id));
+        ensure_relation_remap_is_safe(document, &removed)?;
+        ensure_nonrelation_remap_is_safe(document, &remap)?;
+        let relations = remap_existing_relations(&mut document.relations, &remap, cancellation)?;
+        ensure_relation_remap_is_safe(document, &relations)?;
+        validate_ir_document(document, &limits, &ExtensionSupport::default())
+            .map_err(ResolutionError::InvalidDocument)?;
+        Ok(())
+    }
+}
+
+fn reconcile_perl_target_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let mut producers = BTreeSet::new();
+    for provenance in &document.provenance {
+        cancellation.check()?;
+        if provenance.rule.as_deref() == Some("perl-package-storage-v1.indexed_snapshot") {
+            producers.insert(provenance.id);
+        }
+    }
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let mut sources = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        cancellation.check()?;
+        if producers.contains(&occurrence.provenance)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        {
+            sources.insert(occurrence.source.clone(), occurrence.provenance);
+        }
+    }
+    let mut remap = BTreeMap::new();
+    for gap in &mut document.skipped_regions {
+        cancellation.check()?;
+        if gap.detail == "perl-function-target-unavailable"
+            && let Some(&provenance) = sources.get(&gap.source)
+        {
+            let old = gap.id;
+            // The declaration is now known, but static package matching did not
+            // execute the loader or establish its runtime CODE value.
+            gap.detail = "perl-runtime-code-value-unverified".to_owned();
+            gap.provenance = provenance;
+            gap.id = rootlight_ir::derive_skipped_region_id(gap)
+                .map_err(ResolutionError::FactIdentity)?;
+            remap.insert(old, gap.id);
+        }
+    }
+    ensure_nonrelation_remap_is_safe(document, &remap)?;
+    if document
+        .relations
+        .iter()
+        .any(|relation| contains_remapped_fact(&relation.evidence.derivation, &remap))
+    {
+        return Err(ResolutionError::UnsupportedIdentityRemap);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -393,6 +601,25 @@ impl OutputRecordBudget {
         Ok(())
     }
 
+    fn reserve_skipped_region(
+        &mut self,
+        current: usize,
+        limits: &IrLimits,
+    ) -> Result<(), ResolutionError> {
+        let observed = current.saturating_add(1);
+        if observed > limits.max_skipped_regions {
+            return Err(ResolutionError::InvalidDocument(
+                IrDocumentValidationError::CollectionLimit {
+                    collection: "skipped_regions",
+                    observed,
+                    limit: limits.max_skipped_regions,
+                },
+            ));
+        }
+        self.total_records = self.reserve_total()?;
+        Ok(())
+    }
+
     fn reserve_total(&self) -> Result<usize, ResolutionError> {
         let total_records = self.total_records.saturating_add(1);
         if total_records > self.max_total_records {
@@ -467,6 +694,21 @@ fn build_provenance(
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
         context_digests.push(entity_provenance.build_context.digest());
     }
+    if matches!(
+        decision.explanation.rule,
+        ResolutionRule::PerlPackageStorage
+    ) {
+        for envelope in lookup
+            .perl
+            .evidence(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?
+        {
+            derivation_parents.push(FactRef::Fact(envelope.id));
+            if let Some(source) = &envelope.evidence.source {
+                sources.push(source.clone());
+            }
+        }
+    }
     sources.sort_unstable();
     sources.dedup();
     derivation_parents.sort_unstable();
@@ -484,6 +726,7 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
         ResolutionRule::LexicalScope => "scope-v1.lexical_scope",
         ResolutionRule::Import => "scope-v1.import",
     };

@@ -9,6 +9,7 @@ mod application;
 mod engine;
 mod foreign;
 mod model;
+mod perl;
 mod quality;
 
 pub use engine::ResolutionEngine;

@@ -605,6 +605,115 @@ fn perl_definitions_and_headers_cross_real_process_boundaries() {
 }
 
 #[test]
+fn perl_project_package_calls_preserve_distinct_targets_and_exact_mcp_sources() {
+    for with_write in [false, true] {
+        let client = if with_write {
+            include_str!("../../../tests/fixtures/perl-bindings/cross-file-local-write/client.pl")
+        } else {
+            include_str!("../../../tests/fixtures/perl-bindings/cross-file/client.pl")
+        };
+        let module =
+            include_str!("../../../tests/fixtures/perl-bindings/cross-file/module/Measure.pm");
+        let mut sources = vec![("client.pl", client), ("module/Measure.pm", module)];
+        if with_write {
+            sources.push((
+                "module/Rebind.pm",
+                include_str!(
+                    "../../../tests/fixtures/perl-bindings/cross-file-local-write/module/Rebind.pm"
+                ),
+            ));
+        }
+        let mut fixture = RetrievalFixture::spawn_with_sources(&sources, FixtureLayout::Data);
+        let mut symbols = Vec::new();
+        for (path, written) in [
+            ("module/Measure.pm", "Measure::adjust"),
+            ("client.pl", "adjust"),
+        ] {
+            let located = fixture.standalone(
+                "package-target",
+                "code.locate",
+                json!({"query": "adjust", "search_modes": ["exact"], "languages": ["perl"],
+                "scope": {"paths": [path]}, "response_profile": "evidence"}),
+            );
+            assert_success(&located, "code.locate");
+            let matches: Vec<_> = located["result"]["structuredContent"]["data"]["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["kind"] == "function")
+                .collect();
+            assert_eq!(matches.len(), 1, "{located:#}");
+            let symbol = matches[0]["symbol_id"].clone();
+            let generation = matches[0]["source_ref"]["generation"].clone();
+            symbols.push(symbol.clone());
+            let arguments = json!({"symbol_ids": [symbol], "relations": ["calls"],
+            "direction": "inbound", "include_candidates": false, "response_profile": "evidence"});
+            let response =
+                fixture.standalone("package-callers", "symbol.relationships", arguments.clone());
+            assert_success(&response, "symbol.relationships");
+            let batch = fixture.batch(
+                "package-callers-batch",
+                "symbol.relationships",
+                arguments,
+                "evidence",
+            );
+            assert_standalone_batch_parity(&response, &batch, "symbol.relationships");
+            let output = &response["result"]["structuredContent"];
+            assert_common_read_contract(output, &fixture.repository_id);
+            let expected = usize::from(!with_write || path != "client.pl");
+            assert_eq!(
+                output["data"]["totals"]["total_edges"], expected,
+                "{output:#}"
+            );
+            assert_eq!(output["data"]["totals"]["returned_edges"], expected);
+            // A static package-storage link does not prove runtime module loading
+            // or the absence of every dynamic caller.
+            assert_eq!(output["data"]["totals"]["exact"], false);
+            assert!(
+                output["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| { warning["code"] == "negative_claims_inconclusive" })
+            );
+            let groups = output["data"]["groups"].as_array().unwrap();
+            if expected == 0 {
+                assert!(
+                    groups
+                        .iter()
+                        .all(|group| group["items"].as_array().unwrap().is_empty())
+                );
+                continue;
+            }
+            assert_eq!(groups.len(), 1);
+            let items = groups[0]["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            let references = items[0]["source_refs"].as_array().unwrap();
+            assert_eq!(references.len(), 1);
+            let reference = &references[0];
+            assert_eq!(reference["generation"], generation);
+            let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+            assert_eq!(client.get(start..end), Some(written));
+            let read = fixture.standalone(
+                "package-call-source",
+                "source.read",
+                json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                "context_lines_after": 0, "response_profile": "evidence"}),
+            );
+            assert_success(&read, "source.read");
+            let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+            assert_eq!(chunk["content"], written);
+            for key in ["repository", "generation", "content_hash", "span"] {
+                assert_eq!(chunk["source_ref"][key], reference[key]);
+            }
+        }
+        assert_ne!(symbols[0], symbols[1]);
+        fixture.finish();
+    }
+}
+
+#[test]
 fn perl_extensionless_definitions_cross_real_process_boundaries() {
     for source in [
         include_str!("../../../tests/fixtures/perl-bindings/shebang-probe"),
@@ -3057,14 +3166,20 @@ impl RetrievalFixture {
     }
 
     fn spawn_with_layout(extra_source: Option<(&str, &str)>, layout: FixtureLayout) -> Self {
+        Self::spawn_with_sources(extra_source.as_slice(), layout)
+    }
+
+    fn spawn_with_sources(extra_sources: &[(&str, &str)], layout: FixtureLayout) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
             .expect("fixture source directory is created");
         fs::create_dir_all(repository_root.join("tests"))
             .expect("fixture test directory is created");
-        if let Some((path, source)) = extra_source {
-            fs::write(repository_root.join(path), source).expect("extra source fixture");
+        for (path, source) in extra_sources {
+            let path = repository_root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).expect("extra source parent");
+            fs::write(path, source).expect("extra source fixture");
         }
         fs::write(
             repository_root.join("Cargo.toml"),

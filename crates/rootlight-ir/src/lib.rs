@@ -17,6 +17,7 @@
 mod identity;
 mod lexical;
 mod normalized;
+mod perl_binding;
 mod rebind;
 mod source_projection;
 mod validation;
@@ -64,6 +65,11 @@ pub use normalized::{
     decode_normalized_ir_document_messagepack_reader_with_checkpoint,
     decode_normalized_ir_document_with_checkpoint, decode_skipped_region_with_checkpoint,
     decode_source_mapping_record_with_checkpoint,
+};
+pub use perl_binding::{
+    MAX_PERL_BINDING_PAYLOAD_BYTES, PERL_BINDING_NAMESPACE, PERL_BINDING_VERSION, PerlBinding,
+    PerlBindingError, PerlBindingEvidence, PerlCallableStorage, decode_perl_binding_envelope,
+    new_perl_binding_envelope,
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,

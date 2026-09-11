@@ -25,6 +25,9 @@ use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
 const SOURCE_BYTES: u64 = 64;
 
+#[path = "scope_resolution/perl_binding.rs"]
+mod perl_binding;
+
 #[test]
 fn embedded_code_uses_its_language_and_does_not_bind_other_markdown_examples() {
     for language in ["rust", "python", "javascript"] {
