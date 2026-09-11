@@ -88,6 +88,99 @@ fn every_preregistered_prompt_drives_the_intended_consumer_plan() {
 }
 
 #[test]
+fn direct_and_guided_function_lookups_use_the_same_kind_filter() {
+    let (_, responses) = mpsc::channel();
+    let mut mcp = McpProcess {
+        child: None,
+        input: None,
+        responses,
+        reader: None,
+    };
+    let receipt = || IndexReceipt {
+        repository_id: "repository".to_owned(),
+        generation_id: "generation".to_owned(),
+    };
+    let symbol = || LocatedSymbol {
+        symbol_id: "symbol".to_owned(),
+        source_ref: json!({"generation": "generation"}),
+    };
+    let adapter = RootlightProcessAdapter {
+        mcp: &mut mcp,
+        first: receipt(),
+        second: receipt(),
+        consumer: receipt(),
+        entry: symbol(),
+        helper: symbol(),
+        unused: symbol(),
+        added: symbol(),
+        transform: symbol(),
+        gateway: symbol(),
+        worker: symbol(),
+        cycle_alpha: symbol(),
+        cycle_beta: symbol(),
+        unit_test: symbol(),
+        consumer_migration: symbol(),
+        consumer_helper: symbol(),
+        workflow_observations: Vec::new(),
+    };
+    let protocol = preregistered_trajectory_protocol("ab".repeat(32))
+        .expect("fixture trajectory protocol is valid");
+    for seed in [17, 43] {
+        let mut guided_lookups = 0;
+        for workflow in &protocol.workflows {
+            let task_sha256 = protocol
+                .task_digest(&workflow.workflow_id)
+                .expect("fixture task digest is available");
+            let task = ConsumerTask::from_execution(TrajectoryExecutionInput {
+                workflow,
+                task_sha256: &task_sha256,
+                fixture_sha256: &protocol.fixture_sha256,
+                attempt_index: 0,
+                seed,
+                bounds: protocol.bounds,
+                stopping: protocol.stopping,
+                retry: &protocol.retry,
+            });
+            let calls = adapter.tool_calls(&task, workflow.family);
+            task.assert_rootlight_plan(&calls);
+            for (tool, arguments) in &calls {
+                guided_lookups += assert_function_lookup_filter(tool, arguments);
+            }
+        }
+        assert_eq!(guided_lookups, 6);
+        let direct_lookups: usize = adapter
+            .direct_tool_calls(&fixture_consumer_task(seed))
+            .iter()
+            .map(|(tool, arguments)| assert_function_lookup_filter(tool, arguments))
+            .sum();
+        assert_eq!(direct_lookups, 1);
+    }
+}
+
+fn assert_function_lookup_filter(tool: &str, arguments: &Value) -> usize {
+    match tool {
+        "code.locate" => {
+            assert_eq!(arguments["kinds"], json!(["function"]));
+            assert_eq!(arguments["search_modes"], json!(["exact"]));
+            assert_eq!(arguments["max_results"], 20);
+            1
+        }
+        "query.batch" => arguments["operations"]
+            .as_array()
+            .expect("batch plan contains operations")
+            .iter()
+            .map(|operation| {
+                assert_function_lookup_filter(
+                    operation["tool"].as_str().expect("operation names a tool"),
+                    &operation["arguments"],
+                )
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[test]
 fn consumer_answer_contains_only_observed_evidence() {
     let task = fixture_consumer_task(17);
     let observed = ObservableCall {
@@ -326,6 +419,7 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
     let consumer_fixture_sha256 = fixture_digest(&consumer_root);
     let state_dir = isolated.path().join("state");
     let runtime_dir = isolated.path().join("runtime");
+    configure_history_retention(&state_dir, &runtime_dir);
 
     let mut daemon = DaemonProcess::spawn(&state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
@@ -2464,6 +2558,7 @@ impl RootlightProcessAdapter<'_> {
                     "generation": generation(),
                     "query": primary.query,
                     "search_modes": ["exact"],
+                    "kinds": ["function"],
                     "max_results": 20
                 }),
             ),
@@ -2519,6 +2614,7 @@ impl RootlightProcessAdapter<'_> {
                         "generation": generation(),
                         "query": primary.query,
                         "search_modes": ["exact"],
+                        "kinds": ["function"],
                         "max_results": 20
                     }),
                 ),
@@ -2558,6 +2654,7 @@ impl RootlightProcessAdapter<'_> {
                         "generation": generation(),
                         "query": primary.query,
                         "search_modes": ["exact"],
+                        "kinds": ["function"],
                         "max_results": 20
                     }),
                 ),
@@ -2690,6 +2787,7 @@ impl RootlightProcessAdapter<'_> {
                         "generation": generation(),
                         "query": "submit_budget_request",
                         "search_modes": ["exact"],
+                        "kinds": ["function"],
                         "max_results": 20
                     }),
                 ),
@@ -2809,6 +2907,7 @@ impl RootlightProcessAdapter<'_> {
                             "arguments": {
                                 "query": primary.query,
                                 "search_modes": ["exact"],
+                                "kinds": ["function"],
                                 "max_results": 20
                             }
                         },
@@ -2857,6 +2956,7 @@ impl RootlightProcessAdapter<'_> {
                         "generation": generation(),
                         "query": "budget_entry",
                         "search_modes": ["exact"],
+                        "kinds": ["function"],
                         "max_results": 20
                     }),
                 ),
@@ -2867,6 +2967,7 @@ impl RootlightProcessAdapter<'_> {
                         "generation": self.consumer.generation_id,
                         "query": "migrate_budget_api",
                         "search_modes": ["exact"],
+                        "kinds": ["function"],
                         "max_results": 20
                     }),
                 ),
@@ -3494,6 +3595,27 @@ fn copy_regular_tree(source: &Path, destination: &Path) {
             .expect("fixture parent directory is created");
         fs::copy(source.join(&relative), target).expect("fixture file is copied");
     }
+}
+
+fn configure_history_retention(state_dir: &Path, runtime_dir: &Path) {
+    // History comparisons pin setup generations for the entire suite, not just
+    // the most recent publications retained by the default storage policy.
+    let paths =
+        rootlight_runtime::RuntimePaths::new(state_dir.to_path_buf(), runtime_dir.to_path_buf())
+            .expect("isolated process paths are valid");
+    paths
+        .prepare_owner()
+        .expect("isolated process paths become owner-private");
+    let mut output = rootlight_runtime::PrivateOutputFile::create(&paths.user_config_path())
+        .expect("private history retention config creates");
+    output
+        .write_all(b"version = \"1.2\"\n[storage]\nretained_generations = 8\n")
+        .expect("history retention config writes");
+    output.commit().expect("history retention config commits");
+    paths
+        .read_user_config(256 * 1024)
+        .expect("history retention config is secure")
+        .expect("history retention config exists");
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> IndexReceipt {
