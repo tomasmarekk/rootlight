@@ -4315,7 +4315,9 @@ impl WatchedRepository {
     fn discovered(fingerprint: ContentHash, now: Instant) -> Self {
         Self {
             fingerprint,
-            dirty: false,
+            // The first filesystem sample may already include edits made after
+            // indexing. Reconcile it before treating the baseline as current.
+            dirty: true,
             next_attempt: now,
         }
     }
@@ -17324,7 +17326,7 @@ mod tests {
         let second = ContentHash::from_bytes([2; 32]);
         let mut watched = WatchedRepository::discovered(first, started);
         let first_due = watched.next_attempt;
-        assert!(!watched.dirty);
+        assert!(watched.dirty);
         assert_eq!(first_due, started);
 
         watched.observe(
@@ -17475,6 +17477,17 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn watcher_automatically_reconciles_add_edit_and_delete() {
+        assert_watcher_initial_reconciliation(false);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn watcher_reconciles_edits_before_its_first_observation() {
+        assert_watcher_initial_reconciliation(true);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn assert_watcher_initial_reconciliation(edit_before_start: bool) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -17491,6 +17504,10 @@ mod tests {
         let initial = service
             .index_rust_fixture(fixture.path(), &cancellation)
             .expect("initial generation publishes");
+        let early_edit = "pub fn answer() -> u32 { 2 }\n";
+        if edit_before_start {
+            fs::write(&source, early_edit).expect("source changes before watcher startup");
+        }
         let service = Arc::new(RwLock::new(service));
 
         let state = Arc::new(DaemonState::starting());
@@ -17549,12 +17566,71 @@ mod tests {
         );
 
         wait_for_watcher_status(&control, HealthStatus::Healthy);
-        assert!(
-            journal
-                .repository_operation_contexts()
-                .expect("repository contexts remain readable")
-                .is_empty(),
-            "first observation establishes the watcher baseline without a redundant index"
+        if edit_before_start {
+            stopping.store(true, Ordering::Release);
+            let _ = watcher_cancellation.cancel(CancellationReason::Shutdown);
+            watcher
+                .join()
+                .expect("watcher thread joins")
+                .expect("watcher exits cleanly");
+            actor.join().expect("journal actor joins");
+            let service = service.read().expect("service remains available");
+            let generation = service
+                .active_generation_for(initial.repository)
+                .expect("repository retains an active generation");
+            assert_ne!(
+                generation, initial.generation,
+                "first observation must reconcile changes after indexing"
+            );
+            let located = service
+                .code_locate_with_entity_filters_and_budget(
+                    generation,
+                    "src/lib.rs".to_owned(),
+                    LocateMode::Prefix,
+                    Vec::new(),
+                    vec!["src/lib.rs".to_owned()],
+                    Some(vec!["file".to_owned()]),
+                    1,
+                    0,
+                    FirstSliceBudget::default(),
+                    &cancellation,
+                )
+                .expect("edited file locates in the published generation");
+            assert_eq!(located.data.hits.len(), 1);
+            let source_ref = located.data.hits[0]
+                .source
+                .clone()
+                .expect("edited source remains indexed");
+            let read = service
+                .source_read(generation, vec![source_ref], &cancellation)
+                .expect("edited generation source is readable");
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, early_edit.as_bytes());
+            return;
+        }
+        wait_for_watcher_operations(&journal, initial.repository, 1);
+        let contexts = journal
+            .repository_operation_contexts()
+            .expect("repository contexts remain readable");
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].published_generation, Some(initial.generation));
+        let evidence = contexts[0]
+            .evidence
+            .as_ref()
+            .expect("initial reconciliation retains work evidence");
+        assert_eq!(
+            evidence.build_strategy,
+            RepositoryBuildStrategy::RetainedGeneration
+        );
+        assert_eq!(evidence.changed_files, 0);
+        assert_eq!(evidence.rebuilt_files, 0);
+        assert_eq!(evidence.rebuilt_facts, 0);
+        assert_eq!(
+            service
+                .read()
+                .expect("service remains available")
+                .active_generation_for(initial.repository),
+            Some(initial.generation)
         );
 
         fs::write(&source, "pub fn answer() -> u64 { 200 }\n").expect("source edit writes");
@@ -17567,7 +17643,7 @@ mod tests {
         fs::remove_file(&added_source).expect("added source deletes");
         let deleted = wait_for_watcher_generation(&service, initial.repository, added);
         assert_ne!(deleted, added);
-        wait_for_watcher_operations(&journal, initial.repository, 3);
+        wait_for_watcher_operations(&journal, initial.repository, 4);
         assert_eq!(control.health().watcher_status, HealthStatus::Healthy);
 
         stopping.store(true, Ordering::Release);
