@@ -3,6 +3,7 @@
 mod process_support;
 
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs,
     io::{Read, Write},
@@ -481,6 +482,15 @@ fn read_generation_source(mcp: &mut McpProcess, repository_id: &str, generation:
 
 #[test]
 fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls() {
+    assert_repository_lifecycle(false);
+}
+
+#[test]
+fn repository_lifecycle_preserves_session_history_with_background_noop() {
+    assert_repository_lifecycle(true);
+}
+
+fn assert_repository_lifecycle(observe_background_noop: bool) {
     let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("repository");
     write_repository(&repository_root, 1);
@@ -514,6 +524,9 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
         first["result"]["structuredContent"]["data"]["state"],
         "published"
     );
+
+    let background_operation = observe_background_noop
+        .then(|| wait_for_background_noop(&mut mcp, &repository_id, &first_generation));
 
     write_repository(&repository_root, 2);
     let second = index_repository(&mut mcp, "index-second", &repository_root);
@@ -592,11 +605,37 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
     let operations = structured["data"]["operations"]
         .as_array()
         .expect("repo.status returns requested operation details");
-    assert_eq!(operations.len(), 2);
-    assert_eq!(operations[0]["operation_id"], second_operation);
-    assert_eq!(operations[0]["state"], "published");
-    assert_eq!(operations[1]["operation_id"], first_operation);
-    assert_eq!(operations[1]["state"], "published");
+    if let Some(background_operation) = background_operation {
+        let background = operations
+            .iter()
+            .find(|operation| operation["operation_id"] == background_operation)
+            .expect("observed background operation remains in history");
+        assert_eq!(background["owned_by_session"], false);
+        assert_eq!(background["state"], "published");
+    }
+    let mut operation_ids = BTreeSet::new();
+    for operation in operations {
+        let operation_id = operation["operation_id"]
+            .as_str()
+            .expect("history operation has an identity");
+        assert!(
+            operation_ids.insert(operation_id),
+            "history duplicates an operation"
+        );
+        assert_eq!(operation["kind"], "repository_index");
+        assert!(operation["owned_by_session"].is_boolean());
+    }
+    // Repository history also contains watcher work. The two caller receipts
+    // must remain exact and ordered within this MCP session's operations.
+    let session_operations: Vec<_> = operations
+        .iter()
+        .filter(|operation| operation["owned_by_session"] == true)
+        .collect();
+    assert_eq!(session_operations.len(), 2);
+    assert_eq!(session_operations[0]["operation_id"], second_operation);
+    assert_eq!(session_operations[0]["state"], "published");
+    assert_eq!(session_operations[1]["operation_id"], first_operation);
+    assert_eq!(session_operations[1]["state"], "published");
 
     let stale = mcp.call(
         "status-stale",
@@ -638,6 +677,44 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
     assert_public_error(&unsupported_budget, "UNSUPPORTED_CAPABILITY");
 
     mcp.finish();
+}
+
+fn wait_for_background_noop(mcp: &mut McpProcess, repository_id: &str, generation: &str) -> String {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        let status = mcp.call(
+            "observe-background-noop",
+            "repo.status",
+            json!({"repository": {"repository_id": repository_id}, "include_operations": true}),
+        );
+        assert_success(&status, "repo.status");
+        for operation in status["result"]["structuredContent"]["data"]["operations"]
+            .as_array()
+            .expect("repository operations are listed")
+        {
+            if operation["owned_by_session"] != false || operation["state"] != "published" {
+                continue;
+            }
+            let operation_id = operation["operation_id"]
+                .as_str()
+                .expect("background operation has an identity");
+            let detail = mcp.call(
+                "background-noop-evidence",
+                "operation.status",
+                json!({"operation_id": operation_id}),
+            );
+            assert_success(&detail, "operation.status");
+            let data = &detail["result"]["structuredContent"]["data"];
+            assert_eq!(data["published_generation"], generation);
+            assert_retained_generation(data["incremental"].clone());
+            return operation_id.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background no-op was not observed"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
