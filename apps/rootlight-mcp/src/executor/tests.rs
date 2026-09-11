@@ -906,6 +906,7 @@ async fn analytic_request_options_reach_the_port_unchanged() {
             .expect("fixture timeout is strictly positive"),
     );
     let request = CodeLocatePortRequest {
+        kinds: None,
         repository: repository(),
         generation: ClientGenerationSelector::Active,
         query: "transport options".to_owned(),
@@ -4003,6 +4004,7 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
 #[test]
 fn code_locate_request_debug_redacts_repository_relative_paths() {
     let request = CodeLocatePortRequest {
+        kinds: None,
         repository: repository(),
         generation: ClientGenerationSelector::Active,
         query: "publish".to_owned(),
@@ -4019,6 +4021,174 @@ fn code_locate_request_debug_redacts_repository_relative_paths() {
     assert!(!debug.contains("customer"));
     assert!(!debug.contains("billing"));
     assert!(debug.contains("path_prefix_count: 1"));
+}
+
+#[test]
+fn locate_kind_groups_and_cursor_bindings_match_public_output_semantics() {
+    let mut raw_union = BTreeSet::new();
+    for label in [
+        "file",
+        "module",
+        "type",
+        "function",
+        "method",
+        "field",
+        "constant",
+        "variable",
+        "import",
+        "export",
+        "configuration",
+        "route",
+        "external_symbol",
+        "style_rule",
+        "keyframes",
+        "markup_element",
+        "markup_attribute",
+        "database_object",
+        "event",
+        "error_declaration",
+        "modifier",
+        "document_section",
+        "link_definition",
+    ] {
+        let public: EntityKind = serde_json::from_value(json!(label)).unwrap();
+        for raw in raw_entity_kinds(public) {
+            assert_eq!(entity_kind(raw).unwrap(), public);
+            assert!(
+                raw_union.insert((*raw).to_owned()),
+                "raw kind belongs to exactly one public group"
+            );
+        }
+    }
+    assert!(raw_union.len() <= 64);
+    assert!(raw_union.iter().all(|kind| kind.len() <= 128));
+    let base = json!({"repository": {"repository_id": repository()}, "query": "answer"});
+    let context = |kinds: Option<Value>| {
+        let mut arguments = base.clone();
+        if let Some(kinds) = kinds {
+            arguments["kinds"] = kinds;
+        }
+        pagination_cursor_context(
+            VerticalTool::CodeLocate,
+            arguments,
+            ExposureProfile::Developer,
+            7,
+        )
+    };
+    let contexts = [
+        context(None),
+        context(Some(json!([]))),
+        context(Some(json!(["file"]))),
+        context(Some(json!(["function"]))),
+    ];
+    for (i, left) in contexts.iter().enumerate() {
+        for right in contexts.iter().skip(i + 1) {
+            assert_ne!(left.query_fingerprint, right.query_fingerprint);
+            assert_ne!(left.plan_fingerprint, right.plan_fingerprint);
+        }
+    }
+    assert_eq!(
+        context(Some(json!(["file", "function"]))),
+        context(Some(json!(["function", "file"])))
+    );
+}
+
+#[tokio::test]
+async fn locate_kind_filter_is_forwarded_and_rejects_wrong_backend_kinds() {
+    let mut response = locate_response();
+    response.result.hits[0].kind = "closure".to_owned();
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+    let output: CodeLocateOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish",
+                "kinds": ["function"]
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("supported function filter");
+    };
+    assert_eq!(output.data.matches[0].kind, EntityKind::Function);
+    {
+        let calls = harness.calls.lock().unwrap();
+        let ObservedCall::CodeLocate(request) = &calls[0] else {
+            panic!("locate forwarded");
+        };
+        assert_eq!(
+            request.kinds(),
+            Some(["closure".to_owned(), "function".to_owned()].as_slice())
+        );
+    }
+    for kinds in [json!([]), json!(["function"])] {
+        let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+        assert!(
+            execute(
+                &harness.executor,
+                VerticalTool::CodeLocate,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "query": "publish",
+                    "kinds": kinds
+                }),
+            )
+            .await
+            .is_err()
+        );
+    }
+    let mut response = locate_response();
+    response.result.hits.clear();
+    response.result.truncated = true;
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+    assert!(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish",
+                "kinds": []
+            }),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn locate_cursor_rejects_changed_or_removed_kind_filter_before_port_call() {
+    let key = [0x31; 32];
+    let signing_key = CursorSigningKey::deterministic(key).unwrap();
+    let base = json!({"repository": {"repository_id": repository()}, "query": "publish", "kinds": ["function"]});
+    let cursor = issue_pagination_cursor(
+        VerticalTool::CodeLocate,
+        base.clone(),
+        ExposureProfile::Developer,
+        signing_key,
+        now_unix_ms(),
+        false,
+    );
+    for replacement in [None, Some(json!([])), Some(json!(["file"]))] {
+        let harness = Harness::with_cursor_key(FakeOutcome::CodeLocate(Ok(locate_response())), key);
+        let mut arguments = base.clone();
+        arguments.as_object_mut().unwrap().remove("kinds");
+        if let Some(kinds) = replacement {
+            arguments["kinds"] = kinds;
+        }
+        arguments["cursor"] = json!(cursor);
+        assert!(
+            execute(&harness.executor, VerticalTool::CodeLocate, arguments)
+                .await
+                .is_err()
+        );
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+        assert_eq!(harness.prepare_count.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[tokio::test]
@@ -5848,7 +6018,7 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
             "operations": [
                 {"id": "unsupported", "tool": "code.locate", "arguments": {
                     "query": "publish",
-                    "kinds": ["function"]
+                    "min_confidence": 500
                 }}
             ]
         }),
@@ -5858,7 +6028,7 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
     assert_capability_rejection(
         &error,
         ErrorCode::UnsupportedCapability,
-        "operations.0.arguments.kinds.0",
+        "operations.0.arguments.min_confidence",
         "unsupported_field",
     );
     assert_eq!(
@@ -6141,7 +6311,7 @@ async fn query_batch_root_gate_enforces_parent_budget_dimensions() {
                         "tool": "code.locate",
                         "arguments": {
                             "query": "publish",
-                            "kinds": ["function"]
+                            "min_confidence": 500
                         },
                         "local_budget": {"timeout_ms": 50}
                     }]
@@ -6156,7 +6326,7 @@ async fn query_batch_root_gate_enforces_parent_budget_dimensions() {
     assert_eq!(timeout_result["isError"], true);
     assert_eq!(
         timeout_result["structuredContent"]["error"]["details"]["field_path"]["value"],
-        "operations.0.arguments.kinds.0",
+        "operations.0.arguments.min_confidence",
         "the implemented timeout descendant must reach child preflight"
     );
     assert_eq!(timeout_calls.load(Ordering::Relaxed), 0);
@@ -10436,7 +10606,7 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "kinds": ["function"]}),
+            json!({"repository": {"repository_id": repository()}, "query": "x", "min_confidence": 500}),
         ),
         (
             VerticalTool::CodeLocate,
@@ -11838,6 +12008,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         NormalizedDelta,
         [
             "generation",
+            "kinds",
             "languages",
             "max_results",
             "query",
@@ -12172,7 +12343,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "f49d0068bd1f73ebe3077cf169389d244ea4c1b2f093646ec463b341ad9a3c77",
+        "e8556286f567cb03de08585f16ed42d25026dda421f27c451690db94cf20e70d",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -12237,8 +12408,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [219, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
-    assert_eq!(categorized.len(), 500);
+    assert_eq!(counts, [221, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
+    assert_eq!(categorized.len(), 502);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -12473,6 +12644,7 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ),
         ("generation", json!(alternate_generation()), true),
         ("languages", json!(["rust"]), true),
+        ("kinds", json!(["function"]), true),
         (
             "scope",
             json!({"paths": [format!("src/scope-{seed}")]}),
@@ -12835,6 +13007,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "generation" => json!(format!("{:?}", request.generation())),
                 "query" => json!(request.query()),
                 "languages" => json!(request.languages()),
+                "kinds" => json!(request.kinds()),
                 "scope" => json!({"paths": request.path_prefixes()}),
                 "search_modes" => json!(format!("{:?}", request.mode())),
                 "max_results" => json!(request.maximum_results()),

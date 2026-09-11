@@ -11155,14 +11155,22 @@ fn code_locate(
     };
     let languages = parse_code_locate_languages(request.languages)?;
     let path_prefixes = parse_code_locate_paths(request.path_prefixes)?;
+    let kinds = request.kind_filter.map(|filter| filter.kinds);
+    if kinds
+        .as_ref()
+        .is_some_and(|kinds| !rootlight_protocol::valid_code_locate_kind_filter(kinds))
+    {
+        return Err(invalid_argument());
+    }
     let coverage_languages = languages.clone();
     let response = service
-        .code_locate_with_filters_and_budget(
+        .code_locate_with_entity_filters_and_budget(
             generation.generation,
             request.query,
             mode,
             languages,
             path_prefixes,
+            kinds,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             service_budget(context),
@@ -16123,6 +16131,68 @@ mod tests {
 
     static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
 
+    #[test]
+    fn locate_wire_kind_filters_preserve_source_identity_and_candidate_counts() {
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn selected_answer() -> u32 { 7 }\n",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .unwrap();
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        for (kinds, expected) in [
+            (None, 2),
+            (Some(vec![]), 0),
+            (Some(vec!["file".to_owned()]), 1),
+            (Some(vec!["function".to_owned()]), 1),
+            (Some(vec!["file".to_owned(), "function".to_owned()]), 2),
+        ] {
+            let result = code_locate(
+                &service,
+                daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Active(true)),
+                    }),
+                    query: "selected_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 10,
+                    kind_filter: kinds
+                        .clone()
+                        .map(|kinds| daemon::CodeLocateKindFilter { kinds }),
+                    ..Default::default()
+                },
+                &context,
+            )
+            .unwrap();
+            assert_eq!(result.hits.len(), expected);
+            assert_eq!(result.matched_candidates, u64::try_from(expected).unwrap());
+            for hit in result.hits {
+                assert!(kinds.as_ref().is_none_or(|kinds| kinds.contains(&hit.kind)));
+                assert_eq!(hit.path, "lib.rs");
+                assert!(hit.source.is_some());
+            }
+        }
+    }
+
     fn assert_located_symbol_and_file(hits: &[daemon::FirstSliceLocateHit]) {
         assert_eq!(hits.len(), 2);
         assert!(hits[0].symbol.is_some(), "the exact symbol ranks first");
@@ -20883,6 +20953,7 @@ mod tests {
             code_locate(
                 &service,
                 daemon::CodeLocateRequest {
+                    kind_filter: None,
                     schema_version: Some(schema_version()),
                     repository: Some(repository_to_wire(repository.repository)),
                     generation: Some(daemon::GenerationSelector {
@@ -20909,6 +20980,7 @@ mod tests {
             code_locate(
                 &service,
                 daemon::CodeLocateRequest {
+                    kind_filter: None,
                     schema_version: Some(schema_version()),
                     repository: Some(repository_to_wire(repository.repository)),
                     generation: Some(daemon::GenerationSelector {
@@ -21627,6 +21699,7 @@ mod tests {
             &daemon,
             || {
                 FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                    kind_filter: None,
                     schema_version: Some(schema_version()),
                     repository: Some(repository_to_wire(receipt.repository)),
                     generation: Some(daemon::GenerationSelector {
@@ -21970,6 +22043,7 @@ mod tests {
             &daemon,
             || {
                 FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                    kind_filter: None,
                     schema_version: Some(schema_version()),
                     repository: Some(repository_to_wire(receipt.repository)),
                     generation: Some(daemon::GenerationSelector {
@@ -26993,6 +27067,7 @@ mod tests {
         let locate = execute(
             &daemon,
             FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                kind_filter: None,
                 schema_version: Some(schema_version()),
                 repository: Some(repository),
                 generation: Some(daemon::GenerationSelector {
@@ -27127,6 +27202,7 @@ mod tests {
         let locate = execute(
             &daemon,
             FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                kind_filter: None,
                 schema_version: Some(schema_version()),
                 repository: Some(repository),
                 generation: Some(daemon::GenerationSelector {

@@ -3836,7 +3836,7 @@ mod tests {
             exclusions.is_empty(),
             "review any new generated-rule exclusion: {exclusions:?}"
         );
-        assert_eq!((declared, covered, exclusions.len()), (48, 48, 0));
+        assert_eq!((declared, covered, exclusions.len()), (47, 47, 0));
     }
 
     #[tokio::test]
@@ -4256,16 +4256,16 @@ mod tests {
             observed,
             [
                 (
-                    231_313,
-                    "c35b9d3071eabf1a472543ce32086ffddf024472b485959960e3b21909728e9b".to_owned(),
+                    231_181,
+                    "fa5ffd714dafefb142a952035080c2a6e43d8db09414cf3204c316382b4c8251".to_owned(),
                 ),
                 (
-                    500_910,
-                    "c0ff9b47af83b2c048bcbdbfc03faa3e1461dcfca283bcfa96c4e8460ded0075".to_owned(),
+                    500_778,
+                    "6fb9c2121780adec9fd7c27686387e66d5df0ce311196023f8663826389e8778".to_owned(),
                 ),
                 (
-                    704_269,
-                    "3c4eb5d388418007f4b2b089fa51a676ef0403b3c667149f8529ea952e287995".to_owned(),
+                    704_137,
+                    "ab9ed731fcdc174aff492eb53ebffe79f73fcd6224a98823a96c51a84d0926dd".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

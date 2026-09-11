@@ -837,6 +837,11 @@ message FirstSliceCompleteness {
   repeated FirstSliceContinuationGuidance guidance = 4;
 }
 
+// Presence distinguishes an unrestricted lookup from an empty kind union.
+message CodeLocateKindFilter {
+  repeated string kinds = 1;
+}
+
 // Requests one bounded generation-pinned lexical lookup.
 message CodeLocateRequest {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -848,6 +853,7 @@ message CodeLocateRequest {
   uint64 page_offset = 7;
   repeated string languages = 8;
   repeated string path_prefixes = 9;
+  CodeLocateKindFilter kind_filter = 10;
 }
 
 // One typed lexical lookup result.

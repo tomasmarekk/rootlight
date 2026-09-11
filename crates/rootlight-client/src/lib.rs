@@ -4267,15 +4267,57 @@ impl Client {
         page_offset: u64,
         options: RequestOptions,
     ) -> Result<CodeLocate, ClientError> {
+        self.code_locate_async_with_entity_filters_and_options(
+            repository,
+            generation,
+            query,
+            mode,
+            languages,
+            path_prefixes,
+            None,
+            maximum_results,
+            page_offset,
+            options,
+        )
+        .await
+    }
+
+    /// Locates generation-pinned entities using canonical raw kind, language, and path unions.
+    ///
+    /// `None` leaves kinds unrestricted; an empty explicit union matches none.
+    /// Explicit kinds require protocol 1.18 and are never sent to an older daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid filters, unavailable protocol support,
+    /// transport failure, timeout, or an invalid response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "bounded filters extend the existing asynchronous lookup contract"
+    )]
+    pub async fn code_locate_async_with_entity_filters_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        languages: &[String],
+        path_prefixes: &[String],
+        kinds: Option<&[String]>,
+        maximum_results: u32,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<CodeLocate, ClientError> {
         match self
             .request_async_with_options(
-                build_code_locate_request(
+                build_code_locate_request_with_kinds(
                     repository,
                     generation,
                     query,
                     mode,
                     languages,
                     path_prefixes,
+                    kinds,
                     maximum_results,
                     page_offset,
                 )?,
@@ -4283,13 +4325,25 @@ impl Client {
             )
             .await?
         {
-            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
-                response,
-                repository,
-                generation,
-                maximum_results,
-                page_offset,
-            ),
+            daemon::response_envelope::Response::CodeLocate(response) => {
+                let response = parse_code_locate(
+                    response,
+                    repository,
+                    generation,
+                    maximum_results,
+                    page_offset,
+                )?;
+                if kinds.is_some_and(|kinds| {
+                    response
+                        .hits
+                        .iter()
+                        .any(|hit| kinds.binary_search(&hit.kind).is_err())
+                        || (kinds.is_empty() && response.matched_candidates != 0)
+                }) {
+                    return Err(ClientError::InvalidResponseCorrelation);
+                }
+                Ok(response)
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -7962,6 +8016,9 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::GraphProjectionPage(_)
         | daemon::request_envelope::Request::GraphProjectionRelease(_) => 10,
         daemon::request_envelope::Request::RepositoryCatalogMutation(_) => 11,
+        daemon::request_envelope::Request::CodeLocate(request) if request.kind_filter.is_some() => {
+            rootlight_protocol::CODE_LOCATE_KIND_FILTER_PROTOCOL_MINOR
+        }
         daemon::request_envelope::Request::CodeLocate(request) if !request.languages.is_empty() => {
             8
         }
@@ -8817,11 +8874,40 @@ fn build_code_locate_request(
     maximum_results: u32,
     page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
+    build_code_locate_request_with_kinds(
+        repository,
+        generation,
+        query,
+        mode,
+        languages,
+        path_prefixes,
+        None,
+        maximum_results,
+        page_offset,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the wire request carries independent repository, query, filter, and page dimensions"
+)]
+fn build_code_locate_request_with_kinds(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    query: &str,
+    mode: LocateMode,
+    languages: &[String],
+    path_prefixes: &[String],
+    kinds: Option<&[String]>,
+    maximum_results: u32,
+    page_offset: u64,
+) -> Result<daemon::request_envelope::Request, ClientError> {
     if query.is_empty()
         || query.len() > 2048
         || !(1..=200).contains(&maximum_results)
         || !valid_language_filter(languages)
         || !valid_path_filter(path_prefixes)
+        || kinds.is_some_and(|kinds| !rootlight_protocol::valid_code_locate_kind_filter(kinds))
     {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
@@ -8836,6 +8922,9 @@ fn build_code_locate_request(
             page_offset,
             languages: languages.to_vec(),
             path_prefixes: path_prefixes.to_vec(),
+            kind_filter: kinds.map(|kinds| daemon::CodeLocateKindFilter {
+                kinds: kinds.to_vec(),
+            }),
         },
     ))
 }
@@ -17202,6 +17291,7 @@ mod tests {
         assert!(ensure_request_supported(&first_slice, 5).is_ok());
         let language_filtered =
             daemon::request_envelope::Request::CodeLocate(daemon::CodeLocateRequest {
+                kind_filter: None,
                 languages: vec!["rust".to_owned()],
                 ..daemon::CodeLocateRequest::default()
             });
@@ -17318,6 +17408,56 @@ mod tests {
         assert!(matches!(
             RepositoryCatalogPageRequest::new(1, None, None, None, Some(after)),
             Err(ClientError::InvalidRepositoryCatalogRequest)
+        ));
+    }
+
+    #[test]
+    fn locate_kind_requests_preserve_presence_and_reject_older_daemons() {
+        for kinds in [
+            None,
+            Some(vec![]),
+            Some(vec!["file".to_owned(), "function".to_owned()]),
+        ] {
+            let request = build_code_locate_request_with_kinds(
+                test_repository(),
+                GenerationSelector::Active,
+                "answer",
+                LocateMode::Exact,
+                &["rust".to_owned()],
+                &[],
+                kinds.as_deref(),
+                1,
+                0,
+            )
+            .unwrap();
+            let daemon::request_envelope::Request::CodeLocate(wire) = &request else {
+                panic!("locate request");
+            };
+            assert_eq!(
+                wire.kind_filter.as_ref().map(|filter| &filter.kinds),
+                kinds.as_ref()
+            );
+            for minor in 8..18 {
+                assert_eq!(
+                    ensure_request_supported(&request, minor).is_ok(),
+                    kinds.is_none()
+                );
+            }
+            assert!(ensure_request_supported(&request, 18).is_ok());
+        }
+        assert!(matches!(
+            build_code_locate_request_with_kinds(
+                test_repository(),
+                GenerationSelector::Active,
+                "answer",
+                LocateMode::Exact,
+                &[],
+                &[],
+                Some(&["Function".to_owned()]),
+                1,
+                0
+            ),
+            Err(ClientError::InvalidFirstSliceRequest)
         ));
     }
 

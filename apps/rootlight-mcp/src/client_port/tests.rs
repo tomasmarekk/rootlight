@@ -77,6 +77,7 @@ enum Call {
         mode: LocateMode,
         languages: Vec<String>,
         path_prefixes: Vec<String>,
+        kinds: Option<Vec<String>>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -379,6 +380,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         mode: LocateMode,
         languages: Vec<String>,
         path_prefixes: Vec<String>,
+        kinds: Option<Vec<String>>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -390,6 +392,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             mode,
             languages,
             path_prefixes,
+            kinds,
             maximum_results,
             page_offset,
             options,
@@ -1079,6 +1082,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             "repository": {"repository_id": repository()},
             "generation": "active",
             "query": "answer",
+            "kinds": ["function"],
             "search_modes": ["exact"],
             "languages": ["Rust"],
             "max_results": 7
@@ -1193,11 +1197,13 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             mode: LocateMode::Exact,
             languages,
             maximum_results: 7,
+            kinds,
             options,
             ..
         } if *observed == repository()
             && query == "answer"
             && languages == &["rust".to_owned()]
+            && kinds.as_deref() == Some(["closure".to_owned(), "function".to_owned()].as_slice())
             && options.timeout().is_some()
             && options.effective_budget().is_some()
     ));

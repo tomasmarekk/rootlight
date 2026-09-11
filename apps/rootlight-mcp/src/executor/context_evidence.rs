@@ -729,6 +729,7 @@ where
     let maximum_results = u32::try_from(per_query).unwrap_or(u32::MAX);
     for (query, mode) in queries {
         let request = CodeLocatePortRequest {
+            kinds: None,
             repository: invocation.repository(),
             generation: client::GenerationSelector::Generation(invocation.generation()),
             query,

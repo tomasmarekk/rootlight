@@ -1956,6 +1956,106 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
 }
 
 #[test]
+fn locate_kind_unions_preserve_paging_and_sources_across_processes() {
+    let mut fixture = RetrievalFixture::spawn_with_layout(None, FixtureLayout::Data);
+    for (case, kinds, expected) in [
+        ("unrestricted", None, vec!["file", "function"]),
+        ("empty", Some(json!([])), vec![]),
+        ("file", Some(json!(["file"])), vec!["file"]),
+        ("function", Some(json!(["function"])), vec!["function"]),
+        (
+            "union",
+            Some(json!(["function", "file"])),
+            vec!["file", "function"],
+        ),
+    ] {
+        let mut arguments = json!({
+            "query": "matrix_target_alpha",
+            "search_modes": ["exact"],
+            "languages": ["rust"],
+            "scope": {"paths": ["src"]},
+            "response_profile": "evidence",
+            "max_results": 1
+        });
+        if let Some(kinds) = kinds {
+            arguments["kinds"] = kinds;
+        }
+        let mut observed = Vec::new();
+        for page in 0..3 {
+            let response = fixture.standalone(
+                &format!("kind-{case}-{page}"),
+                "code.locate",
+                arguments.clone(),
+            );
+            assert_success(&response, "code.locate");
+            let output = &response["result"]["structuredContent"];
+            assert_common_read_contract(output, &fixture.repository_id);
+            let matches = output["data"]["matches"]
+                .as_array()
+                .expect("locate matches");
+            assert_eq!(matches.len(), usize::from(!expected.is_empty()));
+            for matched in matches {
+                assert_eq!(matched["path"], "src/lib.rs");
+                let kind = matched["kind"].as_str().expect("entity kind");
+                assert!(expected.contains(&kind));
+                assert_eq!(matched["symbol_id"].is_string(), kind != "file");
+                observed.push(kind.to_owned());
+                let reference = &matched["source_ref"];
+                assert_eq!(reference["span"]["file"], matched["file_id"]);
+                assert_eq!(
+                    reference["repository"],
+                    output["repository"]["repository_id"]
+                );
+                assert_eq!(
+                    reference["generation"],
+                    output["generation"]["generation_id"]
+                );
+                let read = fixture.standalone(
+                    &format!("kind-source-{case}-{page}"),
+                    "source.read",
+                    json!({
+                        "references": [{"source_ref": reference}],
+                        "response_profile": "evidence"
+                    }),
+                );
+                assert_success(&read, "source.read");
+                let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+                for field in ["repository", "generation", "content_hash", "span"] {
+                    assert_eq!(chunk["source_ref"][field], reference[field]);
+                }
+                let start =
+                    usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+                let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+                assert_eq!(chunk["content"].as_str(), RETRIEVAL_SOURCE.get(start..end));
+            }
+            if output["next_cursor"].is_null() {
+                assert_eq!(output["truncated"], false);
+                break;
+            }
+            assert_eq!(output["truncated"], true);
+            assert!(!matches.is_empty());
+            arguments["cursor"] = output["next_cursor"].clone();
+            if case == "union" && page == 0 {
+                let mut replay = arguments.clone();
+                replay["kinds"] = json!(["file"]);
+                let rejected = fixture.standalone("kind-cursor-replay", "code.locate", replay);
+                assert_public_error(&rejected, "INVALID_CURSOR");
+            }
+        }
+        observed.sort();
+        assert_eq!(observed, expected);
+    }
+    let arguments = json!({
+        "query": "matrix_target_alpha", "search_modes": ["exact"],
+        "kinds": ["function"], "response_profile": "compact"
+    });
+    let standalone = fixture.standalone("kind-standalone", "code.locate", arguments.clone());
+    let batch = fixture.batch("kind-batch", "code.locate", arguments, "compact");
+    assert_standalone_batch_parity(&standalone, &batch, "code.locate");
+    fixture.finish();
+}
+
+#[test]
 fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     let mut fixture = RetrievalFixture::spawn();
     supported_profiles_preserve_standalone_and_batch_semantics(&mut fixture);
@@ -2678,11 +2778,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
     assert_public_error(&file_selector, "INVALID_ARGUMENT");
 
     let cases = [
-        (
-            "locate-kinds",
-            "code.locate",
-            json!({"repository": repository(), "query": "matrix", "kinds": ["function"]}),
-        ),
         (
             "locate-scope",
             "code.locate",

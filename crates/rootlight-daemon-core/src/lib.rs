@@ -7673,12 +7673,18 @@ async fn dispatch_first_slice(
         | FirstSliceIpcRequest::GraphProjectionPage(_)
         | FirstSliceIpcRequest::GraphProjectionRelease(_) => 10,
         FirstSliceIpcRequest::RepositoryCatalogMutation(_) => 11,
+        FirstSliceIpcRequest::CodeLocate(request) if request.kind_filter.is_some() => {
+            rootlight_protocol::CODE_LOCATE_KIND_FILTER_PROTOCOL_MINOR
+        }
         FirstSliceIpcRequest::CodeLocate(request) if !request.languages.is_empty() => 8,
         FirstSliceIpcRequest::RepositoryCatalogPage(_) => 6,
         _ => 5,
     };
     if context.selected_protocol_minor < required_protocol_minor {
         let message = match required_protocol_minor {
+            rootlight_protocol::CODE_LOCATE_KIND_FILTER_PROTOCOL_MINOR => {
+                "code locate kind filters need protocol minor eighteen"
+            }
             16 => "clean repository rebuilds need protocol minor sixteen",
             11 => "repository catalog mutations need protocol minor eleven",
             10 => "graph projections need protocol minor ten",
@@ -7918,6 +7924,13 @@ fn first_slice_response_correlates_for_minor(
                     request.repository.as_ref(),
                     request.generation.as_ref(),
                 )
+                && request.kind_filter.as_ref().is_none_or(|filter| {
+                    response
+                        .hits
+                        .iter()
+                        .all(|hit| filter.kinds.binary_search(&hit.kind).is_ok())
+                        && (!filter.kinds.is_empty() || response.matched_candidates == 0)
+                })
                 && response.hits.len()
                     <= usize::try_from(request.maximum_results).unwrap_or(usize::MAX)
                 && u64::try_from(response.hits.len()).is_ok_and(|returned_results| {
@@ -9731,6 +9744,9 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 || request.query.len() > 2048
                 || !(1..=200).contains(&request.maximum_results)
                 || !valid_code_locate_languages(&request.languages)
+                || request.kind_filter.as_ref().is_some_and(|filter| {
+                    !rootlight_protocol::valid_code_locate_kind_filter(&filter.kinds)
+                })
                 || !matches!(
                     daemon::FirstSliceLocateMode::try_from(request.mode),
                     Ok(daemon::FirstSliceLocateMode::FirstSliceLocateExact
@@ -14085,6 +14101,7 @@ mod tests {
         .expect("budget validates")
         .expect("budget is present");
         let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            kind_filter: None,
             schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
             repository: Some(common::RepositoryId {
                 value: vec![92; 16],
@@ -19261,6 +19278,7 @@ mod tests {
     fn code_locate_language_filter_validation_is_canonical_and_bounded() {
         let request = |languages| {
             FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                kind_filter: None,
                 schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
                 repository: Some(common::RepositoryId { value: vec![1; 16] }),
                 generation: Some(daemon::GenerationSelector {
@@ -19285,6 +19303,31 @@ mod tests {
             vec!["rust".to_owned(), "rust".to_owned()],
         ] {
             assert!(validate_first_slice_request(&request(languages)).is_err());
+        }
+    }
+
+    #[test]
+    fn code_locate_kind_filter_validation_rejects_noncanonical_unions() {
+        for (kinds, valid) in [
+            (vec![], true),
+            (vec!["file".to_owned(), "function".to_owned()], true),
+            (vec!["Function".to_owned()], false),
+            (vec!["function".to_owned(), "file".to_owned()], false),
+            (vec!["file".to_owned(); 2], false),
+        ] {
+            let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                repository: Some(common::RepositoryId { value: vec![1; 16] }),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Active(true)),
+                }),
+                query: "answer".to_owned(),
+                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                maximum_results: 1,
+                kind_filter: Some(daemon::CodeLocateKindFilter { kinds }),
+                ..Default::default()
+            });
+            assert_eq!(validate_first_slice_request(&request).is_ok(), valid);
         }
     }
 
@@ -19435,6 +19478,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn code_locate_language_filter_requires_negotiated_minor_eight() {
         let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            kind_filter: None,
             schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
             repository: Some(common::RepositoryId { value: vec![1; 16] }),
             generation: Some(daemon::GenerationSelector {
@@ -19488,6 +19532,50 @@ mod tests {
                 ..
             }) if code == common::ErrorCode::UnsupportedCapability as i32
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_locate_kind_filter_requires_minor_eighteen_even_with_languages() {
+        for kinds in [vec![], vec!["function".to_owned()]] {
+            for minor in [8, 17, 18] {
+                let response = dispatch_first_slice(
+                    &UnavailableFirstSliceIpcHandler,
+                    FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                        kind_filter: Some(daemon::CodeLocateKindFilter {
+                            kinds: kinds.clone(),
+                        }),
+                        languages: vec!["rust".to_owned()],
+                        schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                        repository: Some(common::RepositoryId { value: vec![1; 16] }),
+                        generation: Some(daemon::GenerationSelector {
+                            selector: Some(daemon::generation_selector::Selector::Active(true)),
+                        }),
+                        query: "answer".to_owned(),
+                        mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                        maximum_results: 1,
+                        ..Default::default()
+                    }),
+                    FirstSliceIpcContext {
+                        client_instance_id: ClientInstanceId::SYSTEM,
+                        selected_protocol_minor: minor,
+                        cancellation: Cancellation::new(),
+                        deadline: Instant::now() + Duration::from_secs(1),
+                        effective_budget: None,
+                        index_admission: None,
+                    },
+                )
+                .await;
+                let daemon::response_envelope::Response::Error(error) = response else {
+                    panic!("unavailable handler returns error");
+                };
+                let expected = if minor < 18 {
+                    common::ErrorCode::ProtocolMismatch
+                } else {
+                    common::ErrorCode::UnsupportedCapability
+                };
+                assert_eq!(error.code, expected as i32);
+            }
+        }
     }
 
     #[test]
@@ -20535,6 +20623,7 @@ mod tests {
         let first_source = correlation_source(&repository, &generation, 4, 1, 2);
         let second_source = correlation_source(&repository, &generation, 5, 4, 5);
         let locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            kind_filter: None,
             schema_version: schema,
             repository: Some(repository.clone()),
             generation: Some(daemon::GenerationSelector {
@@ -20577,6 +20666,25 @@ mod tests {
             &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
         ));
         let mut incomplete_without_truncation = locate_response.clone();
+        for (kinds, correlates) in [
+            (vec![], false),
+            (vec!["file".to_owned()], false),
+            (vec!["function".to_owned()], true),
+            (vec!["file".to_owned(), "function".to_owned()], true),
+        ] {
+            let mut filtered_request = locate_request.clone();
+            let FirstSliceIpcRequest::CodeLocate(filtered) = &mut filtered_request else {
+                unreachable!("fixture request is code.locate");
+            };
+            filtered.kind_filter = Some(daemon::CodeLocateKindFilter { kinds });
+            assert_eq!(
+                first_slice_response_correlates(
+                    &filtered_request,
+                    &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
+                ),
+                correlates
+            );
+        }
         incomplete_without_truncation.matched_candidates = 3;
         assert!(!first_slice_response_correlates(
             &locate_request,
@@ -20643,6 +20751,7 @@ mod tests {
             &FirstSliceIpcResponse::CodeLocate(malformed_optional_symbol)
         ));
         let pinned_locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            kind_filter: None,
             schema_version: schema,
             repository: Some(repository.clone()),
             generation: Some(daemon::GenerationSelector {

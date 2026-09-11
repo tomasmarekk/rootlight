@@ -28,9 +28,32 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 17;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 18;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.17";
+pub const PROTOCOL_VERSION: &str = "1.18";
+/// First daemon protocol that applies explicit locate kind unions before paging.
+pub const CODE_LOCATE_KIND_FILTER_PROTOCOL_MINOR: u32 = 18;
+/// Maximum raw kind labels admitted in one locate union.
+pub const MAX_CODE_LOCATE_KINDS: usize = 64;
+/// Maximum bytes in one raw locate kind label.
+pub const MAX_CODE_LOCATE_KIND_BYTES: usize = 128;
+
+/// Checks canonical sorted unique raw kind labels at the transport boundary.
+///
+/// An empty union is valid and matches nothing; an absent union is represented
+/// separately by the optional wire message. Unknown canonical labels are valid.
+#[must_use]
+pub fn valid_code_locate_kind_filter(kinds: &[String]) -> bool {
+    kinds.len() <= MAX_CODE_LOCATE_KINDS
+        && kinds.windows(2).all(|pair| pair[0] < pair[1])
+        && kinds.iter().all(|kind| {
+            !kind.is_empty()
+                && kind.len() <= MAX_CODE_LOCATE_KIND_BYTES
+                && kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
+}
 /// Schema version for a complete effective first-slice request budget.
 pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
 /// Hard transport admission maximum for logical rows.
@@ -87,6 +110,48 @@ mod tests {
             ]
         );
         assert!(descriptor.file.iter().all(|file| file.service.is_empty()));
+    }
+
+    #[test]
+    fn locate_kind_filter_presence_round_trips_without_changing_legacy_wire_bytes() {
+        use generated::daemon::v1::{CodeLocateKindFilter, CodeLocateRequest};
+        let absent = CodeLocateRequest::default();
+        assert!(absent.encode_to_vec().is_empty());
+        for kinds in [vec![], vec!["file".to_owned(), "function".to_owned()]] {
+            let present = CodeLocateRequest {
+                kind_filter: Some(CodeLocateKindFilter { kinds }),
+                ..CodeLocateRequest::default()
+            };
+            assert_ne!(present.encode_to_vec(), absent.encode_to_vec());
+            assert_eq!(
+                CodeLocateRequest::decode(present.encode_to_vec().as_slice()).unwrap(),
+                present
+            );
+        }
+    }
+
+    #[test]
+    fn locate_kind_filter_admission_is_canonical_and_bounded() {
+        assert!(valid_code_locate_kind_filter(&[]));
+        assert!(valid_code_locate_kind_filter(&[
+            "file".to_owned(),
+            "future_kind".to_owned()
+        ]));
+        for kinds in [
+            vec!["".to_owned()],
+            vec!["Function".to_owned()],
+            vec!["a\n".to_owned()],
+            vec!["méthod".to_owned()],
+            vec!["a".repeat(129)],
+            vec!["file".to_owned(); 2],
+            vec!["method".to_owned(), "file".to_owned()],
+            (1..=65).map(|n| "a".repeat(n)).collect(),
+        ] {
+            assert!(!valid_code_locate_kind_filter(&kinds));
+        }
+        assert!(valid_code_locate_kind_filter(
+            &(1..=64).map(|n| "a".repeat(n)).collect::<Vec<_>>()
+        ));
     }
 
     #[test]

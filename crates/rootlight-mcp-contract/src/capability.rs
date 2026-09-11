@@ -600,7 +600,10 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
-    unsupported("kinds", "kind filtering is not served"),
+    implemented(
+        "kinds",
+        "filters entity kind unions before candidate counting and pagination",
+    ),
     implemented(
         "scope",
         "selects bounded path scope while unsupported scope dimensions remain typed",

@@ -576,6 +576,7 @@ pub struct CodeLocatePortRequest {
     mode: LocateMode,
     languages: Vec<String>,
     path_prefixes: Vec<String>,
+    kinds: Option<Vec<String>>,
     maximum_results: u32,
     page_offset: u64,
 }
@@ -615,6 +616,12 @@ impl CodeLocatePortRequest {
     #[must_use]
     pub fn path_prefixes(&self) -> &[String] {
         &self.path_prefixes
+    }
+
+    /// Returns the canonical raw kind union; absent and empty remain distinct.
+    #[must_use]
+    pub fn kinds(&self) -> Option<&[String]> {
+        self.kinds.as_deref()
     }
 
     /// Returns the effective result ceiling.
@@ -3541,6 +3548,13 @@ fn code_locate_cursor_context(
         request_hasher.update(b"\0path-prefixes\0");
         for path in &request.path_prefixes {
             request_hasher.update(path.as_bytes());
+            request_hasher.update(&[0]);
+        }
+    }
+    if let Some(kinds) = &request.kinds {
+        request_hasher.update(b"\0kinds\0");
+        for kind in kinds {
+            request_hasher.update(kind.as_bytes());
             request_hasher.update(&[0]);
         }
     }
@@ -6930,7 +6944,7 @@ fn normalize_code_locate(
     invalid_arguments: &PublicError,
 ) -> Result<CodeLocatePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if input.kinds.is_some() || input.related_to.is_some() || input.min_confidence.is_some() {
+    if input.related_to.is_some() || input.min_confidence.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mode = locate_mode(input.search_modes.as_ref(), unsupported)?;
@@ -6950,6 +6964,15 @@ fn normalize_code_locate(
         mode,
         languages,
         path_prefixes,
+        kinds: input.kinds.map(|kinds| {
+            kinds
+                .into_iter()
+                .flat_map(raw_entity_kinds)
+                .map(|kind| (*kind).to_owned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        }),
         maximum_results: u32::from(maximum_results),
         page_offset: 0,
     })
@@ -8052,6 +8075,8 @@ fn map_code_locate(
         > usize::try_from(request.maximum_results)
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
         || response.result.matched_candidates < returned_end
+        || (request.kinds.as_ref().is_some_and(Vec::is_empty)
+            && response.result.matched_candidates != 0)
         || (!response.result.truncated && response.result.matched_candidates != returned_end)
         || next_page_offset.is_some_and(|next| {
             !response.result.truncated
@@ -8084,6 +8109,10 @@ fn map_code_locate(
     let mut seen_targets = BTreeSet::new();
     for hit in response.result.hits {
         if hit.identifier.is_empty()
+            || request
+                .kinds
+                .as_ref()
+                .is_some_and(|kinds| kinds.binary_search(&hit.kind).is_err())
             || hit.identifier.len() > 1_024
             || !safe_repository_relative_path(&hit.path)
             || !safe_label(&hit.language, 64)
@@ -8782,6 +8811,44 @@ const fn coverage_status(status: client::CoverageStatus) -> rootlight_ir::Covera
         client::CoverageStatus::Bounded => rootlight_ir::CoverageStatus::Bounded,
         client::CoverageStatus::Sampled => rootlight_ir::CoverageStatus::Sampled,
         client::CoverageStatus::Unknown => rootlight_ir::CoverageStatus::Unknown,
+    }
+}
+
+fn raw_entity_kinds(kind: EntityKind) -> &'static [&'static str] {
+    match kind {
+        EntityKind::File => &["file"],
+        EntityKind::Module => &["module", "namespace"],
+        EntityKind::Type => &[
+            "class",
+            "struct",
+            "enum",
+            "union",
+            "type_alias",
+            "trait",
+            "interface",
+            "protocol",
+            "type_parameter",
+        ],
+        EntityKind::Function => &["function", "closure"],
+        EntityKind::Method => &["method", "constructor"],
+        EntityKind::Field => &["field", "property"],
+        EntityKind::Constant => &["constant"],
+        EntityKind::Variable => &["variable", "parameter"],
+        EntityKind::Import => &["import"],
+        EntityKind::Export => &["export"],
+        EntityKind::Configuration => &["configuration_key"],
+        EntityKind::Route => &["route"],
+        EntityKind::ExternalSymbol => &["external_symbol"],
+        EntityKind::StyleRule => &["style_rule"],
+        EntityKind::Keyframes => &["keyframes"],
+        EntityKind::MarkupElement => &["markup_element"],
+        EntityKind::MarkupAttribute => &["markup_attribute"],
+        EntityKind::DatabaseObject => &["database_object"],
+        EntityKind::Event => &["event"],
+        EntityKind::ErrorDeclaration => &["error_declaration"],
+        EntityKind::Modifier => &["modifier"],
+        EntityKind::DocumentSection => &["document_section"],
+        EntityKind::LinkDefinition => &["link_definition"],
     }
 }
 

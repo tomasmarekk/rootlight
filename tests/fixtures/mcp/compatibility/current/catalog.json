@@ -6642,12 +6642,6 @@
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "kinds",
-                "status": "unsupported_stable_error",
-                "summary": "kind filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope.packages",
                 "status": "unsupported_stable_error",
                 "summary": "package scope filtering is not served"

@@ -1304,6 +1304,13 @@ pub struct FirstSliceCompleteness {
     #[allow(missing_docs)]
     pub guidance: ::prost::alloc::vec::Vec<i32>,
 }
+/// Presence distinguishes an unrestricted lookup from an empty kind union.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CodeLocateKindFilter {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub kinds: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// Requests one bounded generation-pinned lexical lookup.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CodeLocateRequest {
@@ -1336,6 +1343,9 @@ pub struct CodeLocateRequest {
     #[prost(string, repeated, tag = "9")]
     #[allow(missing_docs)]
     pub path_prefixes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub kind_filter: ::core::option::Option<CodeLocateKindFilter>,
 }
 /// One typed lexical lookup result.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
