@@ -11,6 +11,10 @@ exactly from the published grammar with Tree-sitter CLI 0.25.10, ABI 15.
 
 The scanner changes are in `src/scanner.c`:
 
+- Numeric brace-range probes use explicit ASCII digit bounds. Lexer lookahead
+  is a Unicode scalar, outside the byte-or-EOF domain accepted by C `isdigit`;
+  passing a non-ASCII scalar to that function could read beyond its locale table.
+  Neither Unicode digits nor a scalar's truncated low byte become a numeric range.
 - Empty restores erase all scanner fields. Shorter restores release removed
   heredocs while retaining reusable buffers for surviving entries.
 - State lengths and delimiter terminators are checked before allocation or

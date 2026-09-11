@@ -227,6 +227,35 @@ fn fixtures() -> Vec<String> {
 }
 
 #[test]
+fn unicode_brace_candidates_preserve_following_functions_and_parser_reuse() {
+    let mut reused = parser();
+    for value in ["\u{10ffff}", "\u{10031}", "🦀", "1🦀", "١", "9", "123"] {
+        for candidate in [format!("{{{value}..2}}"), format!("{{1..{value}}}")] {
+            let source = format!("printf '%s\\n' {candidate}\nafter() {{ :; }}\n");
+            let tree = reused.parse(&source, None).expect("brace candidate parses");
+            assert!(
+                !tree.root_node().has_error(),
+                "{source:?}: {}",
+                tree.root_node().to_sexp()
+            );
+            assert_after_function(tree.root_node(), &source);
+            assert_eq!(
+                fingerprint(tree.root_node())
+                    .iter()
+                    .any(|(kind, ..)| kind == "brace_expression"),
+                value.bytes().all(|byte| byte.is_ascii_digit()),
+                "{source:?}"
+            );
+            let fresh = parser().parse(&source, None).expect("fresh parse");
+            assert_eq!(
+                fingerprint(tree.root_node()),
+                fingerprint(fresh.root_node())
+            );
+        }
+    }
+}
+
+#[test]
 fn unicode_and_prefix_lines_preserve_exact_following_definitions() {
     for source in fixtures() {
         let tree = parser().parse(&source, None).expect("parse");

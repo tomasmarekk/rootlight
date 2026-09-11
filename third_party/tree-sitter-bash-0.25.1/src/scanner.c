@@ -2,7 +2,6 @@
 #include "tree_sitter/parser.h"
 
 #include <assert.h>
-#include <ctype.h>
 #include <string.h>
 #include <wctype.h>
 
@@ -1257,7 +1256,8 @@ brace_start:
         advance(lexer);
         lexer->mark_end(lexer);
 
-        while (isdigit(lexer->lookahead)) {
+        // Lookahead is a Unicode scalar, but numeric brace ranges require ASCII digits.
+        while (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
             advance(lexer);
         }
 
@@ -1271,7 +1271,7 @@ brace_start:
         }
         advance(lexer);
 
-        while (isdigit(lexer->lookahead)) {
+        while (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
             advance(lexer);
         }
 
