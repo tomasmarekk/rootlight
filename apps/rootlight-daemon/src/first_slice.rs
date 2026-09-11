@@ -8598,6 +8598,7 @@ fn repository_index_with_intent(
                         reply,
                         response,
                         AutoRefinementResources {
+                            intent,
                             semantic_refinements,
                             refinement,
                             journal,
@@ -9368,6 +9369,7 @@ fn repository_index_with_intent(
                         reply,
                         response,
                         AutoRefinementResources {
+                            intent,
                             semantic_refinements,
                             refinement,
                             journal,
@@ -9459,6 +9461,7 @@ fn startup_registration_identity(
 
 #[derive(Clone, Copy)]
 struct AutoRefinementResources<'a> {
+    intent: RepositoryIndexIntent,
     semantic_refinements: &'a SemanticRefinements,
     refinement: &'a SyncSender<SemanticRefinementCommand>,
     journal: &'a JournalActorHandle,
@@ -9478,6 +9481,20 @@ fn complete_auto_structural_index(
     };
     let structural_generation = parse_generation(Some(published_generation))?;
     let repository = parse_repository(response.repository.as_ref())?;
+    if matches!(resources.intent, RepositoryIndexIntent::Watcher) {
+        let operation_context = journal_call(
+            resources.runtime,
+            fresh_lifecycle_deadline(context.deadline)?,
+            resources.journal.repository_operation_context(operation),
+        )?;
+        // A watcher checks source freshness; a verified no-op must not upgrade
+        // an explicitly structural generation merely because observation began.
+        if operation_context.evidence.is_some_and(|evidence| {
+            evidence.build_strategy == RepositoryBuildStrategy::RetainedGeneration
+        }) {
+            return deliver_structural_response(reply, response);
+        }
+    }
     let semantic_operation = semantic_refinement_operation(operation);
 
     let refinement_deadline = Instant::now()
@@ -17477,17 +17494,32 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn watcher_automatically_reconciles_add_edit_and_delete() {
-        assert_watcher_initial_reconciliation(false);
+        assert_watcher_initial_reconciliation(false, FirstSliceIndexMode::Deep);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn watcher_reconciles_edits_before_its_first_observation() {
-        assert_watcher_initial_reconciliation(true);
+        assert_watcher_initial_reconciliation(true, FirstSliceIndexMode::Deep);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    fn assert_watcher_initial_reconciliation(edit_before_start: bool) {
+    #[test]
+    fn watcher_retains_unchanged_structural_generation_without_refinement() {
+        assert_watcher_initial_reconciliation(false, FirstSliceIndexMode::Structural);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn watcher_refines_changed_structural_generation() {
+        assert_watcher_initial_reconciliation(true, FirstSliceIndexMode::Structural);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn assert_watcher_initial_reconciliation(
+        edit_before_start: bool,
+        initial_mode: FirstSliceIndexMode,
+    ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -17499,10 +17531,25 @@ mod tests {
         let source = fixture.path().join("src/lib.rs");
         fs::write(&source, "pub fn answer() -> u32 { 1 }\n").expect("initial source writes");
         let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
-        let mut service = FirstSliceService::new_durable(8, paths.state_dir(), &cancellation)
-            .expect("durable service initializes");
+        let mut service = if initial_mode == FirstSliceIndexMode::Structural {
+            FirstSliceService::new_durable_with_project_analyzer(
+                8,
+                paths.state_dir(),
+                Arc::new(SuccessfulSemanticAnalyzer {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    identity: content_hash(b"watcher-semantic-analyzer"),
+                }),
+                &cancellation,
+            )
+        } else {
+            FirstSliceService::new_durable(8, paths.state_dir(), &cancellation)
+        }
+        .expect("durable service initializes");
+        if initial_mode == FirstSliceIndexMode::Structural {
+            assert!(service.deep_analysis_available());
+        }
         let initial = service
-            .index_rust_fixture(fixture.path(), &cancellation)
+            .index_repository_with_mode(fixture.path(), initial_mode, &cancellation)
             .expect("initial generation publishes");
         let early_edit = "pub fn answer() -> u32 { 2 }\n";
         if edit_before_start {
@@ -17517,7 +17564,7 @@ mod tests {
             JournalActor::start_with_state(Arc::clone(&journal), 16, 16, Arc::clone(&state))
                 .expect("journal actor starts");
         let handle = actor.handle();
-        let (refinement, _refinement_receiver) = mpsc::sync_channel(4);
+        let (refinement, refinement_receiver) = mpsc::sync_channel(4);
         let lanes = FirstSliceServiceLanes {
             service: Arc::clone(&service),
             index_serialization: Arc::new(Mutex::new(())),
@@ -17566,6 +17613,27 @@ mod tests {
         );
 
         wait_for_watcher_status(&control, HealthStatus::Healthy);
+        if initial_mode == FirstSliceIndexMode::Structural && !edit_before_start {
+            stopping.store(true, Ordering::Release);
+            let _ = watcher_cancellation.cancel(CancellationReason::Shutdown);
+            watcher
+                .join()
+                .expect("watcher thread joins")
+                .expect("watcher exits cleanly");
+            actor.join().expect("journal actor joins");
+            assert_eq!(
+                service
+                    .read()
+                    .expect("service remains available")
+                    .active_generation_for(initial.repository),
+                Some(initial.generation)
+            );
+            assert!(
+                refinement_receiver.try_recv().is_err(),
+                "unchanged watcher reconciliation must not queue a semantic upgrade"
+            );
+            return;
+        }
         if edit_before_start {
             stopping.store(true, Ordering::Release);
             let _ = watcher_cancellation.cancel(CancellationReason::Shutdown);
@@ -17582,6 +17650,13 @@ mod tests {
                 generation, initial.generation,
                 "first observation must reconcile changes after indexing"
             );
+            if initial_mode == FirstSliceIndexMode::Structural {
+                let refinement = refinement_receiver
+                    .try_recv()
+                    .expect("changed sources retain automatic semantic refinement");
+                assert_eq!(refinement.repository, initial.repository);
+                assert_eq!(refinement.structural_generation, generation);
+            }
             let located = service
                 .code_locate_with_entity_filters_and_budget(
                     generation,
@@ -21441,6 +21516,7 @@ mod tests {
             &mut reply,
             response.clone(),
             AutoRefinementResources {
+                intent: RepositoryIndexIntent::Requested,
                 semantic_refinements: &semantic_refinements,
                 refinement: &refinement,
                 journal: &handle,
