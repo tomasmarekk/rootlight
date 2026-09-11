@@ -22,3 +22,5 @@ third_party/tree-sitter-astro-next-0.1.1/LICENSE-MIT whitespace=-blank-at-eol
 adapters/licenses/tree-sitter-astro-next-0.1.1-LICENSE-MIT whitespace=-blank-at-eol
 # Preserve the published Objective-C highlight query byte-for-byte.
 third_party/tree-sitter-objc-3.0.2/queries/highlights.scm whitespace=-blank-at-eol
+# Preserve the published Groovy Apache notice, including its final blank line.
+third_party/dekobon-tree-sitter-groovy-0.2.0/LICENSE-APACHE whitespace=-blank-at-eof

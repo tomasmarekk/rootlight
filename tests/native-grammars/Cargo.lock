@@ -28,6 +28,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
+name = "dekobon-tree-sitter-groovy"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -133,6 +141,7 @@ dependencies = [
 name = "rootlight-native-grammar-tests"
 version = "0.0.0"
 dependencies = [
+ "dekobon-tree-sitter-groovy",
  "rnix",
  "tree-sitter",
  "tree-sitter-astro-next",
