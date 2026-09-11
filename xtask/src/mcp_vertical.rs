@@ -666,11 +666,11 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
                 .coverage
                 .language_status,
             observed_malformed_query_rust_coverage_tier: malformed_source.coverage.tier,
-            observed_valid_query_coverage_status: "complete",
-            observed_valid_query_rust_coverage_status: "complete",
+            observed_valid_query_coverage_status: "bounded",
+            observed_valid_query_rust_coverage_status: "bounded",
             observed_valid_query_rust_coverage_tier: "B",
-            observed_source_read_coverage_status: "complete",
-            observed_source_read_rust_coverage_status: "complete",
+            observed_source_read_coverage_status: "unknown",
+            observed_source_read_rust_coverage_status: "unknown",
             observed_source_read_rust_coverage_tier: "B",
             expected_syntax_diagnostic_code: SYNTAX_RECOVERY_DIAGNOSTIC,
             syntax_recovery_diagnostic_observed,
@@ -1896,9 +1896,21 @@ fn exercise_malformed_source(
             .ok_or(VerticalError::Invariant(
                 "malformed-source code.locate matches were not an array",
             ))?;
-    if !matches.is_empty() {
+    let expected_source =
+        include_str!("../../tests/fixtures/vertical-slice/first-slice/v1/src/malformed.rs");
+    if matches.len() != 1
+        || matches[0]["kind"] != "file"
+        || matches[0].get("symbol_id") != Some(&Value::Null)
+        || matches[0]["path"] != "src/malformed.rs"
+        || matches[0]["display_name"] != "malformed.rs"
+        || matches[0]["source_ref"]["repository"] != index.repository
+        || matches[0]["source_ref"]["generation"] != index.generation
+        || matches[0]["source_ref"]["span"]["file"] != matches[0]["file_id"]
+        || matches[0]["source_ref"]["span"]["start_byte"] != 0
+        || matches[0]["source_ref"]["span"]["end_byte"] != expected_source.len()
+    {
         return Err(VerticalError::Invariant(
-            "malformed-source code.locate invented a declaration from invalid syntax",
+            "malformed-source code.locate did not preserve exact file-only retrieval",
         ));
     }
     let coverage = observe_rust_coverage(&locate.structured);
@@ -1906,18 +1918,51 @@ fn exercise_malformed_source(
         &locate.structured["coverage"]["skipped_inputs"],
         "malformed-source skipped inputs",
     )?;
-    if coverage.overall_status != "unknown"
-        || coverage.language_status.is_some()
-        || coverage.tier.is_some()
+    if coverage.overall_status != "bounded"
+        || coverage.language_status.as_deref() != Some("bounded")
+        || coverage.tier.as_deref() != Some("B")
         || skipped_inputs == 0
         || !diagnostic_code_is_present(
             &locate.structured["warnings"],
             "negative_claims_inconclusive",
         )
         || healthy_snapshot.symbol.is_empty()
+        || !diagnostic_code_is_present(&locate.structured["warnings"], "coverage_parse_error")
     {
         return Err(VerticalError::Invariant(
-            "malformed-source scenario did not retain unknown aggregate coverage without inventing language metadata",
+            "malformed-source scenario concealed its incomplete structural coverage",
+        ));
+    }
+    let source = call_tool(
+        "v1-malformed.source-read",
+        process,
+        catalog,
+        transcript,
+        "source.read",
+        json!({
+            "repository": {"repository_id": index.repository},
+            "generation": index.generation,
+            "references": [{"source_ref": matches[0]["source_ref"]}],
+            "encoding": "utf8_lossless_when_valid",
+            "response_profile": "compact"
+        }),
+    )?;
+    require_tool_success(&source, "source.read")?;
+    require_trust_labels(&source.structured)?;
+    assert_control_value_omits_sentinels(&source.structured)?;
+    assert_read_correlation(&source.structured, &index.repository, &index.generation)?;
+    assert_complete_source_read_with_unknown_tier_b_coverage(&source.structured)?;
+    let chunks = source.structured["data"]["chunks"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "malformed-source read omitted its exact bytes",
+        ))?;
+    if chunks.len() != 1
+        || chunks[0]["path"] != "src/malformed.rs"
+        || chunks[0]["content"] != expected_source
+    {
+        return Err(VerticalError::Invariant(
+            "malformed-source read changed the fixture bytes",
         ));
     }
     Ok(MalformedSourceEvidence {
@@ -1964,7 +2009,7 @@ fn query_snapshot(
     require_tool_success(&locate, "code.locate")?;
     require_trust_labels(&locate.structured)?;
     assert_control_value_omits_sentinels(&locate.structured)?;
-    assert_complete_tier_b_rust_coverage(&locate.structured)?;
+    assert_mixed_fixture_coverage(&locate.structured)?;
     expected_answer_match(&locate.structured)?;
     let located_generation = required_string(
         &locate.structured["generation"]["generation_id"],
@@ -2028,7 +2073,7 @@ fn query_snapshot(
         require_trust_labels(&pinned.structured)?;
         assert_control_value_omits_sentinels(&pinned.structured)?;
         assert_read_correlation(&pinned.structured, repository, expected_generation)?;
-        assert_complete_tier_b_rust_coverage(&pinned.structured)?;
+        assert_mixed_fixture_coverage(&pinned.structured)?;
         expected_answer_match(&pinned.structured)?;
         pinned
     };
@@ -2059,18 +2104,10 @@ fn query_snapshot(
     require_trust_labels(&lexical.structured)?;
     assert_control_value_omits_sentinels(&lexical.structured)?;
     assert_read_correlation(&lexical.structured, repository, expected_generation)?;
-    assert_complete_tier_b_rust_coverage(&lexical.structured)?;
-    let lexical_matches =
-        lexical.structured["data"]["matches"]
-            .as_array()
-            .ok_or(VerticalError::Invariant(
-                "lexical code.locate matches were not an array",
-            ))?;
-    if lexical_matches.len() != 1
-        || lexical_matches[0]["display_name"] != "answer"
-        || lexical_matches[0]["path"] != "src/lib.rs"
-        || lexical_matches[0]["symbol_id"] != symbol
-        || lexical_matches[0]["source_ref"] != source_ref
+    assert_mixed_fixture_coverage(&lexical.structured)?;
+    let lexical_match = expected_answer_match(&lexical.structured)?;
+    if lexical_match["symbol_id"] != symbol
+        || lexical_match["source_ref"] != source_ref
         || lexical.structured["data"]["query_interpretation"]["modes"] != json!(["lexical"])
     {
         return Err(VerticalError::Invariant(
@@ -2096,7 +2133,7 @@ fn query_snapshot(
     require_trust_labels(&explain.structured)?;
     assert_control_value_omits_sentinels(&explain.structured)?;
     assert_read_correlation(&explain.structured, repository, expected_generation)?;
-    assert_complete_tier_b_rust_coverage(&explain.structured)?;
+    assert_mixed_fixture_coverage(&explain.structured)?;
     let symbols =
         explain.structured["data"]["symbols"]
             .as_array()
@@ -3328,16 +3365,8 @@ fn exercise_nested_ignore_policy(
     assert_control_value_omits_sentinels(&kept.structured)?;
     assert_read_correlation(&kept.structured, repository, generation)?;
     assert_complete_tier_b_rust_coverage(&kept.structured)?;
-    let kept_matches =
-        kept.structured["data"]["matches"]
-            .as_array()
-            .ok_or(VerticalError::Invariant(
-                "kept policy locate matches were not an array",
-            ))?;
-    if kept_matches.len() != 1
-        || kept_matches[0]["display_name"] != "kept_after_negation"
-        || kept_matches[0]["path"] != "nested/ignored/kept.rs"
-    {
+    let kept_matches = expected_function_matches(&kept.structured, "kept_after_negation", 1)?;
+    if kept_matches[0]["path"] != "nested/ignored/kept.rs" {
         return Err(VerticalError::Invariant(
             "nested ignore negation did not re-include its exact source",
         ));
@@ -3417,7 +3446,7 @@ fn exercise_nested_ignore_policy(
         ignored_policy_exclusion_test_passed: true,
         ignored_exhaustive_repository_negative_claimed: false,
         ignored_response_coverage: observe_rust_coverage(&ignored.structured),
-        kept_exact_match_count: 1,
+        kept_exact_match_count: 2,
         kept_source_read: true,
     })
 }
@@ -3830,21 +3859,102 @@ where
 }
 
 fn expected_answer_match(structured: &Value) -> Result<&Value, VerticalError> {
-    let matches = structured["data"]["matches"]
-        .as_array()
-        .ok_or(VerticalError::Invariant(
-            "code.locate matches were not an array",
-        ))?;
-    if matches.len() == 1
-        && matches[0]["display_name"] == "answer"
-        && matches[0]["path"] == "src/lib.rs"
-    {
-        Ok(&matches[0])
+    let matches = expected_function_matches(structured, "answer", 1)?;
+    if matches[0]["path"] == "src/lib.rs" {
+        Ok(matches[0])
     } else {
         Err(VerticalError::Invariant(
             "code.locate did not return the one expected answer declaration",
         ))
     }
+}
+
+fn expected_function_matches<'a>(
+    structured: &'a Value,
+    name: &str,
+    expected: usize,
+) -> Result<Vec<&'a Value>, VerticalError> {
+    let matches = structured["data"]["matches"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "code.locate matches were not an array",
+        ))?;
+    let mut declarations = Vec::new();
+    let mut symbols = BTreeSet::new();
+    let mut files = BTreeMap::new();
+    for entry in matches {
+        match entry["kind"].as_str() {
+            Some("function")
+                if entry["display_name"] == name
+                    && entry["symbol_id"].as_str().is_some_and(|id| !id.is_empty()) =>
+            {
+                if !symbols.insert(required_string(&entry["symbol_id"], "located symbol ID")?) {
+                    return Err(VerticalError::Invariant(
+                        "code.locate duplicated a declaration",
+                    ));
+                }
+                declarations.push(entry);
+            }
+            Some("file") if entry.get("symbol_id") == Some(&Value::Null) => {
+                let id = required_string(&entry["file_id"], "located file ID")?;
+                if files.insert(id, entry).is_some() {
+                    return Err(VerticalError::Invariant(
+                        "code.locate duplicated a source file",
+                    ));
+                }
+            }
+            _ => {
+                return Err(VerticalError::Invariant(
+                    "code.locate returned an unexpected match",
+                ));
+            }
+        }
+    }
+    if declarations.len() != expected {
+        return Err(VerticalError::Invariant(
+            "code.locate returned an unexpected declaration count",
+        ));
+    }
+    // Full source vocabulary is indexed alongside declarations. These fixtures
+    // require exactly their containing file hits, not arbitrary extra results.
+    let mut declaration_files = BTreeSet::new();
+    for declaration in &declarations {
+        let id = required_string(&declaration["file_id"], "declaration file ID")?;
+        let file = files.get(&id).ok_or(VerticalError::Invariant(
+            "code.locate omitted the declaration's source file",
+        ))?;
+        let source = &declaration["source_ref"];
+        let file_source = &file["source_ref"];
+        let path = required_string(&declaration["path"], "declaration path")?;
+        if file["path"] != path
+            || file["display_name"].as_str() != path.rsplit('/').next()
+            || ["repository", "generation", "content_hash"]
+                .iter()
+                .any(|field| {
+                    source[*field].as_str().is_none_or(str::is_empty)
+                        || source[*field] != file_source[*field]
+                })
+            || source["span"]["file"] != id
+            || file_source["span"]["file"] != id
+            || file_source["span"]["start_byte"].as_u64() != Some(0)
+            || !source["span"]["start_byte"]
+                .as_u64()
+                .zip(source["span"]["end_byte"].as_u64())
+                .zip(file_source["span"]["end_byte"].as_u64())
+                .is_some_and(|((start, end), file_end)| start < end && end <= file_end)
+        {
+            return Err(VerticalError::Invariant(
+                "code.locate source file provenance differs from its declaration",
+            ));
+        }
+        declaration_files.insert(id);
+    }
+    if declaration_files.len() != files.len() {
+        return Err(VerticalError::Invariant(
+            "code.locate returned an unrelated source file",
+        ));
+    }
+    Ok(declarations)
 }
 
 fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
@@ -3853,6 +3963,46 @@ fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), Vertic
         "complete",
         "valid first-slice query did not report complete Tier-B Rust coverage",
     )
+}
+
+fn assert_mixed_fixture_coverage(structured: &Value) -> Result<(), VerticalError> {
+    // Successful retrieval cannot erase the fixture's excluded, unrecognized,
+    // and malformed inputs or justify repository-wide negative claims.
+    assert_tier_b_rust_coverage(
+        structured,
+        "bounded",
+        "mixed fixture query did not retain bounded Tier-B Rust coverage",
+    )?;
+    let mut expected = BTreeSet::from([
+        "coverage_excluded",
+        "coverage_parse_error",
+        "coverage_unrecognized",
+        "negative_claims_inconclusive",
+    ]);
+    for field in ["structural_freshness", "semantic_freshness"] {
+        if required_string(&structured["generation"][field], "query freshness")? != "current" {
+            expected.insert("coverage_stale");
+        }
+    }
+    let warnings = structured["warnings"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "mixed fixture omitted coverage warnings",
+        ))?;
+    let actual: BTreeSet<_> = warnings
+        .iter()
+        .filter_map(|warning| warning["code"].as_str())
+        .collect();
+    if actual != expected
+        || warnings.len() != expected.len()
+        || structured["coverage"]["skipped_inputs"] != 3
+        || structured["completeness"]["state"] != "complete"
+    {
+        return Err(VerticalError::Invariant(
+            "mixed fixture coverage gaps or retrieval completeness changed",
+        ));
+    }
+    Ok(())
 }
 
 fn assert_complete_source_read_with_unknown_tier_b_coverage(
@@ -4376,17 +4526,7 @@ fn locate_lineage_symbols(
     assert_control_value_omits_sentinels(&locate.structured)?;
     assert_read_correlation(&locate.structured, &index.repository, &index.generation)?;
     assert_complete_tier_b_rust_coverage(&locate.structured)?;
-    let matches =
-        locate.structured["data"]["matches"]
-            .as_array()
-            .ok_or(VerticalError::Invariant(
-                "lineage code.locate matches were not an array",
-            ))?;
-    if matches.len() != expected || matches.iter().any(|entry| entry["display_name"] != query) {
-        return Err(VerticalError::Invariant(
-            "lineage code.locate did not return the expected exact declarations",
-        ));
-    }
+    let matches = expected_function_matches(&locate.structured, query, expected)?;
     matches
         .iter()
         .map(|entry| required_string(&entry["symbol_id"], "lineage symbol ID"))
@@ -6811,13 +6951,95 @@ mod tests {
         ToolOutcome, VerticalError, admission_retry_delay, assert_active_generation_lineage,
         assert_complete_source_read_with_unknown_tier_b_coverage,
         assert_complete_tier_b_rust_coverage, assert_generation_relationship,
-        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
+        assert_mixed_fixture_coverage, canonicalize_known_identities, diagnostic_code_is_present,
+        estimated_tokens, expected_answer_match, expected_function_matches,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
         observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
         require_tool_success, retryable_busy_delay, shrink_cancellation_repository,
         source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
+
+    #[test]
+    fn answer_match_requires_exact_declaration_and_source_file_provenance() {
+        let declaration = json!({
+            "display_name": "answer", "path": "src/lib.rs",
+            "kind": "function", "symbol_id": "sym1_fixture", "file_id": "file1_fixture",
+            "source_ref": {
+                "repository": "repo1_fixture", "generation": "gen1_fixture", "content_hash": "b3_fixture",
+                "span": {"file": "file1_fixture", "start_byte": 4, "end_byte": 20}
+            }
+        });
+        let mut file = declaration.clone();
+        file["display_name"] = json!("lib.rs");
+        file["kind"] = json!("file");
+        file["symbol_id"] = json!(null);
+        file["source_ref"]["span"]["start_byte"] = json!(0);
+        file["source_ref"]["span"]["end_byte"] = json!(21);
+        let response = json!({"data": {"matches": [file.clone(), declaration.clone()]}});
+        assert_eq!(expected_answer_match(&response).unwrap(), &declaration);
+        for (field, value) in [
+            ("display_name", json!("other")),
+            ("path", json!("src/other.rs")),
+            ("kind", json!("file")),
+            ("symbol_id", json!(null)),
+            ("symbol_id", json!("")),
+        ] {
+            let mut invalid = declaration.clone();
+            invalid[field] = value;
+            assert!(
+                expected_answer_match(&json!({"data": {"matches": [invalid, file.clone()]}}))
+                    .is_err()
+            );
+        }
+        for matches in [
+            json!([]),
+            json!([file.clone()]),
+            json!([declaration.clone()]),
+            json!([declaration.clone(), declaration.clone(), file.clone()]),
+            json!([declaration.clone(), file.clone(), file.clone()]),
+        ] {
+            assert!(expected_answer_match(&json!({"data": {"matches": matches}})).is_err());
+        }
+        for (pointer, value) in [
+            ("/path", json!("src/other.rs")),
+            ("/display_name", json!("other.rs")),
+            ("/symbol_id", json!("sym1_unexpected")),
+            ("/file_id", json!("file1_other")),
+            ("/source_ref/repository", json!("repo1_other")),
+            ("/source_ref/generation", json!("gen1_other")),
+            ("/source_ref/content_hash", json!("b3_other")),
+            ("/source_ref/span/file", json!("file1_other")),
+            ("/source_ref/span/start_byte", json!(1)),
+            ("/source_ref/span/end_byte", json!(19)),
+        ] {
+            let mut invalid = file.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                expected_answer_match(
+                    &json!({"data": {"matches": [declaration.clone(), invalid]}})
+                )
+                .is_err(),
+                "{pointer}"
+            );
+        }
+        let mut second = declaration.clone();
+        second["symbol_id"] = json!("sym1_second");
+        let response = json!({"data": {"matches": [file.clone(), second, declaration.clone()]}});
+        assert_eq!(
+            expected_function_matches(&response, "answer", 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(expected_answer_match(&response).is_err());
+        let mut unrelated = file.clone();
+        unrelated["file_id"] = json!("file1_unrelated");
+        assert!(
+            expected_answer_match(&json!({"data": {"matches": [file, declaration, unrelated]}}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn options_require_bin_dir_and_accept_explicit_output() {
@@ -7196,6 +7418,49 @@ mod tests {
             }
         });
         assert!(assert_complete_tier_b_rust_coverage(&bounded).is_err());
+        let mut mixed = bounded.clone();
+        mixed["generation"] =
+            json!({"structural_freshness": "current", "semantic_freshness": "current"});
+        mixed["coverage"]["skipped_inputs"] = json!(3);
+        mixed["completeness"] = json!({"state": "complete"});
+        mixed["warnings"] = json!([
+            {"code": "coverage_excluded"},
+            {"code": "coverage_parse_error"},
+            {"code": "coverage_unrecognized"},
+            {"code": "negative_claims_inconclusive"}
+        ]);
+        assert!(assert_mixed_fixture_coverage(&mixed).is_ok());
+        for (pointer, value) in [
+            ("/coverage/status", json!("complete")),
+            ("/coverage/skipped_inputs", json!(0)),
+            ("/completeness/state", json!("truncated")),
+            ("/coverage/languages/0/tier", json!("A")),
+        ] {
+            let mut invalid = mixed.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                assert_mixed_fixture_coverage(&invalid).is_err(),
+                "{pointer}"
+            );
+        }
+        for omitted in 0..4 {
+            let mut invalid = mixed.clone();
+            invalid["warnings"].as_array_mut().unwrap().remove(omitted);
+            assert!(assert_mixed_fixture_coverage(&invalid).is_err());
+        }
+        let mut superseded = mixed.clone();
+        superseded["generation"]["structural_freshness"] = json!("superseded");
+        assert!(assert_mixed_fixture_coverage(&superseded).is_err());
+        superseded["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "coverage_stale"}));
+        assert!(assert_mixed_fixture_coverage(&superseded).is_ok());
+        mixed["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "coverage_stale"}));
+        assert!(assert_mixed_fixture_coverage(&mixed).is_err());
         let semantic = json!({
             "coverage": {
                 "status": "complete",
