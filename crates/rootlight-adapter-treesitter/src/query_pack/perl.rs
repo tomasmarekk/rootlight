@@ -377,6 +377,14 @@ fn value_expression(
             },
         );
     }
+    if node.kind() == "eval_expression"
+        && !node.has_error()
+        && single_operand(node, cancellation)?.is_some_and(|operand| operand.kind() == "block")
+    {
+        // Block eval is already parsed: nested writes retain their own evidence.
+        // Exception control flow still prevents definite local CODE-value propagation.
+        return Ok("perl.block_eval_barrier");
+    }
     if matches!(node.kind(), "eval_expression" | "goto_expression")
         || (node.kind() == "substitution_regexp"
             && node

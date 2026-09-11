@@ -165,7 +165,10 @@ pub(super) fn resolve(
         {
             code_names.insert((fact.span().start_byte(), fact.span().end_byte()), target);
         }
-        if kind == "perl.code_flow_barrier.expression" {
+        if matches!(
+            kind,
+            "perl.code_flow_barrier.expression" | "perl.block_eval_barrier.expression"
+        ) {
             barriers.insert(context.enclosing(fact, cancellation)?.0);
         }
     }

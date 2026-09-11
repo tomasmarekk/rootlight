@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/101";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/102";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/11";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -24059,6 +24059,88 @@ mod tests {
             )
             .unwrap();
         assert_eq!(read.data.chunks[0].bytes, b"Measure::adjust");
+    }
+
+    #[test]
+    fn perl_project_block_eval_distinguishes_parsed_and_dynamic_effects() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+
+        for (effect, resolves) in [
+            ("eval { require Optional; };", true),
+            ("eval { eval { require Optional; }; };", true),
+            ("eval { *Measure::adjust = sub { 31 }; };", false),
+            ("eval { *{$name} = sub { 31 }; };", false),
+            ("eval { eval $input; };", false),
+            ("eval { do $path; };", false),
+            ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", false),
+        ] {
+            for effect_path in ["client.pl", "helper.pl"] {
+                let fixture = durable_test_tempdir();
+                let client = "use Measure (); sub consume { Measure::adjust(3); }";
+                fs::write(fixture.path().join("client.pl"), client).unwrap();
+                fs::write(
+                    fixture.path().join("Measure.pm"),
+                    "package Measure; sub adjust { $_[0] + 1 }",
+                )
+                .unwrap();
+                let prefix = if effect_path == "client.pl" {
+                    client
+                } else {
+                    ""
+                };
+                fs::write(
+                    fixture.path().join(effect_path),
+                    format!("{prefix}\n{effect}"),
+                )
+                .unwrap();
+                let mut service = FirstSliceService::new(4).unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == rootlight_ir::EntityKind::Function
+                            && entity.canonical_name == "adjust"
+                    })
+                    .unwrap();
+                let call = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::CallSite
+                            && site.syntactic_text_hash
+                                == rootlight_ids::content_hash(b"Measure::adjust")
+                    })
+                    .unwrap();
+                if resolves {
+                    assert_eq!(
+                        call.target,
+                        OccurrenceTarget::Resolved { symbol: target.id },
+                        "{effect_path}: {effect}"
+                    );
+                } else {
+                    assert!(
+                        matches!(call.target, OccurrenceTarget::Unresolved { .. }),
+                        "{effect_path}: {effect}"
+                    );
+                }
+                assert_eq!(
+                    document.relations.iter().any(|edge| {
+                        edge.predicate == RelationPredicate::Calls
+                            && edge.subject == RelationEndpoint::Occurrence(call.id)
+                            && edge.object == RelationEndpoint::Entity(target.id)
+                    }),
+                    resolves,
+                    "{effect_path}: {effect}"
+                );
+            }
+        }
     }
 
     #[test]

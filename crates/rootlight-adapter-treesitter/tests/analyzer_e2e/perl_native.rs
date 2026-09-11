@@ -27,6 +27,74 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn perl_native_project_context_includes_leading_trivia() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+
+    for prefix in ["\n", "\r\n\t", "\n# A standalone helper.\n"] {
+        let source = format!("{prefix}use Measure (); sub consume {{ Measure::adjust(3); }}\n");
+        let result = output(&source);
+        let mut context = false;
+        for envelope in &result.document().extensions {
+            if envelope.namespace != PERL_BINDING_NAMESPACE {
+                continue;
+            }
+            let claim = decode_perl_binding_envelope(envelope).unwrap();
+            assert_eq!(claim.module().start_byte(), 0, "{prefix:?}");
+            assert_eq!(
+                claim.module().end_byte(),
+                u64::try_from(source.len()).unwrap()
+            );
+            context |= claim.binding() == PerlBinding::ModuleContext;
+        }
+        assert!(context);
+    }
+}
+
+#[test]
+fn perl_native_block_eval_preserves_nested_storage_effects() {
+    use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
+
+    for (source, dynamic, writes) in [
+        ("eval { require Optional; };", 0, 0),
+        ("eval { eval { require Optional; }; };", 0, 0),
+        ("eval { my $text = 'eval $input'; };", 0, 0),
+        ("eval { *Measure::adjust = sub { 31 }; };", 0, 1),
+        ("eval { *{$name} = sub { 31 }; };", 1, 0),
+        ("eval { eval $input; };", 1, 0),
+        ("eval $input;", 1, 0),
+        ("eval;", 1, 0),
+        ("do $path;", 1, 0),
+        ("eval { my $text = 'x'; $text =~ s/x/value()/e; };", 1, 0),
+    ] {
+        let result = output(source);
+        let claims: Vec<_> = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == PERL_BINDING_NAMESPACE)
+            .map(|envelope| decode_perl_binding_envelope(envelope).unwrap().binding())
+            .collect();
+        assert!(claims.contains(&PerlBinding::ModuleContext), "{source}");
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| **claim == PerlBinding::DynamicWrite)
+                .count(),
+            dynamic,
+            "{source}"
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, PerlBinding::Write { .. }))
+                .count(),
+            writes,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn perl_native_bounded_project_evidence_never_claims_a_complete_context() {
     use rootlight_ir::{PERL_BINDING_NAMESPACE, PerlBinding, decode_perl_binding_envelope};
     let source = "package Harbor; sub value { 7 } *value = sub { 31 }; value();\n";
@@ -827,6 +895,8 @@ fn perl_native_variable_coderef_calls_do_not_guess_through_effects_or_unknown_va
         "sub first { 13 } my $call = \\&first; $call++; $call->();",
         "sub first { 13 } my $call = \\&first; eval $input; $call->();",
         "sub first { 13 } my $call = \\&first; my $result = eval $input; $call->();",
+        "sub first { 13 } sub second { 29 } my $call = \\&first; eval { $call = \\&second; }; $call->();",
+        "sub first { 13 } my $call = \\&first; eval { mutate(\\$call); }; $call->();",
         "sub first { 13 } my $call = \\&first; $call .= 'suffix'; $call->();",
         "sub first { 13 } state $call = \\&first; $call->();",
         "sub first { 13 } sub second { 29 } my $call = \\&first; map { $call = \\&second } (); $call->();",
@@ -1998,6 +2068,13 @@ fn perl_native_variable_coderef_artifacts_rebind_generation() {
     assert_perl_artifact_replay(include_str!(
         "../../../../tests/fixtures/perl-bindings/coderef_copy_mutation.pl"
     ));
+}
+
+#[test]
+fn perl_native_block_eval_artifacts_preserve_nested_effects() {
+    assert_perl_artifact_replay(
+        "\n\tpackage Measure; sub adjust { 3 } eval { require Optional; }; eval { *adjust = sub { 31 }; }; eval { eval $input; };\n",
+    );
 }
 
 #[test]

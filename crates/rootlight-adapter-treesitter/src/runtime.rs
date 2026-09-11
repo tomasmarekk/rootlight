@@ -1465,6 +1465,17 @@ fn normalize_query_candidates(
     max_facts: usize,
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
+    if request.language().as_str() == "perl" && request.included_ranges().is_empty() {
+        for candidate in &mut candidates {
+            cancellation.check()?;
+            if candidate.syntax == "perl.file" && candidate.native_depth == 0 {
+                // The native root excludes leading trivia, but a whole-file binding
+                // context covers the snapshot. Included/embedded modules stay scoped.
+                candidate.start = 0;
+                candidate.end = request.source().bytes().len();
+            }
+        }
+    }
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
         (
             left.start,
