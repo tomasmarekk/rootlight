@@ -1913,24 +1913,15 @@ fn exercise_malformed_source(
             "malformed-source code.locate did not preserve exact file-only retrieval",
         ));
     }
+    assert_malformed_fixture_coverage(&locate.structured)?;
     let coverage = observe_rust_coverage(&locate.structured);
     let skipped_inputs = required_u64(
         &locate.structured["coverage"]["skipped_inputs"],
         "malformed-source skipped inputs",
     )?;
-    if coverage.overall_status != "bounded"
-        || coverage.language_status.as_deref() != Some("bounded")
-        || coverage.tier.as_deref() != Some("B")
-        || skipped_inputs == 0
-        || !diagnostic_code_is_present(
-            &locate.structured["warnings"],
-            "negative_claims_inconclusive",
-        )
-        || healthy_snapshot.symbol.is_empty()
-        || !diagnostic_code_is_present(&locate.structured["warnings"], "coverage_parse_error")
-    {
+    if healthy_snapshot.symbol.is_empty() {
         return Err(VerticalError::Invariant(
-            "malformed-source scenario concealed its incomplete structural coverage",
+            "malformed-source scenario omitted the healthy comparison symbol",
         ));
     }
     let source = call_tool(
@@ -3967,12 +3958,30 @@ fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), Vertic
 }
 
 fn assert_mixed_fixture_coverage(structured: &Value) -> Result<(), VerticalError> {
+    assert_mixed_fixture_coverage_status(structured, "bounded")
+}
+
+fn assert_malformed_fixture_coverage(structured: &Value) -> Result<(), VerticalError> {
+    // Unknown coverage is also inconclusive; file-only retrieval must not turn
+    // that conservative classification into a claim of exhaustive analysis.
+    let Some(status @ ("bounded" | "unknown")) = structured["coverage"]["status"].as_str() else {
+        return Err(VerticalError::Invariant(
+            "malformed-source scenario concealed its incomplete structural coverage",
+        ));
+    };
+    assert_mixed_fixture_coverage_status(structured, status)
+}
+
+fn assert_mixed_fixture_coverage_status(
+    structured: &Value,
+    expected_status: &str,
+) -> Result<(), VerticalError> {
     // Successful retrieval cannot erase the fixture's excluded, unrecognized,
     // and malformed inputs or justify repository-wide negative claims.
     assert_tier_b_rust_coverage(
         structured,
-        "bounded",
-        "mixed fixture query did not retain bounded Tier-B Rust coverage",
+        expected_status,
+        "mixed fixture query did not retain the required incomplete Tier-B Rust coverage",
     )?;
     let mut expected = BTreeSet::from([
         "coverage_excluded",
@@ -6952,12 +6961,13 @@ mod tests {
         ToolOutcome, VerticalError, admission_retry_delay, assert_active_generation_lineage,
         assert_complete_source_read_with_unknown_tier_b_coverage,
         assert_complete_tier_b_rust_coverage, assert_generation_relationship,
-        assert_mixed_fixture_coverage, canonicalize_known_identities, diagnostic_code_is_present,
-        estimated_tokens, expected_answer_match, expected_function_matches,
-        matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
-        observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
-        require_tool_success, retryable_busy_delay, shrink_cancellation_repository,
-        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
+        assert_malformed_fixture_coverage, assert_mixed_fixture_coverage,
+        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
+        expected_answer_match, expected_function_matches, matrix_not_applicable_reason,
+        modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
+        prepare_cancellation_repository, redact_request_for_evidence, require_tool_success,
+        retryable_busy_delay, shrink_cancellation_repository, source_tokenizer_input,
+        validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -7431,6 +7441,39 @@ mod tests {
             {"code": "negative_claims_inconclusive"}
         ]);
         assert!(assert_mixed_fixture_coverage(&mixed).is_ok());
+        assert!(assert_malformed_fixture_coverage(&mixed).is_ok());
+        let mut unknown = mixed.clone();
+        unknown["coverage"]["status"] = json!("unknown");
+        unknown["coverage"]["languages"][0]["status"] = json!("unknown");
+        assert!(assert_mixed_fixture_coverage(&unknown).is_err());
+        assert!(assert_malformed_fixture_coverage(&unknown).is_ok());
+        for (pointer, value) in [
+            ("/coverage/status", json!("complete")),
+            ("/coverage/languages/0/status", json!("bounded")),
+            ("/coverage/languages/0/tier", json!("A")),
+            ("/coverage/skipped_inputs", json!(0)),
+            ("/coverage/skipped_inputs", json!(2)),
+            ("/completeness/state", json!("truncated")),
+        ] {
+            let mut invalid = unknown.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                assert_malformed_fixture_coverage(&invalid).is_err(),
+                "{pointer}"
+            );
+        }
+        for omitted in 0..4 {
+            let mut invalid = unknown.clone();
+            invalid["warnings"].as_array_mut().unwrap().remove(omitted);
+            assert!(assert_malformed_fixture_coverage(&invalid).is_err());
+        }
+        unknown["generation"]["semantic_freshness"] = json!("stale");
+        assert!(assert_malformed_fixture_coverage(&unknown).is_err());
+        unknown["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "coverage_stale"}));
+        assert!(assert_malformed_fixture_coverage(&unknown).is_ok());
         for (pointer, value) in [
             ("/coverage/status", json!("complete")),
             ("/coverage/skipped_inputs", json!(0)),
