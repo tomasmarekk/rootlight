@@ -227,6 +227,12 @@ pub(super) fn adjust_candidate(
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
     if candidate.role == StructuralRole::Reference
+        && matches!(node.kind(), "type_identifier" | "qualified_type")
+        && let Some(kind) = inheritance_type(node)
+    {
+        candidate.syntax = kind;
+    }
+    if candidate.role == StructuralRole::Reference
         && node.kind() == "qualified_name"
         && let Some(import) = node.parent().filter(|parent| {
             parent.kind() == "import_declaration"
@@ -329,6 +335,21 @@ pub(super) fn adjust_candidate(
     }
     cancellation.check()?;
     Ok(())
+}
+
+fn inheritance_type(mut node: Node<'_>) -> Option<&'static str> {
+    let mut parent = node.parent()?;
+    // Only the generic base is a parent type; arguments and wildcard bounds
+    // remain ordinary type uses even when they occur inside an extends clause.
+    if parent.kind() == "generic_type" && parent.child_by_field_name("base") == Some(node) {
+        node = parent;
+        parent = node.parent()?;
+    }
+    match parent.kind() {
+        "superclass" | "extends_interfaces" => Some("groovy.extends_type"),
+        "super_interfaces" => Some("groovy.implements_type"),
+        _ => None,
+    }
 }
 
 fn static_context(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {

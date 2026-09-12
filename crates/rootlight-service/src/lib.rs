@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/105";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/12";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/106";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/13";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -27965,7 +27965,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/104",
+            b"rootlight.first-slice.treesitter-structural/105",
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -27976,7 +27976,7 @@ mod tests {
             parser.as_bytes(),
             DISCOVERY_MANIFEST_VERSION.as_bytes(),
             RESOLVER_PROVIDER_VERSION.as_bytes(),
-            b"rootlight.first-slice.resolve/11",
+            b"rootlight.first-slice.resolve/12",
             SEARCH_REVISION_SEED,
             INCREMENTAL_SCHEMA_VERSION.as_bytes(),
             DERIVED_PLAN_REVISION_SEED,
@@ -28252,6 +28252,254 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_inheritance_headers_publish_exact_type_relationships() {
+        use rootlight_ir::{
+            EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+        };
+
+        for (source, companion, written, target_name, target_path, predicate) in [
+            (
+                "class Base {}\nclass Holder extends Base {}",
+                "",
+                "Base",
+                "Base",
+                "client.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "package sample\nclass Base {}\nclass Holder extends sample.Base {}",
+                "",
+                "sample.Base",
+                "Base",
+                "client.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "class Base<T> {}\nclass Holder extends Base<String> {}",
+                "",
+                "Base",
+                "Base",
+                "client.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "interface Face<T> {}\ninterface Extra {}\nclass Holder implements Face<String>, Extra {}",
+                "",
+                "Face",
+                "Face",
+                "client.groovy",
+                RelationPredicate::Implements,
+            ),
+            (
+                "interface Face {}\ninterface Extra {}\ninterface Holder extends Face, Extra {}",
+                "",
+                "Extra",
+                "Extra",
+                "client.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "import other.Base as Selected\nclass Holder extends Selected {}",
+                "package other\nclass Base {}",
+                "Selected",
+                "Base",
+                "definition.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "import other.Base as Selected\nclass Selected {}\nclass Holder extends Selected {}",
+                "package other\nclass Base {}",
+                "Selected",
+                "Base",
+                "definition.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "import other.Base as Selected\nclass Holder<Selected> extends Selected {}",
+                "package other\nclass Base {}",
+                "Selected",
+                "Base",
+                "definition.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "import other.Container as Selected\nclass Holder extends Selected.Base {}",
+                "package other\nclass Container { static class Base {} }",
+                "Selected.Base",
+                "Base",
+                "definition.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "import other.Face as Selected\nclass Holder implements Selected<String> {}",
+                "package other\ninterface Face<T> {}",
+                "Selected",
+                "Face",
+                "definition.groovy",
+                RelationPredicate::Implements,
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), source).unwrap();
+            if !companion.is_empty() {
+                fs::write(fixture.path().join("definition.groovy"), companion).unwrap();
+            }
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{source}: {:?}",
+                document.diagnostics
+            );
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == target_path)
+                .unwrap();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == target_name
+                        && matches!(entity.kind, EntityKind::Class | EntityKind::Interface)
+                        && entity.evidence.source.as_ref().unwrap().span().file() == file.id
+                })
+                .unwrap();
+            let holder = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Holder")
+                .unwrap();
+            let role = if predicate == RelationPredicate::Implements {
+                OccurrenceRole::ImplementationUse
+            } else {
+                OccurrenceRole::InheritanceUse
+            };
+            let start = u64::try_from(source.rfind(written).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.source.span().start_byte() == start && site.role == role)
+                .unwrap_or_else(|| panic!("missing header role in {source}"));
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{source}"
+            );
+            assert_eq!(site.enclosing, Some(holder.id));
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == predicate
+                        && relation.subject == RelationEndpoint::Entity(holder.id)
+                        && relation.object == RelationEndpoint::Entity(target.id)),
+                "{source}"
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_inheritance_edges_follow_reused_import_headers() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("client.groovy"),
+            "import sample.Base as Selected\nclass Holder extends Selected {}\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(3).unwrap();
+        for (ordinal, (name, resolved)) in [("Base", true), ("Other", false), ("Base", true)]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(
+                fixture.path().join("definition.groovy"),
+                format!("package sample\nclass {name} {{}}\n"),
+            )
+            .unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if ordinal > 0 {
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert!(work.reused_parser_artifacts() >= 1);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.role == OccurrenceRole::InheritanceUse)
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.predicate == RelationPredicate::Extends)
+                    .count(),
+                usize::from(resolved)
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"Selected");
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+            drop(snapshot);
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
         }
     }
 

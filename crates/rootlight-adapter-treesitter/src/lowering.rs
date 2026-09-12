@@ -931,7 +931,12 @@ fn preflight_lowering_limits(
             }
             if language_for_fact(request, fact) == "groovy"
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
-                && fact.syntax_kind().as_str() == "groovy.qualified_type.reference"
+                && matches!(
+                    fact.syntax_kind().as_str(),
+                    "groovy.qualified_type.reference"
+                        | "groovy.extends_type.reference"
+                        | "groovy.implements_type.reference"
+                )
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
@@ -1722,6 +1727,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let mut relation = lexical_reference_relation(&occurrence, symbol)?;
                     if occurrence.role == OccurrenceRole::TypeUse {
                         relation.predicate = RelationPredicate::UsesType;
+                    } else if matches!(
+                        occurrence.role,
+                        OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse
+                    ) && let Some(owner) = occurrence.enclosing
+                    {
+                        relation.predicate = if occurrence.role == OccurrenceRole::InheritanceUse {
+                            RelationPredicate::Extends
+                        } else {
+                            RelationPredicate::Implements
+                        };
+                        relation.subject = RelationEndpoint::Entity(owner);
+                        relation.evidence.derivation.push(FactRef::Entity(owner));
+                    }
+                    if relation.predicate != RelationPredicate::RefersTo {
                         relation.id = derive_relation_record_id(&relation)
                             .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     }
@@ -1738,7 +1757,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         binding,
                     )
                     .map_err(|_| provider_failure("groovy-import-use-evidence"))?;
-                    occurrence.role = OccurrenceRole::TypeUse;
+                    if !matches!(
+                        occurrence.role,
+                        OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse
+                    ) {
+                        occurrence.role = OccurrenceRole::TypeUse;
+                    }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     if !insert_optional_extension(
@@ -4036,6 +4060,8 @@ fn structural_resolution_text<'a>(
             fact.syntax_kind().as_str(),
             "groovy.type_import.reference"
                 | "groovy.qualified_type.reference"
+                | "groovy.extends_type.reference"
+                | "groovy.implements_type.reference"
                 | "groovy.package_star_import.reference"
                 | "groovy.static_import.reference"
                 | "groovy.static_star_import.reference"
@@ -4858,6 +4884,16 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     }
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "groovy.extends_type.reference" =>
+        {
+            Some(OccurrenceRole::InheritanceUse)
+        }
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "groovy.implements_type.reference" =>
+        {
+            Some(OccurrenceRole::ImplementationUse)
+        }
         SyntaxFactKind::Occurrence
             if matches!(
                 fact.syntax_kind().as_str(),

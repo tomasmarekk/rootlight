@@ -187,6 +187,49 @@ fn groovy_qualified_import_evidence_uses_native_type_boundaries() {
 }
 
 #[test]
+fn groovy_inheritance_headers_exclude_generic_arguments_and_bounds() {
+    let source = "class Base<T> {}\ninterface Face<T> {}\ninterface Extra {}\nclass Arg {}\nclass Holder<T extends Arg> extends Base<Arg[]> implements Face<Arg>, Extra {}";
+    let result = output(source);
+    let document = result.document();
+    assert!(document.diagnostics.is_empty());
+    let headers: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.role,
+                OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse
+            )
+        })
+        .collect();
+    assert_eq!(headers.len(), 3);
+    for (name, role) in [
+        ("Base", OccurrenceRole::InheritanceUse),
+        ("Face", OccurrenceRole::ImplementationUse),
+        ("Extra", OccurrenceRole::ImplementationUse),
+    ] {
+        let start = u64::try_from(source.rfind(name).unwrap()).unwrap();
+        let site = headers
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert_eq!(site.role, role);
+        assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+    }
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|relation| matches!(
+                relation.predicate,
+                RelationPredicate::Extends | RelationPredicate::Implements
+            ))
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn groovy_qualified_local_types_do_not_hide_unresolved_namespaces() {
     for source in [
         "class Outer { static class Inner {} }\nclass Holder extends base.Parent { Outer.Inner item }",

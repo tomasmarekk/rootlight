@@ -1040,53 +1040,53 @@ fn markdown_reference_edges_are_reserved_before_ir_materialization() {
 
 #[test]
 fn groovy_qualified_type_relations_are_reserved_before_materialization() {
-    const GROOVY: &str = "sample.Local";
-    let (_temporary, snapshot, source) =
-        source_fixture_for(GROOVY, "src/module.groovy", b"qualified-type-quota");
-    let facts = [
-        (1, None, SyntaxFactKind::Root, 0, "groovy.file.root"),
-        (2, Some(1), SyntaxFactKind::Module, 1, "groovy.file.module"),
-        (
-            3,
-            Some(2),
-            SyntaxFactKind::Occurrence,
-            2,
-            "groovy.qualified_type.reference",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, parent, kind, depth, syntax)| {
-        SyntaxFact::new(
-            id,
-            parent,
-            kind,
-            span_in(GROOVY, &source, GROOVY, 0),
-            depth,
-            label(syntax),
+    for kind in [
+        "groovy.qualified_type.reference",
+        "groovy.extends_type.reference",
+        "groovy.implements_type.reference",
+    ] {
+        const GROOVY: &str = "sample.Local";
+        let (_temporary, snapshot, source) =
+            source_fixture_for(GROOVY, "src/module.groovy", b"qualified-type-quota");
+        let facts = [
+            (1, None, SyntaxFactKind::Root, 0, "groovy.file.root"),
+            (2, Some(1), SyntaxFactKind::Module, 1, "groovy.file.module"),
+            (3, Some(2), SyntaxFactKind::Occurrence, 2, kind),
+        ]
+        .into_iter()
+        .map(|(id, parent, kind, depth, syntax)| {
+            SyntaxFact::new(
+                id,
+                parent,
+                kind,
+                span_in(GROOVY, &source, GROOVY, 0),
+                depth,
+                label(syntax),
+            )
+        })
+        .collect::<Vec<_>>();
+        let mut ir = IrLimits::default();
+        ir.max_relations = 1;
+        let error = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("groovy").unwrap(),
+            &limits(ir),
+            facts,
         )
-    })
-    .collect::<Vec<_>>();
-    let mut ir = IrLimits::default();
-    ir.max_relations = 1;
-    let error = analyze_custom(
-        &snapshot,
-        &source,
-        LanguageId::new("groovy").unwrap(),
-        &limits(ir),
-        facts,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            AdapterError::Sink(SinkError::StreamLimit {
-                resource: rootlight_adapter_sdk::ResourceKind::Records,
-                observed: 2,
-                limit: 1,
-            })
-        ),
-        "{error:?}"
-    );
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: rootlight_adapter_sdk::ResourceKind::Records,
+                    observed: 2,
+                    limit: 1,
+                })
+            ),
+            "{kind}: {error:?}"
+        );
+    }
 }
 
 #[test]

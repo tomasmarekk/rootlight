@@ -313,7 +313,7 @@ impl<'a> GroovyBindings<'a> {
     ///
     /// # Errors
     /// Returns cancellation or malformed capture ancestry. Unresolved inheritance
-    /// blocks simple type selection, but not a qualified import alias.
+    /// blocks ordinary simple type selection, but not a qualified alias or header.
     pub(super) fn imported_type(
         &self,
         fact: &SyntaxFact,
@@ -321,9 +321,15 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<GroovyImportedType>, AdapterError> {
         cancellation.check()?;
+        if is_header_type(fact) && !self.header_has_identity(fact, cancellation)? {
+            return Ok(None);
+        }
         if !matches!(
             fact.syntax_kind().as_str(),
-            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+            "groovy.type_identifier.reference"
+                | "groovy.qualified_type.reference"
+                | "groovy.extends_type.reference"
+                | "groovy.implements_type.reference"
         ) {
             return Ok(None);
         }
@@ -341,9 +347,11 @@ impl<'a> GroovyBindings<'a> {
         let Some(binding) = self.imports.get(root).and_then(Option::as_ref) else {
             return Ok(None);
         };
-        // ResolveVisitor checks exact module class names before import aliases.
-        // Generic and nested simple-name lookup does not apply to a dotted type.
-        let shadowed = if suffix.is_some() {
+        // Header aliases precede module/generic names; ordinary uses first check
+        // exact module classes, or lexical shadowing for an unqualified name.
+        let shadowed = if is_header_type(fact) {
+            false
+        } else if suffix.is_some() {
             self.module_type(fact, &name, cancellation)?.is_some()
         } else {
             self.type_parameter(fact, root, cancellation)?.is_some()
@@ -382,6 +390,17 @@ impl<'a> GroovyBindings<'a> {
             parent = owner.parent();
         }
         Err(invalid_capture())
+    }
+
+    fn header_has_identity(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        Ok(self
+            .type_context(fact.parent(), cancellation)?
+            .and_then(|owner| self.type_names.get(&owner))
+            .is_some_and(|(_, symbol)| symbol.is_some()))
     }
 
     fn module_type(
@@ -450,7 +469,9 @@ impl<'a> GroovyBindings<'a> {
             if let Some(target) = self.local_types.get(&(owner, name)) {
                 return Ok(Some(target.and_then(|target| target.symbol)));
             }
-            if self.inherited_scopes.contains(&owner) {
+            if self.inherited_scopes.contains(&owner)
+                && !(is_header_type(reference) && owners.first() == Some(&owner))
+            {
                 return Ok(Some(None));
             }
         }
@@ -463,15 +484,27 @@ impl<'a> GroovyBindings<'a> {
 
     fn nested_type_path(
         &self,
+        owner: u64,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<LocalType>>, AdapterError> {
+        self.nested_type_path_excluding(owner, name, None, cancellation)
+    }
+
+    fn nested_type_path_excluding(
+        &self,
         mut owner: u64,
         name: &str,
+        inheritance_origin: Option<u64>,
         cancellation: &Cancellation,
     ) -> Result<Option<Option<LocalType>>, AdapterError> {
         let mut target = None;
         for component in name.split('.') {
             cancellation.check()?;
             let Some(child) = self.local_types.get(&(owner, component)) else {
-                return Ok(self.inherited_scopes.contains(&owner).then_some(None));
+                return Ok((self.inherited_scopes.contains(&owner)
+                    && inheritance_origin != Some(owner))
+                .then_some(None));
             };
             let Some(child) = child.filter(|child| child.symbol.is_some()) else {
                 return Ok(Some(None));
@@ -523,7 +556,12 @@ impl<'a> GroovyBindings<'a> {
         // Match the entire child path before moving to the next enclosing scope:
         // a same-named prefix with no matching child does not shadow a full path.
         for &owner in owners.iter().take(1).chain(owners.iter().skip(1).rev()) {
-            if let Some(target) = self.nested_type_path(owner, name, cancellation)? {
+            let origin = is_header_type(reference)
+                .then(|| owners.first().copied())
+                .flatten();
+            if let Some(target) =
+                self.nested_type_path_excluding(owner, name, origin, cancellation)?
+            {
                 return Ok(target.and_then(|target| target.symbol));
             }
         }
@@ -547,6 +585,32 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancellation.check()?;
+        if is_header_type(fact) {
+            if !self.header_has_identity(fact, cancellation)? {
+                return Ok(None);
+            }
+            let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+                "groovy",
+                fact,
+                name,
+                self.maximum_name_bytes,
+            ) else {
+                return Ok(None);
+            };
+            let root = name.split('.').next().ok_or_else(invalid_capture)?;
+            // Header aliases are preferred before generic or local names. The
+            // current class's unresolved ancestry cannot block its own parent lookup.
+            if self.imports.contains_key(root) || self.unresolved_imports {
+                return Ok(None);
+            }
+            if name.contains('.') {
+                return self.qualified_local_type(fact, &name, cancellation);
+            }
+            if self.type_parameter(fact, &name, cancellation)?.is_some() {
+                return Ok(None);
+            }
+            return Ok(self.local_type(fact, &name, cancellation)?.flatten());
+        }
         if fact.syntax_kind().as_str() == "groovy.qualified_type.reference" {
             let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
                 "groovy",
@@ -784,6 +848,13 @@ fn is_scope(fact: &SyntaxFact) -> bool {
         )
 }
 
+fn is_header_type(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "groovy.extends_type.reference" | "groovy.implements_type.reference"
+    )
+}
+
 fn bounded_type_path(
     prefix: &str,
     suffix: &str,
@@ -949,6 +1020,99 @@ mod tests {
         );
         assert_eq!(
             plan.resolve(&facts[4], "sample.Local", &cancellation)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn inheritance_headers_require_the_declaring_type_identity() {
+        let source = b"Base Holder Base";
+        let facts = vec![
+            fact(1, None, SyntaxFactKind::Module, "groovy.file.module", 0, 16),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                0,
+                4,
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                "groovy.identifier.definition",
+                0,
+                4,
+            ),
+            fact(
+                4,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                5,
+                16,
+            ),
+            fact(
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                "groovy.identifier.definition",
+                5,
+                11,
+            ),
+            fact(
+                6,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                "groovy.extends_type.reference",
+                12,
+                16,
+            ),
+        ];
+        let cancellation = Cancellation::new();
+        let base = SymbolId::from_bytes([1; 20]);
+        for (symbols, expected) in [
+            (HashMap::from([(3, base)]), None),
+            (
+                HashMap::from([(3, base), (5, SymbolId::from_bytes([2; 20]))]),
+                Some(base),
+            ),
+        ] {
+            let plan = GroovyBindings::new(&facts, source, &symbols, 64, &cancellation).unwrap();
+            assert_eq!(
+                plan.resolve(&facts[5], "Base", &cancellation).unwrap(),
+                expected
+            );
+        }
+        let mut imports = facts;
+        imports.push(fact(
+            7,
+            Some(1),
+            SyntaxFactKind::Scope,
+            "groovy.import.scope",
+            0,
+            4,
+        ));
+        imports.push(fact(
+            8,
+            Some(7),
+            SyntaxFactKind::Occurrence,
+            "groovy.type_import.reference",
+            0,
+            4,
+        ));
+        let plan = GroovyBindings::new(
+            &imports,
+            source,
+            &HashMap::from([(3, base)]),
+            64,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.imported_type(&imports[5], "Base", &cancellation)
                 .unwrap(),
             None
         );

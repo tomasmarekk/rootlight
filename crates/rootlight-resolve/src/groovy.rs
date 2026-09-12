@@ -216,11 +216,15 @@ impl<'a> GroovyIndex<'a> {
             && occurrence.syntax_kind == "groovy.type_import.reference"
         {
             (occurrence.syntactic_text_hash, None)
-        } else if occurrence.role == OccurrenceRole::TypeUse
+        } else if (occurrence.role == OccurrenceRole::TypeUse
             && matches!(
                 occurrence.syntax_kind.as_str(),
                 "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
-            )
+            ))
+            || (occurrence.role == OccurrenceRole::InheritanceUse
+                && occurrence.syntax_kind == "groovy.extends_type.reference")
+            || (occurrence.role == OccurrenceRole::ImplementationUse
+                && occurrence.syntax_kind == "groovy.implements_type.reference")
         {
             let (envelope, binding) = self.uses.get(&occurrence.source.span())?.as_ref()?;
             if envelope.evidence.source.as_ref() != Some(&occurrence.source) {
