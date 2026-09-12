@@ -25,7 +25,8 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
 // CI replays one reviewed corpus; broader random campaigns use a separate runner config.
 const FUZZ_SEED: u64 = 202_607_170_404;
-const FUZZ_ROUTES: [(&str, &str); 21] = [
+const FUZZ_ROUTES: [(&str, &str); 22] = [
+    ("fuzz.groovy", "groovy"),
     ("fuzz.dart", "dart"),
     ("fuzz.toml", "toml"),
     ("fuzz.json", "json"),
@@ -628,6 +629,7 @@ fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
         "css" => b".cleanup { color: red; }\n",
         "bash" => b"cleanup() { :; }\n",
         "perl" => b"sub cleanup {}\n",
+        "groovy" => b"def cleanup() {}\n",
         "json" => br#"{"cleanup":true}"#,
         "toml" => b"cleanup = true\n",
         _ => b"",

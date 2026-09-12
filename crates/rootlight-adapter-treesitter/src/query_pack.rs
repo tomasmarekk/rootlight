@@ -20,6 +20,7 @@ use crate::{
 
 mod dart;
 mod ecmascript;
+mod groovy;
 mod markdown;
 mod matlab;
 mod nix;
@@ -962,6 +963,9 @@ fn candidate_for_capture(
                 "javascript.function"
             }
         }
+        _ if family == GrammarFamily::Groovy => {
+            groovy::syntax(capture.node, role).ok_or_else(|| query_failure("query-groovy-kind"))?
+        }
         _ if family == GrammarFamily::Perl => {
             perl::syntax(capture.node, role, source, cancellation)?
                 .ok_or_else(|| query_failure("query-perl-kind"))?
@@ -1159,6 +1163,7 @@ fn candidate_for_capture(
             GrammarFamily::Nix => "nix.call",
             GrammarFamily::Matlab => return Err(query_failure("query-matlab-ambiguous-call")),
             GrammarFamily::Perl => return Err(query_failure("query-perl-unresolved-call")),
+            GrammarFamily::Groovy => "groovy.call",
         },
         _ => canonical_syntax(family, capture.node.kind())
             .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -1256,7 +1261,11 @@ fn candidate_for_capture(
     }
     if matches!(
         family,
-        GrammarFamily::Swift | GrammarFamily::Bash | GrammarFamily::Solidity | GrammarFamily::Scala
+        GrammarFamily::Swift
+            | GrammarFamily::Bash
+            | GrammarFamily::Solidity
+            | GrammarFamily::Scala
+            | GrammarFamily::Groovy
     ) && matches!(role, StructuralRole::Signature | StructuralRole::ScopeType)
     {
         if let Some(body) = capture.node.child_by_field_name("body") {
@@ -1930,7 +1939,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(32);
+        let mut packs = Vec::with_capacity(33);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -1972,6 +1981,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Nix, include_str!("../queries/nix.scm")),
             (GrammarFamily::Matlab, include_str!("../queries/matlab.scm")),
             (GrammarFamily::Perl, include_str!("../queries/perl.scm")),
+            (GrammarFamily::Groovy, include_str!("../queries/groovy.scm")),
             (GrammarFamily::Scala, include_str!("../queries/scala.scm")),
             (GrammarFamily::Dart, include_str!("../queries/dart.scm")),
             (
@@ -2077,6 +2087,7 @@ mod tests {
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
             GrammarFamily::Perl,
+            GrammarFamily::Groovy,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();

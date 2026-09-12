@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 32] = [
+    let cases: [(&str, &str, &[u8]); 33] = [
+        (
+            "sample.groovy",
+            "groovy",
+            b"class Sample { int read(int value) { value } }\n",
+        ),
         (
             "sample.pm",
             "perl",

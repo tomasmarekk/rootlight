@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "bb164fe48efbddbd49c99e392feca3c0ad2b81d3144c14a76263bd8f90a08df5";
+    "9f8d260c0435ea1e4ac9ef6bb3a92793fc405cd3e5b1ae709a8c464a392b3d1a";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -37,11 +37,16 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 32] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 33] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "dekobon-tree-sitter-groovy",
+        "0.2.0",
+        "891a2367f48836c854e84bac87f17513707a65a20dce7cab5707ddde6ca23fe0",
     ),
     (
         "ts-parser-perl",
@@ -228,6 +233,16 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
     validate_local_license(
         root,
+        "adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-MIT",
+        "7846ff7803888ebb32f936a8a858eb9d5d73560401d92a2f358d562642205263",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-APACHE",
+        "c95bae1d1ce0235ecccd3560b772ec1efb97f348a79f0fbe0a634f0c2ccefe2c",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/ts-parser-perl-2.0.0-LICENSE",
         "68a9a526ae357ed5a2f8ca5dabb14131b283554b69639bb04816088d4b1f2fa0",
     )?;
@@ -336,7 +351,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 32 {
+    if manifest.grammars.len() != 33 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -365,6 +380,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "css",
         "dart",
         "go",
+        "groovy",
         "html",
         "sql",
         "java",
@@ -548,7 +564,10 @@ fn validate_tree_sitter_dependencies(dependencies: &[Dependency]) -> Result<(), 
 }
 
 fn is_tree_sitter_package(name: &str) -> bool {
-    name == "tree-sitter" || name.starts_with("tree-sitter-") || name.starts_with("ts-parser-")
+    name == "tree-sitter"
+        || name == "dekobon-tree-sitter-groovy"
+        || name.starts_with("tree-sitter-")
+        || name.starts_with("ts-parser-")
 }
 
 fn validate_dependency_profile(
@@ -755,7 +774,8 @@ fn validate_vendored_tree(
     // a digest from an unrelated file or resolving a path outside the package.
     let parser_path = vendored.parser_path.as_deref().unwrap_or("src/parser.c");
     let scanner_path = vendored.scanner_path.as_deref().unwrap_or("src/scanner.c");
-    for path in [parser_path, scanner_path] {
+    let license_path = vendored.license_path.as_deref().unwrap_or("LICENSE");
+    for path in [parser_path, scanner_path, license_path] {
         if path.is_empty()
             || path.split('/').any(|part| {
                 part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':'])
@@ -766,7 +786,7 @@ fn validate_vendored_tree(
     }
     if vendored.files.get(parser_path) != Some(&grammar.parser_sha256)
         || vendored.files.get(scanner_path) != scanner
-        || vendored.files.get("LICENSE") != Some(&grammar.license_sha256)
+        || vendored.files.get(license_path) != Some(&grammar.license_sha256)
     {
         return Err(invalid());
     }
@@ -896,6 +916,8 @@ struct VendoredGrammarEvidence {
     parser_path: Option<String>,
     #[serde(default)]
     scanner_path: Option<String>,
+    #[serde(default)]
+    license_path: Option<String>,
     files: BTreeMap<String, String>,
 }
 
@@ -945,7 +967,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 32")]
+    #[error("grammar lock contains {0} grammars instead of 33")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1065,6 +1087,64 @@ mod tests {
     }
 
     #[test]
+    fn vendored_license_path_requires_exact_file_digest_and_relative_identity() {
+        let (directory, mut grammar) = vendored_fixture();
+        fs::rename(
+            directory.path().join("LICENSE"),
+            directory.path().join("LICENSE-MIT"),
+        )
+        .unwrap();
+        let vendored = grammar.vendored.as_mut().unwrap();
+        let digest = vendored.files.remove("LICENSE").unwrap();
+        vendored.files.insert("LICENSE-MIT".into(), digest);
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap()
+            )
+            .is_err()
+        );
+        grammar.vendored.as_mut().unwrap().license_path = Some("LICENSE-MIT".into());
+        validate_vendored_tree(
+            directory.path(),
+            &grammar,
+            grammar.vendored.as_ref().unwrap(),
+        )
+        .unwrap();
+        for path in [
+            "",
+            "../LICENSE-MIT",
+            "/LICENSE-MIT",
+            "./LICENSE-MIT",
+            "C:/LICENSE-MIT",
+            "LICENSE",
+            "src/parser.c",
+        ] {
+            grammar.vendored.as_mut().unwrap().license_path = Some(path.into());
+            assert!(
+                validate_vendored_tree(
+                    directory.path(),
+                    &grammar,
+                    grammar.vendored.as_ref().unwrap()
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+        grammar.vendored.as_mut().unwrap().license_path = Some("LICENSE-MIT".into());
+        grammar.license_sha256 = sha256_hex(b"different license");
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn scannerless_vendor_requires_both_absent_file_and_absent_descriptor() {
         let (directory, mut grammar) = vendored_fixture();
         grammar.scanner_sha256 = "none".into();
@@ -1149,6 +1229,7 @@ mod tests {
                 manifest_path: "third_party/grammar/Cargo.toml".into(),
                 parser_path: None,
                 scanner_path: None,
+                license_path: None,
                 files,
             }),
         };

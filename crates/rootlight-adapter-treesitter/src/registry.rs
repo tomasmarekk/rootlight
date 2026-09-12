@@ -77,6 +77,8 @@ pub enum GrammarFamily {
     Matlab,
     /// Perl written declarations; package and runtime dispatch resolution remain separate.
     Perl,
+    /// Groovy written declarations; runtime metaprogramming and dispatch remain separate.
+    Groovy,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -156,7 +158,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(32);
+        let mut descriptors = Vec::with_capacity(33);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -190,6 +192,7 @@ impl GrammarRegistry {
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
             GrammarFamily::Perl,
+            GrammarFamily::Groovy,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -318,6 +321,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Nix => tree_sitter_nix::LANGUAGE.into(),
         GrammarFamily::Matlab => tree_sitter_matlab::LANGUAGE.into(),
         GrammarFamily::Perl => ts_parser_perl::LANGUAGE.into(),
+        GrammarFamily::Groovy => dekobon_tree_sitter_groovy::LANGUAGE.into(),
     }
 }
 
@@ -332,6 +336,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Groovy => GrammarIdentity {
+            language_id: "groovy",
+            grammar_version: "0.2.0",
+            source_package_sha256: "891a2367f48836c854e84bac87f17513707a65a20dce7cab5707ddde6ca23fe0",
+            parser_sha256: "1dfba48bd54b317a5a720d0ae6ee57b82a1d8bb7a24e7775f65899e548584f18",
+            scanner_sha256: Some(
+                "508dab84d07d4f6de074b2b50b3dbfd17eb3f9b905d255245843b60d53adb5f1",
+            ),
+        },
         GrammarFamily::Perl => GrammarIdentity {
             language_id: "perl",
             grammar_version: "2.0.0",
@@ -656,7 +669,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 32);
+        assert_eq!(registry.descriptors().len(), 33);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -690,6 +703,7 @@ mod tests {
             GrammarFamily::Nix,
             GrammarFamily::Matlab,
             GrammarFamily::Perl,
+            GrammarFamily::Groovy,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -770,6 +784,11 @@ mod tests {
             (GrammarFamily::Nix, "nix", "tree-sitter-nix"),
             (GrammarFamily::Matlab, "matlab", "tree-sitter-matlab"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
+            (
+                GrammarFamily::Groovy,
+                "groovy",
+                "dekobon-tree-sitter-groovy",
+            ),
             (
                 GrammarFamily::PowerShell,
                 "powershell",

@@ -510,6 +510,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
+name = "dekobon-tree-sitter-groovy"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2162,6 +2170,7 @@ name = "rootlight-adapter-treesitter"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "dekobon-tree-sitter-groovy",
  "proptest",
  "rootlight-adapter-sdk",
  "rootlight-cancel",

@@ -49,6 +49,8 @@ mod ecmascript_imports;
 mod ecmascript_native;
 #[path = "analyzer_e2e/ecmascript_references.rs"]
 mod ecmascript_references;
+#[path = "analyzer_e2e/groovy_native.rs"]
+mod groovy_native;
 #[path = "analyzer_e2e/html_native.rs"]
 mod html_native;
 #[path = "analyzer_e2e/markdown_native.rs"]

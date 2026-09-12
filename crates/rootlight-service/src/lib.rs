@@ -27352,11 +27352,7 @@ mod tests {
     #[test]
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let languages = [
-            ("analysis.mlx", "matlab"),
-            ("pipeline.groovy", "groovy"),
-            ("boot.asm", "assembly"),
-        ];
+        let languages = [("analysis.mlx", "matlab"), ("boot.asm", "assembly")];
         for (path, _) in languages {
             fs::write(fixture.path().join(path), "unsupported fixture\n")
                 .expect("unsupported source writes");
@@ -27399,7 +27395,6 @@ mod tests {
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
             ),
-            ("script.groovy", "def render() { return 1 }\n", "groovy"),
             (
                 "mystery.sourceblob",
                 "opaqueWidget configures lexicalFallback\n",
@@ -27481,12 +27476,70 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["objective-cpp", "matlab", "groovy"] {
+        for language in ["objective-cpp", "matlab"] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)
                     && gap.files == 1
             }));
+        }
+    }
+
+    #[test]
+    fn groovy_declarations_publish_queryable_symbols_and_exact_sources() {
+        for path in ["catalog.groovy", "build.gradle"] {
+            let fixture = TempDir::new().unwrap();
+            let source = "class Meter { private int value; String read() { 'value' } }\ndef render() { 'output' }\n";
+            fs::write(fixture.path().join(path), source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let doc = generation.document();
+            assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+            let file = doc.files.iter().find(|file| file.path == path).unwrap();
+            assert_eq!(file.language, "groovy");
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            assert!(doc.skipped_regions.iter().any(|gap| {
+                gap.detail
+                    == "groovy-import-inheritance-and-runtime-dispatch-resolution-unavailable"
+            }));
+            for name in ["Meter", "value", "read", "render"] {
+                let located = service
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let hit = located
+                    .data
+                    .hits
+                    .iter()
+                    .find(|hit| hit.symbol.is_some())
+                    .unwrap();
+                let explained = service
+                    .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+                    .unwrap();
+                assert_eq!(explained.data.entity.canonical_name, name);
+                assert_eq!(explained.data.entity.language, "groovy");
+                assert_eq!(
+                    explained.data.entity.evidence.source.unwrap().generation(),
+                    receipt.generation
+                );
+            }
         }
     }
 

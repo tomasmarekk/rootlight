@@ -3547,6 +3547,10 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "groovy.file.module" => Some((
+            FactDomain::Relations,
+            "groovy-import-inheritance-and-runtime-dispatch-resolution-unavailable",
+        )),
         "perl.function.declaration" => {
             Some((FactDomain::Entities, "perl-function-ownership-unavailable"))
         }
@@ -4414,6 +4418,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "csharp"
                 | "go"
                 | "java"
+                | "groovy"
                 | "kotlin"
                 | "lua"
                 | "php"
@@ -4544,6 +4549,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "nix.file.module"
                 | "matlab.file.module"
                 | "perl.file.module"
+                | "groovy.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
@@ -4576,6 +4582,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "dart"
                 | "powershell"
                 | "markdown"
+                | "groovy"
                 | "astro"
                 | "objective-c"
         )
