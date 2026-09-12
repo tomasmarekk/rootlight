@@ -21,6 +21,7 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Typed declarations, command calls, command chains and competing expressions.
 - Nested type declarations as class members, retaining their own bodies and names.
 - Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
+- Formal parameter annotations and `final` without changing name, type or default spans.
 - Try-statement terminators versus newlines introducing another handler or finally.
 - Reserved catch/finally identifiers versus property names and literal map labels.
 - Slashy strings versus division, escaped slash endings and lazy interpolation.

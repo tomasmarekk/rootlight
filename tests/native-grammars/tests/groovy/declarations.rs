@@ -42,6 +42,61 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn formal_parameter_annotations_and_final_preserve_names_and_types() {
+    for (header, expected_type) in [
+        ("String value", Some("String")),
+        ("@Deprecated String value", Some("String")),
+        ("final String value", Some("String")),
+        ("@Deprecated final String value", Some("String")),
+        ("final @Deprecated String value", Some("String")),
+        ("def value", None),
+        ("final def value", None),
+        ("final value", None),
+        ("final value = 'seed'", None),
+        ("@Deprecated String... value", Some("String...")),
+        ("final List<String> value = null", Some("List<String>")),
+    ] {
+        for declaration in [
+            format!("def consume({header}) {{ value }}"),
+            format!("class Holder {{ Holder({header}) {{ consume(value) }} }}"),
+        ] {
+            let source = format!("{declaration}\n");
+            let tree = valid(&source);
+            let parameters: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "formal_parameter")
+                .collect();
+            assert_eq!(parameters.len(), 1, "{source}");
+            let parameter = parameters[0];
+            assert_eq!(parameter.utf8_text(source.as_bytes()).unwrap(), header);
+            assert_eq!(
+                parameter
+                    .child_by_field_name("name")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                "value"
+            );
+            assert_eq!(
+                parameter
+                    .child_by_field_name("type")
+                    .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+                expected_type,
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_formal_parameter_headers_are_not_accepted() {
+    for header in ["@Deprecated", "String value ="] {
+        let source = format!("def consume({header}) {{ value }}\n");
+        assert!(parse(&source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
 fn nested_types_remain_class_members_with_exact_authored_bodies() {
     for (kind, declaration) in [
         ("class_declaration", "class Inner<T> { T field }"),

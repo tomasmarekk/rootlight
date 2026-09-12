@@ -185,6 +185,36 @@ fn groovy_catch_parameters_bind_untyped_modified_and_multicatch_headers() {
 }
 
 #[test]
+fn groovy_modified_formal_parameters_bind_body_and_captured_reads() {
+    for header in [
+        "String value",
+        "@Deprecated String value",
+        "final String value",
+        "@Deprecated final String value",
+        "final @Deprecated String value",
+        "def value",
+        "final def value",
+        "final value",
+    ] {
+        let source = format!(
+            "class Holder {{ def examine({header}) {{ sink(value); def deferred = {{ sink(value) }} }}; def outside() {{ sink(value) }} }}\n"
+        );
+        let parameter = Some(source.find("value)").unwrap());
+        assert_lexical_reads(&source, "value", &[parameter, parameter, None]);
+        let result = output(&source);
+        let parameters: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Parameter && entity.canonical_name == "value"
+            })
+            .collect();
+        assert_eq!(parameters.len(), 1);
+    }
+}
+
+#[test]
 fn groovy_lexical_reads_respect_initializers_and_closure_parameters() {
     let source = "def examine(input) { sink(value); def value = value; sink(value); def action = { argument -> sink(value, input, argument) }; def implicit = { sink(it, value) }; def explicit = { -> sink(it, value) } }\n";
     let value = Some(source.find("value =").unwrap());

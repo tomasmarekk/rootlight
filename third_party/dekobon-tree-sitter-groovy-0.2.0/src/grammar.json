@@ -2542,24 +2542,49 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "REPEAT",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "annotation"
+              },
+              {
+                "type": "STRING",
+                "value": "final"
+              }
+            ]
+          }
+        },
+        {
           "type": "CHOICE",
           "members": [
             {
-              "type": "FIELD",
-              "name": "type",
-              "content": {
-                "type": "CHOICE",
-                "members": [
-                  {
-                    "type": "SYMBOL",
-                    "name": "_type"
-                  },
-                  {
-                    "type": "SYMBOL",
-                    "name": "varargs_type"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "def"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "type",
+                  "content": {
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "SYMBOL",
+                        "name": "_type"
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "varargs_type"
+                      }
+                    ]
                   }
-                ]
-              }
+                }
+              ]
             },
             {
               "type": "BLANK"

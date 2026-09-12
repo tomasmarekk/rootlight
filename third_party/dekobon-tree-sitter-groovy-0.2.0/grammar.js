@@ -725,11 +725,11 @@ module.exports = grammar({
       ')',
     ),
 
-    // §5.13 — formal parameter with optional type, optional
-    // varargs marker (`Type... name`), and optional default value
-    // (`name = expr`).
+    // Parameter annotations and final are not types. Keep the authored type
+    // field separate from dynamic def and preserve the parameter's name span.
     formal_parameter: $ => seq(
-      optional(field('type', choice($._type, $.varargs_type))),
+      repeat(choice($.annotation, 'final')),
+      optional(choice('def', field('type', choice($._type, $.varargs_type)))),
       field('name', $.identifier),
       optional(seq('=', field('default', $._expression))),
     ),
