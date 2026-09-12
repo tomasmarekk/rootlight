@@ -16,7 +16,7 @@ enum Quoting {
     DollarSlashy,
 }
 
-/// Removes only trivia between grammar-reviewed package-name components.
+/// Removes only trivia between grammar-reviewed package or import name components.
 /// Invalid boundaries, unfinished comments and exceeded byte budgets return `None`.
 pub(crate) fn canonical_qualified_name(text: &str, maximum: usize) -> Option<Cow<'_, str>> {
     if text.is_empty() || text.len() > maximum {

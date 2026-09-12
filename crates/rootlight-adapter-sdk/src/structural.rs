@@ -23,6 +23,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                     | "typescript.import_binding.declaration"
                     | "javascript.type_import_binding.declaration"
                     | "typescript.type_import_binding.declaration"
+                    | "groovy.import_alias.declaration"
             ) =>
         {
             Some(EntityKind::Import)
@@ -395,7 +396,14 @@ pub fn structural_captured_name_for_fact<'a>(
     {
         crate::yaml_names::anchor_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "groovy"
-        && fact.syntax_kind().as_str() == "groovy.qualified_identifier.definition"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "groovy.qualified_identifier.definition"
+                | "groovy.type_import.reference"
+                | "groovy.package_star_import.reference"
+                | "groovy.static_import.reference"
+                | "groovy.static_star_import.reference"
+        )
     {
         crate::groovy_names::canonical_qualified_name(text, maximum_bytes)
     } else {

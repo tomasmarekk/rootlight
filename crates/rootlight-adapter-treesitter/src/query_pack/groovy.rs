@@ -105,6 +105,14 @@ fn member_kind(
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if node.kind() == "identifier"
+        && node.parent().is_some_and(|parent| {
+            parent.kind() == "import_declaration"
+                && parent.child_by_field_name("alias") == Some(node)
+        })
+    {
+        return Some("groovy.import_alias");
+    }
     if role == StructuralRole::Expression
         && node.parent().is_some_and(|parent| {
             parent.kind() == "for_in_statement" && parent.child_by_field_name("value") == Some(node)
@@ -199,12 +207,13 @@ pub(super) fn nonlexical_identifier(node: Node<'_>) -> bool {
         "map_entry" | "named_argument" => "key",
         "labeled_statement" | "break_statement" | "continue_statement" => "label",
         "qualified_name" => return true,
+        "import_declaration" => "alias",
         _ => return false,
     };
     parent.child_by_field_name(field) == Some(node)
 }
 
-/// Preserves interpolation names, resource visibility and authored closure parameters.
+/// Preserves import namespaces, interpolation names and native binding boundaries.
 ///
 /// # Errors
 /// Returns cancellation or an incomplete native control/header error.
@@ -215,6 +224,35 @@ pub(super) fn adjust_candidate(
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
+    if candidate.role == StructuralRole::Reference
+        && node.kind() == "qualified_name"
+        && let Some(import) = node.parent().filter(|parent| {
+            parent.kind() == "import_declaration"
+                && parent.child_by_field_name("name") == Some(node)
+        })
+    {
+        // Only direct anonymous tokens distinguish the import namespace. Text
+        // inside an annotation or comment must not become a static/star marker.
+        let mut is_static = false;
+        let mut is_star = false;
+        let mut cursor = import.walk();
+        for (index, child) in import.children(&mut cursor).enumerate() {
+            if index % 64 == 0 {
+                cancellation.check()?;
+            }
+            match child.kind() {
+                "static" => is_static = true,
+                ".*" => is_star = true,
+                _ => {}
+            }
+        }
+        candidate.syntax = match (is_static, is_star) {
+            (false, false) => "groovy.type_import",
+            (false, true) => "groovy.package_star_import",
+            (true, false) => "groovy.static_import",
+            (true, true) => "groovy.static_star_import",
+        };
+    }
     if candidate.role == StructuralRole::Reference
         && node.kind() == "type_identifier"
         && node

@@ -27615,6 +27615,107 @@ mod tests {
     }
 
     #[test]
+    fn groovy_import_aliases_publish_queryable_symbols_and_exact_sources() {
+        let fixture = TempDir::new().unwrap();
+        let source = "import sample.Widget as Alias\nimport static sample /* trivia */ . Tools.run as perform\n";
+        fs::write(fixture.path().join("imports.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        for name in ["Alias", "perform"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let symbols: Vec<_> = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect();
+            assert_eq!(symbols.len(), 1);
+            let explained = service
+                .symbol_explain(receipt.generation, symbols[0], &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity.kind, rootlight_ir::EntityKind::Import);
+            assert_eq!(explained.data.entity.canonical_name, name);
+            let reference = explained.data.entity.evidence.source.unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, name.as_bytes());
+        }
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        for (kind, text, canonical) in [
+            (
+                "groovy.type_import.reference",
+                "sample.Widget",
+                "sample.Widget",
+            ),
+            (
+                "groovy.static_import.reference",
+                "sample /* trivia */ . Tools.run",
+                "sample.Tools.run",
+            ),
+        ] {
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == kind)
+                .unwrap();
+            assert_eq!(site.role, rootlight_ir::OccurrenceRole::ImportUse);
+            assert_eq!(site.syntactic_text_hash, content_hash(canonical.as_bytes()));
+            assert!(matches!(
+                site.target,
+                rootlight_ir::OccurrenceTarget::Unresolved { .. }
+            ));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "unresolved-import-target")
+        );
+    }
+
+    #[test]
     fn groovy_quoted_methods_publish_decoded_names_and_exact_sources() {
         let fixture = TempDir::new().unwrap();
         let cases = [

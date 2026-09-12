@@ -111,6 +111,156 @@ fn groovy_array_initializers_preserve_value_reads_without_inventing_closures() {
 }
 
 #[test]
+fn groovy_import_fields_preserve_targets_kinds_and_authored_aliases() {
+    for (declaration, target, kind, alias) in [
+        ("import sample.Widget", "sample.Widget", "type_import", None),
+        (
+            "import sample.Widget as Alias",
+            "sample.Widget",
+            "type_import",
+            Some("Alias"),
+        ),
+        ("import sample.*", "sample", "package_star_import", None),
+        (
+            "import static sample.Tools.run",
+            "sample.Tools.run",
+            "static_import",
+            None,
+        ),
+        (
+            "import static sample.Tools.run as perform",
+            "sample.Tools.run",
+            "static_import",
+            Some("perform"),
+        ),
+        (
+            "import static sample.Tools.*",
+            "sample.Tools",
+            "static_star_import",
+            None,
+        ),
+    ] {
+        let source = format!("@Marker\n{declaration}\nclass Widget {{}}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        let targets: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == format!("groovy.{kind}.reference"))
+            .collect();
+        assert_eq!(targets.len(), 1, "{source}");
+        let site = targets[0];
+        assert_eq!(site.role, OccurrenceRole::ImportUse);
+        assert_eq!(site.syntactic_text_hash, content_hash(target.as_bytes()));
+        let start = source.find(target).unwrap();
+        assert_eq!(
+            site.source.span().start_byte(),
+            u64::try_from(start).unwrap()
+        );
+        assert_eq!(
+            site.source.span().end_byte(),
+            u64::try_from(start + target.len()).unwrap()
+        );
+        assert_eq!(site.source.content_hash(), doc.files[0].content_hash);
+        assert_eq!(site.source.generation(), doc.files[0].generation);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        let imports: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Import)
+            .collect();
+        assert_eq!(imports.len(), usize::from(alias.is_some()), "{source}");
+        if let Some(alias) = alias {
+            assert_eq!(imports[0].canonical_name, alias);
+            let definition = doc
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: imports[0].id,
+                            }
+                })
+                .unwrap();
+            let span = definition.source.span();
+            assert_eq!(
+                &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                alias
+            );
+            assert!(
+                !doc.occurrences.iter().any(
+                    |site| site.role == OccurrenceRole::Reference && site.source.span() == span
+                )
+            );
+        }
+        assert!(!doc.relations.iter().any(|relation| matches!(
+            relation.predicate,
+            RelationPredicate::RefersTo | RelationPredicate::Calls
+        )));
+        assert!(
+            doc.skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "unresolved-import-target")
+        );
+    }
+}
+
+#[test]
+fn groovy_import_target_identity_ignores_trivia_but_keeps_exact_source() {
+    for (prefix, kind, target, canonical) in [
+        (
+            "static ",
+            "static_import",
+            "sample /* static .* as */ . Tools . run",
+            "sample.Tools.run",
+        ),
+        ("static ", "static_import", "sample.λ.run", "sample.λ.run"),
+        (
+            "",
+            "type_import",
+            "sample /* static .* as */ . Widget",
+            "sample.Widget",
+        ),
+    ] {
+        let source = format!("@Marker(value='static .* as')\nimport {prefix}{target} as renamed\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        let site = doc
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == format!("groovy.{kind}.reference"))
+            .expect("native import target");
+        assert_eq!(site.syntactic_text_hash, content_hash(canonical.as_bytes()));
+        let span = site.source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            target
+        );
+        assert_eq!(site.role, OccurrenceRole::ImportUse);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
+fn groovy_import_aliases_are_not_lexical_value_definitions() {
+    assert_lexical_reads(
+        "import sample.Widget as Alias\ndef read() { Alias }\n",
+        "Alias",
+        &[None],
+    );
+    assert_lexical_reads(
+        "import static sample.Tools.run as perform\ndef read() { perform }\n",
+        "perform",
+        &[None],
+    );
+}
+
+#[test]
 fn groovy_annotated_imports_preserve_unresolved_source_evidence() {
     for declaration in [
         "import sample.Widget",

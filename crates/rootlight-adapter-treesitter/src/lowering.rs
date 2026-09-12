@@ -3985,6 +3985,22 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "groovy"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "groovy.type_import.reference"
+                | "groovy.package_star_import.reference"
+                | "groovy.static_import.reference"
+                | "groovy.static_star_import.reference"
+        )
+    {
+        return rootlight_adapter_sdk::structural_captured_name_for_fact(
+            language,
+            fact,
+            text,
+            maximum_name_bytes,
+        );
+    }
     // Strings, documentation and full member-path metadata are not identifiers.
     // Only native identifier fields may acquire identifier decoding failures.
     let identifier_reference =
@@ -4796,7 +4812,14 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     match fact.kind() {
         SyntaxFactKind::Import => Some(OccurrenceRole::ImportUse),
         SyntaxFactKind::Occurrence
-            if fact.syntax_kind().as_str() == "perl.use_module_name.reference" =>
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "perl.use_module_name.reference"
+                    | "groovy.type_import.reference"
+                    | "groovy.package_star_import.reference"
+                    | "groovy.static_import.reference"
+                    | "groovy.static_star_import.reference"
+            ) =>
         {
             Some(OccurrenceRole::ImportUse)
         }
@@ -5126,10 +5149,53 @@ mod tests {
     }
 
     #[test]
+    fn groovy_import_names_reject_incomplete_and_oversized_evidence() {
+        for label in [
+            "groovy.type_import.reference",
+            "groovy.package_star_import.reference",
+            "groovy.static_import.reference",
+            "groovy.static_star_import.reference",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(occurrence_role(&fact), Some(OccurrenceRole::ImportUse));
+            for invalid in [
+                "",
+                "sample.",
+                "sample..Type",
+                "sample /* unfinished",
+                "sample.*",
+                "sample.Type as Alias",
+                "sample.\nType",
+            ] {
+                assert!(
+                    structural_resolution_text("groovy", &fact, invalid, None, 128).is_none(),
+                    "{label}: {invalid}"
+                );
+            }
+            let text = "sample /* trivia */ . Type";
+            assert_eq!(
+                structural_resolution_text("groovy", &fact, text, None, text.len()).as_deref(),
+                Some("sample.Type")
+            );
+            assert!(
+                structural_resolution_text("groovy", &fact, text, None, text.len() - 1).is_none()
+            );
+        }
+    }
+
+    #[test]
     fn language_specific_declarations_map_conservatively() {
         for (label, expected) in [
             ("javascript.import_binding.declaration", EntityKind::Import),
             ("typescript.import_binding.declaration", EntityKind::Import),
+            ("groovy.import_alias.declaration", EntityKind::Import),
             (
                 "javascript.type_import_binding.declaration",
                 EntityKind::Import,
