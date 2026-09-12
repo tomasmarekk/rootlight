@@ -1263,6 +1263,12 @@ fn candidate_for_capture(
             .ok_or_else(|| query_failure("query-css-context-body"))?
             .start_byte();
     }
+    if family == GrammarFamily::Groovy
+        && role == StructuralRole::Signature
+        && matches!(capture.node.kind(), "closure" | "gstring_closure")
+    {
+        end = groovy::closure_header_end(capture.node, cancellation)?;
+    }
     if matches!(
         family,
         GrammarFamily::Swift

@@ -106,12 +106,41 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "import_declaration" => "groovy.import",
         "method_invocation" => "groovy.call",
         "block" | "class_body" | "enum_body" => "groovy.block",
-        "closure" => "groovy.closure",
+        "closure" | "gstring_closure" if role == StructuralRole::Declaration => {
+            "groovy.anonymous_function"
+        }
+        "closure" | "gstring_closure" => "groovy.closure",
         "line_comment" => "groovy.line_comment",
         "block_comment" => "groovy.block_comment",
         "string_literal" => "groovy.string",
         _ => return None,
     })
+}
+
+/// Selects only the native closure header, including an explicit empty parameter list.
+///
+/// # Errors
+/// Returns cancellation or an incomplete native header error; never scans body text.
+pub(super) fn closure_header_end(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    let opener = node.child(0).filter(|child| child.kind() == "{");
+    let mut cursor = node.walk();
+    for (index, child) in node.named_children(&mut cursor).enumerate() {
+        if index % 64 == 0 {
+            cancellation.check()?;
+        }
+        match child.kind() {
+            "closure_parameters" => return Ok(child.end_byte()),
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+    }
+    // No arrow means an implicit parameter, not a body-derived signature.
+    opener
+        .map(|node| node.end_byte())
+        .ok_or_else(|| super::query_failure("query-groovy-closure-header"))
 }
 
 #[cfg(test)]

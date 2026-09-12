@@ -2296,7 +2296,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // headers match. Offsets and function bodies must not affect identity.
                 let written_scope_identity = if matches!(
                     language_for_fact(self.request, fact),
-                    "r" | "powershell" | "nix" | "matlab" | "perl"
+                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
                 ) {
                     // Named MATLAB workspaces survive unrelated sibling insertion;
                     // only indistinguishable same-name siblings need an ordinal.
@@ -2491,6 +2491,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 kind = EntityKind::Method;
             }
             if kind == EntityKind::Function
+                && fact.syntax_kind().as_str() != "groovy.anonymous_function.declaration"
                 && parent_entity
                     .and_then(|parent| drafts.get(&parent))
                     .is_some_and(|parent| {
@@ -2556,6 +2557,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "r.anonymous_function.declaration"
                     | "powershell.anonymous_function.declaration"
                     | "nix.anonymous_function.declaration"
+                    | "groovy.anonymous_function.declaration"
             ) {
                 // This label is synthetic, not a written binding. The native
                 // callable span and scope identity retain its source ownership.
@@ -2662,7 +2664,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 language_for_fact(self.request, fact),
-                "r" | "powershell" | "nix" | "matlab" | "perl"
+                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
             ) && kind != EntityKind::Module
             {
                 // Separate written occurrences and their children without claiming
@@ -3772,6 +3774,8 @@ fn written_source_identity(
         "rootlight.matlab-source-occurrence/1"
     } else if language == "perl" {
         "rootlight.perl-source-occurrence/1"
+    } else if language == "groovy" {
+        "rootlight.groovy-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };

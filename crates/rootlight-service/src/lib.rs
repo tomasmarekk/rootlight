@@ -27621,6 +27621,77 @@ mod tests {
     }
 
     #[test]
+    fn groovy_closure_parameters_publish_distinct_source_backed_owners() {
+        let fixture = TempDir::new().unwrap();
+        let closures = ["{ value -> value + 1 }", "{ value -> value + 2 }"];
+        let source = format!(
+            "def first = {}\ndef second = {}\n",
+            closures[0], closures[1]
+        );
+        fs::write(fixture.path().join("callbacks.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "value".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let hits: Vec<_> = located
+            .data
+            .hits
+            .iter()
+            .filter(|hit| hit.symbol.is_some())
+            .collect();
+        assert_eq!(hits.len(), 2);
+        let mut owners = BTreeSet::new();
+        let mut sources = Vec::new();
+        for hit in hits {
+            let parameter = service
+                .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+                .unwrap()
+                .data
+                .entity;
+            assert_eq!(parameter.kind, rootlight_ir::EntityKind::Parameter);
+            let Some(rootlight_ir::ContainerRef::Entity(owner)) = parameter.container else {
+                panic!("parameter owner is missing")
+            };
+            owners.insert(owner);
+            let closure = service
+                .symbol_explain(receipt.generation, owner, &deadline())
+                .unwrap()
+                .data
+                .entity;
+            assert_eq!(closure.kind, rootlight_ir::EntityKind::Function);
+            assert!(closure.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            let reference = closure.evidence.source.unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            sources.push(String::from_utf8(read.data.chunks[0].bytes.clone()).unwrap());
+        }
+        assert_eq!(owners.len(), 2);
+        sources.sort();
+        assert_eq!(sources, closures);
+    }
+
+    #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";

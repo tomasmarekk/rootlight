@@ -318,3 +318,207 @@ fn groovy_unavailable_method_names_report_exact_gaps_without_inventing_local_own
         );
     }
 }
+
+#[test]
+fn groovy_closures_own_explicit_parameters_and_locals_without_written_names() {
+    for (source, callable, header, bindings) in [
+        (
+            "def transform = { String value -> def local = value; local }\n",
+            "{ String value -> def local = value; local }",
+            "{ String value ->",
+            vec!["value", "local"],
+        ),
+        (
+            "class Store { def transform = { value -> value } }\n",
+            "{ value -> value }",
+            "{ value ->",
+            vec!["value"],
+        ),
+        (
+            "def run() { consume { value -> value } }\n",
+            "{ value -> value }",
+            "{ value ->",
+            vec!["value"],
+        ),
+        (
+            "def message = \"${writer -> writer << 'ready'}\"\n",
+            "writer -> writer << 'ready'",
+            "writer ->",
+            vec!["writer"],
+        ),
+        ("def callback = { -> 1 }\n", "{ -> 1 }", "{ ->", vec![]),
+        ("def callback = { it }\n", "{ it }", "{", vec![]),
+    ] {
+        let result = output(source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{source}: {:?}",
+            doc.diagnostics
+        );
+        let functions: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "<anonymous>")
+            .collect();
+        assert_eq!(functions.len(), 1, "{source}: {:?}", doc.entities);
+        let function = functions[0];
+        assert_eq!(function.kind, EntityKind::Function);
+        assert!(
+            function
+                .flags
+                .contains(&rootlight_ir::EntityFlag::Synthetic)
+        );
+        let signatures: Vec<_> = doc
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                if lexical.kind() != rootlight_ir::LexicalEvidenceKind::Signature
+                    || lexical.subject() != rootlight_ir::FactRef::Entity(function.id)
+                {
+                    return None;
+                }
+                let span = extension.evidence.source.as_ref().unwrap().span();
+                assert_eq!(
+                    source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap()
+                    ),
+                    Some(lexical.text())
+                );
+                Some(lexical.text().to_owned())
+            })
+            .collect();
+        assert_eq!(signatures, [header]);
+        let span = function.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(callable)
+        );
+        assert!(!doc.occurrences.iter().any(|occurrence| occurrence.role
+            == OccurrenceRole::Definition
+            && occurrence.target
+                == OccurrenceTarget::Resolved {
+                    symbol: function.id
+                }));
+        for name in bindings {
+            let binding = doc
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(
+                binding.container,
+                Some(rootlight_ir::ContainerRef::Entity(function.id)),
+                "{name}"
+            );
+            assert!(
+                doc.relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Contains
+                        && relation.subject == RelationEndpoint::Entity(function.id)
+                        && relation.object == RelationEndpoint::Entity(binding.id))
+            );
+        }
+        assert!(
+            !doc.entities
+                .iter()
+                .any(|entity| entity.canonical_name == "it"),
+            "implicit parameters have no authored definition"
+        );
+    }
+}
+
+#[test]
+fn groovy_sibling_and_nested_closures_keep_distinct_body_independent_identities() {
+    let source =
+        "def run() { consume({ value -> value }, { value -> { nested -> nested + value } }) }\n";
+    let before = output(source);
+    let doc = before.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let closures: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "<anonymous>")
+        .collect();
+    assert_eq!(closures.len(), 3, "{:?}", doc.entities);
+    assert_eq!(
+        closures
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+    for (name, owner_source) in [
+        ("value", "{ value -> value }"),
+        ("value", "{ value -> { nested -> nested + value } }"),
+        ("nested", "{ nested -> nested + value }"),
+    ] {
+        let owner = closures
+            .iter()
+            .find(|entity| {
+                let span = entity.evidence.source.as_ref().unwrap().span();
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                ) == Some(owner_source)
+            })
+            .unwrap();
+        assert_eq!(
+            doc.entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == name
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(owner.id)))
+                .count(),
+            1
+        );
+    }
+    let after = output(&source.replace("nested + value", "nested + value + 12345"));
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.canonical_name.clone(), entity.container))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(identities(&before), identities(&after));
+}
+
+#[test]
+fn groovy_disjoint_block_variables_keep_distinct_source_identities() {
+    let source = "def run() { if (true) { def local = 1 }; if (false) { def local = 2 } }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let locals: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "local")
+        .collect();
+    assert_eq!(
+        locals.len(),
+        2,
+        "{:?}; {:?}",
+        doc.entities,
+        doc.skipped_regions
+    );
+    assert_ne!(locals[0].id, locals[1].id);
+    let after = output(&source.replace("= 1", "= 12345"));
+    let ids = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(ids(&result), ids(&after));
+}

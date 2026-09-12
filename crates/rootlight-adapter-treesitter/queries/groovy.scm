@@ -20,7 +20,8 @@
 ] @declaration
 
 [(method_declaration) (constructor_declaration)] @signature
-[(block) (class_body) (enum_body) (closure)] @scope
+[(block) (class_body) (enum_body)] @scope
+[(closure) (gstring_closure)] @scope @declaration @signature
 (import_declaration) @import
 (method_invocation) @call
 [(identifier) (type_identifier)] @reference
