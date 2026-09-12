@@ -39,6 +39,8 @@
 (import_declaration name: (qualified_name) @reference)
 (import_declaration alias: (identifier) @declaration @definition)
 [(superclass) (super_interfaces) (extends_interfaces)] @expression
+[(class_declaration) (interface_declaration) (annotation_type_declaration)
+ (trait_declaration) (record_declaration) (enum_declaration)] @expression
 (annotation name: (qualified_name) @reference)
 (qualified_type) @reference
 (method_invocation) @call

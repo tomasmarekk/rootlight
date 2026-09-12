@@ -26,6 +26,255 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+#[test]
+fn groovy_inherited_types_follow_compiler_hierarchy_and_visibility() {
+    for (source, written, expected) in [
+        (
+            "class Parent { static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Parent::Item",
+        ),
+        (
+            "class Parent { static class Outer { static class Inner {} } }\nclass Outer { static class Inner {} }\nclass Holder extends Parent { Outer.Inner item }",
+            "Outer.Inner",
+            "Parent::Outer::Inner",
+        ),
+        (
+            "class Root { static class Item {} }\nclass Parent extends Root {}\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Root::Item",
+        ),
+        (
+            "class Parent { static class Item {} }\nclass Holder extends Parent { static class Item {}\nItem item }",
+            "Item",
+            "Holder::Item",
+        ),
+        (
+            "class Root { static class Item {} }\nclass Parent extends Root { static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Parent::Item",
+        ),
+        (
+            "class Parent { private static class Item {} }\nclass Item {}\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Item",
+        ),
+        (
+            "class Parent { protected static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Parent::Item",
+        ),
+        (
+            "interface Face { class Item {} }\nclass Holder implements Face { Item item }",
+            "Item",
+            "Face::Item",
+        ),
+        (
+            "interface Face { class Item {} }\nclass Parent { static class Item {} }\nclass Holder extends Parent implements Face { Item item }",
+            "Item",
+            "Face::Item",
+        ),
+        (
+            "interface Face { class Item {} }\nclass Parent implements Face { static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+            "Parent::Item",
+        ),
+        (
+            "interface First { class Item {} }\ninterface Second { class Item {} }\nclass Holder implements First, Second { Item item }",
+            "Item",
+            "First::Item",
+        ),
+        (
+            "interface Root { class Item {} }\ninterface Face extends Root {}\nclass Holder implements Face { Item item }",
+            "Item",
+            "Root::Item",
+        ),
+        (
+            "class Parent { static class Outer { static class Inner {} } }\nclass Holder extends Parent { static class Outer {}\nOuter.Inner item }",
+            "Outer.Inner",
+            "Parent::Outer::Inner",
+        ),
+        (
+            "trait Face { static class Item {} }\nclass Holder implements Face { Item item }",
+            "Item",
+            "Face::Item",
+        ),
+        (
+            "trait Face { static class Item {} }\nclass Holder extends Face { Item item }",
+            "Item",
+            "Face::Item",
+        ),
+        (
+            "class Parent { private static class Outer { static class Inner {} } }\nclass Holder extends Parent { Outer.Inner item }",
+            "Outer.Inner",
+            "Parent::Outer::Inner",
+        ),
+        (
+            "trait Mixed { static class Item {} }\ninterface Face { class Item {} }\nclass Holder extends Mixed implements Face { Item item }",
+            "Item",
+            "Face::Item",
+        ),
+        (
+            "trait Mixed { private static class Item {} }\nclass Item {}\nclass Holder extends Mixed { Item item }",
+            "Item",
+            "Item",
+        ),
+        (
+            "trait Mixed { private static class Item {} }\nclass Item {}\nclass Holder implements Mixed { Item item }",
+            "Item",
+            "Mixed::Item",
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{source}: {:?}",
+            document.diagnostics
+        );
+        let start = u64::try_from(source.rfind(written).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && matches!(
+                        site.syntax_kind.as_str(),
+                        "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+                    )
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("unresolved inherited type in {source}");
+        };
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(
+            target.qualified_name,
+            format!("{}::{expected}", GROOVY.path),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn groovy_inherited_type_uncertainty_never_becomes_a_spelling_match() {
+    for (source, written) in [
+        (
+            "class Item {}\nclass Holder extends missing.Parent { Item item }",
+            "Item",
+        ),
+        (
+            "class First extends Second {}\nclass Second extends First { static class Item {} }\nclass Holder extends First { Item item }",
+            "Item",
+        ),
+        (
+            "class Parent { private static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+        ),
+        (
+            "class Parent { static class Item {} }\nclass Outer extends Parent { static class Holder { Item item } }",
+            "Item",
+        ),
+        (
+            "class Parent { static class Item {} }\nclass Child extends Parent {}\nclass Holder { Child.Item item }",
+            "Child.Item",
+        ),
+        (
+            "class Root { static class Item {} }\nclass Parent { static class Child extends Root {} }\nclass Holder extends Parent { Child.Item item }",
+            "Child.Item",
+        ),
+        (
+            "class Parent { @Deprecated static class Item {} }\nclass Holder extends Parent { Item item }",
+            "Item",
+        ),
+        (
+            "interface First extends Second {}\ninterface Second extends First { class Item {} }\nclass Holder implements First { Item item }",
+            "Item",
+        ),
+    ] {
+        let result = output(source);
+        let start = u64::try_from(source.rfind(written).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && matches!(
+                        site.syntax_kind.as_str(),
+                        "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+                    )
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}: {site:?}"
+        );
+    }
+}
+
+#[test]
+fn groovy_type_visibility_uses_native_modifiers_not_annotation_or_comment_text() {
+    use rootlight_ir::EntityVisibility;
+    let source = "class Parent { /* private */ static class Open {}\nprivate static class Hidden {}\nprotected static class Limited {}\n@Mark('public') static class Transformed {} }";
+    let result = output(source);
+    for (name, visibility) in [
+        ("Open", EntityVisibility::Public),
+        ("Hidden", EntityVisibility::Private),
+        ("Limited", EntityVisibility::Restricted),
+        ("Transformed", EntityVisibility::Unknown),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.visibility, visibility, "{name}");
+    }
+}
+
+#[test]
+fn groovy_shared_interface_ancestry_and_long_class_chains_terminate() {
+    let mut source = String::from(
+        "interface Root { class Item {} }\ninterface Left extends Root {}\ninterface Right extends Root {}\nclass Base implements Left, Right {}\n",
+    );
+    for level in 0..96 {
+        let parent = if level == 0 {
+            "Base".to_owned()
+        } else {
+            format!("Layer{}", level - 1)
+        };
+        source.push_str(&format!("class Layer{level} extends {parent} {{}}\n"));
+    }
+    source.push_str("class Holder extends Layer95 { Item item }");
+    let result = output(&source);
+    let start = u64::try_from(source.rfind("Item").unwrap()).unwrap();
+    let site = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == start)
+        .unwrap();
+    let OccurrenceTarget::Resolved { symbol } = site.target else {
+        panic!("unresolved interface diamond");
+    };
+    let entity = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.id == symbol)
+        .unwrap();
+    assert_eq!(
+        entity.qualified_name,
+        format!("{}::Root::Item", GROOVY.path)
+    );
+}
+
 fn assert_lexical_reads(source: &str, name: &str, expected: &[Option<usize>]) {
     assert_named_reads(source, name, expected, "groovy.identifier.reference");
 }

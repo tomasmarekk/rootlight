@@ -226,6 +226,23 @@ pub(super) fn adjust_candidate(
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
+    if candidate.role == StructuralRole::Expression
+        && matches!(
+            node.kind(),
+            "class_declaration"
+                | "interface_declaration"
+                | "annotation_type_declaration"
+                | "trait_declaration"
+                | "record_declaration"
+                | "enum_declaration"
+        )
+    {
+        let name = node
+            .child_by_field_name("name")
+            .ok_or_else(|| super::query_failure("query-groovy-type-name"))?;
+        candidate.end = name.end_byte();
+        candidate.syntax = type_visibility(node, name.start_byte(), cancellation)?;
+    }
     if candidate.role == StructuralRole::Reference
         && matches!(node.kind(), "type_identifier" | "qualified_type")
         && let Some(kind) = inheritance_type(node)
@@ -350,6 +367,44 @@ fn inheritance_type(mut node: Node<'_>) -> Option<&'static str> {
         "super_interfaces" => Some("groovy.implements_type"),
         _ => None,
     }
+}
+
+fn type_visibility(
+    node: Node<'_>,
+    name_start: usize,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    let mut visibility = None;
+    let mut annotated = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.start_byte() >= name_start {
+            break;
+        }
+        let explicit = match child.kind() {
+            "private" => Some("groovy.type_private"),
+            "protected" => Some("groovy.type_protected"),
+            "public" => Some("groovy.type_public"),
+            "annotation" => {
+                annotated = true;
+                None
+            }
+            _ => None,
+        };
+        if let Some(explicit) = explicit
+            && visibility.replace(explicit).is_some()
+        {
+            return Ok("groovy.type_visibility_unknown");
+        }
+    }
+    // AST transforms can change default accessibility; annotation text alone is
+    // not evidence that a transform ran or that its result is public.
+    Ok(if annotated {
+        "groovy.type_visibility_unknown"
+    } else {
+        visibility.unwrap_or("groovy.type_public")
+    })
 }
 
 fn static_context(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {

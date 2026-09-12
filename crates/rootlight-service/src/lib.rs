@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/106";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/107";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/13";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27965,7 +27965,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/105",
+            b"rootlight.first-slice.treesitter-structural/106",
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -28252,6 +28252,109 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_inherited_types_rebind_after_parent_and_visibility_edits() {
+        use rootlight_ir::{OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("stable.groovy"), "class Unrelated {}\n").unwrap();
+        let mut service = FirstSliceService::new(3).unwrap();
+        for (ordinal, (name, modifier, inherited)) in [
+            ("Inner", "public", true),
+            ("Inner", "private", false),
+            ("Renamed", "public", false),
+            ("Inner", "public", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = format!(
+                "class Parent {{ static class Outer {{ {modifier} static class {name} {{}} }} }}\nclass Outer {{ static class Inner {{}} }}\nclass Holder extends Parent {{ Outer.Inner item }}\n"
+            );
+            fs::write(fixture.path().join("types.groovy"), &source).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if ordinal > 0 {
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert!(work.reused_parser_artifacts() >= 1);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{:?}",
+                document.diagnostics
+            );
+            let start = u64::try_from(source.rfind("Outer.Inner").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.syntax_kind == "groovy.qualified_type.reference"
+                })
+                .unwrap();
+            let OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("missing inherited or module target");
+            };
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(
+                entity.qualified_name,
+                if inherited {
+                    "types.groovy::Parent::Outer::Inner"
+                } else {
+                    "types.groovy::Outer::Inner"
+                }
+            );
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::UsesType
+                        && relation.subject == RelationEndpoint::Occurrence(site.id)
+                        && relation.object == RelationEndpoint::Entity(symbol))
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"Outer.Inner");
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+            drop(snapshot);
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
         }
     }
 

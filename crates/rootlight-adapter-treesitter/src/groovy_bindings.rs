@@ -1,13 +1,13 @@
-//! Resolves authored Groovy values, local types and explicit import selections.
+//! Resolves authored Groovy values, source-owned types and explicit import selections.
 //! Value visibility excludes initializers and noncapturing method/type boundaries;
 //! type parameters use a separate namespace and respect static owner boundaries.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact, SyntaxFactKind};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{SymbolId, content_hash};
-use rootlight_ir::GroovyImportedType;
+use rootlight_ir::{EntityVisibility, GroovyImportedType};
 
 struct Binding {
     visible_from: u64,
@@ -25,6 +25,20 @@ struct LocalType {
     symbol: Option<SymbolId>,
 }
 
+#[derive(Default)]
+struct Parents {
+    superclass: Option<u64>,
+    interfaces: Vec<u64>,
+}
+
+impl Parents {
+    fn targets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.superclass
+            .into_iter()
+            .chain(self.interfaces.iter().copied())
+    }
+}
+
 pub(super) struct GroovyBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     iterable_ends: BTreeMap<u64, u64>,
@@ -34,6 +48,9 @@ pub(super) struct GroovyBindings<'a> {
     module_packages: BTreeMap<u64, Option<String>>,
     type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
     inherited_scopes: BTreeSet<u64>,
+    parents: BTreeMap<u64, Option<Parents>>,
+    complete_hierarchies: BTreeSet<u64>,
+    inherited_visibility: BTreeMap<u64, EntityVisibility>,
     imports: BTreeMap<String, Option<ImportedType>>,
     unresolved_imports: bool,
     maximum_name_bytes: usize,
@@ -60,6 +77,9 @@ impl<'a> GroovyBindings<'a> {
             module_packages: BTreeMap::new(),
             type_names: BTreeMap::new(),
             inherited_scopes: BTreeSet::new(),
+            parents: BTreeMap::new(),
+            complete_hierarchies: BTreeSet::new(),
+            inherited_visibility: BTreeMap::new(),
             imports: BTreeMap::new(),
             unresolved_imports: false,
             maximum_name_bytes,
@@ -136,7 +156,229 @@ impl<'a> GroovyBindings<'a> {
                 .or_insert(binding);
         }
         result.collect_type_context(source, symbols, maximum_name_bytes, cancellation)?;
+        result.collect_hierarchy(source, cancellation)?;
         Ok(result)
+    }
+
+    fn collect_hierarchy(
+        &mut self,
+        source: &'a [u8],
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        let mut parents = BTreeMap::new();
+        let mut by_symbol = BTreeMap::new();
+        for (&owner, &(_, symbol)) in &self.type_names {
+            cancellation.check()?;
+            if let Some(symbol) = symbol {
+                by_symbol
+                    .entry(symbol)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(owner));
+            }
+            parents.insert(owner, symbol.map(|_| Parents::default()));
+        }
+        let mut headers = Vec::new();
+        for fact in self.facts.values().copied() {
+            cancellation.check()?;
+            let visibility = match fact.syntax_kind().as_str() {
+                "groovy.type_public.expression" => Some(EntityVisibility::Public),
+                "groovy.type_protected.expression" => Some(EntityVisibility::Restricted),
+                "groovy.type_private.expression" => Some(EntityVisibility::Private),
+                "groovy.type_visibility_unknown.expression" => Some(EntityVisibility::Unknown),
+                _ => None,
+            };
+            if let Some(visibility) = visibility
+                && let Some(owner) = self.type_context(fact.parent(), cancellation)?
+            {
+                self.inherited_visibility
+                    .entry(owner)
+                    .and_modify(|prior| *prior = EntityVisibility::Unknown)
+                    .or_insert(visibility);
+            }
+            if is_header_type(fact) {
+                headers.push(fact);
+            }
+        }
+        headers.sort_unstable_by_key(|fact| fact.span().start_byte());
+        let mut owners_with_headers = BTreeSet::new();
+        for fact in headers {
+            cancellation.check()?;
+            let Some(owner) = self.type_context(fact.parent(), cancellation)? else {
+                continue;
+            };
+            owners_with_headers.insert(owner);
+            let target = self
+                .resolve(fact, self.source_name(fact, source)?, cancellation)?
+                .and_then(|symbol| by_symbol.get(&symbol).copied().flatten());
+            let Some(target) = target else {
+                parents.insert(owner, None);
+                continue;
+            };
+            let owner_kind = self.fact(owner)?.syntax_kind().as_str();
+            let target_kind = self.fact(target)?.syntax_kind().as_str();
+            let interface = matches!(
+                target_kind,
+                "groovy.interface.declaration" | "groovy.trait.declaration"
+            );
+            let extends = fact.syntax_kind().as_str() == "groovy.extends_type.reference";
+            let Some(Some(entry)) = parents.get_mut(&owner) else {
+                continue;
+            };
+            // In type resolution, a class's extends-trait still occupies the
+            // superclass branch, after explicit interfaces and with its visibility filter.
+            if extends
+                && owner_kind == "groovy.class.declaration"
+                && matches!(
+                    target_kind,
+                    "groovy.class.declaration" | "groovy.trait.declaration"
+                )
+                && entry.superclass.is_none()
+            {
+                entry.superclass = Some(target);
+            } else if interface
+                && (!extends
+                    || owner_kind == "groovy.interface.declaration"
+                    || target_kind == "groovy.trait.declaration")
+            {
+                entry.interfaces.push(target);
+            } else {
+                parents.insert(owner, None);
+            }
+        }
+        for owner in self.inherited_scopes.difference(&owners_with_headers) {
+            parents.insert(*owner, None);
+        }
+        // A leaf-first pass proves complete acyclic ancestry once, rather than
+        // rewalking every graph edge for each type occurrence. Unknown parents
+        // and cycles never become an apparently empty inheritance list.
+        let mut remaining = BTreeMap::new();
+        let mut children: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut ready = VecDeque::new();
+        for (&owner, entry) in &parents {
+            cancellation.check()?;
+            let Some(entry) = entry else {
+                continue;
+            };
+            let mut count = 0_usize;
+            for parent in entry.targets() {
+                cancellation.check()?;
+                count = count.checked_add(1).ok_or_else(invalid_capture)?;
+                children.entry(parent).or_default().push(owner);
+            }
+            remaining.insert(owner, count);
+            if count == 0 {
+                ready.push_back(owner);
+            }
+        }
+        while let Some(owner) = ready.pop_front() {
+            cancellation.check()?;
+            self.complete_hierarchies.insert(owner);
+            if let Some(dependents) = children.get(&owner) {
+                for child in dependents {
+                    cancellation.check()?;
+                    let count = remaining.get_mut(child).ok_or_else(invalid_capture)?;
+                    *count = count.checked_sub(1).ok_or_else(invalid_capture)?;
+                    if *count == 0 {
+                        ready.push_back(*child);
+                    }
+                }
+            }
+        }
+        self.parents = parents;
+        Ok(())
+    }
+
+    fn declared_type_path(
+        &self,
+        mut owner: u64,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<LocalType>>, AdapterError> {
+        let mut target = None;
+        for component in name.split('.') {
+            cancellation.check()?;
+            let Some(child) = self.local_types.get(&(owner, component)) else {
+                return Ok(None);
+            };
+            let Some(child) = child.filter(|child| child.symbol.is_some()) else {
+                return Ok(Some(None));
+            };
+            owner = child.declaration;
+            target = Some(child);
+        }
+        Ok(Some(target))
+    }
+
+    /// Returns source-owned type accessibility for the common entity projection.
+    pub(super) fn type_visibilities(&self) -> impl Iterator<Item = (u64, EntityVisibility)> + '_ {
+        self.inherited_visibility
+            .iter()
+            .map(|(&owner, &visibility)| (owner, visibility))
+    }
+
+    fn hierarchy_type_path(
+        &self,
+        owner: u64,
+        name: &str,
+        include_superclass: bool,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<LocalType>>, AdapterError> {
+        if let Some(target) = self.declared_type_path(owner, name, cancellation)? {
+            return Ok(Some(target));
+        }
+        if !self.complete_hierarchies.contains(&owner) {
+            return Ok(Some(None));
+        }
+        let mut current = Some(owner);
+        while let Some(scope) = current {
+            cancellation.check()?;
+            if scope != owner
+                && let Some(target) = self.declared_type_path(scope, name, cancellation)?
+            {
+                let Some(target) = target else {
+                    return Ok(Some(None));
+                };
+                // Groovy checks the final nested declaration's visibility, not
+                // each dotted prefix used to construct its binary name.
+                match self.inherited_visibility.get(&target.declaration).copied() {
+                    Some(EntityVisibility::Public | EntityVisibility::Restricted) => {
+                        return Ok(Some(Some(target)));
+                    }
+                    Some(EntityVisibility::Private) => {}
+                    Some(EntityVisibility::Unknown) | None => return Ok(Some(None)),
+                }
+            }
+            let parents = self
+                .parents
+                .get(&scope)
+                .and_then(Option::as_ref)
+                .ok_or_else(invalid_capture)?;
+            let mut pending: Vec<_> = parents.interfaces.iter().rev().copied().collect();
+            let mut visited = BTreeSet::new();
+            while let Some(face) = pending.pop() {
+                cancellation.check()?;
+                if !visited.insert(face) {
+                    continue;
+                }
+                // ResolveVisitor's interface closure does not apply the class-
+                // ancestor visibility filter, even for an authored private member.
+                if let Some(target) = self.declared_type_path(face, name, cancellation)? {
+                    return Ok(Some(target));
+                }
+                let parents = self
+                    .parents
+                    .get(&face)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(invalid_capture)?;
+                pending.extend(parents.interfaces.iter().rev().copied());
+            }
+            current = if include_superclass {
+                parents.superclass
+            } else {
+                None
+            };
+        }
+        Ok(None)
     }
 
     fn collect_type_context(
@@ -462,10 +704,21 @@ impl<'a> GroovyBindings<'a> {
         {
             return Ok(Some(target));
         }
-        // Groovy checks the current type's children first, then enclosing
-        // types from outermost to innermost (ResolveVisitor.resolveNestedClass).
+        // Groovy checks the current hierarchy first, then enclosing types from
+        // outermost to innermost, without walking those enclosing superclasses.
         for &owner in owners.iter().take(1).chain(owners.iter().skip(1).rev()) {
             cancellation.check()?;
+            if !is_header_type(reference) && !self.parents.is_empty() {
+                if let Some(target) = self.hierarchy_type_path(
+                    owner,
+                    name,
+                    owners.first() == Some(&owner),
+                    cancellation,
+                )? {
+                    return Ok(Some(target.and_then(|target| target.symbol)));
+                }
+                continue;
+            }
             if let Some(target) = self.local_types.get(&(owner, name)) {
                 return Ok(Some(target.and_then(|target| target.symbol)));
             }
@@ -556,6 +809,17 @@ impl<'a> GroovyBindings<'a> {
         // Match the entire child path before moving to the next enclosing scope:
         // a same-named prefix with no matching child does not shadow a full path.
         for &owner in owners.iter().take(1).chain(owners.iter().skip(1).rev()) {
+            if !is_header_type(reference) && !self.parents.is_empty() {
+                if let Some(target) = self.hierarchy_type_path(
+                    owner,
+                    name,
+                    owners.first() == Some(&owner),
+                    cancellation,
+                )? {
+                    return Ok(target.and_then(|target| target.symbol));
+                }
+                continue;
+            }
             let origin = is_header_type(reference)
                 .then(|| owners.first().copied())
                 .flatten();
@@ -574,7 +838,7 @@ impl<'a> GroovyBindings<'a> {
             .and_then(|target| target.symbol))
     }
 
-    /// Returns only an exact authored lexical target, never a runtime dispatch guess.
+    /// Returns a source-owned value or type target, never a runtime dispatch guess.
     ///
     /// # Errors
     /// Returns cancellation or malformed cyclic/missing capture ancestry.

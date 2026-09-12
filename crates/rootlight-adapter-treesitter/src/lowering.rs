@@ -1301,6 +1301,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        if let Some(bindings) = &groovy_bindings {
+            for (owner, visibility) in bindings.type_visibilities() {
+                cancellation.check()?;
+                if let Some(entity) = materialized.get_mut(&owner) {
+                    entity.record.visibility = visibility;
+                    if let Some(record) = entities.get_mut(&entity.record.id) {
+                        record.visibility = visibility;
+                    }
+                }
+            }
+        }
+
         let nix_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
