@@ -385,7 +385,8 @@ jobs:
   platform:
     name: platform / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    # Cold Intel macOS validation takes about 70 minutes before cache compression/upload.
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 90 || 75 }}
     strategy:
       fail-fast: false
       matrix:
