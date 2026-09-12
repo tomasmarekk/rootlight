@@ -27615,6 +27615,317 @@ mod tests {
     }
 
     #[test]
+    fn groovy_type_imports_link_package_owned_declarations_across_files() {
+        let fixture = TempDir::new().unwrap();
+        for (path, source) in [
+            (
+                "client.groovy",
+                "import sample /* name */ . types.Widget as Selected\n",
+            ),
+            (
+                "definition.groovy",
+                "package sample.types\nclass Widget {}\n",
+            ),
+            ("other.groovy", "package other.types\nclass Widget {}\n"),
+        ] {
+            fs::write(fixture.path().join(path), source).unwrap();
+        }
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 3);
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let target_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "definition.groovy")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == rootlight_ir::EntityKind::Class
+                    && entity.evidence.source.as_ref().unwrap().span().file() == target_file.id
+            })
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "groovy.type_import.reference")
+            .unwrap();
+        assert_eq!(
+            site.target,
+            rootlight_ir::OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(document.relations.iter().any(|relation| relation.predicate
+            == rootlight_ir::RelationPredicate::Imports
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)));
+        let provenance = document
+            .provenance
+            .iter()
+            .find(|record| record.id == site.provenance)
+            .unwrap();
+        assert_eq!(
+            provenance.rule.as_deref(),
+            Some("groovy-type-import-v1.indexed_snapshot")
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "groovy-import-build-context-unverified"
+                && gap.provenance == site.provenance
+                && gap.reason == rootlight_ir::SkippedRegionReason::MissingBuildContext
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "unresolved-import-target" && gap.source.span().file() == site.file
+        }));
+        let package = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "sample.types")
+            .unwrap();
+        assert!(
+            provenance
+                .derivation_parents
+                .contains(&rootlight_ir::FactRef::Entity(package.id))
+        );
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([target.id]),
+                vec![RelationFamily::Imports],
+                Some(RelationDirection::Inbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .count(),
+            1
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            read.data.chunks[0].bytes,
+            b"sample /* name */ . types.Widget"
+        );
+    }
+
+    #[test]
+    fn groovy_type_imports_cover_native_type_declaration_families() {
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("definitions.groovy"),
+            "package sample\nclass Widget {}\ninterface Contract {}\ntrait Shared {}\nenum Mode { ACTIVE }\nrecord Entry(String label) {}\n@interface Marker {}\nclass Outer { static class Inner {} }\n",
+        ).unwrap();
+        let names = [
+            "Widget",
+            "Contract",
+            "Shared",
+            "Mode",
+            "Entry",
+            "Marker",
+            "Outer.Inner",
+        ];
+        let imports = names
+            .iter()
+            .map(|name| format!("import sample.{name}\n"))
+            .collect::<String>();
+        fs::write(fixture.path().join("client.groovy"), imports).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "groovy.type_import.reference")
+            .collect();
+        assert_eq!(sites.len(), names.len());
+        for name in names {
+            let site = sites
+                .iter()
+                .find(|site| {
+                    site.syntactic_text_hash == content_hash(format!("sample.{name}").as_bytes())
+                })
+                .unwrap();
+            let rootlight_ir::OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("unresolved native type {name}: {:?}", site.target);
+            };
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(target.canonical_name, name.rsplit('.').next().unwrap());
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == rootlight_ir::RelationPredicate::Imports
+                    && relation.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+            }));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                format!("sample.{name}").as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn groovy_type_imports_recompute_targets_when_declarations_change() {
+        use rootlight_ir::{OccurrenceTarget, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("client.groovy"),
+            "import sample.Widget\n",
+        )
+        .unwrap();
+        let definition = "package sample\nclass Widget {}\n";
+        let mut service = FirstSliceService::new(3).unwrap();
+        let mut prior = None;
+        for (path, source, resolved, parsed) in [
+            ("definition.groovy", Some(definition), true, 2),
+            (
+                "definition.groovy",
+                Some("package elsewhere\nclass Widget {}\n"),
+                false,
+                1,
+            ),
+            ("definition.groovy", Some(definition), true, 1),
+            ("duplicate.groovy", Some(definition), false, 1),
+            ("duplicate.groovy", None, true, 0),
+            ("definition.groovy", None, false, 0),
+            ("definition.groovy", Some(definition), true, 1),
+        ] {
+            let path = fixture.path().join(path);
+            if let Some(source) = source {
+                fs::write(path, source).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if let Some(prior) = prior {
+                assert_ne!(receipt.generation, prior);
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), parsed);
+                assert!(
+                    work.reused_parser_artifacts() >= 1,
+                    "the unchanged importing file must be reused"
+                );
+            }
+            prior = Some(receipt.generation);
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "groovy.type_import.reference")
+                .unwrap();
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            let relations: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::Imports)
+                .collect();
+            assert_eq!(relations.len(), usize::from(resolved));
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.id == target.evidence.source.as_ref().unwrap().span().file())
+                    .unwrap();
+                assert_eq!(file.path, "definition.groovy");
+                assert_eq!(
+                    relations[0].object,
+                    rootlight_ir::RelationEndpoint::Entity(symbol)
+                );
+            }
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"sample.Widget");
+            drop(snapshot);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+                    .generation,
+                receipt.generation
+            );
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+
+    #[test]
     fn groovy_import_aliases_publish_queryable_symbols_and_exact_sources() {
         let fixture = TempDir::new().unwrap();
         let source = "import sample.Widget as Alias\nimport static sample /* trivia */ . Tools.run as perform\n";

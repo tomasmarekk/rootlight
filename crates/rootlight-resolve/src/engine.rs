@@ -34,7 +34,7 @@ const ANCESTOR_SCOPE_STEP_PENALTY: u16 = 20;
 const UNIQUE_SCOPED_CALL_BONUS: u16 = 400;
 const CROSS_FILE_PENALTY: u16 = 100;
 const REPOSITORY_SCOPE_PENALTY: u16 = 50;
-const MAX_SCOPE_DEPTH: usize = 64;
+pub(crate) const MAX_SCOPE_DEPTH: usize = 64;
 
 /// Language-neutral semantic candidate resolver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,7 @@ impl ResolutionEngine {
             &document.entities,
             &document.provenance,
             &document.extensions,
+            &document.coverage_records,
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
@@ -119,16 +120,18 @@ impl ResolutionEngine {
         validate_ir_document(document, &IrLimits::default(), &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
-        if document
-            .extensions
-            .iter()
-            .any(|extension| extension.namespace == rootlight_ir::PERL_BINDING_NAMESPACE)
+        if document.files.iter().any(|file| file.language == "groovy")
+            || document
+                .extensions
+                .iter()
+                .any(|extension| extension.namespace == rootlight_ir::PERL_BINDING_NAMESPACE)
         {
             let index = CandidateIndex::build(
                 &document.files,
                 &document.entities,
                 &document.provenance,
                 &document.extensions,
+                &document.coverage_records,
                 cancellation,
             )?;
             let mut required = 0_usize;
@@ -192,6 +195,9 @@ impl ResolutionEngine {
         cancellation: &Cancellation,
     ) -> Result<ResolutionDecision, ResolutionError> {
         if let Some(decision) = index.perl.resolve(occurrence) {
+            return Ok(decision);
+        }
+        if let Some(decision) = index.groovy.resolve(occurrence) {
             return Ok(decision);
         }
         let file_language = index
@@ -478,6 +484,7 @@ impl Default for ResolutionEngine {
 }
 
 pub(crate) struct CandidateIndex<'a> {
+    pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
@@ -504,6 +511,7 @@ impl<'a> CandidateIndex<'a> {
         entity_records: &'a [EntityRecord],
         provenance_records: &'a [ProvenanceRecord],
         extension_records: &'a [rootlight_ir::ExtensionEnvelope],
+        coverage_records: &'a [rootlight_ir::CoverageRecord],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
@@ -545,6 +553,13 @@ impl<'a> CandidateIndex<'a> {
             entries.dedup_by_key(|entry| entry.entity.id);
         }
         Ok(Self {
+            groovy: crate::groovy::GroovyIndex::build(
+                &files,
+                &entities,
+                &provenance,
+                coverage_records,
+                cancellation,
+            )?,
             perl: crate::perl::PerlIndex::build(
                 &files,
                 &entities,
@@ -564,7 +579,7 @@ impl<'a> CandidateIndex<'a> {
         occurrence: &OccurrenceRecord,
     ) -> Result<Option<usize>, ResolutionError> {
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            && self.perl.eligible(occurrence)
+            && (self.perl.eligible(occurrence) || self.groovy.proof(occurrence).is_some())
         {
             return Ok(Some(1));
         }

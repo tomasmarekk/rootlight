@@ -51,6 +51,7 @@ impl ResolutionEngine {
             &document.entities,
             &document.provenance,
             &document.extensions,
+            &document.coverage_records,
             cancellation,
         )?;
         let occurrence_indexes = document
@@ -117,6 +118,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_groovy_import_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
@@ -185,6 +187,7 @@ impl ResolutionEngine {
             &document.entities,
             &document.provenance,
             &document.extensions,
+            &document.coverage_records,
             cancellation,
         )?;
         let mut required = 0_usize;
@@ -281,6 +284,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_groovy_import_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
         Ok((document, estimate))
@@ -304,6 +308,7 @@ impl ResolutionEngine {
             &document.entities,
             &document.provenance,
             &document.extensions,
+            &document.coverage_records,
             cancellation,
         )?;
         let producer = resolver_producer(self.limits, &self.policy)?;
@@ -489,6 +494,75 @@ fn reconcile_perl_target_gaps(
         return Err(ResolutionError::UnsupportedIdentityRemap);
     }
     Ok(())
+}
+
+fn reconcile_groovy_import_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let mut producers = BTreeSet::new();
+    for provenance in &document.provenance {
+        cancellation.check()?;
+        if provenance.rule.as_deref() == Some("groovy-type-import-v1.indexed_snapshot") {
+            producers.insert(provenance.id);
+        }
+    }
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let mut files = BTreeMap::new();
+    for file in &document.files {
+        cancellation.check()?;
+        if file.language == "groovy" {
+            files.insert(file.id, file.provenance);
+        }
+    }
+    let mut sources = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        cancellation.check()?;
+        if occurrence.syntax_kind == "groovy.type_import.reference"
+            && occurrence.role == OccurrenceRole::ImportUse
+            && producers.contains(&occurrence.provenance)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        {
+            sources
+                .entry((occurrence.file, occurrence.source.span().start_byte()))
+                .and_modify(|prior| *prior = None)
+                .or_insert(Some((&occurrence.source, occurrence.provenance)));
+        }
+    }
+    let mut remap = BTreeMap::new();
+    for gap in &mut document.skipped_regions {
+        cancellation.check()?;
+        let span = gap.source.span();
+        if gap.domain != rootlight_ir::FactDomain::Relations
+            || gap.detail != "unresolved-import-target"
+            || files.get(&span.file()) != Some(&gap.provenance)
+        {
+            continue;
+        }
+        // Import gaps cover the statement, while target proofs cover only its name.
+        // At most two lookups detect ambiguity without scanning overlapping ranges.
+        let mut enclosed =
+            sources.range((span.file(), span.start_byte())..=(span.file(), span.end_byte()));
+        let Some((source, provenance)) = enclosed.next().and_then(|(_, entry)| *entry) else {
+            continue;
+        };
+        if enclosed.next().is_some()
+            || source.span().end_byte() > span.end_byte()
+            || source.content_hash() != gap.source.content_hash()
+        {
+            continue;
+        }
+        let old = gap.id;
+        gap.detail = "groovy-import-build-context-unverified".to_owned();
+        gap.reason = rootlight_ir::SkippedRegionReason::MissingBuildContext;
+        gap.provenance = provenance;
+        gap.id =
+            rootlight_ir::derive_skipped_region_id(gap).map_err(ResolutionError::FactIdentity)?;
+        remap.insert(old, gap.id);
+    }
+    ensure_relation_remap_is_safe(document, &remap)
 }
 
 #[derive(Clone)]
@@ -709,6 +783,24 @@ fn build_provenance(
             }
         }
     }
+    if matches!(decision.explanation.rule, ResolutionRule::GroovyTypeImport) {
+        let proof = lookup
+            .groovy
+            .proof(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        for entity in proof.owners {
+            derivation_parents.push(FactRef::Entity(entity.id));
+            if let Some(source) = &entity.evidence.source {
+                sources.push(source.clone());
+            }
+        }
+        for coverage in proof.coverage {
+            derivation_parents.push(FactRef::Fact(coverage.id));
+            if let Some(source) = &coverage.evidence.source {
+                sources.push(source.clone());
+            }
+        }
+    }
     sources.sort_unstable();
     sources.dedup();
     derivation_parents.sort_unstable();
@@ -726,6 +818,7 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
         ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
         ResolutionRule::LexicalScope => "scope-v1.lexical_scope",
         ResolutionRule::Import => "scope-v1.import",

@@ -8,6 +8,7 @@
 mod application;
 mod engine;
 mod foreign;
+mod groovy;
 mod model;
 mod perl;
 mod quality;

@@ -249,6 +249,8 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// Native Groovy type import with source-owned package and type containers.
+    GroovyTypeImport,
     /// Native Perl package CODE storage in the indexed dependency snapshot.
     PerlPackageStorage,
     /// Lexical scope and file containment resolution.
@@ -261,6 +263,8 @@ pub enum ResolutionRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionSignal {
+    /// Native import target and canonical declaration ownership identify one type.
+    NativeTypeImport,
     /// Source-bound native package/storage identities match without name scoring.
     NativePackageStorage,
     /// The entity canonical-name hash matches the occurrence text hash.
@@ -331,7 +335,7 @@ pub struct RejectedCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompletenessAssumption {
-    /// Links identify indexed package declarations, not evaluated loader paths or runtime CODE values.
+    /// Links identify indexed package declarations, not evaluated loader paths or runtime values.
     IndexedPackageSnapshot,
     /// The normalized document passed common ownership, reference, and quota validation.
     ValidatedNormalizedDocument,
