@@ -374,7 +374,9 @@ pub fn structural_captured_name_for_language<'a>(
 /// scalar values: `true`, `11` and quote characters retain their exact spelling.
 /// Their captures exclude the `&` or `*` indicator. No trimming, escape decoding
 /// or Unicode normalization occurs; malformed or oversized names return `None`.
-/// Other roles use [`structural_captured_name_for_language`]. The caller retains
+/// Groovy qualified identifiers remove inter-component spaces and block comments
+/// without changing component spelling. Other roles use
+/// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
 #[must_use]
 pub fn structural_captured_name_for_fact<'a>(
@@ -391,6 +393,10 @@ pub fn structural_captured_name_for_fact<'a>(
         )
     {
         crate::yaml_names::anchor_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "groovy"
+        && fact.syntax_kind().as_str() == "groovy.qualified_identifier.definition"
+    {
+        crate::groovy_names::canonical_qualified_name(text, maximum_bytes)
     } else {
         structural_captured_name_for_language(language, text, maximum_bytes)
     }

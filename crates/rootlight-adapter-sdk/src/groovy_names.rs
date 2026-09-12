@@ -1,4 +1,4 @@
-//! Constant Groovy member names without evaluation or Unicode normalization.
+//! Constant Groovy member and package names without evaluation or Unicode normalization.
 //! Ordered escape passes retain Java UTF-16 units; unusual names use an injective
 //! quoted identity instead of losing controls, empty strings or lone surrogates.
 
@@ -14,6 +14,72 @@ enum Quoting {
     Double,
     Slashy,
     DollarSlashy,
+}
+
+/// Removes only trivia between grammar-reviewed package-name components.
+/// Invalid boundaries, unfinished comments and exceeded byte budgets return `None`.
+pub(crate) fn canonical_qualified_name(text: &str, maximum: usize) -> Option<Cow<'_, str>> {
+    if text.is_empty() || text.len() > maximum {
+        return None;
+    }
+    let mut remaining = text;
+    let mut name = String::new();
+    loop {
+        remaining = package_trivia(remaining)?;
+        let first = remaining.chars().next()?;
+        if !package_identifier_start(first) {
+            return None;
+        }
+        let end = remaining
+            .char_indices()
+            .find_map(|(index, ch)| {
+                (!package_identifier_start(ch)
+                    && !matches!(
+                        get_general_category(ch),
+                        GeneralCategory::DecimalNumber
+                            | GeneralCategory::NonspacingMark
+                            | GeneralCategory::SpacingMark
+                            | GeneralCategory::Format
+                    ))
+                .then_some(index)
+            })
+            .unwrap_or(remaining.len());
+        append(&mut name, remaining.get(..end)?, maximum)?;
+        remaining = package_trivia(remaining.get(end..)?)?;
+        if remaining.is_empty() {
+            return Some(if name == text {
+                Cow::Borrowed(text)
+            } else {
+                Cow::Owned(name)
+            });
+        }
+        remaining = remaining.strip_prefix('.')?;
+        append(&mut name, ".", maximum)?;
+    }
+}
+
+fn package_identifier_start(ch: char) -> bool {
+    matches!(
+        get_general_category(ch),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+            | GeneralCategory::LetterNumber
+            | GeneralCategory::CurrencySymbol
+            | GeneralCategory::ConnectorPunctuation
+    )
+}
+
+fn package_trivia(mut text: &str) -> Option<&str> {
+    loop {
+        text = text.trim_start_matches([' ', '\t', '\u{000c}']);
+        let Some(comment) = text.strip_prefix("/*") else {
+            return Some(text);
+        };
+        text = comment.get(comment.find("*/")?.checked_add(2)?..)?;
+    }
 }
 
 pub(crate) fn canonical_groovy_name(text: &str, maximum: usize) -> Option<Cow<'_, str>> {
@@ -281,6 +347,49 @@ fn quoted_units(units: &[u16], maximum: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_names_remove_only_inter_component_trivia() {
+        for source in [
+            "sample.catalog",
+            " sample /* comment */ . catalog ",
+            "sample/* a\nb */.catalog",
+        ] {
+            assert_eq!(
+                canonical_qualified_name(source, 128).as_deref(),
+                Some("sample.catalog")
+            );
+        }
+        assert_eq!(
+            canonical_qualified_name("δ.$Store", 128).as_deref(),
+            Some("δ.$Store")
+        );
+        assert_eq!(
+            canonical_qualified_name("a.e\u{301}", 128).as_deref(),
+            Some("a.e\u{301}")
+        );
+        for source in [
+            "",
+            ".sample",
+            "sample.",
+            "sample..catalog",
+            "sample catalog",
+            "sample.\ncatalog",
+            "sample//comment\n.catalog",
+            "sample/* unfinished",
+            "sample:catalog",
+            "7sample",
+            "sample.{catalog}",
+        ] {
+            assert!(canonical_qualified_name(source, 128).is_none(), "{source}");
+        }
+        assert!(canonical_qualified_name("sample.catalog", 13).is_none());
+        assert!(canonical_qualified_name("sample /* long trivia */ . catalog", 14).is_none());
+        assert_eq!(
+            canonical_qualified_name("sample.catalog", 14),
+            Some(Cow::Borrowed("sample.catalog"))
+        );
+    }
 
     #[test]
     fn groovy_escape_pass_order_and_literal_backslashes_match_conversion() {

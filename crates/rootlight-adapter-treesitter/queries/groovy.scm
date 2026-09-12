@@ -2,7 +2,7 @@
 ; Runtime metaprogramming and receiver dispatch are not inferred from spelling.
 
 (source_file) @root @module
-(package_declaration name: (qualified_name) @definition) @module
+(package_declaration name: (qualified_name) @definition) @scope @module
 
 [
   (class_declaration name: (identifier) @definition)

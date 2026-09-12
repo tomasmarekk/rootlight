@@ -565,6 +565,11 @@ impl QueryPack {
         } else {
             None
         };
+        let groovy_package = if input.family == GrammarFamily::Groovy {
+            groovy::leading_package(input.tree.root_node(), input.cancellation)?
+        } else {
+            None
+        };
         let mut cursor = QueryCursor::new();
         cursor.set_match_limit(QUERY_CURSOR_MATCH_LIMIT);
         let mut callback_cancelled = false;
@@ -716,6 +721,21 @@ impl QueryPack {
                 )?;
                 if input.family == GrammarFamily::Groovy && candidate.syntax == "groovy.field" {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
+                }
+                if input.family == GrammarFamily::Groovy
+                    && capture.node.kind() == "package_declaration"
+                    && matches!(role, StructuralRole::Module | StructuralRole::Scope)
+                {
+                    if groovy_package == Some(capture.node) {
+                        // The package owns the remaining compilation unit, not just
+                        // its header. Definition captures keep their written bytes.
+                        candidate.end = input.tree.root_node().end_byte();
+                        // At byte zero, file and package extents coincide. The
+                        // validated package is a direct native child of the file.
+                        candidate.native_depth = 1;
+                    } else if role == StructuralRole::Scope {
+                        candidate.syntax = "groovy.package_ownership_unavailable";
+                    }
                 }
                 if input.family == GrammarFamily::Markdown
                     && role == StructuralRole::Declaration

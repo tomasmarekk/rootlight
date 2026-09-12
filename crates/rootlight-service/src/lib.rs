@@ -27692,6 +27692,85 @@ mod tests {
     }
 
     #[test]
+    fn groovy_package_owners_publish_exact_generation_bound_sources() {
+        let fixture = TempDir::new().unwrap();
+        let sources = [
+            (
+                "left.groovy",
+                "package sample /* name */ . left\nclass Meter { int read() { 1 } }\n",
+            ),
+            (
+                "right.groovy",
+                "package sample.right\nclass Meter { int read() { 2 } }\n",
+            ),
+        ];
+        for (path, source) in sources {
+            fs::write(fixture.path().join(path), source).unwrap();
+        }
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "Meter".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let symbols: Vec<_> = located
+            .data
+            .hits
+            .iter()
+            .filter_map(|hit| hit.symbol)
+            .collect();
+        assert_eq!(symbols.len(), 2);
+        let mut packages = BTreeMap::new();
+        for symbol in symbols {
+            let class = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .unwrap()
+                .data
+                .entity;
+            assert_eq!(class.kind, rootlight_ir::EntityKind::Class);
+            let Some(rootlight_ir::ContainerRef::Entity(owner)) = class.container else {
+                panic!("package owner missing")
+            };
+            let package = service
+                .symbol_explain(receipt.generation, owner, &deadline())
+                .unwrap()
+                .data
+                .entity;
+            assert_eq!(package.kind, rootlight_ir::EntityKind::Module);
+            let reference = package.evidence.source.unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            packages.insert(
+                package.canonical_name,
+                String::from_utf8(read.data.chunks[0].bytes.clone()).unwrap(),
+            );
+        }
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages["sample.left"], sources[0].1);
+        assert_eq!(packages["sample.right"], sources[1].1);
+    }
+
+    #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";

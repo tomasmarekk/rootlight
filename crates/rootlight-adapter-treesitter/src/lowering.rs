@@ -1432,7 +1432,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
-                    "groovy-quoted-name-unavailable",
+                    if fact.syntax_kind().as_str() == "groovy.qualified_identifier.definition" {
+                        "groovy-package-name-unavailable"
+                    } else {
+                        "groovy-quoted-name-unavailable"
+                    },
                     provenance_id,
                 )?;
                 skipped.insert(region.id, region);
@@ -2538,7 +2542,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     )
                 };
                 let Some(name) = name else {
-                    if definition.syntax_kind().as_str() == "groovy.quoted_identifier.definition" {
+                    if matches!(
+                        definition.syntax_kind().as_str(),
+                        "groovy.quoted_identifier.definition"
+                            | "groovy.qualified_identifier.definition"
+                    ) {
                         groovy_name_gaps.insert(definition.local_id());
                         parent_scope
                             .get_or_insert_with(ScopeContext::default)
@@ -3598,6 +3606,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "scala.unbraced_package_unavailable.scope" => Some((
             FactDomain::Relations,
             "scala-nonleading-unbraced-package-scope-unavailable",
+        )),
+        "groovy.package_ownership_unavailable.scope" => Some((
+            FactDomain::Relations,
+            "groovy-invalid-package-ownership-unavailable",
         )),
         "powershell.file.module" => Some((
             FactDomain::Relations,

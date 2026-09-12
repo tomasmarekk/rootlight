@@ -27,6 +27,77 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_package_owns_top_level_types_without_stealing_members() {
+    let source = "// header\npackage sample.catalog\nclass Meter { int read() { 1 } }\ninterface Named {}\ntrait Stored {}\nenum Mode { OPEN }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    let named = |name: &str| {
+        doc.entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap_or_else(|| panic!("missing {name}: {:?}", doc.entities))
+    };
+    let package = named("sample.catalog");
+    assert_eq!(package.kind, EntityKind::Module);
+    for name in ["Meter", "Named", "Stored", "Mode"] {
+        let entity = named(name);
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(package.id)),
+            "{name}"
+        );
+        assert!(doc.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Contains
+                && relation.subject == RelationEndpoint::Entity(package.id)
+                && relation.object == RelationEndpoint::Entity(entity.id)
+        }));
+    }
+    assert_eq!(
+        named("read").container,
+        Some(rootlight_ir::ContainerRef::Entity(named("Meter").id))
+    );
+    assert_eq!(
+        named("OPEN").container,
+        Some(rootlight_ir::ContainerRef::Entity(named("Mode").id))
+    );
+    let definitions: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition
+                && occurrence.target == OccurrenceTarget::Resolved { symbol: package.id }
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    let span = definitions[0].source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("sample.catalog")
+    );
+    let edited = output(&source.replace("{ 1 }", "{ 12345 }"));
+    let identities = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.container))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(identities(&result), identities(&edited));
+    let renamed = output(&source.replace("sample.catalog", "sample.storage"));
+    let renamed_class = renamed
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Meter")
+        .unwrap();
+    assert_ne!(named("Meter").id, renamed_class.id);
+}
+
+#[test]
 fn groovy_declarations_keep_exact_definition_sources() {
     let result = output(GROOVY.source);
     let doc = result.document();
@@ -65,6 +136,178 @@ fn groovy_declarations_keep_exact_definition_sources() {
             Some(name)
         );
     }
+}
+
+#[test]
+fn groovy_package_trivia_keeps_identity_and_exact_definition_bytes() {
+    let mut expected = None;
+    for (prefix, name, separator) in [
+        ("", "sample.catalog", "\n"),
+        ("/** Package documentation. */\n", "sample.catalog", "\n"),
+        ("// header\n", "sample /* component */ . catalog", "; "),
+        ("#!/usr/bin/env groovy\n", "sample.catalog", ";\n"),
+    ] {
+        let source =
+            format!("{prefix}package {name}{separator}class Meter {{ int read() {{ 1 }} }}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{source}: {:?}",
+            doc.diagnostics
+        );
+        let package = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "sample.catalog")
+            .unwrap();
+        let class = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Meter")
+            .unwrap();
+        assert_eq!(
+            class.container,
+            Some(rootlight_ir::ContainerRef::Entity(package.id))
+        );
+        let definition = doc
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: package.id }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+        let identities = doc
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.container))
+            .collect::<BTreeSet<_>>();
+        if let Some(expected) = &expected {
+            assert_eq!(&identities, expected);
+        } else {
+            expected = Some(identities);
+        }
+    }
+    let default_package = output("class Meter {}\n");
+    let doc = default_package.document();
+    let class = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Meter")
+        .unwrap();
+    let file = doc
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module)
+        .unwrap();
+    assert_eq!(file.canonical_name, GROOVY.path);
+    assert_eq!(
+        class.container,
+        Some(rootlight_ir::ContainerRef::Entity(file.id))
+    );
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Module)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn groovy_invalid_package_positions_report_source_scoped_ownership_gaps() {
+    for (source, expected_headers) in [
+        (
+            "class Before {}\npackage late\nclass After {}\n",
+            vec!["package late"],
+        ),
+        (
+            "package first\npackage second\nclass After {}\n",
+            vec!["package first", "package second"],
+        ),
+        ("def run() { package nested; 1 }\n", vec!["package nested"]),
+    ] {
+        let result = output(source);
+        let doc = result.document();
+        let headers: BTreeSet<_> = doc
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "groovy-invalid-package-ownership-unavailable")
+            .map(|gap| {
+                let span = gap.source.span();
+                source
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            expected_headers.into_iter().collect(),
+            "{source}: {:?}",
+            doc.skipped_regions
+        );
+        if let Some(after) = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "After")
+        {
+            let owner = doc
+                .entities
+                .iter()
+                .find(|entity| {
+                    Some(rootlight_ir::ContainerRef::Entity(entity.id)) == after.container
+                })
+                .unwrap();
+            assert_eq!(owner.canonical_name, GROOVY.path);
+        }
+    }
+}
+
+#[test]
+fn groovy_package_unavailable_name_is_not_silently_dropped() {
+    let source = "package sample.\n catalog\nclass Meter {}\n";
+    let result = output(source);
+    let doc = result.document();
+    let gap = doc
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "groovy-package-name-unavailable")
+        .unwrap_or_else(|| {
+            panic!(
+                "missing name gap: {:?}; {:?}",
+                doc.skipped_regions, doc.diagnostics
+            )
+        });
+    let span = gap.source.span();
+    assert_eq!(
+        source.get(
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()
+        ),
+        Some("sample.\n catalog")
+    );
+    assert!(
+        !doc.entities
+            .iter()
+            .any(|entity| entity.canonical_name == "sample.catalog")
+    );
+    assert!(
+        !doc.entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Meter"),
+        "an unavailable package cannot silently become the default package"
+    );
 }
 
 #[test]

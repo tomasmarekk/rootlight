@@ -7,6 +7,38 @@ use rootlight_cancel::Cancellation;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
+/// Finds the single leading package that can own the rest of this source unit.
+///
+/// # Errors
+/// Returns cancellation while scanning direct children; malformed, late or
+/// repeated package headers are not promoted to compilation-unit containers.
+pub(super) fn leading_package<'tree>(
+    root: Node<'tree>,
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    cancellation.check()?;
+    let mut package = None;
+    let mut seen_statement = false;
+    let mut cursor = root.walk();
+    for (index, child) in root.named_children(&mut cursor).enumerate() {
+        if index % 64 == 0 {
+            cancellation.check()?;
+        }
+        match child.kind() {
+            "line_comment" | "block_comment" | "groovydoc_comment" | "shebang" => {}
+            "package_declaration" => {
+                if seen_statement || child.has_error() || child.is_missing() {
+                    return Ok(None);
+                }
+                package = Some(child);
+                seen_statement = true;
+            }
+            _ => seen_statement = true,
+        }
+    }
+    Ok(package)
+}
+
 /// Per-scan member classification shares a declaration header across all its bindings.
 #[derive(Default)]
 pub(super) struct MemberKinds {
@@ -146,6 +178,34 @@ pub(super) fn closure_header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_context_requires_one_leading_header_and_honors_cancellation() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&dekobon_tree_sitter_groovy::LANGUAGE.into())
+            .unwrap();
+        for (source, expected) in [
+            ("package sample\nclass Meter {}", Some("package sample")),
+            (
+                "// header\npackage sample\nclass Meter {}",
+                Some("package sample"),
+            ),
+            ("package sample\npackage repeated\nclass Meter {}", None),
+            ("class Before {}\npackage late", None),
+            ("", None),
+        ] {
+            let tree = parser.parse(source, None).unwrap();
+            let cancellation = Cancellation::new();
+            let package = leading_package(tree.root_node(), &cancellation).unwrap();
+            assert_eq!(
+                package.map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+                expected
+            );
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(leading_package(tree.root_node(), &cancellation).is_err());
+        }
+    }
 
     #[test]
     fn member_headers_are_shared_and_cancellable_without_text_keyword_matching() {
