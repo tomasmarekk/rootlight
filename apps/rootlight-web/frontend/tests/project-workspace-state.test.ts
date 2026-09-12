@@ -12,6 +12,20 @@ const generationId = `gen1_${"b".repeat(39)}`;
 const symbolId = `sym1_${"c".repeat(39)}`;
 
 describe("project workspace URL state", () => {
+  it.each([0, 250, 500, 750] as const)(
+    "preserves the supported confidence threshold %i through URL serialization",
+    (confidence) => {
+      const state = parseProjectWorkspaceState(
+        new URLSearchParams({ min_confidence: String(confidence) }),
+      );
+
+      expect(state.minConfidence).toBe(confidence);
+      const parameters = serializeProjectWorkspaceState(state);
+      expect(parameters.get("min_confidence")).toBe(String(confidence));
+      expect(parseProjectWorkspaceState(parameters).minConfidence).toBe(confidence);
+    },
+  );
+
   it("round trips exact generation, filters, selection, and display settings", () => {
     const state = parseProjectWorkspaceState(
       new URLSearchParams([
