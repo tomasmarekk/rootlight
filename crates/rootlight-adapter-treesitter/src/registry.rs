@@ -340,7 +340,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "groovy",
             grammar_version: "0.2.0",
             source_package_sha256: "891a2367f48836c854e84bac87f17513707a65a20dce7cab5707ddde6ca23fe0",
-            parser_sha256: "e61c35c56c620edc17baff1df06cd597c8fc40849ba2f8e2669d3d208d64739c",
+            parser_sha256: "e854b05a78cb611de22017de60a26f6bab52d6f5d744eeabaaa41bc0d94af1d7",
             scanner_sha256: Some(
                 "508dab84d07d4f6de074b2b50b3dbfd17eb3f9b905d255245843b60d53adb5f1",
             ),

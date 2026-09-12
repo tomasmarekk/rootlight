@@ -4,6 +4,9 @@ use std::ops::ControlFlow;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const SOURCES: &[&str] = &[
+    "def values = new T[rows + 1][columns][]\nfinish(values)\n",
+    "def values = new String[]{\r\n'λ',\r\n// boundary\r\nvalue,\r\n}\r\nfinish()\r\n",
+    "def values = new int[][]{new int[]{1}, new int[]{2, 3}}\nfinish(values)\n",
     "@First\r\n// λ\r\n@Second\nimport static sample.Tools.run as perform\nperform()\n",
     "@Marker import sample.Widget\n@Other class Holder { Widget value }\n",
     "def action = { value -> assert value != null, 'λ'; sink(value) }\n",

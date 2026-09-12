@@ -67,6 +67,193 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn array_creation_keeps_element_types_and_ordered_dimension_expressions() {
+    for (expression, element, sizes) in [
+        ("new String[0]", "String", vec![Some("0")]),
+        ("new int[size]", "int", vec![Some("size")]),
+        (
+            "new sample.Widget[rows][columns]",
+            "sample.Widget",
+            vec![Some("rows"), Some("columns")],
+        ),
+        ("new String[rows][]", "String", vec![Some("rows"), None]),
+    ] {
+        let source = format!("def values = {expression}\n");
+        let tree = valid(&source);
+        let arrays: Vec<_> = nodes(tree.root_node())
+            .into_iter()
+            .filter(|node| node.kind() == "array_creation_expression")
+            .collect();
+        assert_eq!(arrays.len(), 1);
+        let array = arrays[0];
+        assert_eq!(array.utf8_text(source.as_bytes()).unwrap(), expression);
+        assert_eq!(
+            array
+                .child_by_field_name("type")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            element
+        );
+        assert!(array.child_by_field_name("initializer").is_none());
+        let mut cursor = array.walk();
+        let dimensions: Vec<_> = array
+            .children_by_field_name("dimension", &mut cursor)
+            .collect();
+        assert_eq!(dimensions.len(), sizes.len());
+        for (dimension, expected) in dimensions.into_iter().zip(sizes) {
+            assert_eq!(
+                dimension
+                    .child_by_field_name("size")
+                    .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+                expected
+            );
+        }
+        assert!(
+            !nodes(array)
+                .iter()
+                .any(|node| node.kind() == "subscript_expression")
+        );
+    }
+}
+
+#[test]
+fn array_creation_initializers_keep_values_and_nested_array_ownership() {
+    for (expression, dimensions, initializer, values) in [
+        (
+            "new String[]{'a', 'b'}",
+            1,
+            "{'a', 'b'}",
+            vec!["'a'", "'b'"],
+        ),
+        (
+            "new int[][]{new int[]{1}, new int[]{2, 3}}",
+            2,
+            "{new int[]{1}, new int[]{2, 3}}",
+            vec!["new int[]{1}", "new int[]{2, 3}"],
+        ),
+    ] {
+        let source = format!("def values = {expression}\n");
+        let tree = valid(&source);
+        let array = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| {
+                node.kind() == "array_creation_expression"
+                    && node.utf8_text(source.as_bytes()).unwrap() == expression
+            })
+            .unwrap();
+        let mut cursor = array.walk();
+        let sizes: Vec<_> = array
+            .children_by_field_name("dimension", &mut cursor)
+            .collect();
+        assert_eq!(sizes.len(), dimensions);
+        assert!(
+            sizes
+                .iter()
+                .all(|node| node.child_by_field_name("size").is_none())
+        );
+        let init = array.child_by_field_name("initializer").unwrap();
+        assert_eq!(init.utf8_text(source.as_bytes()).unwrap(), initializer);
+        let mut cursor = init.walk();
+        let elements: Vec<_> = init.children_by_field_name("value", &mut cursor).collect();
+        assert_eq!(
+            elements
+                .iter()
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect::<Vec<_>>(),
+            values
+        );
+        assert!(elements.iter().all(|node| node.parent() == Some(init)));
+    }
+}
+
+#[test]
+fn array_creation_rejects_incomplete_and_reordered_dimensions() {
+    for expression in [
+        "new int[][]{{1}, {2, 3}}",
+        "new int[]",
+        "new int[][size]",
+        "new int[1]{2}",
+        "new int[]{transform value}",
+        "new int[]()",
+        "new int[1, 2]",
+        "new int[1][][index]",
+    ] {
+        let source = format!("def values = {expression}\n");
+        assert!(parse(&source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn array_creation_trivia_and_initializer_calls_preserve_boundaries() {
+    for expression in [
+        "new int[]{}",
+        "new String[]{\n'λ',\n// boundary\n'x',\n}",
+        "new T[rows + 1][columns][]",
+        "new List<String>[size]",
+        "new int[]{transform(value), fallback()}",
+        "new int[rows] [columns]",
+        "new int[rows /* λ */][]",
+        "new int[\nrows\n]",
+        "new int[]{\r\nvalue\r\n}",
+    ] {
+        let source = format!("def values = {expression}\nfinish()\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "array_creation_expression", expression);
+        exact(&tree, &source, "method_invocation", "finish()");
+        assert!(
+            !nodes(tree.root_node())
+                .iter()
+                .any(|node| node.kind() == "closure")
+        );
+    }
+}
+
+#[test]
+fn array_creation_is_distinct_from_post_creation_access_and_subscripts() {
+    for (expression, kind) in [
+        ("new int[rows].length", "field_access"),
+        ("(new int[rows])[index]", "subscript_expression"),
+    ] {
+        let source = format!("def values = {expression}\n");
+        let tree = valid(&source);
+        exact(&tree, &source, kind, expression);
+        exact(&tree, &source, "array_creation_expression", "new int[rows]");
+    }
+}
+
+#[test]
+fn array_creation_postfix_calls_distinguish_initializers_and_closures() {
+    for (expression, array, kind, closures) in [
+        ("(new int[1]){2}", "new int[1]", "method_invocation", 1),
+        ("new int[]{1}{2}", "new int[]{1}", "method_invocation", 1),
+        ("new int[]{1}(2)", "new int[]{1}", "method_invocation", 0),
+        ("new int[1](2)", "new int[1]", "method_invocation", 0),
+        ("(new int[1])(2)", "new int[1]", "method_invocation", 0),
+        ("new int[1] value", "new int[1]", "command_chain", 0),
+        (
+            "new int[]{1}[index]",
+            "new int[]{1}",
+            "subscript_expression",
+            0,
+        ),
+    ] {
+        let source = format!("def values = {expression}\nfinish()\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "array_creation_expression", array);
+        exact(&tree, &source, kind, expression);
+        exact(&tree, &source, "method_invocation", "finish()");
+        assert_eq!(
+            nodes(tree.root_node())
+                .iter()
+                .filter(|node| node.kind() == "closure")
+                .count(),
+            closures
+        );
+    }
+}
+
+#[test]
 fn semicolons_separate_script_and_closure_statements() {
     let source = "def first = 1; def second = 2;\ndef run() { def a = 1; def b = 2; a + b; }\n";
     let tree = valid(source);

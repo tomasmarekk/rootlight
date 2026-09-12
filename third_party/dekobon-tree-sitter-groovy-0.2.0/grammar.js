@@ -72,7 +72,7 @@ function gstringPart($, textRule) {
 }
 
 /** Returns shared alternatives with context-specific reduction precedence. */
-function expressionForms($, receiver = false) {
+function expressionForms($, receiver = false, sizedArray = true, closure = true) {
   const forms = [
     $.identifier,
     $.number_literal,
@@ -83,7 +83,6 @@ function expressionForms($, receiver = false) {
     $.unary_expression,
     $.list_literal,
     $.map_literal,
-    $.closure,
     $.binary_expression,
     $.range_expression,
     $.identity_expression,
@@ -106,12 +105,15 @@ function expressionForms($, receiver = false) {
     $.direct_field_access_expression,
     $.method_reference_expression,
     $.object_creation_expression,
+    $.array_creation_expression,
     $.parenthesized_type_cast,
     $.cast_expression,
     $.membership_expression,
     $.instanceof_expression,
     $.switch_expression,
   ];
+  if (sizedArray) forms.push(alias($._sized_array_creation_expression, $.array_creation_expression));
+  if (closure) forms.push($.closure);
   // An unparenthesized assignment owns its command-valued right-hand side.
   if (!receiver) forms.push($.assignment_expression, $.method_invocation);
   return choice(...forms);
@@ -314,7 +316,19 @@ module.exports = grammar({
         repeat($.command_link),
       ),
       seq(field('receiver', $.method_invocation), repeat1($.command_link)),
+      seq(
+        field('receiver', alias($._sized_array_creation_expression, $.array_creation_expression)),
+        field('arguments', alias($._array_command_arguments, $.command_arguments)),
+        repeat($.command_link),
+      ),
     ))),
+
+    // A brace immediately after sized dimensions is an invalid initializer,
+    // not a closure argument. Grouping or a completed initializer removes it.
+    _array_command_arguments: $ => prec.left(-1, seq(
+      choice(expressionForms($, false, true, false), alias($.map_entry, $.named_argument), $.spread_arguments),
+      repeat(seq(',', $._argument)),
+    )),
 
     command_arguments: $ => prec.left(seq(
       $._argument,
@@ -343,7 +357,7 @@ module.exports = grammar({
     // Sharing the same _expression wrapper would merge the stacks too early and
     // let unary precedence turn f + x into a command. Dynamic priority favors
     // ordinary syntax when both parses are complete.
-    _command_receiver: $ => expressionForms($, true),
+    _command_receiver: $ => expressionForms($, true, false),
 
     // §5.3 — `label: stmt`. Required only at statement-start
     // position; map_entries (which share `:`) are inside `[…]`
@@ -1066,16 +1080,50 @@ module.exports = grammar({
       ))));
     },
 
-    // §3.2 / §5.15 — `new Foo(args)`. We only handle the plain
-    // constructor-call form here; array creation `new Foo[10]`,
-    // generic types, and array initialisers land later. PREC.PRIMARY
-    // so it composes with the access tier from the left
-    // (`new Foo().bar`).
+    // Construction owns its type and arguments before following member access.
+    // Array brackets belong to dimensions, not to a callable array type.
     object_creation_expression: $ => prec.right(PREC.PRIMARY, seq(
       'new',
-      field('type', $._type),
+      field('type', $._construction_type),
       field('arguments', $.argument_list),
     )),
+
+    _construction_type: $ => choice(
+      alias($.identifier, $.type_identifier),
+      $.qualified_type,
+      $.generic_type,
+    ),
+
+    array_creation_expression: $ => prec.right(seq(
+      'new',
+      field('type', $._construction_type),
+      repeat1(field('dimension', $.empty_array_dimension)),
+      field('initializer', $.array_initializer),
+    )),
+
+    _sized_array_creation_expression: $ => prec.right(seq(
+      'new',
+      field('type', $._construction_type),
+      repeat1(field('dimension', $.array_dimension)),
+      repeat(field('dimension', $.empty_array_dimension)),
+    )),
+
+    // A following bracket continues construction before postfix subscripting.
+    array_dimension: $ => prec(PREC.PRIMARY, seq('[', field('size', $._expression), ']')),
+    empty_array_dimension: _ => prec(PREC.PRIMARY, seq('[', ']')),
+
+    // Groovy rejects unparenthesized command chains in array initializers.
+    array_initializer: $ => seq(
+      '{',
+      repeat($._newline),
+      optional(seq(
+        field('value', $._expression),
+        repeat(seq(',', repeat($._newline), field('value', $._expression))),
+        optional(','),
+        repeat($._newline),
+      )),
+      '}',
+    ),
 
     // §5.15 — C-style cast `(Foo) x`. Distinct from
     // `parenthesized_expression` followed by something (resolved
@@ -1234,10 +1282,14 @@ module.exports = grammar({
 
     // Closures are postfix call arguments, including when parentheses are absent.
     // Repeated suffixes retain each callable expression instead of becoming statements.
-    method_invocation: $ => prec.dynamic(1, prec.left(PREC.POSTFIX, seq(
-      field('function', $._expression),
-      choice(
-        seq(field('arguments', $.argument_list), repeat(field('closure', $.closure))),
+    method_invocation: $ => prec.dynamic(1, prec.left(PREC.POSTFIX, choice(
+      seq(
+        field('function', $._expression),
+        field('arguments', $.argument_list),
+        repeat(field('closure', $.closure)),
+      ),
+      seq(
+        field('function', expressionForms($, false, false)),
         repeat1(field('closure', $.closure)),
       ),
     ))),

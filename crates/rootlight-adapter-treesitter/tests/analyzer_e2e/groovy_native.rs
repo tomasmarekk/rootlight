@@ -84,6 +84,33 @@ fn assert_named_reads(source: &str, name: &str, expected: &[Option<usize>], synt
 }
 
 #[test]
+fn groovy_array_creation_preserves_generic_type_and_dimension_reads() {
+    let source =
+        "class Factory<T> { T[] allocate(int size) { def values = new T[size]; values } }\n";
+    let owner = Some(source.find("<T>").unwrap() + 1);
+    assert_type_reads(source, "T", &[owner; 2]);
+    assert_lexical_reads(source, "size", &[Some(source.find("size)").unwrap())]);
+    assert_lexical_reads(source, "values", &[Some(source.find("values =").unwrap())]);
+}
+
+#[test]
+fn groovy_array_initializers_preserve_value_reads_without_inventing_closures() {
+    let source = "def allocate(rows, columns, value) { def sized = new String[rows][columns][]; def initialized = new String[]{value}; def nested = new String[][]{new String[]{value}}; [sized, initialized, nested] }\n";
+    assert_lexical_reads(source, "rows", &[Some(source.find("rows,").unwrap())]);
+    assert_lexical_reads(source, "columns", &[Some(source.find("columns,").unwrap())]);
+    assert_lexical_reads(source, "value", &[Some(source.find("value)").unwrap()); 2]);
+    let result = output(source);
+    let functions: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 1);
+    assert_eq!(functions[0].canonical_name, "allocate");
+}
+
+#[test]
 fn groovy_annotated_imports_preserve_unresolved_source_evidence() {
     for declaration in [
         "import sample.Widget",
