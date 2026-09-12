@@ -19,16 +19,23 @@ struct ImportedType {
     qualified_name: String,
 }
 
+#[derive(Clone, Copy)]
+struct LocalType {
+    declaration: u64,
+    symbol: Option<SymbolId>,
+}
+
 pub(super) struct GroovyBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     iterable_ends: BTreeMap<u64, u64>,
     bindings: BTreeMap<(u64, &'a str), Binding>,
     type_bindings: BTreeMap<(u64, &'a str), Option<SymbolId>>,
-    local_types: BTreeMap<(u64, &'a str), Option<SymbolId>>,
+    local_types: BTreeMap<(u64, &'a str), Option<LocalType>>,
     module_packages: BTreeMap<u64, Option<String>>,
     type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
     inherited_scopes: BTreeSet<u64>,
     imports: BTreeMap<String, Option<ImportedType>>,
+    unresolved_imports: bool,
     maximum_name_bytes: usize,
 }
 
@@ -54,6 +61,7 @@ impl<'a> GroovyBindings<'a> {
             type_names: BTreeMap::new(),
             inherited_scopes: BTreeSet::new(),
             imports: BTreeMap::new(),
+            unresolved_imports: false,
             maximum_name_bytes,
         };
         cancellation.check()?;
@@ -170,6 +178,9 @@ impl<'a> GroovyBindings<'a> {
         for fact in self.facts.values().copied() {
             cancellation.check()?;
             match fact.syntax_kind().as_str() {
+                "groovy.package_star_import.reference"
+                | "groovy.static_import.reference"
+                | "groovy.static_star_import.reference" => self.unresolved_imports = true,
                 "groovy.import_alias.definition" => {
                     if let Some(owner) = self.import_owner(fact, cancellation)? {
                         let name = self.source_name(fact, source)?;
@@ -202,7 +213,12 @@ impl<'a> GroovyBindings<'a> {
                             self.local_types
                                 .entry((owner, name))
                                 .and_modify(|prior| *prior = None)
-                                .or_insert_with(|| symbols.get(&fact.local_id()).copied());
+                                .or_insert_with(|| {
+                                    Some(LocalType {
+                                        declaration: declaration.local_id(),
+                                        symbol: symbols.get(&fact.local_id()).copied(),
+                                    })
+                                });
                         }
                     }
                 }
@@ -383,46 +399,24 @@ impl<'a> GroovyBindings<'a> {
         if self.module_packages.get(&module).and_then(Option::as_deref) != Some(package) {
             return Ok(None);
         }
-        Ok(self.local_types.get(&(module, name)).copied())
+        Ok(self
+            .local_types
+            .get(&(module, name))
+            .map(|target| target.and_then(|target| target.symbol)))
     }
 
-    fn local_type(
+    fn type_owners(
         &self,
         reference: &SyntaxFact,
-        name: &str,
         cancellation: &Cancellation,
-    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
+    ) -> Result<(Vec<u64>, Option<u64>), AdapterError> {
         let mut parent = reference.parent();
         let mut owners = Vec::new();
         let mut module = None;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
             let Some(id) = parent else {
-                if let Some(&current) = owners.first() {
-                    if let Some(&(current_name, target)) = self.type_names.get(&current)
-                        && current_name == name
-                    {
-                        return Ok(Some(target));
-                    }
-                    if let Some(target) = self.local_types.get(&(current, name)) {
-                        return Ok(Some(*target));
-                    }
-                    if self.inherited_scopes.contains(&current) {
-                        return Ok(Some(None));
-                    }
-                }
-                // Groovy checks the current type's children first, then enclosing
-                // types from outermost to innermost (ResolveVisitor.resolveNestedClass).
-                for &owner in owners.iter().skip(1).rev() {
-                    cancellation.check()?;
-                    if let Some(target) = self.local_types.get(&(owner, name)) {
-                        return Ok(Some(*target));
-                    }
-                    if self.inherited_scopes.contains(&owner) {
-                        return Ok(Some(None));
-                    }
-                }
-                return Ok(module.and_then(|module| self.local_types.get(&(module, name)).copied()));
+                return Ok((owners, module));
             };
             let owner = self.fact(id)?;
             if is_type_declaration(owner) {
@@ -434,6 +428,112 @@ impl<'a> GroovyBindings<'a> {
             parent = owner.parent();
         }
         Err(invalid_capture())
+    }
+
+    fn local_type(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
+        let (owners, module) = self.type_owners(reference, cancellation)?;
+        if let Some(&current) = owners.first()
+            && let Some(&(current_name, target)) = self.type_names.get(&current)
+            && current_name == name
+        {
+            return Ok(Some(target));
+        }
+        // Groovy checks the current type's children first, then enclosing
+        // types from outermost to innermost (ResolveVisitor.resolveNestedClass).
+        for &owner in owners.iter().take(1).chain(owners.iter().skip(1).rev()) {
+            cancellation.check()?;
+            if let Some(target) = self.local_types.get(&(owner, name)) {
+                return Ok(Some(target.and_then(|target| target.symbol)));
+            }
+            if self.inherited_scopes.contains(&owner) {
+                return Ok(Some(None));
+            }
+        }
+        Ok(module.and_then(|module| {
+            self.local_types
+                .get(&(module, name))
+                .map(|target| target.and_then(|target| target.symbol))
+        }))
+    }
+
+    fn nested_type_path(
+        &self,
+        mut owner: u64,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<LocalType>>, AdapterError> {
+        let mut target = None;
+        for component in name.split('.') {
+            cancellation.check()?;
+            let Some(child) = self.local_types.get(&(owner, component)) else {
+                return Ok(self.inherited_scopes.contains(&owner).then_some(None));
+            };
+            let Some(child) = child.filter(|child| child.symbol.is_some()) else {
+                return Ok(Some(None));
+            };
+            owner = child.declaration;
+            target = Some(child);
+        }
+        Ok(Some(target))
+    }
+
+    fn qualified_local_type(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SymbolId>, AdapterError> {
+        if let Some(target) = self.module_type(reference, name, cancellation)? {
+            return Ok(target);
+        }
+        let Some((root, _)) = name.split_once('.') else {
+            return Ok(None);
+        };
+        // Import selection precedes the compiler's dotted-to-nested lookup.
+        // Unimplemented static/star selection cannot justify a local fallback.
+        if self.imports.contains_key(root) || self.unresolved_imports {
+            return Ok(None);
+        }
+        let (owners, module) = self.type_owners(reference, cancellation)?;
+        if let Some(module) = module {
+            match self.module_packages.get(&module) {
+                Some(Some(package)) => {
+                    if let Some(path) = name
+                        .strip_prefix(package)
+                        .and_then(|path| path.strip_prefix('.'))
+                        && let Some(target) = self.nested_type_path(module, path, cancellation)?
+                    {
+                        return Ok(target.and_then(|target| target.symbol));
+                    }
+                }
+                Some(None) => return Ok(None),
+                None => {}
+            }
+            if let Some(Some(target)) = self.nested_type_path(module, name, cancellation)?
+                && owners.first() == Some(&target.declaration)
+            {
+                return Ok(target.symbol);
+            }
+        }
+        // Match the entire child path before moving to the next enclosing scope:
+        // a same-named prefix with no matching child does not shadow a full path.
+        for &owner in owners.iter().take(1).chain(owners.iter().skip(1).rev()) {
+            if let Some(target) = self.nested_type_path(owner, name, cancellation)? {
+                return Ok(target.and_then(|target| target.symbol));
+            }
+        }
+        let Some(module) = module else {
+            return Ok(None);
+        };
+        Ok(self
+            .nested_type_path(module, name, cancellation)?
+            .flatten()
+            .and_then(|target| target.symbol))
     }
 
     /// Returns only an exact authored lexical target, never a runtime dispatch guess.
@@ -456,7 +556,7 @@ impl<'a> GroovyBindings<'a> {
             ) else {
                 return Ok(None);
             };
-            return Ok(self.module_type(fact, &name, cancellation)?.flatten());
+            return self.qualified_local_type(fact, &name, cancellation);
         }
         if fact.syntax_kind().as_str() == "groovy.type_identifier.reference" {
             return self.resolve_type(fact, name, cancellation);
@@ -851,6 +951,104 @@ mod tests {
             plan.resolve(&facts[4], "sample.Local", &cancellation)
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn nested_type_paths_require_complete_unique_identities() {
+        let source = b"Outer Inner Outer.Inner";
+        let mut facts = vec![
+            fact(1, None, SyntaxFactKind::Module, "groovy.file.module", 0, 23),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                0,
+                11,
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                "groovy.identifier.definition",
+                0,
+                5,
+            ),
+            fact(
+                4,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                6,
+                11,
+            ),
+            fact(
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                "groovy.identifier.definition",
+                6,
+                11,
+            ),
+            fact(
+                6,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                "groovy.qualified_type.reference",
+                12,
+                23,
+            ),
+        ];
+        let outer = SymbolId::from_bytes([1; 20]);
+        let inner = SymbolId::from_bytes([2; 20]);
+        let cancellation = Cancellation::new();
+        for _ in 0..2 {
+            for (symbols, maximum, expected) in [
+                (HashMap::from([(3, outer), (5, inner)]), 11, Some(inner)),
+                (HashMap::from([(3, outer), (5, inner)]), 10, None),
+                (HashMap::from([(3, outer)]), 11, None),
+                (HashMap::from([(5, inner)]), 11, None),
+            ] {
+                let plan =
+                    GroovyBindings::new(&facts, source, &symbols, maximum, &cancellation).unwrap();
+                let reference = facts.iter().find(|fact| fact.local_id() == 6).unwrap();
+                assert_eq!(
+                    plan.resolve(reference, "Outer.Inner", &cancellation)
+                        .unwrap(),
+                    expected
+                );
+            }
+            facts.reverse();
+        }
+        facts.push(fact(
+            7,
+            Some(1),
+            SyntaxFactKind::Declaration,
+            "groovy.class.declaration",
+            0,
+            5,
+        ));
+        facts.push(fact(
+            8,
+            Some(7),
+            SyntaxFactKind::Occurrence,
+            "groovy.identifier.definition",
+            0,
+            5,
+        ));
+        let symbols = HashMap::from([(3, outer), (5, inner), (8, SymbolId::from_bytes([3; 20]))]);
+        let plan = GroovyBindings::new(&facts, source, &symbols, 11, &cancellation).unwrap();
+        let reference = facts.iter().find(|fact| fact.local_id() == 6).unwrap();
+        assert_eq!(
+            plan.resolve(reference, "Outer.Inner", &cancellation)
+                .unwrap(),
+            None
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(
+            plan.resolve(reference, "Outer.Inner", &cancellation)
+                .is_err()
         );
     }
 

@@ -187,6 +187,33 @@ fn groovy_qualified_import_evidence_uses_native_type_boundaries() {
 }
 
 #[test]
+fn groovy_qualified_local_types_do_not_hide_unresolved_namespaces() {
+    for source in [
+        "class Outer { static class Inner {} }\nclass Holder extends base.Parent { Outer.Inner item }",
+        "import sample.*\nclass Outer { static class Inner {} }\nclass Holder { Outer.Inner item }",
+        "import static sample.Container.Outer\nclass Outer { static class Inner {} }\nclass Holder { Outer.Inner item }",
+        "import static sample.Container.*\nclass Outer { static class Inner {} }\nclass Holder { Outer.Inner item }",
+        "class Outer { static class Inner {} }\nclass Holder { other.Outer.Inner item }",
+        "class Outer { static class Inner {} }\nclass Holder { Outer.Missing item }",
+    ] {
+        let result = output(source);
+        let reads: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "groovy.qualified_type.reference")
+            .collect();
+        assert!(!reads.is_empty(), "{source}");
+        for site in reads {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{source}: {site:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn groovy_local_type_precedence_matches_native_nested_class_order() {
     for (source, name, declaration) in [
         (

@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/104";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/105";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/12";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27965,7 +27965,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/103",
+            b"rootlight.first-slice.treesitter-structural/104",
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -28103,6 +28103,233 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_local_qualified_types_preserve_definition_ownership() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        for (source, written, definition) in [
+            (
+                "class Outer { static class Inner {} }\nclass Holder { Outer.Inner item }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "package sample\nclass Outer { static class Inner {} }\nclass Holder { Outer.Inner item }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "package sample\nclass Outer { static class Inner {} }\nclass Holder { sample.Outer.Inner item }",
+                "sample.Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Holder { static class Outer { static class Inner {} }\nOuter.Inner item }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Inner {}\nstatic class Holder { Outer.Inner item } }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Inner {} }\nclass Holder<Outer> { Outer.Inner item }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Middle { static class Inner {} }\nstatic class Holder { Middle.Inner item } }",
+                "Middle.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Inner {} }\nclass Holder { static class Outer { static class Inner {} }\nOuter.Inner item }",
+                "Outer.Inner",
+                "class Holder { static class Outer { static class Inner",
+            ),
+            (
+                "class Outer { static class Inner {} }\nclass Holder { static class Outer {}\nOuter.Inner item }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Root { static class Outer { static class Inner {} }\nstatic class Middle { static class Outer { static class Inner {} }\nstatic class Holder { Outer.Inner item } } }",
+                "Outer.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Holder { Outer.Holder item } }",
+                "Outer.Holder",
+                "class Holder",
+            ),
+            (
+                "class Outer { static class Middle { static class Inner {} } }\nclass Holder { Outer.Middle.Inner item }",
+                "Outer.Middle.Inner",
+                "class Inner",
+            ),
+            (
+                "class Outer { static class Inner {} }\nclass Holder { Outer /* gap */ . Inner[] item }",
+                "Outer /* gap */ . Inner",
+                "class Inner",
+            ),
+            (
+                "class Δέντρο { static class Κλάδος {} }\nclass Holder { Δέντρο.Κλάδος item }",
+                "Δέντρο.Κλάδος",
+                "class Κλάδος",
+            ),
+            (
+                "package sample\nclass Outer { static class Inner {} }\nclass Holder { static class Outer { static class Inner {} }\nsample.Outer.Inner item }",
+                "sample.Outer.Inner",
+                "class Inner",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{source}: {:?}",
+                document.diagnostics
+            );
+            let definition_start = u64::try_from(
+                source.find(definition).unwrap() + definition.rfind(' ').unwrap() + 1,
+            )
+            .unwrap();
+            let declaration = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == definition_start
+                })
+                .unwrap();
+            let OccurrenceTarget::Resolved { symbol } = declaration.target else {
+                panic!("definition has no identity")
+            };
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "groovy.qualified_type.reference"
+                        && site.source.span().start_byte()
+                            == u64::try_from(source.find(written).unwrap()).unwrap()
+                })
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol },
+                "{source}"
+            );
+            assert_eq!(site.role, OccurrenceRole::TypeUse);
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::UsesType
+                        && relation.subject == RelationEndpoint::Occurrence(site.id)
+                        && relation.object == RelationEndpoint::Entity(symbol))
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_local_qualified_types_follow_incremental_declaration_changes() {
+        use rootlight_ir::{OccurrenceTarget, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("stable.groovy"), "class Stable {}\n").unwrap();
+        let mut service = FirstSliceService::new(3).unwrap();
+        for (ordinal, (declaration, resolved)) in
+            [("Inner", true), ("Other", false), ("Inner", true)]
+                .into_iter()
+                .enumerate()
+        {
+            let source = format!(
+                "class Outer {{ static class {declaration} {{}} }}\nclass Holder {{ Outer.Inner item }}\n"
+            );
+            fs::write(fixture.path().join("client.groovy"), source).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if ordinal > 0 {
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert!(work.reused_parser_artifacts() >= 1);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "groovy.qualified_type.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.predicate == RelationPredicate::UsesType)
+                    .count(),
+                usize::from(resolved)
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"Outer.Inner");
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+            drop(snapshot);
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
         }
     }
 
