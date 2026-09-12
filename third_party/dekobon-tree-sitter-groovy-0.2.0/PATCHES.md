@@ -19,6 +19,7 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 
 - Statement separators, compound statements, newline continuations and comments.
 - Typed declarations, command calls, command chains and competing expressions.
+- Nested type declarations as class members, retaining their own bodies and names.
 - Slashy strings versus division, escaped slash endings and lazy interpolation.
 - Unicode identifier categories and interpolation paths.
 - CR, LF and CRLF comment endings without consuming adjacent source.

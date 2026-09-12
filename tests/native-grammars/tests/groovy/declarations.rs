@@ -42,6 +42,36 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn nested_types_remain_class_members_with_exact_authored_bodies() {
+    for (kind, declaration) in [
+        ("class_declaration", "class Inner<T> { T field }"),
+        ("class_declaration", "static class Nested<T> { T field }"),
+        ("interface_declaration", "interface Reader<T> { T read() }"),
+        ("trait_declaration", "trait Reader<T> { T read() { null } }"),
+        ("enum_declaration", "enum State { READY, DONE }"),
+        ("record_declaration", "record Entry(String name) {}"),
+        (
+            "annotation_type_declaration",
+            "@interface Mark { String value() }",
+        ),
+    ] {
+        for separator in ["; ", "\n", "\r\n"] {
+            let source = format!("class Outer {{ {declaration}{separator}def after() {{ 1 }} }}\n");
+            let tree = valid(&source);
+            exact(&tree, &source, kind, declaration);
+            exact(&tree, &source, "method_declaration", "def after() { 1 }");
+            let nested = nodes(tree.root_node())
+                .into_iter()
+                .find(|node| {
+                    node.kind() == kind && node.utf8_text(source.as_bytes()).unwrap() == declaration
+                })
+                .unwrap();
+            assert_eq!(nested.parent().unwrap().kind(), "class_body");
+        }
+    }
+}
+
+#[test]
 fn typed_local_without_initializer_owns_only_its_declaration() {
     for declaration in [
         "String label",

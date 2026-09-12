@@ -1352,12 +1352,27 @@ fn candidate_for_capture(
         role,
         syntax,
         required: false,
-        native_depth: if family == GrammarFamily::Perl {
-            perl::native_depth(capture.node, cancellation)?
+        native_depth: if matches!(family, GrammarFamily::Perl | GrammarFamily::Groovy) {
+            native_depth(capture.node, cancellation)?
         } else {
             0
         },
     })
+}
+
+fn native_depth(
+    mut node: tree_sitter::Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    let mut depth = 0usize;
+    while let Some(parent) = node.parent() {
+        cancellation.check()?;
+        depth = depth
+            .checked_add(1)
+            .ok_or_else(|| query_failure("query-native-depth"))?;
+        node = parent;
+    }
+    Ok(depth)
 }
 
 fn is_c_function_prototype(node: tree_sitter::Node<'_>) -> bool {

@@ -602,6 +602,10 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
         ("perl", "perl.method_application.reference"),
         ("perl", "perl.identifier.reference"),
         ("perl", "perl.package_context.reference"),
+        ("groovy", "groovy.identifier.reference"),
+        ("groovy", "groovy.type_identifier.reference"),
+        ("groovy", "groovy.qualified_type_identifier.reference"),
+        ("groovy", "groovy.call.call"),
     ] {
         for resolved in [false, true] {
             let mut fixture = Fixture::new();

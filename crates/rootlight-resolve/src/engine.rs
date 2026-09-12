@@ -807,6 +807,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("perl.") {
         return false;
     }
+    // Groovy lexical and generic visibility is established by the adapter.
+    // Name scoring cannot recover a rejected static binding or dynamic receiver.
+    if occurrence.syntax_kind.starts_with("groovy.") {
+        return false;
+    }
     // ECMAScript member leaves require their receiver's module/type evidence.
     // Re-scoring a source-backed adapter gap by spelling would invent a target.
     if matches!(

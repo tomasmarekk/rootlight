@@ -27861,6 +27861,136 @@ mod tests {
     }
 
     #[test]
+    fn groovy_generic_relationships_keep_shadowed_targets_and_exact_sources() {
+        use rootlight_ir::{EntityKind, OccurrenceRole, OccurrenceTarget};
+
+        let fixture = TempDir::new().unwrap();
+        let source = "class Store<T extends Number> { T field; <T extends CharSequence> T convert(T value) { value }; class Nested { T item }; static T unavailable }\n";
+        fs::write(fixture.path().join("types.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert!(document.diagnostics.is_empty());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "T".to_owned(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let types: BTreeSet<_> = located
+            .data
+            .hits
+            .iter()
+            .filter_map(|hit| hit.symbol)
+            .collect();
+        assert_eq!(types.len(), 2);
+        for symbol in &types {
+            let explained = service
+                .symbol_explain(receipt.generation, *symbol, &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity.kind, EntityKind::TypeParameter);
+            assert_eq!(explained.data.entity.canonical_name, "T");
+        }
+        let defined = |offset: usize| {
+            document
+                .occurrences
+                .iter()
+                .find_map(|site| {
+                    if site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == u64::try_from(offset).unwrap()
+                        && let OccurrenceTarget::Resolved { symbol } = site.target
+                    {
+                        Some(symbol)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap()
+        };
+        let outer = defined(source.find("T extends Number").unwrap());
+        let inner = defined(source.find("T extends CharSequence").unwrap());
+        assert_ne!(outer, inner);
+        assert_eq!(types, BTreeSet::from([outer, inner]));
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                document.entities.iter().map(|entity| entity.id).collect(),
+                vec![RelationFamily::References],
+                Some(RelationDirection::Outbound),
+                0,
+                30,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(!relationships.data.exact);
+        let mut actual = BTreeMap::new();
+        for edge in relationships
+            .data
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+        {
+            if !types.contains(&edge.symbol) {
+                continue;
+            }
+            for reference in &edge.source_refs {
+                assert_eq!(reference.generation(), receipt.generation);
+                assert!(
+                    actual
+                        .insert(
+                            usize::try_from(reference.span().start_byte()).unwrap(),
+                            edge.symbol,
+                        )
+                        .is_none()
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, b"T");
+            }
+        }
+        assert_eq!(
+            actual,
+            BTreeMap::from([
+                (source.find("T field").unwrap(), outer),
+                (source.find("T convert").unwrap(), inner),
+                (source.find("T value").unwrap(), inner),
+                (source.find("T item").unwrap(), outer),
+            ])
+        );
+        let unavailable = u64::try_from(source.find("T unavailable").unwrap()).unwrap();
+        let unavailable = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == unavailable)
+            .expect("static type reference remains source-backed");
+        assert!(
+            matches!(unavailable.target, OccurrenceTarget::Unresolved { .. }),
+            "{unavailable:?}"
+        );
+    }
+
+    #[test]
     fn groovy_control_and_type_bindings_publish_exact_symbol_sources() {
         use rootlight_ir::EntityKind;
 

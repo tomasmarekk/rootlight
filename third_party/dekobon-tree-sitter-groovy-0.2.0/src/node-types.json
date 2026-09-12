@@ -1808,7 +1808,19 @@
       "required": false,
       "types": [
         {
+          "type": "annotation_type_declaration",
+          "named": true
+        },
+        {
+          "type": "class_declaration",
+          "named": true
+        },
+        {
           "type": "constructor_declaration",
+          "named": true
+        },
+        {
+          "type": "enum_declaration",
           "named": true
         },
         {
@@ -1816,11 +1828,23 @@
           "named": true
         },
         {
+          "type": "interface_declaration",
+          "named": true
+        },
+        {
           "type": "method_declaration",
           "named": true
         },
         {
+          "type": "record_declaration",
+          "named": true
+        },
+        {
           "type": "static_initializer",
+          "named": true
+        },
+        {
+          "type": "trait_declaration",
           "named": true
         }
       ]
@@ -3456,6 +3480,14 @@
       "required": false,
       "types": [
         {
+          "type": "annotation_type_declaration",
+          "named": true
+        },
+        {
+          "type": "class_declaration",
+          "named": true
+        },
+        {
           "type": "constructor_declaration",
           "named": true
         },
@@ -3464,7 +3496,15 @@
           "named": true
         },
         {
+          "type": "enum_declaration",
+          "named": true
+        },
+        {
           "type": "field_declaration",
+          "named": true
+        },
+        {
+          "type": "interface_declaration",
           "named": true
         },
         {
@@ -3472,7 +3512,15 @@
           "named": true
         },
         {
+          "type": "record_declaration",
+          "named": true
+        },
+        {
           "type": "static_initializer",
+          "named": true
+        },
+        {
+          "type": "trait_declaration",
           "named": true
         }
       ]

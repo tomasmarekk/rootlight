@@ -631,6 +631,12 @@ module.exports = grammar({
     ),
 
     _class_member: $ => choice(
+      $.class_declaration,
+      $.interface_declaration,
+      $.annotation_type_declaration,
+      $.trait_declaration,
+      $.enum_declaration,
+      $.record_declaration,
       $.method_declaration,
       $.field_declaration,
       $.constructor_declaration,

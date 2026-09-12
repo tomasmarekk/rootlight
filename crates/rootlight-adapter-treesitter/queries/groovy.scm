@@ -27,6 +27,9 @@
 
 [(method_declaration) (constructor_declaration)] @signature
 [(method_declaration) (constructor_declaration)] @scope
+[(class_declaration) (interface_declaration) (annotation_type_declaration)
+ (trait_declaration) (record_declaration) (enum_declaration)
+ (field_declaration) (static_initializer)] @scope
 [(block) (class_body) (enum_body)] @scope
 [(for_statement) (for_in_statement) (catch_clause) (try_statement)] @scope
 [(local_variable_declaration) (multi_assignment_declaration)] @scope

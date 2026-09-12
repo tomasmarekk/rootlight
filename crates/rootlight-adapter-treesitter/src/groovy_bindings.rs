@@ -1,6 +1,6 @@
-//! Resolves authored Groovy locals and parameters from audited lexical captures.
-//! Visibility excludes initializers and noncapturing method/type boundaries;
-//! runtime properties and generated closure parameters never acquire invented identities.
+//! Resolves authored Groovy value and type parameters from audited lexical captures.
+//! Value visibility excludes initializers and noncapturing method/type boundaries;
+//! type parameters use a separate namespace and respect static owner boundaries.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,6 +17,7 @@ pub(super) struct GroovyBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     iterable_ends: BTreeMap<u64, u64>,
     bindings: BTreeMap<(u64, &'a str), Binding>,
+    type_bindings: BTreeMap<(u64, &'a str), Option<SymbolId>>,
 }
 
 impl<'a> GroovyBindings<'a> {
@@ -35,6 +36,7 @@ impl<'a> GroovyBindings<'a> {
             facts: BTreeMap::new(),
             iterable_ends: BTreeMap::new(),
             bindings: BTreeMap::new(),
+            type_bindings: BTreeMap::new(),
         };
         cancellation.check()?;
         for fact in facts {
@@ -63,10 +65,18 @@ impl<'a> GroovyBindings<'a> {
         }
         for fact in facts {
             cancellation.check()?;
-            if fact.syntax_kind().as_str() != "groovy.identifier.definition" {
+            let is_type = fact.syntax_kind().as_str() == "groovy.type_identifier.definition";
+            if !is_type && fact.syntax_kind().as_str() != "groovy.identifier.definition" {
                 continue;
             }
-            let Some((scope, visible_from)) = result.visibility(fact, cancellation)? else {
+            let visibility = if is_type {
+                result
+                    .type_owner(fact, cancellation)?
+                    .map(|owner| (owner, 0))
+            } else {
+                result.visibility(fact, cancellation)?
+            };
+            let Some((scope, visible_from)) = visibility else {
                 continue;
             };
             let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
@@ -76,6 +86,14 @@ impl<'a> GroovyBindings<'a> {
                 continue;
             }
             let name = std::str::from_utf8(name).map_err(|_| invalid_capture())?;
+            if is_type {
+                result
+                    .type_bindings
+                    .entry((scope, name))
+                    .and_modify(|target| *target = None)
+                    .or_insert_with(|| symbols.get(&fact.local_id()).copied());
+                continue;
+            }
             let binding = Binding {
                 visible_from,
                 symbol: symbols.get(&fact.local_id()).copied(),
@@ -105,6 +123,9 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancellation.check()?;
+        if fact.syntax_kind().as_str() == "groovy.type_identifier.reference" {
+            return self.resolve_type(fact, name, cancellation);
+        }
         if fact.syntax_kind().as_str() != "groovy.identifier.reference" {
             return Ok(None);
         }
@@ -123,6 +144,7 @@ impl<'a> GroovyBindings<'a> {
             if matches!(
                 owner.syntax_kind().as_str(),
                 "groovy.function.scope"
+                    | "groovy.static_function.scope"
                     | "groovy.constructor.scope"
                     | "groovy.type_body.scope"
                     | "groovy.file.scope"
@@ -132,6 +154,75 @@ impl<'a> GroovyBindings<'a> {
                 return Ok(None);
             }
             scope = self.nearest_scope(owner.parent(), cancellation)?;
+        }
+        Err(invalid_capture())
+    }
+
+    fn type_owner(
+        &self,
+        definition: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        let mut parent = definition.parent();
+        let mut parameter_seen = false;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else {
+                return Ok(None);
+            };
+            let fact = self.fact(id)?;
+            if fact.kind() == SyntaxFactKind::Declaration {
+                if !parameter_seen {
+                    if fact.syntax_kind().as_str() != "groovy.type_parameter.declaration" {
+                        return Ok(None);
+                    }
+                    parameter_seen = true;
+                } else if matches!(
+                    fact.syntax_kind().as_str(),
+                    "groovy.class.declaration"
+                        | "groovy.interface.declaration"
+                        | "groovy.trait.declaration"
+                        | "groovy.record.declaration"
+                        | "groovy.function.declaration"
+                        | "groovy.constructor.declaration"
+                ) {
+                    return Ok(Some(id));
+                } else {
+                    return Ok(None);
+                }
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn resolve_type(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SymbolId>, AdapterError> {
+        let mut parent = reference.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else {
+                return Ok(None);
+            };
+            let owner = self.fact(id)?;
+            if let Some(target) = self.type_bindings.get(&(id, name)) {
+                return Ok(*target);
+            }
+            // Static owners can declare their own generic parameters, but cannot
+            // capture those of an enclosing class. Their declaration precedes this scope.
+            if matches!(
+                owner.syntax_kind().as_str(),
+                "groovy.static_function.scope"
+                    | "groovy.static_context.scope"
+                    | "groovy.file.scope"
+            ) {
+                return Ok(None);
+            }
+            parent = owner.parent();
         }
         Err(invalid_capture())
     }
@@ -222,6 +313,7 @@ fn is_scope(fact: &SyntaxFact) -> bool {
             fact.syntax_kind().as_str(),
             "groovy.file.scope"
                 | "groovy.function.scope"
+                | "groovy.static_function.scope"
                 | "groovy.constructor.scope"
                 | "groovy.block.scope"
                 | "groovy.type_body.scope"
@@ -295,6 +387,191 @@ mod tests {
                 5,
             ),
         ]
+    }
+
+    #[test]
+    fn type_bindings_preserve_shadowing_without_identities_or_capture_order() {
+        let mut facts = vec![
+            fact(1, None, SyntaxFactKind::Scope, "groovy.file.scope", 0, 8),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                0,
+                8,
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "groovy.type_parameter.declaration",
+                0,
+                1,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.definition",
+                0,
+                1,
+            ),
+            fact(
+                5,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "groovy.function.declaration",
+                2,
+                8,
+            ),
+            fact(
+                6,
+                Some(5),
+                SyntaxFactKind::Declaration,
+                "groovy.type_parameter.declaration",
+                2,
+                3,
+            ),
+            fact(
+                7,
+                Some(6),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.definition",
+                2,
+                3,
+            ),
+            fact(
+                8,
+                Some(5),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.reference",
+                4,
+                5,
+            ),
+            fact(
+                9,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.reference",
+                6,
+                7,
+            ),
+        ];
+        let outer = SymbolId::from_bytes([8; 20]);
+        let inner = SymbolId::from_bytes([9; 20]);
+        let cancellation = Cancellation::new();
+        for symbols in [
+            HashMap::from([(4, outer), (7, inner)]),
+            HashMap::from([(4, outer)]),
+        ] {
+            for _ in 0..2 {
+                let plan =
+                    GroovyBindings::new(&facts, b"T T T T ", &symbols, 64, &cancellation).unwrap();
+                for (id, expected) in [(8, symbols.get(&7).copied()), (9, Some(outer))] {
+                    let read = facts.iter().find(|fact| fact.local_id() == id).unwrap();
+                    assert_eq!(plan.resolve(read, "T", &cancellation).unwrap(), expected);
+                }
+                facts.reverse();
+            }
+        }
+        facts.push(fact(
+            10,
+            Some(5),
+            SyntaxFactKind::Declaration,
+            "groovy.type_parameter.declaration",
+            7,
+            8,
+        ));
+        facts.push(fact(
+            11,
+            Some(10),
+            SyntaxFactKind::Occurrence,
+            "groovy.type_identifier.definition",
+            7,
+            8,
+        ));
+        let plan = GroovyBindings::new(
+            &facts,
+            b"T T T TT",
+            &HashMap::from([(4, outer), (7, inner)]),
+            64,
+            &cancellation,
+        )
+        .unwrap();
+        let read = facts.iter().find(|fact| fact.local_id() == 8).unwrap();
+        assert_eq!(plan.resolve(read, "T", &cancellation).unwrap(), None);
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(plan.resolve(read, "T", &cancellation).is_err());
+        assert!(
+            GroovyBindings::new(&facts, b"T T T TT", &HashMap::new(), 64, &cancellation).is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_type_capture_ancestry_and_source_return_errors() {
+        let cancellation = Cancellation::new();
+        for parent in [Some(99), Some(2)] {
+            let facts = vec![
+                fact(1, None, SyntaxFactKind::Scope, "groovy.file.scope", 0, 8),
+                fact(2, parent, SyntaxFactKind::Scope, "groovy.block.scope", 0, 8),
+                fact(
+                    3,
+                    Some(2),
+                    SyntaxFactKind::Occurrence,
+                    "groovy.type_identifier.definition",
+                    0,
+                    1,
+                ),
+            ];
+            assert!(
+                GroovyBindings::new(&facts, b"T       ", &HashMap::new(), 64, &cancellation)
+                    .is_err()
+            );
+            let plan =
+                GroovyBindings::new(&facts[..2], b"T       ", &HashMap::new(), 64, &cancellation)
+                    .unwrap();
+            let read = fact(
+                4,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.reference",
+                2,
+                3,
+            );
+            assert!(plan.resolve(&read, "T", &cancellation).is_err());
+        }
+        let facts = vec![
+            fact(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                0,
+                8,
+            ),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.type_parameter.declaration",
+                0,
+                8,
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                "groovy.type_identifier.definition",
+                7,
+                8,
+            ),
+        ];
+        for source in [b"T".as_slice(), b"       \xff".as_slice()] {
+            assert!(
+                GroovyBindings::new(&facts, source, &HashMap::new(), 64, &cancellation).is_err()
+            );
+        }
     }
 
     #[test]

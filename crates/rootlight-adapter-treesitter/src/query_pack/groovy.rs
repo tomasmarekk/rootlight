@@ -153,6 +153,8 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         }
         "identifier" => "groovy.identifier",
         "type_identifier" => "groovy.type_identifier",
+        "field_declaration" => "groovy.member",
+        "static_initializer" => "groovy.static_context",
         "quoted_identifier" => "groovy.quoted_identifier",
         "import_declaration" => "groovy.import",
         "method_invocation" => "groovy.call",
@@ -214,6 +216,14 @@ pub(super) fn adjust_candidate(
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
     if candidate.role == StructuralRole::Reference
+        && node.kind() == "type_identifier"
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "qualified_type")
+    {
+        candidate.syntax = "groovy.qualified_type_identifier";
+    }
+    if candidate.role == StructuralRole::Reference
         && node
             .parent()
             .is_some_and(|parent| parent.kind() == "gstring_dollar_interpolation")
@@ -243,6 +253,24 @@ pub(super) fn adjust_candidate(
     if candidate.role != StructuralRole::Scope {
         return Ok(());
     }
+    if matches!(
+        node.kind(),
+        "class_declaration"
+            | "interface_declaration"
+            | "annotation_type_declaration"
+            | "trait_declaration"
+            | "record_declaration"
+            | "enum_declaration"
+            | "method_declaration"
+            | "field_declaration"
+    ) && static_context(node, cancellation)?
+    {
+        candidate.syntax = if node.kind() == "method_declaration" {
+            "groovy.static_function"
+        } else {
+            "groovy.static_context"
+        };
+    }
     if node.kind() == "try_statement" {
         // Resource bindings end with the try body, not with its catch/finally clauses.
         candidate.end = node
@@ -261,6 +289,49 @@ pub(super) fn adjust_candidate(
     }
     cancellation.check()?;
     Ok(())
+}
+
+fn static_context(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    // Groovy resolves enclosing type parameters in nested interfaces, traits,
+    // annotations and records; Java's implicit-static rule cannot classify them.
+    if node.kind() == "enum_declaration" {
+        return Ok(true);
+    }
+    let mut cursor = node.walk();
+    for (index, child) in node.children(&mut cursor).enumerate() {
+        if index % 64 == 0 {
+            cancellation.check()?;
+        }
+        if child.kind() == "static" {
+            return Ok(true);
+        }
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "type_identifier"
+                | "type_parameters"
+                | "class_body"
+                | "block"
+                | "variable_declarator"
+        ) {
+            break;
+        }
+    }
+    Ok(node
+        .parent()
+        .and_then(|body| body.parent())
+        .is_some_and(|owner| {
+            (node.kind() == "class_declaration"
+                && matches!(
+                    owner.kind(),
+                    "interface_declaration" | "annotation_type_declaration" | "trait_declaration"
+                ))
+                || (node.kind() == "field_declaration"
+                    && matches!(
+                        owner.kind(),
+                        "interface_declaration" | "annotation_type_declaration"
+                    ))
+        }))
 }
 
 /// Selects only the native closure header, including an explicit empty parameter list.

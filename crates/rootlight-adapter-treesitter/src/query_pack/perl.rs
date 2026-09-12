@@ -7,21 +7,6 @@ use tree_sitter::Node;
 
 use super::StructuralRole;
 
-pub(super) fn native_depth(
-    mut node: Node<'_>,
-    cancellation: &Cancellation,
-) -> Result<usize, AdapterError> {
-    let mut depth = 0usize;
-    while let Some(parent) = node.parent() {
-        cancellation.check()?;
-        depth = depth
-            .checked_add(1)
-            .ok_or_else(|| super::query_failure("query-perl-depth"))?;
-        node = parent;
-    }
-    Ok(depth)
-}
-
 fn variable_kind(node: Node<'_>) -> bool {
     matches!(node.kind(), "scalar" | "array" | "hash")
 }

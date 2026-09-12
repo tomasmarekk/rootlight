@@ -27,6 +27,14 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 fn assert_lexical_reads(source: &str, name: &str, expected: &[Option<usize>]) {
+    assert_named_reads(source, name, expected, "groovy.identifier.reference");
+}
+
+fn assert_type_reads(source: &str, name: &str, expected: &[Option<usize>]) {
+    assert_named_reads(source, name, expected, "groovy.type_identifier.reference");
+}
+
+fn assert_named_reads(source: &str, name: &str, expected: &[Option<usize>], syntax: &str) {
     let result = output(source);
     let document = result.document();
     assert!(
@@ -38,7 +46,7 @@ fn assert_lexical_reads(source: &str, name: &str, expected: &[Option<usize>]) {
         .occurrences
         .iter()
         .filter(|occurrence| {
-            occurrence.syntax_kind == "groovy.identifier.reference"
+            occurrence.syntax_kind == syntax
                 && source.get(
                     usize::try_from(occurrence.source.span().start_byte()).unwrap()
                         ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
@@ -73,6 +81,75 @@ fn assert_lexical_reads(source: &str, name: &str, expected: &[Option<usize>]) {
         })
         .collect();
     assert_eq!(actual, expected, "{name} in {source}\n{reads:?}");
+}
+
+#[test]
+fn groovy_generic_parameters_bind_bounds_members_and_shadowing_methods() {
+    let source = "class Outer<T extends Number> { T field; T plain(T argument) { T local = argument; local }; <T extends CharSequence> T shadow(T argument) { T local = argument; local }; <U extends T> U bound(U value) { value }; class Inner { T field }; static <V> V factory(V item) { item } }\n";
+    let outer = Some(source.find("T extends Number").unwrap());
+    let shadow = Some(source.find("T extends CharSequence").unwrap());
+    assert_type_reads(
+        source,
+        "T",
+        &[
+            outer, outer, outer, outer, shadow, shadow, shadow, outer, outer,
+        ],
+    );
+    assert_type_reads(source, "U", &[Some(source.find("U extends").unwrap()); 2]);
+    assert_type_reads(source, "V", &[Some(source.find("V>").unwrap()); 2]);
+    assert_lexical_reads(source, "item", &[Some(source.find("item)").unwrap())]);
+}
+
+#[test]
+fn groovy_generic_parameters_are_visible_in_recursive_and_forward_bounds() {
+    let source = "class Forward<T extends U, U extends Number> { T field; U other }; class Recursive<V extends Comparable<V>> { V field }\n";
+    assert_type_reads(source, "U", &[Some(source.find("U extends").unwrap()); 2]);
+    assert_type_reads(source, "T", &[Some(source.find("T extends").unwrap())]);
+    assert_type_reads(source, "V", &[Some(source.find("V extends").unwrap()); 2]);
+}
+
+#[test]
+fn groovy_static_contexts_do_not_capture_outer_generic_parameters() {
+    let source = "class Holder<T> { static T field; static T read(T value) { value }; static class Nested { T field }; static { T local }; static <T> T own(T value) { value }; class Inner<T extends CharSequence> { T field } }\n";
+    let own = Some(source.find("<T> T own").unwrap() + 1);
+    let inner = Some(source.find("T extends").unwrap());
+    assert_type_reads(
+        source,
+        "T",
+        &[None, None, None, None, None, own, own, inner],
+    );
+}
+
+#[test]
+fn groovy_type_and_value_namespaces_do_not_share_targets() {
+    let source = "class Holder<T> { def examine() { def T = 1; T local; sink(T) } }\n";
+    assert_type_reads(source, "T", &[Some(source.find("<T>").unwrap() + 1)]);
+    assert_lexical_reads(source, "T", &[Some(source.find("T =").unwrap())]);
+    let source = "class Holder<T> { pkg.T external; List<T[]> typed; T[] array; <T> T shadow(T value) { value } }\n";
+    let outer = Some(source.find("<T>").unwrap() + 1);
+    let inner = Some(source.find("<T> T shadow").unwrap() + 1);
+    assert_type_reads(source, "T", &[outer, outer, inner, inner]);
+    let result = output(source);
+    let qualified = u64::try_from(source.find("pkg.T").unwrap() + 4).unwrap();
+    let reference = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == qualified)
+        .unwrap();
+    assert!(matches!(
+        reference.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn groovy_nested_type_bindings_distinguish_implicit_static_members() {
+    let source = "interface Holder<T> { T field = null; T read(T value) }; class Outer<U> { interface Inner { U read() }; trait Nested { U read() { null } }; @interface Marker { U value() }; record Entry(U value) {}; enum State { READY; U read() { null } } }\n";
+    let generic = Some(source.find("<T>").unwrap() + 1);
+    assert_type_reads(source, "T", &[None, generic, generic]);
+    let outer = Some(source.find("<U>").unwrap() + 1);
+    assert_type_reads(source, "U", &[outer, outer, outer, outer, None]);
 }
 
 #[test]
