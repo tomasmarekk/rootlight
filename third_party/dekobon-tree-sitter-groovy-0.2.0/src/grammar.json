@@ -3051,6 +3051,13 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_annotation_modifier"
+          }
+        },
+        {
           "type": "STRING",
           "value": "import"
         },
@@ -4952,6 +4959,10 @@
               {
                 "type": "STRING",
                 "value": "def"
+              },
+              {
+                "type": "STRING",
+                "value": "import"
               }
             ]
           },
@@ -5013,6 +5024,10 @@
                       {
                         "type": "STRING",
                         "value": "def"
+                      },
+                      {
+                        "type": "STRING",
+                        "value": "import"
                       }
                     ]
                   },
@@ -7268,6 +7283,10 @@
                     {
                       "type": "STRING",
                       "value": "def"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "import"
                     }
                   ]
                 },
@@ -8131,6 +8150,7 @@
       "method_declaration",
       "enum_declaration",
       "record_declaration",
+      "import_declaration",
       "local_variable_declaration"
     ],
     [
@@ -8141,6 +8161,7 @@
       "method_declaration",
       "enum_declaration",
       "record_declaration",
+      "import_declaration",
       "local_variable_declaration",
       "closure_parameter"
     ],
@@ -8232,6 +8253,10 @@
       {
         "type": "STRING",
         "value": "def"
+      },
+      {
+        "type": "STRING",
+        "value": "import"
       }
     ],
     "commands": [

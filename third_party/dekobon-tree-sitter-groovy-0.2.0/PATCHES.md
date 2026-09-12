@@ -25,6 +25,8 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Closure-arrow comment sequences without changing parameter or body ownership.
 - Contextual `var` identifiers and closure annotation, varargs and default fields.
 - Annotation-to-declaration and list/map comma trivia without detaching source nodes.
+- Annotated imports with static, wildcard and alias forms, retaining annotation ownership.
+- Reserved import declarations versus member names and literal map labels.
 - Both power-assert message separators without stealing following closure statements.
 - Bodyless method terminators versus newlines before a throws clause or body.
 - `def`-prefixed generic methods with optional authored return types.

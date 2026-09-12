@@ -4,6 +4,8 @@ use std::ops::ControlFlow;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const SOURCES: &[&str] = &[
+    "@First\r\n// λ\r\n@Second\nimport static sample.Tools.run as perform\nperform()\n",
+    "@Marker import sample.Widget\n@Other class Holder { Widget value }\n",
     "def action = { value -> assert value != null, 'λ'; sink(value) }\n",
     "def values = [\nfirst: 1,\n// λ\nsecond: [2],\n]\n",
     "def action = { var -> sink(var) }\n",

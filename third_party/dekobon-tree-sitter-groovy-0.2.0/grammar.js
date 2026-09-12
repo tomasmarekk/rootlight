@@ -126,7 +126,7 @@ module.exports = grammar({
 
   reserved: {
     global: _ => [],
-    values: _ => ['catch', 'finally', 'def'],
+    values: _ => ['catch', 'finally', 'def', 'import'],
     commands: _ => [
       'abstract', 'assert', 'break', 'case', 'catch', 'class', 'continue',
       'default', 'def', 'do', 'else', 'enum', 'extends', 'final', 'finally',
@@ -191,12 +191,14 @@ module.exports = grammar({
     [$._uninitialized_local_type, $.identifier],
     [$._qualified_local_type, $._expression, $.qualified_type],
     [$._qualified_local_type, $.qualified_type],
+    // Annotation ownership is decided by the following declaration keyword.
     [$.class_declaration, $.trait_declaration, $.interface_declaration,
       $.annotation_type_declaration, $.method_declaration, $.enum_declaration,
-      $.record_declaration, $.local_variable_declaration],
+      $.record_declaration, $.import_declaration, $.local_variable_declaration],
     [$.class_declaration, $.trait_declaration, $.interface_declaration,
       $.annotation_type_declaration, $.method_declaration, $.enum_declaration,
-      $.record_declaration, $.local_variable_declaration, $.closure_parameter],
+      $.record_declaration, $.import_declaration, $.local_variable_declaration,
+      $.closure_parameter],
     // Newlines after enum constants can introduce another comma or members;
     // constant arguments and constructor parameters also share their prefix.
     [$._enum_constants],
@@ -827,6 +829,7 @@ module.exports = grammar({
     // imports only appear in this position, so the lexer-wide
     // longest-match is safe.
     import_declaration: $ => seq(
+      repeat($._annotation_modifier),
       'import',
       optional('static'),
       field('name', $.qualified_name),
@@ -1201,7 +1204,7 @@ module.exports = grammar({
     // `def "abstract"() { … }` both rely on this.
     _property_name: $ => choice(
       $.identifier,
-      alias(choice('catch', 'finally', 'def'), $.identifier),
+      alias(choice('catch', 'finally', 'def', 'import'), $.identifier),
       alias($.string_literal, $.quoted_identifier),
     ),
 
@@ -1211,7 +1214,7 @@ module.exports = grammar({
     method_reference_expression: $ => prec.left(PREC.ACCESS, seq(
       field('target', $._expression),
       '::',
-      field('name', choice($.identifier, alias(choice('catch', 'finally', 'def'), $.identifier), 'new')),
+      field('name', choice($.identifier, alias(choice('catch', 'finally', 'def', 'import'), $.identifier), 'new')),
     )),
 
     // §3.2 — postfix `++` / `--`. Distinct node kind from the
@@ -1545,7 +1548,7 @@ module.exports = grammar({
 
     map_entry: $ => seq(
       // Bare handler words are literal labels here, not expression identifiers.
-      field('key', choice(alias(choice('catch', 'finally', 'def'), $.identifier), $._expression)),
+      field('key', choice(alias(choice('catch', 'finally', 'def', 'import'), $.identifier), $._expression)),
       ':',
       field('value', $._expression),
     ),

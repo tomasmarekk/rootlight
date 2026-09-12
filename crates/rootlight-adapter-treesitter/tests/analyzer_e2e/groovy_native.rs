@@ -84,6 +84,66 @@ fn assert_named_reads(source: &str, name: &str, expected: &[Option<usize>], synt
 }
 
 #[test]
+fn groovy_annotated_imports_preserve_unresolved_source_evidence() {
+    for declaration in [
+        "import sample.Widget",
+        "import sample.Widget as Alias",
+        "import sample.*",
+        "import static sample.Tools.run",
+        "import static sample.Tools.run as perform",
+        "import static sample.Tools.*",
+    ] {
+        let import = format!("@Marker\r\n// λ\r\n@sample.Other\n{declaration}");
+        let source = format!("{import}\n@interface Marker {{}}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+        let gaps: Vec<_> = doc
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "unresolved-import-target")
+            .collect();
+        assert_eq!(gaps.len(), 1, "{source}");
+        let span = gaps[0].source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            import
+        );
+        let mut annotations: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.syntax_kind == "groovy.qualified_identifier.reference")
+            .collect();
+        annotations.sort_by_key(|occurrence| occurrence.source.span().start_byte());
+        assert_eq!(annotations.len(), 2, "{source}");
+        for (occurrence, name) in annotations.into_iter().zip(["Marker", "sample.Other"]) {
+            let span = occurrence.source.span();
+            assert_eq!(
+                &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                name
+            );
+            assert_eq!(
+                occurrence.syntactic_text_hash,
+                content_hash(name.as_bytes())
+            );
+            assert!(matches!(
+                occurrence.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert_eq!(occurrence.repository, doc.files[0].repository);
+            assert_eq!(occurrence.generation, doc.files[0].generation);
+        }
+        assert!(
+            !doc.relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::RefersTo)
+        );
+    }
+}
+
+#[test]
 fn groovy_generic_parameters_bind_bounds_members_and_shadowing_methods() {
     let source = "class Outer<T extends Number> { T field; T plain(T argument) { T local = argument; local }; <T extends CharSequence> T shadow(T argument) { T local = argument; local }; <U extends T> U bound(U value) { value }; class Inner { T field }; static <V> V factory(V item) { item } }\n";
     let outer = Some(source.find("T extends Number").unwrap());

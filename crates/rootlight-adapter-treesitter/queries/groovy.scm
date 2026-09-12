@@ -36,6 +36,7 @@
 (for_in_statement value: (_) @expression)
 [(closure) (gstring_closure)] @scope @declaration @signature
 (import_declaration) @import
+(annotation name: (qualified_name) @reference)
 (method_invocation) @call
 [(identifier) (type_identifier)] @reference
 [(line_comment) (block_comment)] @comment

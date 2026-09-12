@@ -42,6 +42,132 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn annotated_imports_preserve_names_aliases_and_annotation_ownership() {
+    for (declaration, name, alias) in [
+        ("import sample.Widget", "sample.Widget", None),
+        (
+            "import sample.Widget as Alias",
+            "sample.Widget",
+            Some("Alias"),
+        ),
+        ("import sample.*", "sample", None),
+        ("import static sample.Tools.run", "sample.Tools.run", None),
+        (
+            "import static sample.Tools.run as perform",
+            "sample.Tools.run",
+            Some("perform"),
+        ),
+        ("import static sample.Tools.*", "sample.Tools", None),
+    ] {
+        for (prefix, annotations) in [
+            ("", &[][..]),
+            ("@Marker ", &["@Marker"][..]),
+            (
+                "@First\r\n// λ\r\n@Second\n/* boundary */\n",
+                &["@First", "@Second"][..],
+            ),
+        ] {
+            let source = format!("{prefix}{declaration}\n");
+            let tree = valid(&source);
+            let imports: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "import_declaration")
+                .collect();
+            assert_eq!(imports.len(), 1, "{source}");
+            let import = imports[0];
+            assert_eq!(import.parent().unwrap(), tree.root_node());
+            assert_eq!(
+                import.utf8_text(source.as_bytes()).unwrap(),
+                source.trim_end()
+            );
+            assert_eq!(
+                import
+                    .child_by_field_name("name")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                name
+            );
+            assert_eq!(
+                import
+                    .child_by_field_name("alias")
+                    .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+                alias
+            );
+            let mut actual: Vec<_> = nodes(import)
+                .into_iter()
+                .filter(|node| node.kind() == "annotation")
+                .collect();
+            actual.sort_by_key(Node::start_byte);
+            assert_eq!(actual.len(), annotations.len());
+            for (node, expected) in actual.into_iter().zip(annotations) {
+                assert_eq!(node.parent().unwrap(), import);
+                assert_eq!(node.utf8_text(source.as_bytes()).unwrap(), *expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn annotated_imports_reject_statement_separators_and_missing_targets() {
+    for source in [
+        "@Marker; import sample.Widget\n",
+        "@Marker import\n",
+        "@Marker import static\n",
+    ] {
+        assert!(parse(source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn import_keyword_remains_available_for_members_and_literal_labels() {
+    for source in [
+        "service.import()",
+        "def action = service.&import",
+        "def action = service::import",
+        "def options = [import: 1]",
+        "service(import: 1)",
+        "def 'import'() {}",
+    ] {
+        valid(source);
+    }
+    for source in ["import", "def import"] {
+        assert!(parse(source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn annotated_imports_do_not_capture_annotations_from_following_declarations() {
+    let source =
+        "@Marker import sample.Widget\nimport sample.Other\n@Next class Holder { Widget value }\n";
+    let tree = valid(source);
+    for (annotation, owner, text) in [
+        (
+            "@Marker",
+            "import_declaration",
+            "@Marker import sample.Widget",
+        ),
+        (
+            "@Next",
+            "class_declaration",
+            "@Next class Holder { Widget value }",
+        ),
+    ] {
+        let node = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| {
+                node.kind() == "annotation"
+                    && node.utf8_text(source.as_bytes()).unwrap() == annotation
+            })
+            .unwrap();
+        let parent = node.parent().unwrap();
+        assert_eq!(parent.kind(), owner);
+        assert_eq!(parent.utf8_text(source.as_bytes()).unwrap(), text);
+    }
+    exact(&tree, source, "import_declaration", "import sample.Other");
+}
+
+#[test]
 fn formal_parameter_annotations_and_final_preserve_names_and_types() {
     for (header, expected_type) in [
         ("String value", Some("String")),
