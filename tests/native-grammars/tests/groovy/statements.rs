@@ -139,6 +139,34 @@ fn conditional_and_loop_bodies_keep_semicolons() {
 }
 
 #[test]
+fn conditional_separators_do_not_require_an_else_clause() {
+    for source in [
+        "def run() { if (true) { def local = 1 }; if (false) { def local = 2 } }\n",
+        "if (ready) first(); second()\n",
+        "if (ready) { first() }; second()\n",
+        "if (ready) { first() };\n",
+        "if (ready) first(); else second(); third()\n",
+        "if (ready) { first() }; else { second() }; third()\n",
+        "if (outer) if (inner) first(); else second(); third()\n",
+    ] {
+        valid(source);
+    }
+    let source = "if (ready) { first() }; second()\n";
+    let tree = valid(source);
+    exact(&tree, source, "if_statement", "if (ready) { first() }");
+    exact(&tree, source, "expression_statement", "second()");
+    let source = "if (outer) if (inner) first(); else second(); third()\n";
+    let tree = valid(source);
+    exact(
+        &tree,
+        source,
+        "if_statement",
+        "if (inner) first(); else second()",
+    );
+    exact(&tree, source, "expression_statement", "third()");
+}
+
+#[test]
 fn newline_comments_do_not_hide_statement_boundaries() {
     let source = "def first = 1 // note\ndef second = 2\n";
     let tree = valid(source);

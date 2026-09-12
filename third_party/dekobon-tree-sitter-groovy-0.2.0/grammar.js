@@ -164,6 +164,8 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
+    // A separator may end the conditional or precede its else clause.
+    [$.if_statement],
     [$._command_receiver, $._expression, $._type],
     [$._command_receiver, $._expression],
     [$._command_receiver, $._type],
@@ -350,22 +352,21 @@ module.exports = grammar({
       '}',
     )),
 
-    // §4 — if / else. `prec.right` resolves the dangling-else
-    // ambiguity in favour of the closest `if`. Body accepts either
-    // an explicit block (preferred) or a single statement.
-    if_statement: $ => prec.right(seq(
+    // Keep separator ownership undecided until an else or following statement
+    // is visible; eager right association would commit a terminator to else.
+    if_statement: $ => seq(
       'if',
       '(',
       field('condition', $._expression),
       ')',
       field('consequence', choice($.block, $._statement)),
-      optional(seq(
+      optional(prec.dynamic(1, seq(
         optional(';'),
         repeat($._newline),
         'else',
         field('alternative', choice($.block, $._statement)),
-      )),
-    )),
+      ))),
+    ),
 
     // §4 — while loop. do-while lands separately.
     while_statement: $ => seq(

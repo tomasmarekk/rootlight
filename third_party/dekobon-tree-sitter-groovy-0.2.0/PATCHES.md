@@ -22,6 +22,9 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Slashy strings versus division, escaped slash endings and lazy interpolation.
 - Unicode identifier categories and interpolation paths.
 - CR, LF and CRLF comment endings without consuming adjacent source.
+- Conditional terminators versus separators before an `else` clause. Runtime
+  ambiguity handling defers the decision until the following statement is known;
+  a real `else` clause outranks an unrelated expression with that spelling.
 
 The scanner owns its continuation state. Serialization is empty or exactly five
 bytes: a little-endian remaining distance and a validated decision byte.
@@ -36,11 +39,12 @@ the competing completed-slashy branch. It never emits a zero-width token.
 Do not mix this scanner with the upstream generated parser or reuse persisted
 parser state across the changed grammar identity.
 
-The isolated native test suite contains 135 authored syntax, exact-coordinate,
+The isolated native test suite contains authored syntax, exact-coordinate,
 scanner-state, incremental-edit, cancellation, parser-reset and threaded-lifetime
-regressions. Fixtures are parsed only, never executed. Separate AddressSanitizer
-qualification instrumented Tree-sitter 0.26.11, this parser and scanner, and the
-test harness, with a working detector negative control. Finite test coverage is
+regressions. Fixtures are parsed only, never executed. The original scanner-state
+admission also instrumented Tree-sitter 0.26.11, its generated parser, scanner and
+test harness with AddressSanitizer and a working detector negative control.
+That historical run does not qualify later grammar changes. Finite test coverage is
 not a proof of universal memory safety, leak freedom or semantic completeness.
 Native parser qualification alone does not establish Rootlight structural,
 semantic or MCP support for Groovy.

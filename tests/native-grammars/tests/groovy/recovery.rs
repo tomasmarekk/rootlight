@@ -13,6 +13,8 @@ const SOURCES: &[&str] = &[
     "def run() { String first, second = 'x'\nfinish(first, second) }\n",
     "service.consume value then next\nfinish()\n",
     "if (ready) { run() } else { stop() }\nfinish()\n",
+    "if (ready) { run() }; finish()\n",
+    "if (outer) if (inner) run(); else stop();\nfinish()\n",
     "for (String item in items) { consume(item) }\nfinish()\n",
     "def c = { x -> x /* a */\n + 2 }\nfinish()\n",
     "try { run() } catch (Exception ex) { stop() } finally { finish() }\n",
