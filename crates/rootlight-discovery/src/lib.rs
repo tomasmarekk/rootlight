@@ -37,7 +37,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.6";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.7";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -520,6 +520,8 @@ pub enum LanguageEvidence {
     Manifest,
     /// Bounded deterministic content signal.
     Content,
+    /// Exact conventional source filename, independent of its directory.
+    Filename,
 }
 
 /// One language signal without a semantic-tier claim.
@@ -1435,6 +1437,12 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
             evidence: LanguageEvidence::Extension,
         });
     }
+    if let Some(language) = filename_language(&normalized) {
+        signals.insert(LanguageSignal {
+            language: language.to_owned(),
+            evidence: LanguageEvidence::Filename,
+        });
+    }
     if let Some(language) = manifest_language(&normalized) {
         signals.insert(LanguageSignal {
             language: language.to_owned(),
@@ -1588,11 +1596,11 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "groovy",
-        suffixes: &[".gradle", ".groovy"],
+        suffixes: &[".gradle", ".groovy", ".gsh", ".gvy", ".gy", ".jenkins"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "filename", "shebang"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "html",
@@ -1811,6 +1819,16 @@ pub fn extension_language(path: &str) -> Option<&'static str> {
         }
     }
     best.map(|(_, language)| language)
+}
+
+/// Returns the source language of an exact conventional basename.
+///
+/// Matching is ASCII-case-insensitive and accepts either path separator. Backup
+/// suffixes and directory names do not match; no file contents are inspected.
+#[must_use]
+pub fn filename_language(path: &str) -> Option<&'static str> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    name.eq_ignore_ascii_case("Jenkinsfile").then_some("groovy")
 }
 
 /// Resolves one installed canonical language label or accepted alias.
@@ -2702,6 +2720,132 @@ max_source_file_bytes = 2097152
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn groovy_script_suffixes_preserve_exact_extension_evidence() {
+        for path in [
+            "task.groovy",
+            "task.gvy",
+            "task.gy",
+            "task.gsh",
+            "build.gradle",
+            "flow.jenkins",
+            "scripts/TASK.GVY",
+        ] {
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            assert_eq!(
+                classify(&path, b"def values = new String[0]\n").1,
+                vec![LanguageSignal {
+                    language: "groovy".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }]
+            );
+        }
+        for path in [
+            "task.gvy.bak",
+            "task.gsh.txt",
+            "flow.jenkins.bak",
+            "build.gradle.kts",
+            "task.gtpl",
+            "task.grt",
+        ] {
+            assert_ne!(extension_language(path), Some("groovy"), "{path}");
+        }
+    }
+
+    #[test]
+    fn groovy_shebangs_use_interpreter_identity_not_arguments() {
+        for header in [
+            "#!/usr/bin/groovy",
+            "#!/usr/bin/env groovy",
+            "#!/usr/bin/env -S groovy -Dmode=plain",
+            "#!/usr/bin/env -S -u UNUSED groovy",
+        ] {
+            assert_eq!(
+                shebang_language(format!("{header}\ndef run() {{}}\n").as_bytes()),
+                Some("groovy"),
+                "{header}"
+            );
+        }
+        for header in [
+            "#!/usr/bin/groovyc",
+            "#!/usr/bin/groovysh",
+            "#!/usr/bin/env GROOVY=groovy",
+            "#!/usr/bin/env -S ${INTERPRETER} groovy",
+            "#!/usr/bin/env groovy -x",
+        ] {
+            assert_ne!(
+                shebang_language(header.as_bytes()),
+                Some("groovy"),
+                "{header}"
+            );
+        }
+        assert_eq!(
+            shebang_language(b"#!/usr/bin/python groovy\n"),
+            Some("python")
+        );
+    }
+
+    #[test]
+    fn groovy_known_filenames_have_distinct_filename_evidence() {
+        assert_eq!(filename_language("ci\\Jenkinsfile"), Some("groovy"));
+        for name in ["Jenkinsfile", "ci/Jenkinsfile", "ci/JENKINSFILE"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            let signals = classify(&path, b"node { echo 'ready' }\n").1;
+            assert_eq!(
+                serde_json::to_value(signals).unwrap(),
+                serde_json::json!([
+                    {"language": "groovy", "evidence": "filename"}
+                ])
+            );
+            assert_eq!(extension_language(name), None);
+        }
+        for name in [
+            "NotJenkinsfile",
+            "Jenkinsfile.bak",
+            "Jenkinsfile.txt",
+            "Jenkinsfile/notes",
+            "ci/Jenkinsfile.py",
+        ] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert!(
+                !classify(&path, b"node { echo 'ready' }\n")
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "groovy"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_evidence_preserves_existing_wire_labels() {
+        for (label, evidence) in [
+            ("extension", LanguageEvidence::Extension),
+            ("shebang", LanguageEvidence::Shebang),
+            ("manifest", LanguageEvidence::Manifest),
+            ("content", LanguageEvidence::Content),
+            ("filename", LanguageEvidence::Filename),
+        ] {
+            let value = serde_json::json!(label);
+            assert_eq!(serde_json::to_value(evidence).unwrap(), value);
+            assert_eq!(
+                serde_json::from_value::<LanguageEvidence>(value).unwrap(),
+                evidence
+            );
+        }
+    }
+
+    #[test]
+    fn groovy_capability_advertises_native_structural_analysis() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "groovy")
+            .unwrap();
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.detectors, ["extension", "filename", "shebang"]);
     }
 
     #[test]

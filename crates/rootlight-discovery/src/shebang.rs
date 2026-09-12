@@ -58,6 +58,7 @@ fn interpreter_language(path: &str) -> Option<&'static str> {
         Some("python")
     } else {
         match name {
+            "groovy" => Some("groovy"),
             "node" | "nodejs" | "deno" => Some("javascript"),
             "sh" | "bash" | "dash" | "ksh" => Some("bash"),
             _ => None,

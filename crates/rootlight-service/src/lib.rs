@@ -65,7 +65,7 @@ use rootlight_discovery::{
     InputClass, LanguageEvidence, MAX_DISCOVERY_ENTRIES, ManifestInput, ManifestReconcileInputs,
     canonical_language, correlate_incremental_manifest, discover_incremental_with_progress,
     discover_manifest_and_reconcile_with_progress, discover_manifest_streaming,
-    discover_with_snapshots_at_limit, extension_language, language_capabilities,
+    discover_with_snapshots_at_limit, extension_language, filename_language, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -15290,7 +15290,11 @@ fn supported_source_language<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
-    for evidence in [LanguageEvidence::Extension, LanguageEvidence::Shebang] {
+    for evidence in [
+        LanguageEvidence::Filename,
+        LanguageEvidence::Extension,
+        LanguageEvidence::Shebang,
+    ] {
         if let Some(language) = unique_supported_language(input, analyzers, evidence) {
             return Some(language);
         }
@@ -15352,12 +15356,14 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     // Manifest signals describe the toolchain, never the manifest's own syntax.
     let evidence_order = if extension_language(&input.path) == Some("objective-c") {
         [
+            LanguageEvidence::Filename,
             LanguageEvidence::Content,
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
         ]
     } else {
         [
+            LanguageEvidence::Filename,
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
             LanguageEvidence::Content,
@@ -15382,7 +15388,8 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
     if is_ambiguous_c_header(path) {
         return None;
     }
-    extension_language(path).filter(|language| *language != "objective-c")
+    filename_language(path)
+        .or_else(|| extension_language(path).filter(|language| *language != "objective-c"))
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -27256,6 +27263,7 @@ mod tests {
             "sample.cs",
             "sample.css",
             "sample.go",
+            "sample.groovy",
             "sample.html",
             "sample.java",
             "sample.js",
@@ -27486,11 +27494,67 @@ mod tests {
     }
 
     #[test]
-    fn groovy_declarations_publish_queryable_symbols_and_exact_sources() {
-        for path in ["catalog.groovy", "build.gradle"] {
+    fn groovy_named_sources_do_not_fall_back_to_foreign_shebangs() {
+        for path in ["Jenkinsfile", "flow.jenkins"] {
             let fixture = TempDir::new().unwrap();
-            let source = "class Meter { String title; private int value; String read() { 'value' } }\ndef render() { 'output' }\n";
+            let source = "#!/usr/bin/python\nclass Meter {}\n";
             fs::write(fixture.path().join(path), source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            assert!(service.analyzers.remove("groovy").is_some());
+            assert!(service.analyzers.contains_key("python"));
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let status = service.repository_status(receipt.repository, None).unwrap();
+            assert_eq!(status.coverage.len(), 1);
+            assert_eq!(status.coverage[0].language, "groovy");
+            assert_eq!(status.coverage[0].discovered_files, 1);
+            assert_eq!(status.coverage[0].indexed_files, 0);
+            assert!(
+                receipt
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "unsupported-language")
+            );
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let file = generation
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, "groovy");
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_declarations_publish_queryable_symbols_and_exact_sources() {
+        for path in [
+            "catalog.groovy",
+            "build.gradle",
+            "catalog.gvy",
+            "catalog.gy",
+            "catalog.gsh",
+            "flow.jenkins",
+            "Jenkinsfile",
+            "runner",
+        ] {
+            let fixture = TempDir::new().unwrap();
+            let body = "class Meter { String title; private int value; String read() { 'value' } }\ndef render() { 'output' }\n";
+            let source = if path == "runner" {
+                format!("#!/usr/bin/env groovy\n{body}")
+            } else {
+                body.to_owned()
+            };
+            fs::write(fixture.path().join(path), &source).unwrap();
             let mut service = FirstSliceService::new(2).unwrap();
             let receipt = service
                 .index_repository(fixture.path(), &deadline())
