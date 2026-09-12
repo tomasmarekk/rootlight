@@ -124,6 +124,72 @@ fn groovy_def_prefixed_generics_keep_type_and_value_bindings() {
 }
 
 #[test]
+fn groovy_extended_closure_parameters_keep_authored_bindings() {
+    for (header, name) in [
+        ("var", "var"),
+        ("String var", "var"),
+        ("String... remaining", "remaining"),
+        ("@Deprecated final String value", "value"),
+        ("final def value", "value"),
+        ("String value = seed", "value"),
+    ] {
+        let source = format!("def seed = 'λ'; def action = {{ {header} -> sink({name}) }}\n");
+        let parameter_start = source.find(header).unwrap() + header.find(name).unwrap();
+        assert_lexical_reads(&source, name, &[Some(parameter_start)]);
+        if header.contains("seed") {
+            assert_lexical_reads(&source, "seed", &[Some(source.find("seed =").unwrap())]);
+        }
+        let result = output(&source);
+        let doc = result.document();
+        let parameter = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let closure = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "<anonymous>")
+            .unwrap();
+        assert_eq!(parameter.kind, EntityKind::Parameter);
+        assert_eq!(
+            parameter.container,
+            Some(rootlight_ir::ContainerRef::Entity(closure.id))
+        );
+    }
+}
+
+#[test]
+fn groovy_annotation_and_list_trivia_preserve_source_bindings() {
+    let source = "class Reader<T> { @Deprecated\r\n// λ\r\nT read(T value) { def items = [[value],\n\n// boundary\n[value],\n]; value } }\n";
+    assert_type_reads(source, "T", &[Some(source.find("<T>").unwrap() + 1); 2]);
+    assert_lexical_reads(source, "value", &[Some(source.find("value)").unwrap()); 3]);
+    let result = output(source);
+    let method = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "read")
+        .unwrap();
+    assert_eq!(method.kind, EntityKind::Method);
+    let span = method.evidence.source.as_ref().unwrap().span();
+    let authored = &source
+        [usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap()];
+    assert!(authored.starts_with("@Deprecated\r\n// λ\r\nT read"));
+    assert!(authored.ends_with("; value }"));
+}
+
+#[test]
+fn groovy_assert_message_and_map_trivia_keep_value_reads() {
+    for separator in [",", ":"] {
+        let source = format!(
+            "def run(value) {{ assert value != null{separator} value; def entries = [\nfirst: value,\n// λ\nsecond: [value],\n]; value }}\n"
+        );
+        assert_lexical_reads(&source, "value", &[Some(source.find("value)").unwrap()); 5]);
+    }
+}
+
+#[test]
 fn groovy_bodyless_methods_keep_generic_owners_across_trivia() {
     for tail in ["\n\n", "\r\n// boundary\r\n", ";\n"] {
         let source = format!("interface Reader<T> {{ T read(T value){tail}T next(){tail}}}\n");

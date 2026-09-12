@@ -177,7 +177,16 @@ module.exports = grammar({
     [$._enhanced_argument, $.parenthesized_expression],
     [$._argument, $.map_entry],
     [$._modifier, $.local_variable_declaration],
+    // Before ->, modifiers can belong to a parameter or a body declaration.
+    [$._modifier, $.local_variable_declaration, $.closure_parameter],
+    [$.local_variable_declaration, $.closure_parameter],
+    [$._expression, $.closure_parameter],
+    [$.variable_declarator, $.closure_parameter],
     [$.local_variable_declaration, $.for_in_statement],
+    // Contextual var can introduce a declaration or name an explicit parameter.
+    [$.local_variable_declaration, $.identifier],
+    [$.local_variable_declaration, $.for_in_statement, $.identifier],
+    [$.for_in_statement, $.identifier],
     [$._uninitialized_local_type, $._type],
     [$._uninitialized_local_type, $.identifier],
     [$._qualified_local_type, $._expression, $.qualified_type],
@@ -185,6 +194,9 @@ module.exports = grammar({
     [$.class_declaration, $.trait_declaration, $.interface_declaration,
       $.annotation_type_declaration, $.method_declaration, $.enum_declaration,
       $.record_declaration, $.local_variable_declaration],
+    [$.class_declaration, $.trait_declaration, $.interface_declaration,
+      $.annotation_type_declaration, $.method_declaration, $.enum_declaration,
+      $.record_declaration, $.local_variable_declaration, $.closure_parameter],
     // Newlines after enum constants can introduce another comma or members;
     // constant arguments and constructor parameters also share their prefix.
     [$._enum_constants],
@@ -434,14 +446,12 @@ module.exports = grammar({
       $._expression,
     )),
 
-    // §4 — power-assert: `assert e` or `assert e : msg`. The colon
-    // separator may collide with map_entry in later iterations, but
-    // assert is a statement-only construct so the context resolves
-    // it.
+    // §4 — power-assert accepts colon and comma message separators. The message
+    // remains inside the assertion, not a following command argument.
     assert_statement: $ => prec.right(seq(
       'assert',
       $._expression,
-      optional(seq(':', field('message', $._expression))),
+      optional(seq(choice(':', ','), field('message', $._expression))),
     )),
 
     // Handler newlines also terminate the statement, so defer separator ownership.
@@ -484,7 +494,7 @@ module.exports = grammar({
     // Missing types and `def` use Groovy's implicit exception type. Keep only
     // authored types in the tree, with annotations and final in either order.
     catch_formal_parameter: $ => seq(
-      repeat(choice($.annotation, 'final')),
+      repeat(choice($._annotation_modifier, 'final')),
       optional(choice('def', field('type', choice($._type, $.multi_type)))),
       field('name', $.identifier),
     ),
@@ -508,7 +518,7 @@ module.exports = grammar({
     // anonymous token (token('non-sealed')) so the dash doesn't
     // get lexed as subtraction.
     class_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       optional(choice('sealed', token('non-sealed'))),
       'class',
@@ -521,7 +531,7 @@ module.exports = grammar({
     ),
 
     trait_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       optional(choice('sealed', token('non-sealed'))),
       'trait',
@@ -533,7 +543,7 @@ module.exports = grammar({
     ),
 
     interface_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       optional(choice('sealed', token('non-sealed'))),
       'interface',
@@ -611,7 +621,7 @@ module.exports = grammar({
     // alternative parse `annotation` (which needs identifier)
     // cannot fire here.
     annotation_type_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       '@',
       'interface',
       field('name', $.identifier),
@@ -653,7 +663,7 @@ module.exports = grammar({
     // both field and method when the identifier is followed by `(`
     // and no return type precedes it.
     constructor_declaration: $ => prec.right(3, seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       field('name', $.identifier),
       field('parameters', $.formal_parameters),
@@ -675,7 +685,7 @@ module.exports = grammar({
     // declarations share the same prefix; `prec(2, …)` on
     // `method_declaration` and the trailing `(` discriminate.
     field_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       choice('def', field('type', $._type)),
       $.variable_declarator,
@@ -686,7 +696,7 @@ module.exports = grammar({
     // Before generic parameters, def permits an omitted authored return type;
     // it must not itself become a return-type field.
     method_declaration: $ => prec(2, seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       repeat($._modifier),
       choice(
         seq(
@@ -736,7 +746,7 @@ module.exports = grammar({
     // Parameter annotations and final are not types. Keep the authored type
     // field separate from dynamic def and preserve the parameter's name span.
     formal_parameter: $ => seq(
-      repeat(choice($.annotation, 'final')),
+      repeat(choice($._annotation_modifier, 'final')),
       optional(choice('def', field('type', choice($._type, $.varargs_type)))),
       field('name', $.identifier),
       optional(seq('=', field('default', $._expression))),
@@ -748,7 +758,7 @@ module.exports = grammar({
     // contract: a newline can replace the conventional semicolon. Preserve
     // constants as distinct nodes, including their constructor arguments.
     enum_declaration: $ => seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       'enum',
       field('name', $.identifier),
       field('body', $.enum_body),
@@ -783,7 +793,7 @@ module.exports = grammar({
     // `record` is a contextual keyword — tree-sitter's word: directive
     // keeps `record` usable as a plain identifier elsewhere.
     record_declaration: $ => prec.right(seq(
-      repeat($.annotation),
+      repeat($._annotation_modifier),
       'record',
       field('name', $.identifier),
       field('components', $.record_components),
@@ -849,7 +859,7 @@ module.exports = grammar({
         repeat(seq(',', $.variable_declarator)),
       )),
       seq(
-        repeat1(choice($.annotation, 'final', 'public', 'private', 'protected', 'static', 'abstract', 'strictfp')),
+        repeat1(choice($._annotation_modifier, 'final', 'public', 'private', 'protected', 'static', 'abstract', 'strictfp')),
         optional(choice('def', 'var', field('type', $._type))),
         $.variable_declarator,
         repeat(seq(',', $.variable_declarator)),
@@ -906,10 +916,10 @@ module.exports = grammar({
       field('body', $.closure),
     ),
 
-    // §5.9 — annotation usage. Lands on its own here; class /
-    // method / record / enum declarations gain an optional
-    // leading `repeat($.annotation)` so a `@Foo @Bar class X { }`
-    // attaches the annotations to the class node.
+    // Declaration trivia does not extend the annotation's own source span.
+    _annotation_modifier: $ => seq($.annotation, repeat($._newline)),
+
+    // §5.9 — annotation usage, retained under its annotated declaration.
     annotation: $ => seq(
       '@',
       field('name', $.qualified_name),
@@ -921,7 +931,7 @@ module.exports = grammar({
     for_in_statement: $ => seq(
       'for',
       '(',
-      repeat(choice($.annotation, 'final')),
+      repeat(choice($._annotation_modifier, 'final')),
       optional(choice('def', 'var', field('type', $._type))),
       field('variable', $.identifier),
       choice('in', ':'),
@@ -1466,7 +1476,8 @@ module.exports = grammar({
     // form; `{ a, b -> body }` has identifier parameters;
     // `{ String a, int b -> body }` has typed parameters; `{ body }`
     // has no `->` and an implicit `it` parameter (we do NOT emit a
-    // synthetic `it` per §5.8). This rule does not recognize defaults or varargs.
+    // synthetic `it` per §5.8). Explicit parameters preserve the same authored
+    // annotation, dynamic type, varargs and default fields as method parameters.
     // Trivia after the arrow belongs to the closure, not its parameter span.
     closure: $ => seq(
       '{',
@@ -1485,8 +1496,10 @@ module.exports = grammar({
     ),
 
     closure_parameter: $ => seq(
-      optional(field('type', $._type)),
+      repeat(choice($._annotation_modifier, 'final')),
+      optional(choice('def', field('type', choice($._type, $.varargs_type)))),
       field('name', $.identifier),
+      optional(seq('=', field('default', $._expression))),
     ),
 
     // §3.2 PRIMARY / §5.13 — list literal with trailing-comma support.
@@ -1496,10 +1509,12 @@ module.exports = grammar({
     // the conflict declaration above keeps both alternatives alive.
     list_literal: $ => seq(
       '[',
+      repeat($._newline),
       optional(seq(
         $._expression,
-        repeat(seq(',', $._expression)),
+        repeat(seq(',', repeat($._newline), $._expression)),
         optional(','),
+        repeat($._newline),
       )),
       ']',
     ),
@@ -1507,21 +1522,23 @@ module.exports = grammar({
     // §3.2 PRIMARY / §5.3 — map literal. `[:]` is the empty map;
     // anything else is one-or-more `key: value` entries. The
     // distinction between map_entry and a labelled statement is
-    // contextual — labels are statement-start-only (see §5.3 and
-    // the LABEL_COLON scanner branch), so inside `[ … ]` a `:` after
-    // an identifier is always a map key separator.
+    // contextual — labels are statement-start-only, so inside `[ … ]` a `:`
+    // after an identifier is a map key separator. Lists and maps admit the same
+    // opening trivia so a newline cannot prematurely discard either branch.
     map_literal: $ => {
       const entry = choice($.map_entry, $.spread_map_entry);
       return seq(
         '[',
+        repeat($._newline),
         choice(
           ':',
           seq(
             entry,
-            repeat(seq(',', entry)),
+            repeat(seq(',', repeat($._newline), entry)),
             optional(','),
           ),
         ),
+        repeat($._newline),
         ']',
       );
     },
@@ -1729,8 +1746,8 @@ module.exports = grammar({
       /[0-9][0-9_]*[GgLlIiDdFf]?/,
     )),
 
-    // Declaration/handler words are not values or types; properties admit them explicitly.
-    identifier: $ => choice(reserved('values', $._word_identifier), $._capitalized_identifier, $._primitive_type),
+    // Var is contextual; declaration/handler words require explicit property contexts.
+    identifier: $ => choice('var', reserved('values', $._word_identifier), $._capitalized_identifier, $._primitive_type),
     // Java identifier categories, excluding Groovy's forbidden ignorable controls.
     // Property data is fixed by the pinned parser generator, not the host locale.
     _word_identifier: _ => new RustRegex('[\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}][\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Nd}]*'),

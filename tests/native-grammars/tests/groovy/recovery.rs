@@ -4,6 +4,12 @@ use std::ops::ControlFlow;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const SOURCES: &[&str] = &[
+    "def action = { value -> assert value != null, 'λ'; sink(value) }\n",
+    "def values = [\nfirst: 1,\n// λ\nsecond: [2],\n]\n",
+    "def action = { var -> sink(var) }\n",
+    "def action = { @Deprecated final String value = 'λ', String... remaining -> sink(value, remaining) }\n",
+    "class Reader { @Deprecated\r\n// λ\r\nvoid read() {} }\r\n",
+    "def items = [[1],\n\n// λ\n[2],\n]\n",
     "interface Reader { String read() throws Exception\r\n// λ\r\n}\r\n",
     "class Reader { def <T> T read(T value) { value }\n def <U> next(U value) { value } }\n",
     "def action = { value ->\r\n// λ\r\n/* note */\r\nsink(value) }\r\nfinish()\r\n",

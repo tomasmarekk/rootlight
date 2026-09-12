@@ -23,6 +23,9 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
 - Formal parameter annotations and `final` without changing name, type or default spans.
 - Closure-arrow comment sequences without changing parameter or body ownership.
+- Contextual `var` identifiers and closure annotation, varargs and default fields.
+- Annotation-to-declaration and list/map comma trivia without detaching source nodes.
+- Both power-assert message separators without stealing following closure statements.
 - Bodyless method terminators versus newlines before a throws clause or body.
 - `def`-prefixed generic methods with optional authored return types.
 - Try-statement terminators versus newlines introducing another handler or finally.

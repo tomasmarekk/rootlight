@@ -80,6 +80,254 @@ fn semicolons_separate_script_and_closure_statements() {
 }
 
 #[test]
+fn closure_body_declarations_are_not_parameters_without_arrow() {
+    for body in [
+        "var value = 1; sink(value)",
+        "final def value = 1; sink(value)",
+        "String value = 'seed'; sink(value)",
+        "value = 'seed'; sink(value)",
+    ] {
+        let source = format!("def action = {{ {body} }}\n");
+        let tree = valid(&source);
+        assert!(
+            !nodes(tree.root_node())
+                .iter()
+                .any(|node| node.kind() == "closure_parameters")
+        );
+        exact(&tree, &source, "method_invocation", "sink(value)");
+    }
+    for source in [
+        "def action = { String... -> sink() }",
+        "def action = { value = -> sink() }",
+        "def items = [[1],, [2]]",
+        "class Reader { @Deprecated; void read() {} }",
+    ] {
+        assert!(
+            parse(source).root_node().has_error(),
+            "accepted malformed source: {source}"
+        );
+    }
+}
+
+fn closure_parameter_fields(header: &str, name: &str, ty: Option<&str>, default: Option<&str>) {
+    let source = format!("def action = {{ {header} -> sink({name}) }}\n");
+    let tree = valid(&source);
+    let parameters: Vec<_> = nodes(tree.root_node())
+        .into_iter()
+        .filter(|node| node.kind() == "closure_parameter")
+        .collect();
+    assert_eq!(parameters.len(), 1, "{source}");
+    let parameter = parameters[0];
+    assert_eq!(parameter.utf8_text(source.as_bytes()).unwrap(), header);
+    for (field, expected) in [("name", Some(name)), ("type", ty), ("default", default)] {
+        assert_eq!(
+            parameter
+                .child_by_field_name(field)
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+            expected,
+            "{field}: {source}"
+        );
+    }
+    exact(
+        &tree,
+        &source,
+        "method_invocation",
+        &format!("sink({name})"),
+    );
+}
+
+#[test]
+fn closure_contextual_var_preserves_parameter_and_read() {
+    closure_parameter_fields("var", "var", None, None);
+    closure_parameter_fields("String var", "var", Some("String"), None);
+}
+
+#[test]
+fn contextual_var_declarations_and_loop_names_keep_their_roles() {
+    let source = "var var = 1; sink(var)\n";
+    let tree = valid(source);
+    exact(&tree, source, "local_variable_declaration", "var var = 1");
+    exact(&tree, source, "variable_declarator", "var = 1");
+    for (header, name) in [("var in values", "var"), ("var value in values", "value")] {
+        let source = format!("for ({header}) {{ sink({name}) }}\n");
+        let tree = valid(&source);
+        let loop_node = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "for_in_statement")
+            .unwrap();
+        assert_eq!(
+            loop_node
+                .child_by_field_name("variable")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            name
+        );
+    }
+}
+
+#[test]
+fn annotation_trivia_keeps_other_declaration_contexts_and_exact_annotation_span() {
+    for (source, kind) in [
+        (
+            "@Deprecated\n// boundary\nclass Reader {}",
+            "class_declaration",
+        ),
+        (
+            "class Reader { @Deprecated\n// boundary\nString value }",
+            "field_declaration",
+        ),
+        (
+            "def read(@Deprecated\n// boundary\nString value) { value }",
+            "formal_parameter",
+        ),
+        (
+            "try { work() } catch (@Deprecated\n// boundary\nException problem) { sink(problem) }",
+            "catch_formal_parameter",
+        ),
+    ] {
+        let tree = valid(source);
+        let annotation = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "annotation")
+            .unwrap();
+        assert_eq!(
+            annotation.utf8_text(source.as_bytes()).unwrap(),
+            "@Deprecated"
+        );
+        assert_eq!(annotation.parent().unwrap().kind(), kind);
+    }
+}
+
+#[test]
+fn closure_varargs_preserve_parameter_type_and_body() {
+    closure_parameter_fields("String... remaining", "remaining", Some("String..."), None);
+    let source = "def action = { String first, String... remaining -> sink(first, remaining) }\n";
+    let tree = valid(source);
+    exact(&tree, source, "closure_parameter", "String first");
+    exact(&tree, source, "closure_parameter", "String... remaining");
+    exact(&tree, source, "method_invocation", "sink(first, remaining)");
+}
+
+#[test]
+fn closure_parameter_modifiers_preserve_authored_fields() {
+    for header in [
+        "@Deprecated final String value",
+        "final @Deprecated String value",
+        "final def value",
+    ] {
+        closure_parameter_fields(
+            header,
+            "value",
+            header.contains("String").then_some("String"),
+            None,
+        );
+    }
+}
+
+#[test]
+fn closure_parameter_defaults_preserve_expression_span() {
+    closure_parameter_fields(
+        "String value = 'seed'",
+        "value",
+        Some("String"),
+        Some("'seed'"),
+    );
+    closure_parameter_fields("value = 'seed'", "value", None, Some("'seed'"));
+}
+
+#[test]
+fn annotation_comment_trivia_preserves_method_owner() {
+    for trivia in ["\n// boundary\n", "\r\n// λ\r\n", "\n/* boundary */\n\n"] {
+        let declaration = format!("@Deprecated{trivia}void read() {{}}");
+        let source = format!("class Reader {{ {declaration} }}\n");
+        let tree = valid(&source);
+        let method = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "method_declaration")
+            .unwrap();
+        assert_eq!(method.utf8_text(source.as_bytes()).unwrap(), declaration);
+        assert_eq!(
+            method
+                .child_by_field_name("name")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            "read"
+        );
+        assert_eq!(
+            nodes(method)
+                .iter()
+                .filter(|node| node.kind() == "annotation")
+                .count(),
+            1
+        );
+        exact(&tree, &source, "block", "{}");
+    }
+}
+
+#[test]
+fn list_comma_comment_trivia_preserves_nested_elements() {
+    for trivia in ["\n\n// boundary\n", "\r\n// λ\r\n", "\n/* boundary */\n\n"] {
+        let literal = format!("[[1],{trivia}[2],{trivia}]");
+        let source = format!("def items = {literal}\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "list_literal", &literal);
+        exact(&tree, &source, "list_literal", "[1]");
+        exact(&tree, &source, "list_literal", "[2]");
+        let outer = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| {
+                node.kind() == "list_literal"
+                    && node.utf8_text(source.as_bytes()).unwrap() == literal
+            })
+            .unwrap();
+        let mut cursor = outer.walk();
+        let elements: Vec<_> = outer
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "list_literal")
+            .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(elements, ["[1]", "[2]"]);
+    }
+}
+
+#[test]
+fn multiline_maps_remain_distinct_from_lists() {
+    for trivia in ["\n", "\n// boundary\n", "\r\n/* λ */\r\n"] {
+        let literal = format!("[{trivia}first: 1,{trivia}second: [2],{trivia}]");
+        let source = format!("def values = {literal}\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "map_literal", &literal);
+        exact(&tree, &source, "map_entry", "first: 1");
+        exact(&tree, &source, "map_entry", "second: [2]");
+        exact(&tree, &source, "list_literal", "[2]");
+    }
+}
+
+#[test]
+fn assert_message_separators_preserve_closure_statement_ownership() {
+    for separator in [",", ":"] {
+        let assertion = format!("assert value != null{separator} 'missing'");
+        let source = format!("def action = {{ value -> {assertion}; sink(value) }}\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "assert_statement", &assertion);
+        let node = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "assert_statement")
+            .unwrap();
+        assert_eq!(
+            node.child_by_field_name("message")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            "'missing'"
+        );
+        exact(&tree, &source, "method_invocation", "sink(value)");
+    }
+}
+
+#[test]
 fn semicolons_separate_fields_and_abstract_methods() {
     valid(
         "abstract class Meter { int value = 1; abstract int measure(); int read() { value; } }\n",
