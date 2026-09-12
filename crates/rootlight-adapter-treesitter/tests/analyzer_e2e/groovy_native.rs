@@ -150,12 +150,18 @@ fn groovy_qualified_import_evidence_uses_native_type_boundaries() {
             "class Holder { Selected.Inner<String> item }",
             Some("sample.Widget.Inner"),
         ),
-        ("class Holder<Selected> { Selected.Inner item }", None),
+        (
+            "class Holder<Selected> { Selected.Inner item }",
+            Some("sample.Widget.Inner"),
+        ),
         (
             "class Selected {}\nclass Holder { Selected.Inner item }",
-            None,
+            Some("sample.Widget.Inner"),
         ),
-        ("class Holder extends Parent { Selected.Inner item }", None),
+        (
+            "class Holder extends Parent { Selected.Inner item }",
+            Some("sample.Widget.Inner"),
+        ),
         ("def value = Selected.Inner", None),
     ] {
         let source = format!("import sample.Widget as Selected\n{body}\n");

@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/103";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/11";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/104";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/12";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -27955,6 +27955,154 @@ mod tests {
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
             assert_eq!(site.source.generation(), receipt.generation);
+        }
+    }
+
+    #[test]
+    fn structural_semantic_revisions_invalidate_prior_provider_identities() {
+        let grammar = first_slice_grammar_revision_hash().unwrap();
+        let previous_parser = hash_static_components(&[
+            PARSER_PROVIDER_SET_SEED,
+            TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+            TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+            b"rootlight.first-slice.treesitter-structural/103",
+            grammar.as_bytes(),
+        ])
+        .unwrap();
+        let parser = first_slice_parser_provider_hash().unwrap();
+        assert_ne!(parser, previous_parser);
+        let previous_resolver = hash_static_components(&[
+            PROVIDER_SET_SEED,
+            parser.as_bytes(),
+            DISCOVERY_MANIFEST_VERSION.as_bytes(),
+            RESOLVER_PROVIDER_VERSION.as_bytes(),
+            b"rootlight.first-slice.resolve/11",
+            SEARCH_REVISION_SEED,
+            INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+            DERIVED_PLAN_REVISION_SEED,
+            LANGUAGE_DISPOSITION_PROVIDER_SEED,
+            SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+        ])
+        .unwrap();
+        assert_ne!(first_slice_provider_set_hash().unwrap(), previous_resolver);
+    }
+
+    #[test]
+    fn groovy_qualified_type_precedence_matches_compilation_units() {
+        use rootlight_ir::{
+            EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+        };
+
+        let imported = "package sample\nclass Widget { static class Inner {} }\n";
+        for (source, companion, written, target_name, target_path) in [
+            (
+                "import sample.Widget as Selected\nclass Holder<Selected> { Selected.Inner item }",
+                imported,
+                "Selected.Inner",
+                "Inner",
+                "definition.groovy",
+            ),
+            (
+                "import sample.Widget as Selected\nclass Selected { static class Inner {} }\nclass Holder { Selected.Inner item }",
+                imported,
+                "Selected.Inner",
+                "Inner",
+                "definition.groovy",
+            ),
+            (
+                "import sample.Widget as Selected\nclass Holder { static class Selected { static class Inner {} }\nSelected.Inner item }",
+                imported,
+                "Selected.Inner",
+                "Inner",
+                "definition.groovy",
+            ),
+            (
+                "import sample.Widget as Selected\nclass Parent { static class Selected { static class Inner {} } }\nclass Holder extends Parent { Selected.Inner item }",
+                imported,
+                "Selected.Inner",
+                "Inner",
+                "definition.groovy",
+            ),
+            (
+                "package sample\nimport other.Widget as sample\nclass Local {}\nclass Holder { sample.Local item }",
+                "package other\nclass Widget { static class Local {} }",
+                "sample.Local",
+                "Local",
+                "client.groovy",
+            ),
+            (
+                "package sample\nclass Local {}\nclass Holder { sample.Local item }",
+                "",
+                "sample.Local",
+                "Local",
+                "client.groovy",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), source).unwrap();
+            if !companion.is_empty() {
+                fs::write(fixture.path().join("definition.groovy"), companion).unwrap();
+            }
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{source}: {:?}",
+                document.diagnostics
+            );
+            let target_file = document
+                .files
+                .iter()
+                .find(|file| file.path == target_path)
+                .unwrap()
+                .id;
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Class
+                        && entity.canonical_name == target_name
+                        && entity.evidence.source.as_ref().unwrap().span().file() == target_file
+                })
+                .unwrap();
+            let start = u64::try_from(source.find(written).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "groovy.qualified_type.reference"
+                        && site.source.span().start_byte() == start
+                })
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{source}"
+            );
+            assert_eq!(site.role, OccurrenceRole::TypeUse);
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::UsesType
+                    && relation.subject == RelationEndpoint::Occurrence(site.id)
+                    && relation.object == RelationEndpoint::Entity(target.id)
+            }));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
         }
     }
 

@@ -929,6 +929,12 @@ fn preflight_lowering_limits(
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
+            if language_for_fact(request, fact) == "groovy"
+                && parse_output.report().coverage().status() == CoverageStatus::Complete
+                && fact.syntax_kind().as_str() == "groovy.qualified_type.reference"
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+            }
             if language_for_fact(request, fact) == "yaml"
                 && fact.syntax_kind().as_str() == "yaml.alias.reference"
             {
@@ -1708,9 +1714,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    if fact.syntax_kind().as_str() == "groovy.qualified_type.reference" {
+                        occurrence.role = OccurrenceRole::TypeUse;
+                    }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
-                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    let mut relation = lexical_reference_relation(&occurrence, symbol)?;
+                    if occurrence.role == OccurrenceRole::TypeUse {
+                        relation.predicate = RelationPredicate::UsesType;
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+                    }
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &groovy_bindings

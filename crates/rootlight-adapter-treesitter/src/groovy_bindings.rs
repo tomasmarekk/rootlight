@@ -25,6 +25,7 @@ pub(super) struct GroovyBindings<'a> {
     bindings: BTreeMap<(u64, &'a str), Binding>,
     type_bindings: BTreeMap<(u64, &'a str), Option<SymbolId>>,
     local_types: BTreeMap<(u64, &'a str), Option<SymbolId>>,
+    module_packages: BTreeMap<u64, Option<String>>,
     type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
     inherited_scopes: BTreeSet<u64>,
     imports: BTreeMap<String, Option<ImportedType>>,
@@ -49,6 +50,7 @@ impl<'a> GroovyBindings<'a> {
             bindings: BTreeMap::new(),
             type_bindings: BTreeMap::new(),
             local_types: BTreeMap::new(),
+            module_packages: BTreeMap::new(),
             type_names: BTreeMap::new(),
             inherited_scopes: BTreeSet::new(),
             imports: BTreeMap::new(),
@@ -137,6 +139,34 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<(), AdapterError> {
         let mut aliases = BTreeMap::new();
+        let mut packages = BTreeMap::new();
+        for fact in self.facts.values().copied() {
+            cancellation.check()?;
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "groovy.qualified_identifier.definition"
+                    | "groovy.package_ownership_unavailable.scope"
+            ) && let Some(module) = self.file_module(fact, cancellation)?
+            {
+                let name =
+                    if fact.syntax_kind().as_str() == "groovy.qualified_identifier.definition" {
+                        rootlight_adapter_sdk::structural_captured_name_for_fact(
+                            "groovy",
+                            fact,
+                            self.source_name(fact, source)?,
+                            maximum_name_bytes,
+                        )
+                        .map(std::borrow::Cow::into_owned)
+                    } else {
+                        None
+                    };
+                packages
+                    .entry(module)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(name);
+            }
+        }
+        self.module_packages = packages;
         for fact in self.facts.values().copied() {
             cancellation.check()?;
             match fact.syntax_kind().as_str() {
@@ -263,11 +293,11 @@ impl<'a> GroovyBindings<'a> {
         Err(invalid_capture())
     }
 
-    /// Returns a native import selection only after all lexical shadow checks.
+    /// Returns a native import selection with simple and qualified type precedence.
     ///
     /// # Errors
     /// Returns cancellation or malformed capture ancestry. Unresolved inheritance
-    /// is a blocker because an inherited nested type precedes an explicit import.
+    /// blocks simple type selection, but not a qualified import alias.
     pub(super) fn imported_type(
         &self,
         fact: &SyntaxFact,
@@ -295,36 +325,65 @@ impl<'a> GroovyBindings<'a> {
         let Some(binding) = self.imports.get(root).and_then(Option::as_ref) else {
             return Ok(None);
         };
-        if self.type_parameter(fact, root, cancellation)?.is_some()
-            || self.local_type(fact, root, cancellation)?.is_some()
-        {
+        // ResolveVisitor checks exact module class names before import aliases.
+        // Generic and nested simple-name lookup does not apply to a dotted type.
+        let shadowed = if suffix.is_some() {
+            self.module_type(fact, &name, cancellation)?.is_some()
+        } else {
+            self.type_parameter(fact, root, cancellation)?.is_some()
+                || self.local_type(fact, root, cancellation)?.is_some()
+        };
+        if shadowed {
             return Ok(None);
         }
         let mut evidence = binding.evidence;
         if let Some(suffix) = suffix {
-            let Some(length) = binding
-                .qualified_name
-                .len()
-                .checked_add(1)
-                .and_then(|length| length.checked_add(suffix.len()))
+            // Only the native qualified-type node admits this substitution. Field
+            // access and arbitrary dotted expressions do not prove a type target.
+            let Some(target) =
+                bounded_type_path(&binding.qualified_name, suffix, self.maximum_name_bytes)?
             else {
                 return Ok(None);
             };
-            if length > self.maximum_name_bytes {
-                return Ok(None);
-            }
-            // Only the native qualified-type node admits this substitution. Field
-            // access and arbitrary dotted expressions do not prove a type target.
-            let mut target = String::new();
-            target
-                .try_reserve_exact(length)
-                .map_err(|_| invalid_capture())?;
-            target.push_str(&binding.qualified_name);
-            target.push('.');
-            target.push_str(suffix);
             evidence.target = content_hash(target.as_bytes());
         }
         Ok(Some(evidence))
+    }
+
+    fn file_module(
+        &self,
+        reference: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        let mut parent = Some(reference.local_id());
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { return Ok(None) };
+            let owner = self.fact(id)?;
+            if owner.syntax_kind().as_str() == "groovy.file.module" {
+                return Ok(Some(id));
+            }
+            parent = owner.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn module_type(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
+        let Some((package, name)) = name.rsplit_once('.') else {
+            return Ok(None);
+        };
+        let Some(module) = self.file_module(reference, cancellation)? else {
+            return Ok(None);
+        };
+        if self.module_packages.get(&module).and_then(Option::as_deref) != Some(package) {
+            return Ok(None);
+        }
+        Ok(self.local_types.get(&(module, name)).copied())
     }
 
     fn local_type(
@@ -388,6 +447,17 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancellation.check()?;
+        if fact.syntax_kind().as_str() == "groovy.qualified_type.reference" {
+            let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+                "groovy",
+                fact,
+                name,
+                self.maximum_name_bytes,
+            ) else {
+                return Ok(None);
+            };
+            return Ok(self.module_type(fact, &name, cancellation)?.flatten());
+        }
         if fact.syntax_kind().as_str() == "groovy.type_identifier.reference" {
             return self.resolve_type(fact, name, cancellation);
         }
@@ -614,6 +684,30 @@ fn is_scope(fact: &SyntaxFact) -> bool {
         )
 }
 
+fn bounded_type_path(
+    prefix: &str,
+    suffix: &str,
+    maximum: usize,
+) -> Result<Option<String>, AdapterError> {
+    let Some(length) = prefix
+        .len()
+        .checked_add(1)
+        .and_then(|length| length.checked_add(suffix.len()))
+    else {
+        return Ok(None);
+    };
+    if length > maximum {
+        return Ok(None);
+    }
+    let mut name = String::new();
+    name.try_reserve_exact(length)
+        .map_err(|_| invalid_capture())?;
+    name.push_str(prefix);
+    name.push('.');
+    name.push_str(suffix);
+    Ok(Some(name))
+}
+
 fn invalid_capture() -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new("groovy-binding-capture")
@@ -675,6 +769,98 @@ mod tests {
                 5,
             ),
         ]
+    }
+
+    #[test]
+    fn qualified_module_names_preserve_missing_and_duplicate_identities() {
+        let source = b"sample Local sample.Local";
+        let mut facts = vec![
+            fact(1, None, SyntaxFactKind::Module, "groovy.file.module", 0, 25),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                "groovy.qualified_identifier.definition",
+                0,
+                6,
+            ),
+            fact(
+                3,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                "groovy.class.declaration",
+                7,
+                12,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "groovy.identifier.definition",
+                7,
+                12,
+            ),
+            fact(
+                5,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                "groovy.qualified_type.reference",
+                13,
+                25,
+            ),
+        ];
+        let cancellation = Cancellation::new();
+        let symbol = SymbolId::from_bytes([8; 20]);
+        for missing in [false, true] {
+            let symbols = if missing {
+                HashMap::new()
+            } else {
+                HashMap::from([(4, symbol)])
+            };
+            let plan = GroovyBindings::new(&facts, source, &symbols, 100, &cancellation).unwrap();
+            assert_eq!(
+                plan.module_type(&facts[4], "sample.Local", &cancellation)
+                    .unwrap(),
+                Some((!missing).then_some(symbol))
+            );
+        }
+        facts.push(fact(
+            6,
+            Some(1),
+            SyntaxFactKind::Declaration,
+            "groovy.class.declaration",
+            7,
+            12,
+        ));
+        facts.push(fact(
+            7,
+            Some(6),
+            SyntaxFactKind::Occurrence,
+            "groovy.identifier.definition",
+            7,
+            12,
+        ));
+        let symbols = HashMap::from([(4, symbol), (7, SymbolId::from_bytes([9; 20]))]);
+        let plan = GroovyBindings::new(&facts, source, &symbols, 100, &cancellation).unwrap();
+        assert_eq!(
+            plan.module_type(&facts[4], "sample.Local", &cancellation)
+                .unwrap(),
+            Some(None)
+        );
+        assert_eq!(
+            plan.resolve(&facts[4], "sample.Local", &cancellation)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn qualified_type_composition_obeys_exact_byte_limits() {
+        assert_eq!(
+            bounded_type_path("sample", "Local", 12).unwrap().as_deref(),
+            Some("sample.Local")
+        );
+        assert_eq!(bounded_type_path("sample", "Local", 11).unwrap(), None);
     }
 
     #[test]
