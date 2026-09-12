@@ -37,6 +37,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                     | "typescript.mapped_type_parameter.declaration"
                     | "typescript.infer_parameter.declaration"
                     | "objective_c.type_parameter.declaration"
+                    | "groovy.type_parameter.declaration"
             ) =>
         {
             Some(EntityKind::TypeParameter)

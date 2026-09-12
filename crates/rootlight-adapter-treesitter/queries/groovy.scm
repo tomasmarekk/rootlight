@@ -17,10 +17,17 @@
   (variable_declarator name: (identifier) @definition)
   (formal_parameter name: (identifier) @definition)
   (closure_parameter name: (identifier) @definition)
+  (catch_formal_parameter name: (identifier) @definition)
+  (resource name: (identifier) @definition)
+  (type_parameter name: (type_identifier) @definition)
+  (record_component name: (identifier) @definition)
 ] @declaration
+
+(for_in_statement variable: (identifier) @declaration @definition)
 
 [(method_declaration) (constructor_declaration)] @signature
 [(block) (class_body) (enum_body)] @scope
+[(for_statement) (for_in_statement) (catch_clause) (try_statement)] @scope
 [(closure) (gstring_closure)] @scope @declaration @signature
 (import_declaration) @import
 (method_invocation) @call

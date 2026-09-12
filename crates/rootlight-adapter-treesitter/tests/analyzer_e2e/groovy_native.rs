@@ -27,6 +27,156 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_control_bindings_keep_distinct_names_sources_and_owners() {
+    for (body, name, kind, count) in [
+        (
+            "try { work() } catch (IOException problem) { sink(problem, 1) } catch (RuntimeException problem) { sink(problem, 1) }",
+            "problem",
+            EntityKind::Parameter,
+            2,
+        ),
+        (
+            "for (item in items) { sink(item, 1) }; for (String item : items) { sink(item, 1) }",
+            "item",
+            EntityKind::Variable,
+            2,
+        ),
+        (
+            "try (Reader handle = open()) { sink(handle, 1) } finally {}; try (Reader handle = open()) { sink(handle, 1) } finally {}",
+            "handle",
+            EntityKind::Variable,
+            2,
+        ),
+        (
+            "for (int index = 0; index < 2; index++) { sink(index, 1) }; for (int index = 0; index < 2; index++) { sink(index, 1) }",
+            "index",
+            EntityKind::Variable,
+            2,
+        ),
+        (
+            "def (left, right) = pair; sink(left, 1)",
+            "left",
+            EntityKind::Variable,
+            1,
+        ),
+    ] {
+        let source = format!("def run() {{ {body} }}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{source}: {:?}",
+            doc.diagnostics
+        );
+        let owner = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "run")
+            .unwrap();
+        let bindings: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(
+            bindings.len(),
+            count,
+            "{source}: {:?}; {:?}",
+            doc.entities,
+            doc.skipped_regions
+        );
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            count
+        );
+        for binding in bindings {
+            assert_eq!(binding.kind, kind);
+            assert_eq!(
+                binding.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+            let definitions: Vec<_> = doc
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: binding.id }
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let span = definitions[0].source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+        }
+        let changed = output(&source.replace(", 1)", ", 12345)"));
+        let identities = |output: &AnalysisOutput| {
+            output
+                .document()
+                .entities
+                .iter()
+                .map(|entity| (entity.id, entity.container))
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(identities(&result), identities(&changed));
+    }
+}
+
+#[test]
+fn groovy_type_parameters_and_record_components_have_authored_owners() {
+    let source = "class Store<T extends Number> { <U> U convert(U value) { value } }\nrecord Entry(String title, int size) {}\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    for (name, kind, owner) in [
+        ("T", EntityKind::TypeParameter, "Store"),
+        ("U", EntityKind::TypeParameter, "convert"),
+        ("title", EntityKind::Property, "Entry"),
+        ("size", EntityKind::Property, "Entry"),
+    ] {
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap_or_else(|| panic!("missing {name}: {:?}", doc.entities));
+        let parent = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == owner)
+            .unwrap();
+        assert_eq!(entity.kind, kind);
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(parent.id))
+        );
+        let definition = doc
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+}
+
+#[test]
 fn groovy_package_owns_top_level_types_without_stealing_members() {
     let source = "// header\npackage sample.catalog\nclass Meter { int read() { 1 } }\ninterface Named {}\ntrait Stored {}\nenum Mode { OPEN }\n";
     let result = output(source);

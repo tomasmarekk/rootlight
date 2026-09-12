@@ -27771,6 +27771,111 @@ mod tests {
     }
 
     #[test]
+    fn groovy_control_and_type_bindings_publish_exact_symbol_sources() {
+        use rootlight_ir::EntityKind;
+
+        let fixture = TempDir::new().unwrap();
+        let source = "class Store<T extends Number> { <U> U convert(U value) { value } }\nrecord Entry(String title, int size) {}\ndef runBindings() {\ntry { work() } catch (IOException problem) { sink(problem) } catch (RuntimeException problem) { sink(problem) }\nfor (item in items) { sink(item) }; for (String item : items) { sink(item) }\ntry (Reader handle = open()) { sink(handle) } finally {}; try (Reader handle = open()) { sink(handle) } finally {}\nfor (int index = 0; index < 2; index++) { sink(index) }; for (int index = 0; index < 2; index++) { sink(index) }\ndef (left, right) = pair\n}\n";
+        fs::write(fixture.path().join("bindings.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        for (name, kind, owner_name, expected) in [
+            (
+                "problem",
+                EntityKind::Parameter,
+                "runBindings",
+                vec!["IOException problem", "RuntimeException problem"],
+            ),
+            (
+                "item",
+                EntityKind::Variable,
+                "runBindings",
+                vec!["item", "item"],
+            ),
+            (
+                "handle",
+                EntityKind::Variable,
+                "runBindings",
+                vec!["Reader handle = open()", "Reader handle = open()"],
+            ),
+            (
+                "index",
+                EntityKind::Variable,
+                "runBindings",
+                vec!["index = 0", "index = 0"],
+            ),
+            ("left", EntityKind::Variable, "runBindings", vec!["left"]),
+            ("right", EntityKind::Variable, "runBindings", vec!["right"]),
+            (
+                "T",
+                EntityKind::TypeParameter,
+                "Store",
+                vec!["T extends Number"],
+            ),
+            ("U", EntityKind::TypeParameter, "convert", vec!["U"]),
+            ("title", EntityKind::Property, "Entry", vec!["String title"]),
+            ("size", EntityKind::Property, "Entry", vec!["int size"]),
+        ] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let symbols: BTreeSet<_> = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect();
+            assert_eq!(symbols.len(), expected.len(), "{name}");
+            let mut actual = Vec::new();
+            for symbol in symbols {
+                let entity = service
+                    .symbol_explain(receipt.generation, symbol, &deadline())
+                    .unwrap()
+                    .data
+                    .entity;
+                assert_eq!(entity.canonical_name, name);
+                assert_eq!(entity.kind, kind);
+                let Some(rootlight_ir::ContainerRef::Entity(owner)) = entity.container else {
+                    panic!("binding owner missing")
+                };
+                let owner = service
+                    .symbol_explain(receipt.generation, owner, &deadline())
+                    .unwrap()
+                    .data
+                    .entity;
+                assert_eq!(owner.canonical_name, owner_name);
+                let reference = entity.evidence.source.unwrap();
+                assert_eq!(reference.generation(), receipt.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                actual.push(String::from_utf8(read.data.chunks[0].bytes.clone()).unwrap());
+            }
+            actual.sort();
+            assert_eq!(actual, expected, "{name}");
+        }
+    }
+
+    #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";

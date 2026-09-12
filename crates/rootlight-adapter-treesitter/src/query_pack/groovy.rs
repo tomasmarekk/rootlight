@@ -131,13 +131,28 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
                 "groovy.variable"
             }
         }
-        "formal_parameter" | "closure_parameter" => "groovy.parameter",
+        "formal_parameter" | "closure_parameter" | "catch_formal_parameter" => "groovy.parameter",
+        "resource" => "groovy.variable",
+        "type_parameter" => "groovy.type_parameter",
+        "record_component" => "groovy.property",
+        "identifier"
+            if role == StructuralRole::Declaration
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "for_in_statement"
+                        && parent.child_by_field_name("variable") == Some(node)
+                }) =>
+        {
+            "groovy.variable"
+        }
         "identifier" => "groovy.identifier",
         "type_identifier" => "groovy.type_identifier",
         "quoted_identifier" => "groovy.quoted_identifier",
         "import_declaration" => "groovy.import",
         "method_invocation" => "groovy.call",
         "block" | "class_body" | "enum_body" => "groovy.block",
+        "for_statement" | "for_in_statement" => "groovy.for",
+        "catch_clause" => "groovy.catch",
+        "try_statement" => "groovy.try",
         "closure" | "gstring_closure" if role == StructuralRole::Declaration => {
             "groovy.anonymous_function"
         }
