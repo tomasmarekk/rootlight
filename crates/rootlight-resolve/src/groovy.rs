@@ -33,6 +33,7 @@ pub(crate) struct Proof<'a, 'index> {
     pub(crate) target: &'a EntityRecord,
     pub(crate) owners: &'index [&'a EntityRecord],
     pub(crate) coverage: [&'a CoverageRecord; 4],
+    pub(crate) binding: Option<&'a rootlight_ir::ExtensionEnvelope>,
 }
 
 #[derive(Default)]
@@ -40,6 +41,13 @@ pub(crate) struct GroovyIndex<'a> {
     contexts: BTreeMap<FileId, Context<'a>>,
     declarations: BTreeMap<ContentHash, Option<Declaration<'a>>>,
     unavailable: bool,
+    uses: BTreeMap<
+        rootlight_ir::SourceSpan,
+        Option<(
+            &'a rootlight_ir::ExtensionEnvelope,
+            rootlight_ir::GroovyImportedType,
+        )>,
+    >,
 }
 
 impl<'a> GroovyIndex<'a> {
@@ -48,6 +56,7 @@ impl<'a> GroovyIndex<'a> {
         entities: &BTreeMap<SymbolId, &'a EntityRecord>,
         provenance: &BTreeMap<FactId, &'a ProvenanceRecord>,
         coverage: &'a [CoverageRecord],
+        extensions: &'a [rootlight_ir::ExtensionEnvelope],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         cancellation.check()?;
@@ -162,14 +171,39 @@ impl<'a> GroovyIndex<'a> {
         {
             index.unavailable = true;
         }
+        for envelope in extensions {
+            cancellation.check()?;
+            if envelope.namespace != rootlight_ir::GROOVY_BINDING_NAMESPACE {
+                continue;
+            }
+            let Some(source) = envelope.evidence.source.as_ref() else {
+                continue;
+            };
+            let binding = rootlight_ir::decode_groovy_binding_envelope(envelope)
+                .ok()
+                .filter(|binding| {
+                    index
+                        .contexts
+                        .get(&source.span().file())
+                        .is_some_and(|context| {
+                            envelope.provenance == context.file.provenance
+                                && source.content_hash() == context.file.content_hash
+                                && binding.import.end_byte() <= context.file.byte_length
+                                && source.span().end_byte() <= context.file.byte_length
+                        })
+                })
+                .map(|binding| (envelope, binding));
+            index
+                .uses
+                .entry(source.span())
+                .and_modify(|prior| *prior = None)
+                .or_insert(binding);
+        }
         Ok(index)
     }
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<Proof<'a, '_>> {
-        if self.unavailable
-            || occurrence.role != OccurrenceRole::ImportUse
-            || occurrence.syntax_kind != "groovy.type_import.reference"
-        {
+        if self.unavailable {
             return None;
         }
         let source = self.contexts.get(&occurrence.file)?;
@@ -178,15 +212,28 @@ impl<'a> GroovyIndex<'a> {
         {
             return None;
         }
-        let target = self
-            .declarations
-            .get(&occurrence.syntactic_text_hash)?
-            .as_ref()?;
+        let (name, binding) = if occurrence.role == OccurrenceRole::ImportUse
+            && occurrence.syntax_kind == "groovy.type_import.reference"
+        {
+            (occurrence.syntactic_text_hash, None)
+        } else if occurrence.role == OccurrenceRole::TypeUse
+            && occurrence.syntax_kind == "groovy.type_identifier.reference"
+        {
+            let (envelope, binding) = self.uses.get(&occurrence.source.span())?.as_ref()?;
+            if envelope.evidence.source.as_ref() != Some(&occurrence.source) {
+                return None;
+            }
+            (binding.target, Some(*envelope))
+        } else {
+            return None;
+        };
+        let target = self.declarations.get(&name)?.as_ref()?;
         let destination = self
             .contexts
             .get(&target.entity.evidence.source.as_ref()?.span().file())?;
         Some(Proof {
             target: target.entity,
+            binding,
             owners: &target.owners,
             coverage: [
                 source.coverage[0],

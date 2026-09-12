@@ -94,6 +94,105 @@ fn groovy_array_creation_preserves_generic_type_and_dimension_reads() {
 }
 
 #[test]
+fn groovy_imported_type_evidence_preserves_native_alias_ownership() {
+    for (import, name) in [
+        ("import sample.Widget", "Widget"),
+        ("@Marker\nimport sample.Widget", "Widget"),
+        ("import sample /* owner */ . Widget as Selected", "Selected"),
+    ] {
+        let source = format!("{import}\nclass Holder {{ {name} item }}\n");
+        let result = output(&source);
+        let bindings: Vec<_> = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::GROOVY_BINDING_NAMESPACE)
+            .collect();
+        assert_eq!(bindings.len(), 1, "{import}");
+        let binding = rootlight_ir::decode_groovy_binding_envelope(bindings[0]).unwrap();
+        assert_eq!(binding.target, content_hash(b"sample.Widget"));
+        assert_eq!(
+            binding.import.start_byte(),
+            u64::try_from(source.find("sample").unwrap()).unwrap()
+        );
+        let site = bindings[0].evidence.source.as_ref().unwrap();
+        assert_eq!(
+            site.span().start_byte(),
+            u64::try_from(source.find(&format!("{name} item")).unwrap()).unwrap()
+        );
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.source == *site
+                    && occurrence.role == OccurrenceRole::TypeUse)
+        );
+    }
+}
+
+#[test]
+fn groovy_local_type_precedence_matches_native_nested_class_order() {
+    for (source, name, declaration) in [
+        (
+            "import sample.Widget as Selected\nclass Selected {}\nclass Holder { Selected item }",
+            "Selected",
+            "class Selected",
+        ),
+        (
+            "class Outer { static class Selected {}\nstatic class Middle { static class Selected {}\nstatic class Holder { Selected item } } }",
+            "Selected",
+            "class Selected",
+        ),
+        (
+            "class Outer { static class Selected {}\nstatic class Holder { static class Chosen {}\nChosen item } }",
+            "Chosen",
+            "class Chosen",
+        ),
+        (
+            "class Holder extends base.Parent { Holder item }",
+            "Holder",
+            "class Holder",
+        ),
+    ] {
+        let expected = Some(source.find(declaration).unwrap() + "class ".len());
+        assert_type_reads(source, name, &[expected]);
+    }
+}
+
+#[test]
+fn groovy_imported_type_evidence_respects_shadowing_and_inheritance_uncertainty() {
+    for (body, expected) in [
+        ("class Holder<Selected> { Selected item }", 0),
+        ("class Holder<Selected> { static Selected item }", 1),
+        (
+            "class Holder { static class Selected {}\nSelected item }",
+            0,
+        ),
+        ("class Holder extends base.Parent { Selected item }", 0),
+        (
+            "interface Holder extends base.Parent { Selected read() }",
+            0,
+        ),
+        (
+            "class Other { static class Selected {} }\nclass Holder { Selected item }",
+            1,
+        ),
+    ] {
+        let source = format!("import sample.Widget as Selected\n{body}\n");
+        let result = output(&source);
+        assert!(result.document().diagnostics.is_empty(), "{body}");
+        let count = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::GROOVY_BINDING_NAMESPACE)
+            .count();
+        assert_eq!(count, expected, "{body}");
+    }
+}
+
+#[test]
 fn groovy_array_initializers_preserve_value_reads_without_inventing_closures() {
     let source = "def allocate(rows, columns, value) { def sized = new String[rows][columns][]; def initialized = new String[]{value}; def nested = new String[][]{new String[]{value}}; [sized, initialized, nested] }\n";
     assert_lexical_reads(source, "rows", &[Some(source.find("rows,").unwrap())]);
@@ -203,7 +302,10 @@ fn groovy_import_fields_preserve_targets_kinds_and_authored_aliases() {
         assert!(
             doc.skipped_regions
                 .iter()
-                .any(|gap| gap.detail == "unresolved-import-target")
+                .any(|gap| gap.detail == "unresolved-import-target"),
+            "{source}: gaps={:?}; occurrences={:?}",
+            doc.skipped_regions,
+            doc.occurrences
         );
     }
 }

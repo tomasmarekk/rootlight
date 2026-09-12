@@ -165,6 +165,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "static_initializer" => "groovy.static_context",
         "quoted_identifier" => "groovy.quoted_identifier",
         "import_declaration" => "groovy.import",
+        "superclass" | "super_interfaces" | "extends_interfaces" => "groovy.inheritance",
         "method_invocation" => "groovy.call",
         "block" => "groovy.block",
         "class_body" | "enum_body" => "groovy.type_body",

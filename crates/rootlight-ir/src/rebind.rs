@@ -25,6 +25,9 @@ use crate::{
     derive_source_mapping_record_id, new_file_identity_claim_envelope,
     new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
+use crate::{
+    GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
+};
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 
 const GENERATION_NEUTRAL_ID: GenerationId = GenerationId::from_bytes([0; 20]);
@@ -686,6 +689,7 @@ fn require_supported_extensions_with_checkpoint(
                 | SYMBOL_IDENTITY_CLAIM_NAMESPACE
                 | LEXICAL_EXTENSION_NAMESPACE
                 | PERL_BINDING_NAMESPACE
+                | GROOVY_BINDING_NAMESPACE
         ) {
             return Err(NormalizedRebindError::UnsupportedExtension);
         }
@@ -1226,6 +1230,12 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        GROOVY_BINDING_NAMESPACE => {
+            let evidence = decode_groovy_binding_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         PERL_BINDING_NAMESPACE => {
             let evidence = decode_perl_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -1654,6 +1664,55 @@ mod tests {
         assert_eq!(first_chunk.file(), second_chunk.file());
         assert_eq!(first_chunk.digest(), second_chunk.digest());
         assert_eq!(first_chunk.encoded_bytes(), second_chunk.encoded_bytes());
+    }
+
+    #[test]
+    fn groovy_binding_rebinds_with_generation_neutral_import_spans() {
+        use crate::SourceSpan;
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(file.id, 2, 3).unwrap(),
+            file.content_hash,
+            None,
+        );
+        let binding = crate::GroovyImportedType {
+            import: SourceSpan::new(file.id, 0, 1).unwrap(),
+            target: rootlight_ids::content_hash(b"sample.Widget"),
+        };
+        document.extensions.push(
+            new_groovy_binding_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source,
+                binding,
+            )
+            .unwrap(),
+        );
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let generation = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+        let envelope = &rebound.extensions[0];
+        assert_eq!(decode_groovy_binding_envelope(envelope).unwrap(), binding);
+        assert_eq!(envelope.generation, generation);
+        assert_eq!(
+            envelope.evidence.source.as_ref().unwrap().generation(),
+            generation
+        );
+        assert_ne!(envelope.id, document.extensions[0].id);
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        validate_ir_document(&rebound, &limits, &support).unwrap();
     }
 
     #[test]

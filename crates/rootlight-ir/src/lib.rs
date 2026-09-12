@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod groovy_binding;
 mod identity;
 mod lexical;
 mod normalized;
@@ -22,6 +23,10 @@ mod rebind;
 mod source_projection;
 mod validation;
 
+pub use groovy_binding::{
+    GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,
+    decode_groovy_binding_envelope, new_groovy_binding_envelope,
+};
 pub use identity::{
     FILE_IDENTITY_CLAIM_NAMESPACE, FactIdentityRecipeError, FileIdentityClaim,
     IDENTITY_CLAIM_VERSION, IdentityClaimError, RustImplScopeIdentity, RustScopeIdentityError,

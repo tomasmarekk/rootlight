@@ -206,6 +206,109 @@ fn groovy_import_proofs_preserve_owners_and_coverage_across_application_paths() 
 }
 
 #[test]
+fn groovy_type_uses_require_exact_native_binding_envelopes() {
+    use rootlight_ir::{GroovyImportedType, SourceSpan, new_groovy_binding_envelope};
+    let (mut fixture, target) = fixture();
+    let site = &mut fixture.document.occurrences[0];
+    site.role = OccurrenceRole::TypeUse;
+    site.syntax_kind = "groovy.type_identifier.reference".to_owned();
+    site.syntactic_text_hash = content_hash(b"Selected");
+    site.target = OccurrenceTarget::Unresolved {
+        text_hash: site.syntactic_text_hash,
+    };
+    let source = site.source.clone();
+    let binding = GroovyImportedType {
+        import: SourceSpan::new(source.span().file(), 0, 10).unwrap(),
+        target: content_hash(b"sample.types.Widget"),
+    };
+    let envelope = new_groovy_binding_envelope(
+        fixture.document.repository,
+        fixture.document.generation,
+        site.provenance,
+        source.clone(),
+        binding,
+    )
+    .unwrap();
+    assert_unresolved(&fixture);
+    fixture.document.extensions.push(envelope.clone());
+    fixture.validate();
+    let engine = ResolutionEngine::default();
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let cancellation = Cancellation::new();
+    let applied = engine
+        .apply(fixture.document.clone(), context, &cancellation)
+        .unwrap()
+        .document;
+    assert_eq!(
+        applied.occurrences[0].target,
+        OccurrenceTarget::Resolved { symbol: target }
+    );
+    assert_eq!(applied.relations[0].predicate, RelationPredicate::UsesType);
+    let proof = applied
+        .provenance
+        .iter()
+        .find(|record| record.id == applied.occurrences[0].provenance)
+        .unwrap();
+    assert!(
+        proof
+            .derivation_parents
+            .contains(&FactRef::Fact(envelope.id))
+    );
+    assert!(
+        proof
+            .input_sources
+            .iter()
+            .any(|source| source.span() == binding.import)
+    );
+    assert_eq!(
+        applied,
+        engine
+            .apply_document(fixture.document.clone(), context, &cancellation)
+            .unwrap()
+    );
+    assert_eq!(
+        applied,
+        engine
+            .apply_document_bounded(fixture.document.clone(), context, &cancellation)
+            .unwrap()
+            .0
+    );
+    for wrong_span in [
+        SourceSpan::new(source.span().file(), 25, 26).unwrap(),
+        SourceSpan::new(source.span().file(), 16, 25).unwrap(),
+    ] {
+        let wrong_source = SourceRef::new(
+            source.repository(),
+            source.generation(),
+            wrong_span,
+            source.content_hash(),
+            None,
+        );
+        fixture.document.extensions[0] = new_groovy_binding_envelope(
+            fixture.document.repository,
+            fixture.document.generation,
+            envelope.provenance,
+            wrong_source,
+            binding,
+        )
+        .unwrap();
+        assert_unresolved(&fixture);
+    }
+    fixture.document.extensions[0] = new_groovy_binding_envelope(
+        fixture.document.repository,
+        fixture.document.generation,
+        envelope.provenance,
+        source,
+        GroovyImportedType {
+            target: content_hash(b"missing.Widget"),
+            ..binding
+        },
+    )
+    .unwrap();
+    assert_unresolved(&fixture);
+}
+
+#[test]
 fn groovy_imports_ignore_presentation_names_and_refuse_duplicate_declarations() {
     let (mut fixture, target) = fixture();
     let declaration = fixture.document.files[1].id;

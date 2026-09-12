@@ -35,9 +35,10 @@
 [(local_variable_declaration) (multi_assignment_declaration)] @scope
 (for_in_statement value: (_) @expression)
 [(closure) (gstring_closure)] @scope @declaration @signature
-(import_declaration) @import
+(import_declaration) @import @scope
 (import_declaration name: (qualified_name) @reference)
 (import_declaration alias: (identifier) @declaration @definition)
+[(superclass) (super_interfaces) (extends_interfaces)] @expression
 (annotation name: (qualified_name) @reference)
 (method_invocation) @call
 [(identifier) (type_identifier)] @reference

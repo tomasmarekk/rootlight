@@ -1,12 +1,13 @@
-//! Resolves authored Groovy value and type parameters from audited lexical captures.
+//! Resolves authored Groovy values, local types and explicit import selections.
 //! Value visibility excludes initializers and noncapturing method/type boundaries;
 //! type parameters use a separate namespace and respect static owner boundaries.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact, SyntaxFactKind};
 use rootlight_cancel::Cancellation;
-use rootlight_ids::SymbolId;
+use rootlight_ids::{SymbolId, content_hash};
+use rootlight_ir::GroovyImportedType;
 
 struct Binding {
     visible_from: u64,
@@ -18,6 +19,10 @@ pub(super) struct GroovyBindings<'a> {
     iterable_ends: BTreeMap<u64, u64>,
     bindings: BTreeMap<(u64, &'a str), Binding>,
     type_bindings: BTreeMap<(u64, &'a str), Option<SymbolId>>,
+    local_types: BTreeMap<(u64, &'a str), Option<SymbolId>>,
+    type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
+    inherited_scopes: BTreeSet<u64>,
+    imports: BTreeMap<String, Option<GroovyImportedType>>,
 }
 
 impl<'a> GroovyBindings<'a> {
@@ -37,6 +42,10 @@ impl<'a> GroovyBindings<'a> {
             iterable_ends: BTreeMap::new(),
             bindings: BTreeMap::new(),
             type_bindings: BTreeMap::new(),
+            local_types: BTreeMap::new(),
+            type_names: BTreeMap::new(),
+            inherited_scopes: BTreeSet::new(),
+            imports: BTreeMap::new(),
         };
         cancellation.check()?;
         for fact in facts {
@@ -109,7 +118,211 @@ impl<'a> GroovyBindings<'a> {
                 })
                 .or_insert(binding);
         }
+        result.collect_type_context(source, symbols, maximum_name_bytes, cancellation)?;
         Ok(result)
+    }
+
+    fn collect_type_context(
+        &mut self,
+        source: &'a [u8],
+        symbols: &HashMap<u64, SymbolId>,
+        maximum_name_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        let mut aliases = BTreeMap::new();
+        for fact in self.facts.values().copied() {
+            cancellation.check()?;
+            match fact.syntax_kind().as_str() {
+                "groovy.import_alias.definition" => {
+                    if let Some(owner) = self.import_owner(fact, cancellation)? {
+                        let name = self.source_name(fact, source)?;
+                        aliases
+                            .entry(owner)
+                            .and_modify(|prior| *prior = None)
+                            .or_insert(Some(name));
+                    }
+                }
+                "groovy.inheritance.expression" => {
+                    if let Some(owner) = self.type_context(fact.parent(), cancellation)? {
+                        self.inherited_scopes.insert(owner);
+                    }
+                }
+                "groovy.identifier.definition" => {
+                    let Some(declaration) = fact.parent().map(|id| self.fact(id)).transpose()?
+                    else {
+                        continue;
+                    };
+                    if !is_type_declaration(declaration) {
+                        continue;
+                    }
+                    if let Some(owner) = self.type_context(declaration.parent(), cancellation)? {
+                        let name = self.source_name(fact, source)?;
+                        if name.len() <= maximum_name_bytes {
+                            self.type_names.insert(
+                                declaration.local_id(),
+                                (name, symbols.get(&fact.local_id()).copied()),
+                            );
+                            self.local_types
+                                .entry((owner, name))
+                                .and_modify(|prior| *prior = None)
+                                .or_insert_with(|| symbols.get(&fact.local_id()).copied());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for fact in self.facts.values().copied() {
+            cancellation.check()?;
+            if fact.syntax_kind().as_str() != "groovy.type_import.reference" {
+                continue;
+            }
+            let Some(owner) = self.import_owner(fact, cancellation)? else {
+                continue;
+            };
+            let text = self.source_name(fact, source)?;
+            let Some(target) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+                "groovy",
+                fact,
+                text,
+                maximum_name_bytes,
+            ) else {
+                continue;
+            };
+            let name = match aliases.get(&owner) {
+                Some(Some(alias)) => *alias,
+                Some(None) => continue,
+                None => target.rsplit('.').next().ok_or_else(invalid_capture)?,
+            };
+            if name.len() > maximum_name_bytes {
+                continue;
+            }
+            let binding = GroovyImportedType {
+                import: fact.span(),
+                target: content_hash(target.as_bytes()),
+            };
+            self.imports
+                .entry(name.to_owned())
+                .and_modify(|prior| *prior = None)
+                .or_insert(Some(binding));
+        }
+        Ok(())
+    }
+
+    fn source_name(&self, fact: &SyntaxFact, source: &'a [u8]) -> Result<&'a str, AdapterError> {
+        let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
+        std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
+            .map_err(|_| invalid_capture())
+    }
+
+    fn import_owner(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        let mut parent = fact.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { return Ok(None) };
+            let owner = self.fact(id)?;
+            if owner.syntax_kind().as_str() == "groovy.import.scope" {
+                return Ok(Some(id));
+            }
+            parent = owner.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn type_context(
+        &self,
+        mut parent: Option<u64>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { return Ok(None) };
+            let owner = self.fact(id)?;
+            if is_type_declaration(owner) || owner.syntax_kind().as_str() == "groovy.file.module" {
+                return Ok(Some(id));
+            }
+            parent = owner.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    /// Returns a native import selection only after all lexical shadow checks.
+    ///
+    /// # Errors
+    /// Returns cancellation or malformed capture ancestry. Unresolved inheritance
+    /// is a blocker because an inherited nested type precedes an explicit import.
+    pub(super) fn imported_type(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<GroovyImportedType>, AdapterError> {
+        cancellation.check()?;
+        let Some(binding) = self.imports.get(name).copied().flatten() else {
+            return Ok(None);
+        };
+        if fact.syntax_kind().as_str() != "groovy.type_identifier.reference"
+            || self.type_parameter(fact, name, cancellation)?.is_some()
+            || self.local_type(fact, name, cancellation)?.is_some()
+        {
+            return Ok(None);
+        }
+        Ok(Some(binding))
+    }
+
+    fn local_type(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
+        let mut parent = reference.parent();
+        let mut owners = Vec::new();
+        let mut module = None;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else {
+                if let Some(&current) = owners.first() {
+                    if let Some(&(current_name, target)) = self.type_names.get(&current)
+                        && current_name == name
+                    {
+                        return Ok(Some(target));
+                    }
+                    if let Some(target) = self.local_types.get(&(current, name)) {
+                        return Ok(Some(*target));
+                    }
+                    if self.inherited_scopes.contains(&current) {
+                        return Ok(Some(None));
+                    }
+                }
+                // Groovy checks the current type's children first, then enclosing
+                // types from outermost to innermost (ResolveVisitor.resolveNestedClass).
+                for &owner in owners.iter().skip(1).rev() {
+                    cancellation.check()?;
+                    if let Some(target) = self.local_types.get(&(owner, name)) {
+                        return Ok(Some(*target));
+                    }
+                    if self.inherited_scopes.contains(&owner) {
+                        return Ok(Some(None));
+                    }
+                }
+                return Ok(module.and_then(|module| self.local_types.get(&(module, name)).copied()));
+            };
+            let owner = self.fact(id)?;
+            if is_type_declaration(owner) {
+                owners.push(id);
+            }
+            if owner.syntax_kind().as_str() == "groovy.file.module" {
+                module = Some(id);
+            }
+            parent = owner.parent();
+        }
+        Err(invalid_capture())
     }
 
     /// Returns only an exact authored lexical target, never a runtime dispatch guess.
@@ -202,6 +415,18 @@ impl<'a> GroovyBindings<'a> {
         name: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<SymbolId>, AdapterError> {
+        if let Some(target) = self.type_parameter(reference, name, cancellation)? {
+            return Ok(target);
+        }
+        Ok(self.local_type(reference, name, cancellation)?.flatten())
+    }
+
+    fn type_parameter(
+        &self,
+        reference: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
         let mut parent = reference.parent();
         for _ in 0..self.facts.len() {
             cancellation.check()?;
@@ -210,7 +435,7 @@ impl<'a> GroovyBindings<'a> {
             };
             let owner = self.fact(id)?;
             if let Some(target) = self.type_bindings.get(&(id, name)) {
-                return Ok(*target);
+                return Ok(Some(*target));
             }
             // Static owners can declare their own generic parameters, but cannot
             // capture those of an enclosing class. Their declaration precedes this scope.
@@ -305,6 +530,17 @@ impl<'a> GroovyBindings<'a> {
     fn fact(&self, id: u64) -> Result<&'a SyntaxFact, AdapterError> {
         self.facts.get(&id).copied().ok_or_else(invalid_capture)
     }
+}
+
+fn is_type_declaration(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "groovy.class.declaration"
+            | "groovy.interface.declaration"
+            | "groovy.trait.declaration"
+            | "groovy.record.declaration"
+            | "groovy.enum.declaration"
+    )
 }
 
 fn is_scope(fact: &SyntaxFact) -> bool {

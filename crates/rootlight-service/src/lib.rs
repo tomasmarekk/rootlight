@@ -27808,13 +27808,98 @@ mod tests {
     }
 
     #[test]
+    fn groovy_imported_type_uses_preserve_aliases_and_generic_shadowing() {
+        use rootlight_ir::{EntityKind, OccurrenceTarget};
+
+        for name in ["Widget", "Selected"] {
+            let fixture = TempDir::new().unwrap();
+            let import = if name == "Widget" {
+                "import sample.Widget".to_owned()
+            } else {
+                format!("import sample.Widget as {name}")
+            };
+            let source = format!(
+                "{import}\nclass Holder {{ {name} item; {name} echo({name} value) {{ value }} }}\nclass Shadow<{name}> {{ {name} local }}\n"
+            );
+            fs::write(fixture.path().join("client.groovy"), &source).unwrap();
+            fs::write(
+                fixture.path().join("definition.groovy"),
+                "package sample\nclass Widget {}\n",
+            )
+            .unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{:?}",
+                document.diagnostics
+            );
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Class && entity.canonical_name == "Widget"
+                })
+                .unwrap();
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::TypeParameter && entity.canonical_name == name
+                })
+                .unwrap();
+            for (suffix, expected) in [
+                ("local", parameter.id),
+                ("item", target.id),
+                ("echo", target.id),
+                ("value", target.id),
+            ] {
+                let start =
+                    u64::try_from(source.find(&format!("{name} {suffix}")).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "groovy.type_identifier.reference"
+                            && site.source.span().start_byte() == start
+                    })
+                    .unwrap();
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, name.as_bytes());
+                assert_eq!(site.source.generation(), receipt.generation);
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: expected },
+                    "{name} {suffix}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn groovy_type_imports_recompute_targets_when_declarations_change() {
         use rootlight_ir::{OccurrenceTarget, RelationPredicate};
 
         let fixture = TempDir::new().unwrap();
         fs::write(
             fixture.path().join("client.groovy"),
-            "import sample.Widget\n",
+            "import sample.Widget\nclass Holder { Widget item }\n",
         )
         .unwrap();
         let definition = "package sample\nclass Widget {}\n";
@@ -27867,6 +27952,31 @@ mod tests {
                 matches!(site.target, OccurrenceTarget::Resolved { .. }),
                 resolved
             );
+            let type_use = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "groovy.type_identifier.reference")
+                .unwrap();
+            assert_eq!(type_use.source.generation(), receipt.generation);
+            assert_eq!(
+                matches!(type_use.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            if resolved {
+                assert_eq!(type_use.target, site.target);
+            }
+            let uses: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::UsesType)
+                .collect();
+            assert_eq!(uses.len(), usize::from(resolved));
+            if let OccurrenceTarget::Resolved { symbol } = type_use.target {
+                assert_eq!(
+                    uses[0].object,
+                    rootlight_ir::RelationEndpoint::Entity(symbol)
+                );
+            }
             let relations: Vec<_> = document
                 .relations
                 .iter()

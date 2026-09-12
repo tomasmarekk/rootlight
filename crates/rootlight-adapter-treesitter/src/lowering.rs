@@ -1713,6 +1713,37 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
+                if let Some(bindings) = &groovy_bindings
+                    && let Some(binding) = bindings.imported_type(fact, text, cancellation)?
+                {
+                    let envelope = rootlight_ir::new_groovy_binding_envelope(
+                        self.full_source.repository(),
+                        self.full_source.generation(),
+                        provenance_id,
+                        occurrence.source.clone(),
+                        binding,
+                    )
+                    .map_err(|_| provider_failure("groovy-import-use-evidence"))?;
+                    occurrence.role = OccurrenceRole::TypeUse;
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    if !insert_optional_extension(
+                        envelope,
+                        &mut extensions,
+                        &mut extension_bytes,
+                        self.request.limits().ir(),
+                    )? {
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "groovy-import-use-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                }
                 if let Some(bindings) = &nix_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
@@ -3613,6 +3644,7 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "groovy.import.scope" => Some((FactDomain::Relations, "unresolved-import-target")),
         "groovy.file.module" => Some((
             FactDomain::Relations,
             "groovy-import-inheritance-and-runtime-dispatch-resolution-unavailable",

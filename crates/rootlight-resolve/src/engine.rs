@@ -558,6 +558,7 @@ impl<'a> CandidateIndex<'a> {
                 &entities,
                 &provenance,
                 coverage_records,
+                extension_records,
                 cancellation,
             )?,
             perl: crate::perl::PerlIndex::build(

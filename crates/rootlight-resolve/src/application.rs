@@ -794,6 +794,21 @@ fn build_provenance(
                 sources.push(source.clone());
             }
         }
+        if let Some(binding) = proof.binding {
+            derivation_parents.push(FactRef::Fact(binding.id));
+            if let Some(source) = &binding.evidence.source {
+                sources.push(source.clone());
+                let selection = rootlight_ir::decode_groovy_binding_envelope(binding)
+                    .map_err(|_| ResolutionError::UnsupportedIdentityRemap)?;
+                sources.push(rootlight_ir::SourceRef::new(
+                    source.repository(),
+                    source.generation(),
+                    selection.import,
+                    source.content_hash(),
+                    None,
+                ));
+            }
+        }
         for coverage in proof.coverage {
             derivation_parents.push(FactRef::Fact(coverage.id));
             if let Some(source) = &coverage.evidence.source {

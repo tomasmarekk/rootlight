@@ -1364,6 +1364,16 @@ fn verify_snapshot_identities(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         match envelope.namespace.as_str() {
+            rootlight_ir::GROOVY_BINDING_NAMESPACE => {
+                rootlight_ir::decode_groovy_binding_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             FILE_IDENTITY_CLAIM_NAMESPACE => {
                 let claim = decode_file_identity_claim_envelope_with_checkpoint(envelope, || {
                     context.check().is_ok()
