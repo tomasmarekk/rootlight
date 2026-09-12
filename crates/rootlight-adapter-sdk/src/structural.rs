@@ -292,6 +292,10 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// case folding and generated fragment identifiers require separate interpretation.
 /// ECMAScript identifiers decode Unicode escapes without Unicode normalization;
 /// other grammar-reviewed names keep the shared borrowed-name contract.
+/// Groovy constant member strings decode their own delimiters and ordered escapes.
+/// Empty, control-bearing, edge-whitespace and quote-prefixed names retain an
+/// injective JSON-quoted identity, including unpaired UTF-16 units. Interpolated
+/// names are unavailable rather than evaluated; source spans retain all quoting.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -304,6 +308,8 @@ pub fn structural_captured_name_for_language<'a>(
     if matches!(language, "javascript" | "typescript") {
         crate::canonical_ecmascript_identifier(text, maximum_bytes)
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
+    } else if language == "groovy" {
+        crate::groovy_names::canonical_groovy_name(text, maximum_bytes)
     } else if language == "scala" {
         let candidate = text.trim();
         if candidate.is_empty() || candidate.len() > maximum_bytes {
@@ -404,6 +410,8 @@ pub fn structural_captured_name_for_fact<'a>(
 /// Nix static keys decode escapes for display, and paths omit trivia while
 /// retaining quoted nonidentifier segments. A dotted single key stays quoted;
 /// ambiguous or expanding display text retains the original written name.
+/// Groovy's quoted exceptional identities use the same readable-string rule;
+/// controls, empty names and unpaired UTF-16 units remain visibly escaped.
 /// Other languages are unchanged. The input must already be a
 /// bounded canonical name from [`structural_captured_name_for_language`]; display
 /// text is no longer than that input and must never replace the durable identity.
@@ -416,7 +424,9 @@ pub fn structural_display_name_for_language<'a>(
         crate::powershell_names::display_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "nix" {
         crate::nix_names::display_path(canonical).unwrap_or(Cow::Borrowed(canonical))
-    } else if matches!(language, "json" | "toml") {
+    } else if matches!(language, "json" | "toml")
+        || (language == "groovy" && canonical.starts_with('"'))
+    {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "yaml" {
         canonical
@@ -689,6 +699,38 @@ mod tests {
         ] {
             assert!(
                 structural_captured_name_for_language("r", source, 128).is_none(),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn groovy_quoted_names_preserve_constant_identity() {
+        for (source, expected) in [
+            ("'with space'", "with space"),
+            ("\"double space\"", "double space"),
+            ("'''triple space'''", "triple space"),
+            ("\"\"\"triple double\"\"\"", "triple double"),
+            ("/slash name/", "slash name"),
+            ("$/dollar name/$", "dollar name"),
+            (r"'uni\u0063ode'", "unicode"),
+            (r"'oct\141l'", "octal"),
+            (r"'space\sname'", "space name"),
+            (r"'quote\'name'", "quote'name"),
+            (r"'slash\\name'", r"slash\name"),
+            (r"'surrogate\uD83D\uDE80'", "surrogate🚀"),
+            (r"'line\nname'", r#""line\u000aname""#),
+            (r"'lone\uD800'", r#""lone\ud800""#),
+            ("''", "\"\""),
+            (r"'${name}'", "${name}"),
+            (r#""dollar\$name""#, "dollar$name"),
+            (r"/literal\n/", r"literal\n"),
+            (r"/uni\u0061/", "unia"),
+            (r"$/uni\u0061/$", "unia"),
+            ("$/literal$$name/$", "literal$name"),
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("groovy", source, 128).as_deref(),
+                Some(expected),
                 "{source}"
             );
         }

@@ -207,3 +207,114 @@ fn groovy_dynamic_receiver_is_not_resolved_by_matching_method_name() {
         gap.detail == "groovy-import-inheritance-and-runtime-dispatch-resolution-unavailable"
     }));
 }
+
+#[test]
+fn groovy_quoted_method_names_keep_decoded_identity_and_exact_written_definitions() {
+    for (written, name) in [
+        ("'with space'", "with space"),
+        ("\"double space\"", "double space"),
+        ("'''triple space'''", "triple space"),
+        ("\"\"\"triple double\"\"\"", "triple double"),
+        ("/slash name/", "slash name"),
+        ("$/dollar name/$", "dollar name"),
+        (r"'uni\u0063ode'", "unicode"),
+        (r"'quote\'name'", "quote'name"),
+        (r"'surrogate\uD83D\uDE80'", "surrogate🚀"),
+        (r"'line\nname'", r#""line\u000aname""#),
+        (r"'lone\uD800'", r#""lone\ud800""#),
+        ("''", "\"\""),
+    ] {
+        let source = format!("class Sample {{ def {written}() {{ 1 }} }}\n");
+        let result = output(&source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{written}: {:?}",
+            doc.diagnostics
+        );
+        let methods: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .collect();
+        assert_eq!(
+            methods.len(),
+            1,
+            "{written}: {:?}; {:?}",
+            doc.entities,
+            doc.skipped_regions
+        );
+        assert_eq!(methods[0].canonical_name, name, "{written}");
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: methods[0].id,
+                        }
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "{written}");
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+        assert_eq!(
+            definitions[0].syntactic_text_hash,
+            content_hash(written.as_bytes())
+        );
+        assert!(
+            !doc.skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "groovy-quoted-name-unavailable")
+        );
+    }
+}
+
+#[test]
+fn groovy_unavailable_method_names_report_exact_gaps_without_inventing_local_owners() {
+    for written in [r#""${name}""#, r#""$name""#, r"'bad\q'"] {
+        let source = format!(
+            "class Sample {{ def {written}(parameter) {{ def localValue = 1 }}\ndef valid() {{ 2 }} }}\n"
+        );
+        let result = output(&source);
+        let doc = result.document();
+        assert!(
+            doc.diagnostics.is_empty(),
+            "{written}: {:?}",
+            doc.diagnostics
+        );
+        let methods: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .map(|entity| entity.canonical_name.as_str())
+            .collect();
+        assert_eq!(methods, ["valid"], "{written}");
+        assert!(
+            !doc.entities
+                .iter()
+                .any(|entity| matches!(entity.canonical_name.as_str(), "parameter" | "localValue"))
+        );
+        let gaps: Vec<_> = doc
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "groovy-quoted-name-unavailable")
+            .collect();
+        assert_eq!(gaps.len(), 1, "{written}: {:?}", doc.skipped_regions);
+        let span = gaps[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(written)
+        );
+    }
+}

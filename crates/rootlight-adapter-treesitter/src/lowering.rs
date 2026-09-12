@@ -1426,6 +1426,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
+            if entity_plan.groovy_name_gaps.contains(&fact.local_id()) {
+                let region = skipped_region(
+                    self.full_source,
+                    fact.span(),
+                    FactDomain::Entities,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    "groovy-quoted-name-unavailable",
+                    provenance_id,
+                )?;
+                skipped.insert(region.id, region);
+            }
             if nix_paths::is_segment(fact)
                 && (entity_plan.nix_path_gaps.contains(&fact.local_id())
                     || entity_plan
@@ -2178,6 +2189,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut nearest_entity_ancestor = HashMap::new();
         let mut nearest_scope_ancestor = HashMap::<u64, Option<ScopeContext>>::new();
         let mut unsupported_scope_entities = BTreeSet::new();
+        let mut groovy_name_gaps = BTreeSet::new();
         let mut json_positions = HashMap::<Option<u64>, u64>::new();
         let mut json_members = HashMap::<(Option<u64>, String), u64>::new();
         let mut markup_members = HashMap::<(Option<u64>, EntityKind, String), u64>::new();
@@ -2525,6 +2537,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     )
                 };
                 let Some(name) = name else {
+                    if definition.syntax_kind().as_str() == "groovy.quoted_identifier.definition" {
+                        groovy_name_gaps.insert(definition.local_id());
+                        parent_scope
+                            .get_or_insert_with(ScopeContext::default)
+                            .unsupported_semantic_identity = true;
+                    }
                     nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                     nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                     continue;
@@ -2938,6 +2956,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             matlab,
             drafts,
             nix_path_gaps,
+            groovy_name_gaps,
             nearest_entity_ancestor,
             unsupported_scope_entities,
             duplicate_data_keys,
@@ -3081,6 +3100,7 @@ struct EntityPlan {
     perl: perl::Plan,
     matlab: matlab::Plan,
     nix_path_gaps: BTreeSet<u64>,
+    groovy_name_gaps: BTreeSet<u64>,
     drafts: Vec<EntityDraft>,
     nearest_entity_ancestor: HashMap<u64, Option<u64>>,
     unsupported_scope_entities: BTreeSet<u64>,

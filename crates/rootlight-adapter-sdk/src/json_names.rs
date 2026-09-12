@@ -138,7 +138,7 @@ pub(crate) fn append(output: &mut String, text: &str, maximum_bytes: usize) -> O
     Some(())
 }
 
-/// Uses one injective quoted scalar spelling for JSON, TOML and YAML data keys.
+/// Uses one injective quoted scalar spelling across source-name decoders.
 pub(crate) fn append_character(
     output: &mut String,
     character: char,
@@ -160,7 +160,12 @@ pub(crate) fn append_character(
     }
 }
 
-fn append_unit_escape(output: &mut String, unit: u16, maximum_bytes: usize) -> Option<()> {
+/// Preserves one UTF-16 unit as a bounded canonical escape, including lone surrogates.
+pub(crate) fn append_unit_escape(
+    output: &mut String,
+    unit: u16,
+    maximum_bytes: usize,
+) -> Option<()> {
     append(output, "\\u", maximum_bytes)?;
     for shift in [12, 8, 4, 0] {
         let digit = char::from_digit(u32::from((unit >> shift) & 0xf), 16)?;

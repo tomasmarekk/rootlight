@@ -10,6 +10,7 @@ mod dart_names;
 mod descriptor;
 mod ecmascript_names;
 mod error;
+mod groovy_names;
 mod ir_accounting;
 mod json_names;
 mod limits;

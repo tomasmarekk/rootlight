@@ -27551,6 +27551,76 @@ mod tests {
     }
 
     #[test]
+    fn groovy_quoted_methods_publish_decoded_names_and_exact_sources() {
+        let fixture = TempDir::new().unwrap();
+        let cases = [
+            ("'with space'", "with space"),
+            ("\"double space\"", "double space"),
+            ("'''triple space'''", "triple space"),
+            ("\"\"\"triple double\"\"\"", "triple double"),
+            ("/slash name/", "slash name"),
+            ("$/dollar name/$", "dollar name"),
+            (r"'uni\u0063ode'", "unicode"),
+            (r"'quote\'name'", "quote'name"),
+            (r"'line\nname'", r#""line\u000aname""#),
+            (r"'lone\uD800'", r#""lone\ud800""#),
+            ("''", "\"\""),
+        ];
+        let methods: Vec<_> = cases
+            .iter()
+            .map(|(written, _)| format!("def {written}() {{ 1 }}"))
+            .collect();
+        let source = format!("class Sample {{\n{}\n}}\n", methods.join("\n"));
+        fs::write(fixture.path().join("methods.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        for ((_, canonical), written_method) in cases.iter().zip(methods) {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    (*canonical).to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .unwrap_or_else(|| panic!("{canonical}: {:?}", located.data));
+            let explained = service
+                .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity.kind, rootlight_ir::EntityKind::Method);
+            assert_eq!(explained.data.entity.canonical_name, *canonical);
+            let reference = explained.data.entity.evidence.source.unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                written_method.as_bytes(),
+                "{canonical}"
+            );
+        }
+    }
+
+    #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";
