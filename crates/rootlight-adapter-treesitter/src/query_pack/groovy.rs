@@ -2,7 +2,75 @@
 //! Declaration ownership follows native fields, never descendant-name heuristics.
 
 use super::StructuralRole;
+use rootlight_adapter_sdk::AdapterError;
+use rootlight_cancel::Cancellation;
+use std::collections::HashMap;
 use tree_sitter::Node;
+
+/// Per-scan member classification shares a declaration header across all its bindings.
+#[derive(Default)]
+pub(super) struct MemberKinds {
+    declarations: HashMap<usize, &'static str>,
+}
+
+impl MemberKinds {
+    /// Classifies a native field declarator without repeating annotation/modifier scans.
+    ///
+    /// # Errors
+    /// Returns cancellation, allocation, or invalid native-owner errors.
+    pub(super) fn kind(
+        &mut self,
+        node: Node<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<&'static str, AdapterError> {
+        cancellation.check()?;
+        let declaration = node
+            .parent()
+            .filter(|parent| parent.kind() == "field_declaration")
+            .ok_or_else(|| super::query_failure("query-groovy-field-owner"))?;
+        if let Some(kind) = self.declarations.get(&declaration.id()) {
+            return Ok(*kind);
+        }
+        let kind = member_kind(declaration, cancellation)?;
+        self.declarations
+            .try_reserve(1)
+            .map_err(|_| super::query_failure("query-groovy-member-allocation"))?;
+        self.declarations.insert(declaration.id(), kind);
+        Ok(kind)
+    }
+}
+
+fn member_kind(
+    declaration: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    if declaration
+        .parent()
+        .and_then(|body| body.parent())
+        .is_some_and(|owner| {
+            matches!(
+                owner.kind(),
+                "interface_declaration" | "annotation_type_declaration"
+            )
+        })
+    {
+        return Ok("groovy.field");
+    }
+    let mut cursor = declaration.walk();
+    for (index, child) in declaration.children(&mut cursor).enumerate() {
+        if index % 64 == 0 {
+            cancellation.check()?;
+        }
+        match child.kind() {
+            "public" | "protected" | "private" => return Ok("groovy.field"),
+            "variable_declarator" => break,
+            _ => {}
+        }
+    }
+    // Static/final modifiers do not suppress Groovy's implicit property accessors.
+    // Only authored declarations are emitted; generated accessors have no source span.
+    Ok("groovy.property")
+}
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
     if role == StructuralRole::Signature {
@@ -44,4 +112,55 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "string_literal" => "groovy.string",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_headers_are_shared_and_cancellable_without_text_keyword_matching() {
+        let source = b"class Holder { /* private */ @Mark(\"public\") String first, second }";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&dekobon_tree_sitter_groovy::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let body = tree
+            .root_node()
+            .named_child(0)
+            .unwrap()
+            .child_by_field_name("body")
+            .unwrap();
+        let mut cursor = body.walk();
+        let declaration = body
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "field_declaration")
+            .unwrap();
+        let mut cursor = declaration.walk();
+        let bindings: Vec<_> = declaration
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "variable_declarator")
+            .collect();
+        assert_eq!(bindings.len(), 2);
+        let cancellation = Cancellation::new();
+        let mut cache = MemberKinds::default();
+        for _ in 0..128 {
+            for binding in &bindings {
+                assert_eq!(
+                    cache.kind(*binding, &cancellation).unwrap(),
+                    "groovy.property"
+                );
+            }
+        }
+        assert_eq!(cache.declarations.len(), 1);
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(cache.kind(bindings[0], &cancellation).is_err());
+        assert!(
+            MemberKinds::default()
+                .kind(bindings[0], &cancellation)
+                .is_err()
+        );
+    }
 }

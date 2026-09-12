@@ -27489,7 +27489,7 @@ mod tests {
     fn groovy_declarations_publish_queryable_symbols_and_exact_sources() {
         for path in ["catalog.groovy", "build.gradle"] {
             let fixture = TempDir::new().unwrap();
-            let source = "class Meter { private int value; String read() { 'value' } }\ndef render() { 'output' }\n";
+            let source = "class Meter { String title; private int value; String read() { 'value' } }\ndef render() { 'output' }\n";
             fs::write(fixture.path().join(path), source).unwrap();
             let mut service = FirstSliceService::new(2).unwrap();
             let receipt = service
@@ -27513,7 +27513,13 @@ mod tests {
                 gap.detail
                     == "groovy-import-inheritance-and-runtime-dispatch-resolution-unavailable"
             }));
-            for name in ["Meter", "value", "read", "render"] {
+            for (name, kind) in [
+                ("Meter", rootlight_ir::EntityKind::Class),
+                ("title", rootlight_ir::EntityKind::Property),
+                ("value", rootlight_ir::EntityKind::Field),
+                ("read", rootlight_ir::EntityKind::Method),
+                ("render", rootlight_ir::EntityKind::Function),
+            ] {
                 let located = service
                     .code_locate(
                         receipt.generation,
@@ -27534,6 +27540,7 @@ mod tests {
                     .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
                     .unwrap();
                 assert_eq!(explained.data.entity.canonical_name, name);
+                assert_eq!(explained.data.entity.kind, kind);
                 assert_eq!(explained.data.entity.language, "groovy");
                 assert_eq!(
                     explained.data.entity.evidence.source.unwrap().generation(),

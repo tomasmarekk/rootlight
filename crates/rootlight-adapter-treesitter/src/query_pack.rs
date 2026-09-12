@@ -583,6 +583,7 @@ impl QueryPack {
         let mut capture_count = 0usize;
         let mut limit = None;
         let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
+        let mut groovy_members = groovy::MemberKinds::default();
 
         'query: while let Some(query_match) = matches.next() {
             if match_count >= limits.matches {
@@ -713,6 +714,9 @@ impl QueryPack {
                     input.source,
                     input.cancellation,
                 )?;
+                if input.family == GrammarFamily::Groovy && candidate.syntax == "groovy.field" {
+                    candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
+                }
                 if input.family == GrammarFamily::Markdown
                     && role == StructuralRole::Declaration
                     && matches!(capture.node.kind(), "atx_heading" | "setext_heading")

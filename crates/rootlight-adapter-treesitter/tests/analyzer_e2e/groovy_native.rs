@@ -7,7 +7,7 @@ pub(super) const GROOVY: LanguageCase = LanguageCase {
     name: "groovy",
     path: "src/catalog.groovy",
     frontend: "dekobon-tree-sitter-groovy-0.2.0",
-    source: "class Meter { private int value; String read() { 'x' } }\nString render() { 'y' }\n",
+    source: "class Meter { String title; private int value; String read() { 'x' } }\nString render() { 'y' }\n",
     generated: false,
     body_before: "'x'",
     body_after: "'updated'",
@@ -33,6 +33,7 @@ fn groovy_declarations_keep_exact_definition_sources() {
     assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
     for (name, kind) in [
         ("Meter", EntityKind::Class),
+        ("title", EntityKind::Property),
         ("value", EntityKind::Field),
         ("read", EntityKind::Method),
         ("render", EntityKind::Function),
@@ -117,6 +118,68 @@ fn groovy_body_edits_preserve_declaration_identity() {
             .collect::<BTreeMap<_, _>>()
     };
     assert_eq!(identities(&before), identities(&after));
+}
+
+#[test]
+fn groovy_properties_and_explicit_fields_keep_exact_authored_identity() {
+    let source = "class Ledger { String title; private int secret; protected int guarded; public int exposed; static int count; final int version = 1; String first, second; @Deprecated String legacy }\ntrait Named { String label; private int slot }\ninterface Limits { int MAX = 10 }\n";
+    let result = output(source);
+    let doc = result.document();
+    assert!(doc.diagnostics.is_empty(), "{:?}", doc.diagnostics);
+    for (name, kind, owner) in [
+        ("title", EntityKind::Property, "Ledger"),
+        ("secret", EntityKind::Field, "Ledger"),
+        ("guarded", EntityKind::Field, "Ledger"),
+        ("exposed", EntityKind::Field, "Ledger"),
+        ("count", EntityKind::Property, "Ledger"),
+        ("version", EntityKind::Property, "Ledger"),
+        ("first", EntityKind::Property, "Ledger"),
+        ("second", EntityKind::Property, "Ledger"),
+        ("legacy", EntityKind::Property, "Ledger"),
+        ("label", EntityKind::Property, "Named"),
+        ("slot", EntityKind::Field, "Named"),
+        ("MAX", EntityKind::Field, "Limits"),
+    ] {
+        let entities: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        assert_eq!(entities.len(), 1, "{name}: {entities:?}");
+        let entity = entities[0];
+        assert_eq!(entity.kind, kind, "{name}");
+        let container = doc
+            .entities
+            .iter()
+            .find(|candidate| {
+                Some(rootlight_ir::ContainerRef::Entity(candidate.id)) == entity.container
+            })
+            .unwrap();
+        assert_eq!(container.canonical_name, owner, "{name}");
+        let definitions: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "{name}");
+        let span = definitions[0].source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+    assert!(
+        !doc.entities
+            .iter()
+            .any(|entity| matches!(entity.kind, EntityKind::Method | EntityKind::Function)),
+        "implicit accessors have no authored declarations"
+    );
 }
 
 #[test]
