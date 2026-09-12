@@ -26,6 +26,195 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+fn assert_lexical_reads(source: &str, name: &str, expected: &[Option<usize>]) {
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let mut reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.syntax_kind == "groovy.identifier.reference"
+                && source.get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(name)
+        })
+        .collect();
+    reads.sort_by_key(|read| read.source.span().start_byte());
+    let actual: Vec<_> = reads
+        .iter()
+        .map(|read| match read.target {
+            OccurrenceTarget::Resolved { symbol } => {
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target == OccurrenceTarget::Resolved { symbol }
+                    })
+                    .unwrap();
+                assert!(
+                    document.relations.iter().any(|relation| {
+                        relation.predicate == RelationPredicate::RefersTo
+                            && relation.subject == RelationEndpoint::Occurrence(read.id)
+                            && relation.object == RelationEndpoint::Entity(symbol)
+                            && relation.evidence.source.as_ref() == Some(&read.source)
+                    }),
+                    "missing lexical relation for {read:?}"
+                );
+                Some(usize::try_from(definition.source.span().start_byte()).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actual, expected, "{name} in {source}\n{reads:?}");
+}
+
+#[test]
+fn groovy_lexical_reads_respect_initializers_and_closure_parameters() {
+    let source = "def examine(input) { sink(value); def value = value; sink(value); def action = { argument -> sink(value, input, argument) }; def implicit = { sink(it, value) }; def explicit = { -> sink(it, value) } }\n";
+    let value = Some(source.find("value =").unwrap());
+    assert_lexical_reads(source, "value", &[None, None, value, value, value, value]);
+    assert_lexical_reads(source, "input", &[Some(source.find("input").unwrap())]);
+    assert_lexical_reads(
+        source,
+        "argument",
+        &[Some(source.find("argument").unwrap())],
+    );
+    assert_lexical_reads(source, "it", &[None, None]);
+}
+
+#[test]
+fn groovy_lexical_reads_keep_control_bindings_inside_their_visibility() {
+    let source = "def examine(items) { for (item in items) { sink(item) }; sink(item); for (int index = 0; index < 2; index++) { sink(index) }; sink(index); try (Reader handle = open(); Reader second = wrap(handle)) { sink(handle, second) } catch (IOException problem) { sink(handle, second, problem) } finally { sink(handle, second, problem) } }\n";
+    assert_lexical_reads(source, "items", &[Some(source.find("items").unwrap())]);
+    assert_lexical_reads(
+        source,
+        "item",
+        &[Some(source.find("item in").unwrap()), None],
+    );
+    let index = Some(source.find("index =").unwrap());
+    assert_lexical_reads(source, "index", &[index, index, index, None]);
+    let handle = Some(source.find("handle =").unwrap());
+    assert_lexical_reads(source, "handle", &[handle, handle, None, None]);
+    assert_lexical_reads(
+        source,
+        "second",
+        &[Some(source.find("second =").unwrap()), None, None],
+    );
+    assert_lexical_reads(
+        source,
+        "problem",
+        &[Some(source.find("problem)").unwrap()), None],
+    );
+    let source = "def loop(items) { for (item in items) def local = local; sink(local) }\n";
+    assert_lexical_reads(source, "local", &[None, None]);
+}
+
+#[test]
+fn groovy_lexical_reads_exclude_member_names_and_literal_keys() {
+    let source = "def examine(value, receiver) { sink([value: value, (value): value], receiver.value, receiver.value(value), receiver?.value, receiver*.value, receiver.@value, receiver.&value, receiver::value) }\n";
+    let value = Some(source.find("value,").unwrap());
+    assert_lexical_reads(source, "value", &[value, value, value, value]);
+    let receiver = Some(source.find("receiver)").unwrap());
+    assert_lexical_reads(source, "receiver", &[receiver; 7]);
+    let command = "def commands(value, then) { send value then value }\n";
+    assert_lexical_reads(
+        command,
+        "value",
+        &[Some(command.find("value,").unwrap()); 2],
+    );
+    assert_lexical_reads(command, "then", &[]);
+}
+
+#[test]
+fn groovy_lexical_reads_observe_binding_order_and_noncapturing_methods() {
+    let source = "def outer = 1\ndef examine(input) { def recursive = { sink(recursive) }; def first = 1, second = first; def (left, right) = [left, right]; def captured = { sink(later) }; def later = 2; sink(outer); def explicit = { -> sink(input) }; sink(second, left, right) }\n";
+    assert_lexical_reads(source, "recursive", &[None]);
+    assert_lexical_reads(source, "first", &[Some(source.find("first =").unwrap())]);
+    assert_lexical_reads(source, "left", &[None, Some(source.find("left,").unwrap())]);
+    assert_lexical_reads(
+        source,
+        "right",
+        &[None, Some(source.find("right)").unwrap())],
+    );
+    assert_lexical_reads(source, "later", &[None]);
+    assert_lexical_reads(source, "outer", &[None]);
+    assert_lexical_reads(source, "input", &[Some(source.find("input)").unwrap())]);
+}
+
+#[test]
+fn groovy_lexical_reads_do_not_confuse_siblings_or_generated_parameters() {
+    let source = "def examine(it, items) { for (item in items) { sink(item) }; for (item in items) { sink(item) }; def implicit = { sink(it) }; def explicit = { -> sink(it) }; for (value in value) sink(value) }\n";
+    let mut items = source
+        .match_indices("item in")
+        .map(|(start, _)| Some(start));
+    assert_lexical_reads(
+        source,
+        "item",
+        &[items.next().unwrap(), items.next().unwrap()],
+    );
+    assert_lexical_reads(source, "it", &[None, Some(source.find("it,").unwrap())]);
+    assert_lexical_reads(
+        source,
+        "value",
+        &[None, Some(source.find("value in").unwrap())],
+    );
+}
+
+#[test]
+fn groovy_lazy_interpolation_keeps_explicit_parameter_visibility() {
+    let source =
+        "def examine(it) { sink(\"${-> it}\", \"${writer -> writer.append(it)}\", \"${it}\") }\n";
+    assert_lexical_reads(source, "it", &[Some(source.find("it)").unwrap()); 3]);
+    assert_lexical_reads(source, "writer", &[Some(source.find("writer ->").unwrap())]);
+    let source = "def dollars(value, $value) { sink(\"$value\", \"$value.name\", \"${value}\") }\n";
+    assert_lexical_reads(source, "value", &[Some(source.find("value,").unwrap()); 3]);
+    assert_lexical_reads(source, "$value", &[]);
+}
+
+#[test]
+fn groovy_bounded_capture_plans_do_not_guess_lexical_bindings() {
+    let source = format!(
+        "def examine(value) {{ sink({}) }}",
+        vec!["value"; 80].join(", ")
+    );
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(GROOVY, source.as_bytes());
+    let budget = limits_with_syntax_records(64);
+    let result = analyze(
+        &analyzer(&provider, GROOVY),
+        &request(&fixture.snapshot, &fixture.source, GROOVY, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    let reads: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Reference)
+        .collect();
+    assert!(!reads.is_empty());
+    assert!(
+        reads
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+    );
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+}
+
 #[test]
 fn groovy_control_bindings_keep_distinct_names_sources_and_owners() {
     for (body, name, kind, count) in [

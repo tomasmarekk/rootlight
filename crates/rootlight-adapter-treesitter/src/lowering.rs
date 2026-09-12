@@ -1263,6 +1263,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let groovy_bindings = if self.parse_output.report().coverage().status()
+            == CoverageStatus::Complete
+            && self
+                .parse_output
+                .facts()
+                .iter()
+                .any(|fact| fact.syntax_kind().as_str() == "groovy.file.module")
+        {
+            let symbols = materialized
+                .values()
+                .filter_map(|entity| {
+                    entity
+                        .definition_local_id
+                        .map(|definition| (definition, entity.record.id))
+                })
+                .collect();
+            Some(crate::groovy_bindings::GroovyBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let nix_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
@@ -1669,6 +1696,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     skipped.insert(region.id, region);
                 }
                 if let Some(bindings) = &lua_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &groovy_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };

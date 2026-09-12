@@ -27771,6 +27771,96 @@ mod tests {
     }
 
     #[test]
+    fn groovy_lexical_relationships_publish_exact_generation_bound_sources() {
+        let fixture = TempDir::new().unwrap();
+        let source =
+            "def examine(input) { def value = input; sink(value); receiver.value; value }\n";
+        fs::write(fixture.path().join("bindings.groovy"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let symbols: BTreeMap<_, _> = generation
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.canonical_name.as_str(), entity.id))
+            .collect();
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                // The initializer is owned by its local declaration, not by the method.
+                BTreeSet::from([symbols["examine"], symbols["value"]]),
+                vec![RelationFamily::References],
+                Some(RelationDirection::Outbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let edges: Vec<_> = relationships
+            .data
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .collect();
+        assert_eq!(edges.len(), 3);
+        assert!(
+            !relationships.data.exact,
+            "lexical bindings are not complete runtime dispatch"
+        );
+        let mut spans = Vec::new();
+        for edge in edges {
+            assert!([symbols["input"], symbols["value"]].contains(&edge.symbol));
+            let name = if edge.symbol == symbols["input"] {
+                "input"
+            } else {
+                "value"
+            };
+            for reference in &edge.source_refs {
+                assert_eq!(reference.generation(), receipt.generation);
+                spans.push(usize::try_from(reference.span().start_byte()).unwrap());
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, name.as_bytes());
+            }
+        }
+        spans.sort_unstable();
+        assert_eq!(
+            spans,
+            [
+                source.find("= input").unwrap() + 2,
+                source.find("sink(value)").unwrap() + 5,
+                source.rfind("value }").unwrap()
+            ]
+        );
+        let member =
+            u64::try_from(source.find("receiver.value").unwrap() + "receiver.".len()).unwrap();
+        assert!(!generation.document().occurrences.iter().any(|occurrence| {
+            occurrence.source.span().start_byte() == member
+                && matches!(
+                    occurrence.target,
+                    rootlight_ir::OccurrenceTarget::Resolved { .. }
+                )
+        }));
+    }
+
+    #[test]
     fn groovy_control_and_type_bindings_publish_exact_symbol_sources() {
         use rootlight_ir::EntityKind;
 

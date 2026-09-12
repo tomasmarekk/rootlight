@@ -374,7 +374,7 @@ impl QueryPack {
             if family == GrammarFamily::Nix {
                 expected.extend(["definition_part", "expression"]);
             }
-            if family == GrammarFamily::Perl {
+            if matches!(family, GrammarFamily::Perl | GrammarFamily::Groovy) {
                 expected.push("expression");
             }
             if supports_terminal_call_name(family) {
@@ -618,6 +618,12 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Groovy
+                    && role == StructuralRole::Reference
+                    && groovy::nonlexical_identifier(capture.node)
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Perl
                     && !perl::retain_capture(capture.node, role, input.source, input.cancellation)?
                 {
@@ -721,6 +727,14 @@ impl QueryPack {
                 )?;
                 if input.family == GrammarFamily::Groovy && candidate.syntax == "groovy.field" {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
+                }
+                if input.family == GrammarFamily::Groovy {
+                    groovy::adjust_candidate(
+                        capture.node,
+                        &mut candidate,
+                        input.source,
+                        input.cancellation,
+                    )?;
                 }
                 if input.family == GrammarFamily::Groovy
                     && capture.node.kind() == "package_declaration"
@@ -2178,7 +2192,7 @@ mod tests {
                 if family == GrammarFamily::Nix {
                     expected.extend(["definition_part", "expression"]);
                 }
-                if family == GrammarFamily::Perl {
+                if matches!(family, GrammarFamily::Perl | GrammarFamily::Groovy) {
                     expected.push("expression");
                 }
                 if supports_terminal_call_name(family) {

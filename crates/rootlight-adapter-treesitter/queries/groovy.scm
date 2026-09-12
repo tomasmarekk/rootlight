@@ -1,7 +1,7 @@
 ; Authored Groovy declarations with exact names and native lexical owners.
 ; Runtime metaprogramming and receiver dispatch are not inferred from spelling.
 
-(source_file) @root @module
+(source_file) @root @module @scope
 (package_declaration name: (qualified_name) @definition) @scope @module
 
 [
@@ -26,8 +26,11 @@
 (for_in_statement variable: (identifier) @declaration @definition)
 
 [(method_declaration) (constructor_declaration)] @signature
+[(method_declaration) (constructor_declaration)] @scope
 [(block) (class_body) (enum_body)] @scope
 [(for_statement) (for_in_statement) (catch_clause) (try_statement)] @scope
+[(local_variable_declaration) (multi_assignment_declaration)] @scope
+(for_in_statement value: (_) @expression)
 [(closure) (gstring_closure)] @scope @declaration @signature
 (import_declaration) @import
 (method_invocation) @call

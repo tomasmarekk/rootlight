@@ -105,6 +105,13 @@ fn member_kind(
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if role == StructuralRole::Expression
+        && node.parent().is_some_and(|parent| {
+            parent.kind() == "for_in_statement" && parent.child_by_field_name("value") == Some(node)
+        })
+    {
+        return Some("groovy.iterable");
+    }
     if role == StructuralRole::Signature {
         return Some("groovy.parameters");
     }
@@ -149,8 +156,12 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "quoted_identifier" => "groovy.quoted_identifier",
         "import_declaration" => "groovy.import",
         "method_invocation" => "groovy.call",
-        "block" | "class_body" | "enum_body" => "groovy.block",
-        "for_statement" | "for_in_statement" => "groovy.for",
+        "block" => "groovy.block",
+        "class_body" | "enum_body" => "groovy.type_body",
+        "for_statement" => "groovy.for",
+        "for_in_statement" => "groovy.enhanced_for",
+        "local_variable_declaration" => "groovy.local_binding",
+        "multi_assignment_declaration" => "groovy.destructuring",
         "catch_clause" => "groovy.catch",
         "try_statement" => "groovy.try",
         "closure" | "gstring_closure" if role == StructuralRole::Declaration => {
@@ -162,6 +173,94 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "string_literal" => "groovy.string",
         _ => return None,
     })
+}
+
+/// Distinguishes variable expressions from literal labels and member spelling.
+pub(super) fn nonlexical_identifier(node: Node<'_>) -> bool {
+    if node.kind() != "identifier" {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let field = match parent.kind() {
+        "field_access" | "direct_field_access_expression" => "field",
+        "safe_navigation_expression" | "safe_chain_dot_expression" | "spread_dot_expression" => {
+            "property"
+        }
+        "method_pointer_expression" => "method",
+        "method_reference_expression" => "name",
+        "method_invocation" => "function",
+        "command_chain" => "receiver",
+        "command_link" => "name",
+        "command_suffix" => "member",
+        "map_entry" | "named_argument" => "key",
+        "labeled_statement" | "break_statement" | "continue_statement" => "label",
+        "qualified_name" => return true,
+        _ => return false,
+    };
+    parent.child_by_field_name(field) == Some(node)
+}
+
+/// Preserves interpolation names, resource visibility and authored closure parameters.
+///
+/// # Errors
+/// Returns cancellation or an incomplete native control/header error.
+pub(super) fn adjust_candidate(
+    node: Node<'_>,
+    candidate: &mut super::QueryCandidate,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    if candidate.role == StructuralRole::Reference
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "gstring_dollar_interpolation")
+    {
+        let text = source
+            .get(candidate.start..candidate.end)
+            .and_then(|text| text.strip_prefix(b"$"))
+            .ok_or_else(|| super::query_failure("query-groovy-interpolation-name"))?;
+        let length = text
+            .iter()
+            .position(|byte| *byte == b'.')
+            .unwrap_or(text.len());
+        if length == 0 {
+            return Err(super::query_failure("query-groovy-interpolation-name"));
+        }
+        // The native token includes '$' and optional property suffixes; only its
+        // first identifier is a lexical read, with exactly those authored bytes.
+        candidate.start = candidate
+            .start
+            .checked_add(1)
+            .ok_or_else(|| super::query_failure("query-groovy-interpolation-name"))?;
+        candidate.end = candidate
+            .start
+            .checked_add(length)
+            .ok_or_else(|| super::query_failure("query-groovy-interpolation-name"))?;
+    }
+    if candidate.role != StructuralRole::Scope {
+        return Ok(());
+    }
+    if node.kind() == "try_statement" {
+        // Resource bindings end with the try body, not with its catch/finally clauses.
+        candidate.end = node
+            .child_by_field_name("body")
+            .ok_or_else(|| super::query_failure("query-groovy-try-body"))?
+            .end_byte();
+    }
+    if matches!(node.kind(), "closure" | "gstring_closure") {
+        let end = closure_header_end(node, cancellation)?;
+        if node
+            .child(0)
+            .is_some_and(|opener| opener.kind() == "{" && end == opener.end_byte())
+        {
+            candidate.syntax = "groovy.implicit_closure";
+        }
+    }
+    cancellation.check()?;
+    Ok(())
 }
 
 /// Selects only the native closure header, including an explicit empty parameter list.

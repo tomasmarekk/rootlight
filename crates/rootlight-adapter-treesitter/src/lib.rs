@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod groovy_bindings;
 mod incremental;
 mod lowering;
 mod lua_bindings;
