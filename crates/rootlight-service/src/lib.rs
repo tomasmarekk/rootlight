@@ -27893,6 +27893,151 @@ mod tests {
     }
 
     #[test]
+    fn groovy_qualified_imported_types_preserve_exact_source() {
+        use rootlight_ir::{EntityKind, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        for written in ["Selected.Inner", "Selected /* owner */ . Inner"] {
+            let fixture = TempDir::new().unwrap();
+            let source =
+                format!("import sample.Widget as Selected\nclass Holder {{ {written} item }}\n");
+            fs::write(fixture.path().join("client.groovy"), &source).unwrap();
+            fs::write(
+                fixture.path().join("definition.groovy"),
+                "package sample\nclass Widget { static class Inner {} }\n",
+            )
+            .unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{:?}",
+                document.diagnostics
+            );
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Inner")
+                .unwrap();
+            let start = u64::try_from(source.find(written).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte()
+                            == start + u64::try_from(written.len()).unwrap()
+                })
+                .expect("qualified type must retain its complete source occurrence");
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id }
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::UsesType
+                    && relation.object == RelationEndpoint::Entity(target.id)
+            }));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+            assert_eq!(site.source.generation(), receipt.generation);
+        }
+    }
+
+    #[test]
+    fn groovy_qualified_imports_rebind_reused_parser_evidence() {
+        use rootlight_ir::{OccurrenceTarget, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("client.groovy"),
+            "import sample.Widget as Selected\nclass Holder { Selected.Inner item }\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(3).unwrap();
+        for (ordinal, (definition, resolved)) in [
+            (
+                "package sample\nclass Widget { static class Inner {} }\n",
+                true,
+            ),
+            (
+                "package sample\nclass Widget { static class Other {} }\n",
+                false,
+            ),
+            (
+                "package sample\nclass Widget { static class Inner {} }\n",
+                true,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fs::write(fixture.path().join("definition.groovy"), definition).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if ordinal > 0 {
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert!(work.reused_parser_artifacts() >= 1);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "groovy.qualified_type.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.predicate == RelationPredicate::UsesType)
+                    .count(),
+                usize::from(resolved)
+            );
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+            drop(snapshot);
+            let prepared = service
+                .prepare_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+
+    #[test]
     fn groovy_type_imports_recompute_targets_when_declarations_change() {
         use rootlight_ir::{OccurrenceTarget, RelationPredicate};
 

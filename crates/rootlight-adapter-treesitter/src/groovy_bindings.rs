@@ -14,6 +14,11 @@ struct Binding {
     symbol: Option<SymbolId>,
 }
 
+struct ImportedType {
+    evidence: GroovyImportedType,
+    qualified_name: String,
+}
+
 pub(super) struct GroovyBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     iterable_ends: BTreeMap<u64, u64>,
@@ -22,7 +27,8 @@ pub(super) struct GroovyBindings<'a> {
     local_types: BTreeMap<(u64, &'a str), Option<SymbolId>>,
     type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
     inherited_scopes: BTreeSet<u64>,
-    imports: BTreeMap<String, Option<GroovyImportedType>>,
+    imports: BTreeMap<String, Option<ImportedType>>,
+    maximum_name_bytes: usize,
 }
 
 impl<'a> GroovyBindings<'a> {
@@ -46,6 +52,7 @@ impl<'a> GroovyBindings<'a> {
             type_names: BTreeMap::new(),
             inherited_scopes: BTreeSet::new(),
             imports: BTreeMap::new(),
+            maximum_name_bytes,
         };
         cancellation.check()?;
         for fact in facts {
@@ -204,7 +211,12 @@ impl<'a> GroovyBindings<'a> {
             self.imports
                 .entry(name.to_owned())
                 .and_modify(|prior| *prior = None)
-                .or_insert(Some(binding));
+                .or_insert_with(|| {
+                    Some(ImportedType {
+                        evidence: binding,
+                        qualified_name: target.into_owned(),
+                    })
+                });
         }
         Ok(())
     }
@@ -263,16 +275,56 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<GroovyImportedType>, AdapterError> {
         cancellation.check()?;
-        let Some(binding) = self.imports.get(name).copied().flatten() else {
+        if !matches!(
+            fact.syntax_kind().as_str(),
+            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+        ) {
+            return Ok(None);
+        }
+        let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+            "groovy",
+            fact,
+            name,
+            self.maximum_name_bytes,
+        ) else {
             return Ok(None);
         };
-        if fact.syntax_kind().as_str() != "groovy.type_identifier.reference"
-            || self.type_parameter(fact, name, cancellation)?.is_some()
-            || self.local_type(fact, name, cancellation)?.is_some()
+        let (root, suffix) = name
+            .split_once('.')
+            .map_or((name.as_ref(), None), |(root, suffix)| (root, Some(suffix)));
+        let Some(binding) = self.imports.get(root).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        if self.type_parameter(fact, root, cancellation)?.is_some()
+            || self.local_type(fact, root, cancellation)?.is_some()
         {
             return Ok(None);
         }
-        Ok(Some(binding))
+        let mut evidence = binding.evidence;
+        if let Some(suffix) = suffix {
+            let Some(length) = binding
+                .qualified_name
+                .len()
+                .checked_add(1)
+                .and_then(|length| length.checked_add(suffix.len()))
+            else {
+                return Ok(None);
+            };
+            if length > self.maximum_name_bytes {
+                return Ok(None);
+            }
+            // Only the native qualified-type node admits this substitution. Field
+            // access and arbitrary dotted expressions do not prove a type target.
+            let mut target = String::new();
+            target
+                .try_reserve_exact(length)
+                .map_err(|_| invalid_capture())?;
+            target.push_str(&binding.qualified_name);
+            target.push('.');
+            target.push_str(suffix);
+            evidence.target = content_hash(target.as_bytes());
+        }
+        Ok(Some(evidence))
     }
 
     fn local_type(

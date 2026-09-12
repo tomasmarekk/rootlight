@@ -127,6 +127,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "source_file" => "groovy.file",
         "package_declaration" => "groovy.package",
         "qualified_name" => "groovy.qualified_identifier",
+        "qualified_type" => "groovy.qualified_type",
         "class_declaration" => "groovy.class",
         "interface_declaration" | "annotation_type_declaration" => "groovy.interface",
         "trait_declaration" => "groovy.trait",

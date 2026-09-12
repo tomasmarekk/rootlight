@@ -399,6 +399,7 @@ pub fn structural_captured_name_for_fact<'a>(
         && matches!(
             fact.syntax_kind().as_str(),
             "groovy.qualified_identifier.definition"
+                | "groovy.qualified_type.reference"
                 | "groovy.type_import.reference"
                 | "groovy.package_star_import.reference"
                 | "groovy.static_import.reference"

@@ -132,6 +132,55 @@ fn groovy_imported_type_evidence_preserves_native_alias_ownership() {
 }
 
 #[test]
+fn groovy_qualified_import_evidence_uses_native_type_boundaries() {
+    for (body, expected) in [
+        (
+            "class Holder { Selected.Inner item }",
+            Some("sample.Widget.Inner"),
+        ),
+        (
+            "class Holder { Selected /* name */ . Inner item }",
+            Some("sample.Widget.Inner"),
+        ),
+        (
+            "class Holder { Selected.Inner.Deep[] item }",
+            Some("sample.Widget.Inner.Deep"),
+        ),
+        (
+            "class Holder { Selected.Inner<String> item }",
+            Some("sample.Widget.Inner"),
+        ),
+        ("class Holder<Selected> { Selected.Inner item }", None),
+        (
+            "class Selected {}\nclass Holder { Selected.Inner item }",
+            None,
+        ),
+        ("class Holder extends Parent { Selected.Inner item }", None),
+        ("def value = Selected.Inner", None),
+    ] {
+        let source = format!("import sample.Widget as Selected\n{body}\n");
+        let result = output(&source);
+        assert!(result.document().diagnostics.is_empty(), "{body}");
+        let bindings: Vec<_> = result
+            .document()
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::GROOVY_BINDING_NAMESPACE)
+            .map(|envelope| {
+                rootlight_ir::decode_groovy_binding_envelope(envelope)
+                    .unwrap()
+                    .target
+            })
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|name| content_hash(name.as_bytes()))
+            .collect();
+        assert_eq!(bindings, expected, "{body}");
+    }
+}
+
+#[test]
 fn groovy_local_type_precedence_matches_native_nested_class_order() {
     for (source, name, declaration) in [
         (

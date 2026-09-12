@@ -4021,6 +4021,7 @@ fn structural_resolution_text<'a>(
         && matches!(
             fact.syntax_kind().as_str(),
             "groovy.type_import.reference"
+                | "groovy.qualified_type.reference"
                 | "groovy.package_star_import.reference"
                 | "groovy.static_import.reference"
                 | "groovy.static_star_import.reference"

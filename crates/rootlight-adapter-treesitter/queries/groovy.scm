@@ -40,6 +40,7 @@
 (import_declaration alias: (identifier) @declaration @definition)
 [(superclass) (super_interfaces) (extends_interfaces)] @expression
 (annotation name: (qualified_name) @reference)
+(qualified_type) @reference
 (method_invocation) @call
 [(identifier) (type_identifier)] @reference
 [(line_comment) (block_comment)] @comment

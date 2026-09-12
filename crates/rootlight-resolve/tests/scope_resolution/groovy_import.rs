@@ -207,11 +207,20 @@ fn groovy_import_proofs_preserve_owners_and_coverage_across_application_paths() 
 
 #[test]
 fn groovy_type_uses_require_exact_native_binding_envelopes() {
+    assert_type_use_requires_native_binding("groovy.type_identifier.reference");
+}
+
+#[test]
+fn groovy_qualified_type_uses_require_exact_native_binding_envelopes() {
+    assert_type_use_requires_native_binding("groovy.qualified_type.reference");
+}
+
+fn assert_type_use_requires_native_binding(syntax: &str) {
     use rootlight_ir::{GroovyImportedType, SourceSpan, new_groovy_binding_envelope};
     let (mut fixture, target) = fixture();
     let site = &mut fixture.document.occurrences[0];
     site.role = OccurrenceRole::TypeUse;
-    site.syntax_kind = "groovy.type_identifier.reference".to_owned();
+    site.syntax_kind = syntax.to_owned();
     site.syntactic_text_hash = content_hash(b"Selected");
     site.target = OccurrenceTarget::Unresolved {
         text_hash: site.syntactic_text_hash,
