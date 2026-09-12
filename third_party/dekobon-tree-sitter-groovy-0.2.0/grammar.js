@@ -126,6 +126,7 @@ module.exports = grammar({
 
   reserved: {
     global: _ => [],
+    handlers: _ => ['catch', 'finally'],
     commands: _ => [
       'abstract', 'assert', 'break', 'case', 'catch', 'class', 'continue',
       'default', 'def', 'do', 'else', 'enum', 'extends', 'final', 'finally',
@@ -166,6 +167,8 @@ module.exports = grammar({
   conflicts: $ => [
     // A separator may end the conditional or precede its else clause.
     [$.if_statement],
+    // Handler separators can also terminate the complete try statement.
+    [$.try_statement],
     [$._command_receiver, $._expression, $._type],
     [$._command_receiver, $._expression],
     [$._command_receiver, $._type],
@@ -439,18 +442,15 @@ module.exports = grammar({
       optional(seq(':', field('message', $._expression))),
     )),
 
-    // §4 — try / catch / finally. At least one of catch/finally is
-    // required per Java/Groovy semantics; the grammar relaxes that
-    // to allow a bare `try { … }` and lets downstream tooling
-    // surface the error if needed. Try-with-resources lands later
-    // with local variable declarations.
-    try_statement: $ => prec.right(seq(
+    // Handler newlines also terminate the statement, so defer separator ownership.
+    // A bare try block is retained for incomplete-source analysis.
+    try_statement: $ => seq(
       'try',
       optional(field('resources', $.resource_specification)),
       field('body', $.block),
       repeat(seq(repeat($._newline), $.catch_clause)),
       optional(seq(repeat($._newline), $.finally_clause)),
-    )),
+    ),
 
     // §4 — `try (Foo f = expr; Bar b = expr) { … }`. Resources
     // are typed or `def`-style declarators with required `=`
@@ -479,11 +479,11 @@ module.exports = grammar({
       field('body', $.block),
     ),
 
-    // §4 — `catch_formal_parameter` accepts either a single _type
-    // or a multi_type for Java 7+ / Groovy multi-catch. Closes
-    // murtaza64 #39.
+    // Missing types and `def` use Groovy's implicit exception type. Keep only
+    // authored types in the tree, with annotations and final in either order.
     catch_formal_parameter: $ => seq(
-      field('type', choice($._type, $.multi_type)),
+      repeat(choice($.annotation, 'final')),
+      optional(choice('def', field('type', choice($._type, $.multi_type)))),
       field('name', $.identifier),
     ),
 
@@ -1183,6 +1183,7 @@ module.exports = grammar({
     // `def "abstract"() { … }` both rely on this.
     _property_name: $ => choice(
       $.identifier,
+      alias(choice('catch', 'finally'), $.identifier),
       alias($.string_literal, $.quoted_identifier),
     ),
 
@@ -1192,7 +1193,7 @@ module.exports = grammar({
     method_reference_expression: $ => prec.left(PREC.ACCESS, seq(
       field('target', $._expression),
       '::',
-      field('name', choice($.identifier, 'new')),
+      field('name', choice($.identifier, alias(choice('catch', 'finally'), $.identifier), 'new')),
     )),
 
     // §3.2 — postfix `++` / `--`. Distinct node kind from the
@@ -1517,7 +1518,8 @@ module.exports = grammar({
     },
 
     map_entry: $ => seq(
-      field('key', $._expression),
+      // Bare handler words are literal labels here, not expression identifiers.
+      field('key', choice(alias(choice('catch', 'finally'), $.identifier), $._expression)),
       ':',
       field('value', $._expression),
     ),
@@ -1718,7 +1720,8 @@ module.exports = grammar({
       /[0-9][0-9_]*[GgLlIiDdFf]?/,
     )),
 
-    identifier: $ => choice($._word_identifier, $._capitalized_identifier, $._primitive_type),
+    // Handler words are reserved values; property and label rules admit them explicitly.
+    identifier: $ => choice(reserved('handlers', $._word_identifier), $._capitalized_identifier, $._primitive_type),
     // Java identifier categories, excluding Groovy's forbidden ignorable controls.
     // Property data is fixed by the pinned parser generator, not the host locale.
     _word_identifier: _ => new RustRegex('[\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}][\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Nd}]*'),

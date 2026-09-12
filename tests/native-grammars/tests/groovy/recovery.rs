@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const SOURCES: &[&str] = &[
+    "try { work() } catch (@Deprecated final def problem) { sink(problem) }\r\nfinally { finish() }\n",
     "def value = 1\nvalue\n/* a */\n/* b */\n.member()\nfinish()\n",
     "def value = 1\nvalue\n/* a */\n/* b */\nother()\nfinish()\n",
     "def text = / first\n${-> render()} last /\nfinish()\n",

@@ -27991,6 +27991,148 @@ mod tests {
     }
 
     #[test]
+    fn groovy_catch_bindings_publish_distinct_targets_without_scope_leaks() {
+        use rootlight_ir::{EntityKind, OccurrenceRole, OccurrenceTarget};
+
+        for header in [
+            "problem",
+            "final def problem",
+            "final @Deprecated Exception problem",
+            "IOException | RuntimeException problem",
+        ] {
+            let fixture = TempDir::new().unwrap();
+            let source = format!(
+                "def examine() {{ try {{ work() }} catch ({header}) {{ sink(problem); def deferred = {{ sink(problem) }} }} finally {{ sink(problem) }}; try {{ work() }} catch ({header}) {{ sink(problem) }}; sink(problem) }}\n"
+            );
+            fs::write(fixture.path().join("handlers.groovy"), &source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert!(document.diagnostics.is_empty());
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "problem".to_owned(),
+                    LocateMode::Exact,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let symbols: BTreeSet<_> = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect();
+            assert_eq!(symbols.len(), 2);
+            let mut definitions = BTreeMap::new();
+            for symbol in &symbols {
+                let entity = service
+                    .symbol_explain(receipt.generation, *symbol, &deadline())
+                    .unwrap()
+                    .data
+                    .entity;
+                assert_eq!(entity.kind, EntityKind::Parameter);
+                let reference = entity.evidence.source.unwrap();
+                assert_eq!(reference.generation(), receipt.generation);
+                let offset = usize::try_from(reference.span().start_byte()).unwrap();
+                definitions.insert(offset, *symbol);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, header.as_bytes());
+            }
+            assert_eq!(definitions.len(), 2);
+            let first = *definitions.first_key_value().unwrap().1;
+            let second = *definitions.last_key_value().unwrap().1;
+            let references: Vec<_> = source
+                .match_indices("sink(problem)")
+                .map(|(offset, _)| offset + 5)
+                .collect();
+            assert_eq!(references.len(), 5);
+            let expected = BTreeMap::from([
+                (references[0], first),
+                (references[1], first),
+                (references[3], second),
+            ]);
+            let result = service
+                .symbol_relationships(
+                    receipt.generation,
+                    document.entities.iter().map(|entity| entity.id).collect(),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    30,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(!result.data.exact);
+            let mut actual = BTreeMap::new();
+            for edge in result
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .filter(|edge| symbols.contains(&edge.symbol))
+            {
+                for reference in &edge.source_refs {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    assert!(
+                        actual
+                            .insert(
+                                usize::try_from(reference.span().start_byte()).unwrap(),
+                                edge.symbol
+                            )
+                            .is_none()
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks.len(), 1);
+                    assert_eq!(read.data.chunks[0].bytes, b"problem");
+                }
+            }
+            assert_eq!(actual, expected);
+            for offset in [references[2], references[4]] {
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Reference
+                            && site.source.span().start_byte() == u64::try_from(offset).unwrap()
+                    })
+                    .unwrap();
+                assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            }
+        }
+    }
+
+    #[test]
     fn groovy_control_and_type_bindings_publish_exact_symbol_sources() {
         use rootlight_ir::EntityKind;
 

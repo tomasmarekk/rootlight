@@ -20,6 +20,9 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Statement separators, compound statements, newline continuations and comments.
 - Typed declarations, command calls, command chains and competing expressions.
 - Nested type declarations as class members, retaining their own bodies and names.
+- Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
+- Try-statement terminators versus newlines introducing another handler or finally.
+- Reserved catch/finally identifiers versus property names and literal map labels.
 - Slashy strings versus division, escaped slash endings and lazy interpolation.
 - Unicode identifier categories and interpolation paths.
 - CR, LF and CRLF comment endings without consuming adjacent source.

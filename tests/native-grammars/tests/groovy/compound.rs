@@ -58,6 +58,148 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn handler_keywords_are_not_standalone_expressions() {
+    for source in [
+        "catch",
+        "finally",
+        "catch (problem) { sink(problem) }",
+        "finally { finish() }",
+    ] {
+        assert!(parse(source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn handler_words_remain_property_names_and_literal_labels() {
+    for source in [
+        "service.finally()",
+        "service.catch(problem)",
+        "def options = [catch: 1, finally: 2]",
+        "service(catch: 1, finally: 2)",
+        "def 'catch'() {}",
+        "def action = service::catch",
+        "def action = service.&finally",
+    ] {
+        valid(source);
+    }
+}
+
+#[test]
+fn catch_headers_keep_optional_types_modifiers_and_exact_names() {
+    for header in [
+        "problem",
+        "def problem",
+        "final problem",
+        "final def problem",
+        "Exception problem",
+        "final Exception problem",
+        "IOException | RuntimeException problem",
+        "@Deprecated Exception problem",
+        "@Deprecated final def problem",
+        "final @Deprecated Exception problem",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "try {{ work() }}{newline}catch ({header}) {{ sink(problem) }}{newline}finally {{ finish() }}\n"
+            );
+            let tree = valid(&source);
+            exact(&tree, &source, "catch_formal_parameter", header);
+            let parameters: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "catch_formal_parameter")
+                .collect();
+            assert_eq!(parameters.len(), 1);
+            let name = parameters[0].child_by_field_name("name").unwrap();
+            assert_eq!(name.kind(), "identifier");
+            assert_eq!(name.utf8_text(source.as_bytes()).unwrap(), "problem");
+            assert_eq!(name.start_byte(), source.find("problem)").unwrap());
+            exact(&tree, &source, "finally_clause", "finally { finish() }");
+        }
+    }
+}
+
+#[test]
+fn catch_terminators_do_not_require_another_handler_or_finally() {
+    for header in ["problem", "Exception problem"] {
+        let statement = format!("try {{ work() }} catch ({header}) {{ sink(problem) }}");
+        for tail in [
+            "",
+            "\n",
+            "\r\n",
+            "\nfinish()\n",
+            "\n// note\nfinish()\n",
+            "\ncatch (RuntimeException next) { sink(next) }\n",
+            "\nfinally { finish() }\n",
+        ] {
+            let source = format!("{statement}{tail}");
+            let tree = valid(&source);
+            let first = tree.root_node().named_child(0).unwrap();
+            assert_eq!(first.kind(), "try_statement");
+            let expected_catches = if tail.contains("catch") { 2 } else { 1 };
+            assert_eq!(
+                nodes(first)
+                    .iter()
+                    .filter(|node| node.kind() == "catch_clause")
+                    .count(),
+                expected_catches
+            );
+            if tail.contains("finally") {
+                exact(&tree, &source, "finally_clause", "finally { finish() }");
+            } else if !tail.contains("catch") {
+                assert_eq!(first.utf8_text(source.as_bytes()).unwrap(), statement);
+            }
+        }
+    }
+}
+
+#[test]
+fn catch_header_edits_preserve_fresh_tree_names_and_coordinates() {
+    use tree_sitter::InputEdit;
+
+    let source = "try { work() } catch (problem) { sink(problem) }\r\nfinally { finish() }\n";
+    for replacement in [
+        "def problem",
+        "final problem",
+        "@Deprecated final Exception problem",
+        "IOException | RuntimeException problem",
+        "λ",
+    ] {
+        let start = source.find("problem").unwrap();
+        let changed = source.replacen("problem", replacement, 1);
+        let mut old = valid(source);
+        old.edit(&InputEdit {
+            start_byte: start,
+            old_end_byte: start + "problem".len(),
+            new_end_byte: start + replacement.len(),
+            start_position: point(source, start),
+            old_end_position: point(source, start + "problem".len()),
+            new_end_position: point(&changed, start + replacement.len()),
+        });
+        let mut parser = Parser::new();
+        parser
+            .set_language(&dekobon_tree_sitter_groovy::LANGUAGE.into())
+            .unwrap();
+        let incremental = parser.parse(&changed, Some(&old)).unwrap();
+        let fresh = valid(&changed);
+        let signature = |tree: &Tree| {
+            nodes(tree.root_node())
+                .into_iter()
+                .map(|node| {
+                    (
+                        node.kind().to_owned(),
+                        node.byte_range(),
+                        node.start_position(),
+                        node.end_position(),
+                        node.is_missing(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(signature(&incremental), signature(&fresh));
+    }
+}
+
+#[test]
 fn classic_switch_preserves_branch_statements() {
     let source = "switch (value) {\ncase 1:\ndef first = 'λ😀';\nconsume(first);\nbreak;\ndefault:\ndef second = 2\nconsume(second)\n}\n";
     let tree = valid(source);

@@ -153,6 +153,38 @@ fn groovy_nested_type_bindings_distinguish_implicit_static_members() {
 }
 
 #[test]
+fn groovy_catch_parameters_bind_untyped_modified_and_multicatch_headers() {
+    for header in [
+        "problem",
+        "def problem",
+        "final problem",
+        "final def problem",
+        "Exception problem",
+        "final Exception problem",
+        "IOException | RuntimeException problem",
+        "@Deprecated Exception problem",
+        "@Deprecated final def problem",
+        "final @Deprecated Exception problem",
+    ] {
+        let source = format!(
+            "def examine() {{ try {{ work() }} catch ({header}) {{ sink(problem); def deferred = {{ sink(problem) }} }} finally {{ sink(problem) }}; sink(problem) }}\n"
+        );
+        let parameter = Some(source.find("problem)").unwrap());
+        assert_lexical_reads(&source, "problem", &[parameter, parameter, None, None]);
+        let result = output(&source);
+        let parameters: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Parameter && entity.canonical_name == "problem"
+            })
+            .collect();
+        assert_eq!(parameters.len(), 1);
+    }
+}
+
+#[test]
 fn groovy_lexical_reads_respect_initializers_and_closure_parameters() {
     let source = "def examine(input) { sink(value); def value = value; sink(value); def action = { argument -> sink(value, input, argument) }; def implicit = { sink(it, value) }; def explicit = { -> sink(it, value) } }\n";
     let value = Some(source.find("value =").unwrap());
