@@ -126,7 +126,7 @@ module.exports = grammar({
 
   reserved: {
     global: _ => [],
-    handlers: _ => ['catch', 'finally'],
+    values: _ => ['catch', 'finally', 'def'],
     commands: _ => [
       'abstract', 'assert', 'break', 'case', 'catch', 'class', 'continue',
       'default', 'def', 'do', 'else', 'enum', 'extends', 'final', 'finally',
@@ -169,6 +169,8 @@ module.exports = grammar({
     [$.if_statement],
     // Handler separators can also terminate the complete try statement.
     [$.try_statement],
+    // A method's newline can terminate its signature or introduce throws/body.
+    [$.method_declaration],
     [$._command_receiver, $._expression, $._type],
     [$._command_receiver, $._expression],
     [$._command_receiver, $._type],
@@ -680,17 +682,23 @@ module.exports = grammar({
       repeat(seq(',', $.variable_declarator)),
     ),
 
-    // §4 — `def name(params) body`. Typed return type (`String foo()
-    // { … }`) lands once we can disambiguate from local variable
-    // declaration. Modifiers and throws clause similarly defer.
-    // prec(1) wins over local_variable_declaration when `(` follows
-    // the name, so `def f() { … }` at script-top-level parses as a
-    // method rather than a `def f` variable followed by `(…) { … }`.
-    method_declaration: $ => prec.right(2, seq(
+    // Prefer a method over a variable/call when its parameter list follows.
+    // Before generic parameters, def permits an omitted authored return type;
+    // it must not itself become a return-type field.
+    method_declaration: $ => prec(2, seq(
       repeat($.annotation),
       repeat($._modifier),
-      optional(field('type_parameters', $.method_type_parameters)),
-      choice('def', field('return_type', $._type)),
+      choice(
+        seq(
+          optional(field('type_parameters', $.method_type_parameters)),
+          choice('def', field('return_type', $._type)),
+        ),
+        seq(
+          'def',
+          field('type_parameters', $.method_type_parameters),
+          optional(field('return_type', $._type)),
+        ),
+      ),
       field('name', $._property_name),
       field('parameters', $.formal_parameters),
       optional(seq(repeat($._newline), $.throws_clause)),
@@ -1183,7 +1191,7 @@ module.exports = grammar({
     // `def "abstract"() { … }` both rely on this.
     _property_name: $ => choice(
       $.identifier,
-      alias(choice('catch', 'finally'), $.identifier),
+      alias(choice('catch', 'finally', 'def'), $.identifier),
       alias($.string_literal, $.quoted_identifier),
     ),
 
@@ -1193,7 +1201,7 @@ module.exports = grammar({
     method_reference_expression: $ => prec.left(PREC.ACCESS, seq(
       field('target', $._expression),
       '::',
-      field('name', choice($.identifier, alias(choice('catch', 'finally'), $.identifier), 'new')),
+      field('name', choice($.identifier, alias(choice('catch', 'finally', 'def'), $.identifier), 'new')),
     )),
 
     // §3.2 — postfix `++` / `--`. Distinct node kind from the
@@ -1520,7 +1528,7 @@ module.exports = grammar({
 
     map_entry: $ => seq(
       // Bare handler words are literal labels here, not expression identifiers.
-      field('key', choice(alias(choice('catch', 'finally'), $.identifier), $._expression)),
+      field('key', choice(alias(choice('catch', 'finally', 'def'), $.identifier), $._expression)),
       ':',
       field('value', $._expression),
     ),
@@ -1721,8 +1729,8 @@ module.exports = grammar({
       /[0-9][0-9_]*[GgLlIiDdFf]?/,
     )),
 
-    // Handler words are reserved values; property and label rules admit them explicitly.
-    identifier: $ => choice(reserved('handlers', $._word_identifier), $._capitalized_identifier, $._primitive_type),
+    // Declaration/handler words are not values or types; properties admit them explicitly.
+    identifier: $ => choice(reserved('values', $._word_identifier), $._capitalized_identifier, $._primitive_type),
     // Java identifier categories, excluding Groovy's forbidden ignorable controls.
     // Property data is fixed by the pinned parser generator, not the host locale.
     _word_identifier: _ => new RustRegex('[\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}][\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Nd}]*'),

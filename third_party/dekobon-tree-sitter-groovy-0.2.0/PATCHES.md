@@ -23,8 +23,10 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
 - Formal parameter annotations and `final` without changing name, type or default spans.
 - Closure-arrow comment sequences without changing parameter or body ownership.
+- Bodyless method terminators versus newlines before a throws clause or body.
+- `def`-prefixed generic methods with optional authored return types.
 - Try-statement terminators versus newlines introducing another handler or finally.
-- Reserved catch/finally identifiers versus property names and literal map labels.
+- Reserved catch/finally/def identifiers versus property names and literal map labels.
 - Slashy strings versus division, escaped slash endings and lazy interpolation.
 - Unicode identifier categories and interpolation paths.
 - CR, LF and CRLF comment endings without consuming adjacent source.

@@ -109,6 +109,40 @@ fn groovy_generic_parameters_are_visible_in_recursive_and_forward_bounds() {
 }
 
 #[test]
+fn groovy_def_prefixed_generics_keep_type_and_value_bindings() {
+    for (header, type_reads) in [("def <T> T read", 3), ("def <T> read", 2)] {
+        let source = format!(
+            "class Outer<T> {{ {header}(T value) {{ T local = value; local }}; T after }}\n"
+        );
+        let method_type = Some(source.find("def <T>").unwrap() + 5);
+        let mut expected = vec![method_type; type_reads];
+        expected.push(Some(source.find("<T>").unwrap() + 1));
+        assert_type_reads(&source, "T", &expected);
+        assert_lexical_reads(&source, "value", &[Some(source.find("value)").unwrap())]);
+        assert_lexical_reads(&source, "local", &[Some(source.find("local =").unwrap())]);
+    }
+}
+
+#[test]
+fn groovy_bodyless_methods_keep_generic_owners_across_trivia() {
+    for tail in ["\n\n", "\r\n// boundary\r\n", ";\n"] {
+        let source = format!("interface Reader<T> {{ T read(T value){tail}T next(){tail}}}\n");
+        let owner = Some(source.find("<T>").unwrap() + 1);
+        assert_type_reads(&source, "T", &[owner; 3]);
+        let result = output(&source);
+        let mut methods: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .map(|entity| entity.canonical_name.as_str())
+            .collect();
+        methods.sort_unstable();
+        assert_eq!(methods, ["next", "read"]);
+    }
+}
+
+#[test]
 fn groovy_static_contexts_do_not_capture_outer_generic_parameters() {
     let source = "class Holder<T> { static T field; static T read(T value) { value }; static class Nested { T field }; static { T local }; static <T> T own(T value) { value }; class Inner<T extends CharSequence> { T field } }\n";
     let own = Some(source.find("<T> T own").unwrap() + 1);

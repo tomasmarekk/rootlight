@@ -89,10 +89,104 @@ fn formal_parameter_annotations_and_final_preserve_names_and_types() {
 }
 
 #[test]
+fn bodyless_method_terminators_preserve_declared_spans() {
+    for (container, header) in [
+        ("interface Reader", "String read()"),
+        (
+            "interface Reader",
+            "String read() throws IllegalStateException",
+        ),
+        ("@interface Mark", "String[] read()"),
+        ("abstract class Reader", "abstract String read()"),
+    ] {
+        for tail in ["\n\n", "\r\n\r\n", "\n// boundary\n", ";\n"] {
+            let source = format!("{container} {{ {header}{tail}}}\n");
+            let tree = valid(&source);
+            exact(&tree, &source, "method_declaration", header);
+            let method = nodes(tree.root_node())
+                .into_iter()
+                .find(|node| node.kind() == "method_declaration")
+                .unwrap();
+            assert!(method.child_by_field_name("body").is_none());
+            assert_eq!(
+                method
+                    .child_by_field_name("name")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                "read"
+            );
+        }
+    }
+}
+
+#[test]
+fn def_prefixed_generic_methods_preserve_type_parameters_and_body() {
+    for (prefix, return_type) in [
+        ("<T> T", Some("T")),
+        ("def <T> T", Some("T")),
+        ("def <T>", None),
+        ("public def <T> T", Some("T")),
+    ] {
+        let method = format!("{prefix} read(T value) {{ value }}");
+        let source = format!("class Reader {{ {method} }}\n");
+        let tree = valid(&source);
+        exact(&tree, &source, "method_declaration", &method);
+        let declaration = nodes(tree.root_node())
+            .into_iter()
+            .find(|node| node.kind() == "method_declaration")
+            .unwrap();
+        for (field, expected) in [
+            ("type_parameters", "<T>"),
+            ("name", "read"),
+            ("parameters", "(T value)"),
+            ("body", "{ value }"),
+        ] {
+            assert_eq!(
+                declaration
+                    .child_by_field_name(field)
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            declaration
+                .child_by_field_name("return_type")
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+            return_type
+        );
+    }
+    assert!(
+        parse("class Reader { def <T> def read(T value) { value } }\n")
+            .root_node()
+            .has_error()
+    );
+}
+
+#[test]
 fn malformed_formal_parameter_headers_are_not_accepted() {
     for header in ["@Deprecated", "String value ="] {
         let source = format!("def consume({header}) {{ value }}\n");
         assert!(parse(&source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn def_keyword_remains_a_property_name_but_not_a_value_or_type() {
+    for source in [
+        "service.def()",
+        "def action = service.&def",
+        "def action = service::def",
+        "def options = [def: 1]",
+        "service(def: 1)",
+        "def 'def'() {}",
+    ] {
+        valid(source);
+    }
+    for source in ["def", "def + 1", "def def"] {
+        assert!(parse(source).root_node().has_error(), "{source}");
     }
 }
 
