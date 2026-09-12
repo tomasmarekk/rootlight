@@ -1,21 +1,24 @@
-//! Explicit Groovy type imports over source-owned package/type declarations.
+//! Groovy imports, qualified parents and inherited types over source-owned declarations.
 //! Links identify declarations in the admitted snapshot, not classpath selection
 //! or dynamic dispatch; incomplete inventories and duplicate names veto promotion.
 
-use std::collections::BTreeMap;
+mod hierarchy;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
     ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityKind, EntityRecord,
-    FactDomain, FileRecord, IrLimits, OccurrenceRecord, OccurrenceRole, ProducerKind,
-    ProvenanceRecord,
+    FactDomain, FactRef, FileRecord, IrLimits, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerKind, ProvenanceRecord,
 };
 
 use crate::{
     CandidateExplanation, CompletenessAssumption, RESOLVER_PROVIDER_NAME,
     RESOLVER_PROVIDER_VERSION, ResolutionDecision, ResolutionError, ResolutionExplanation,
-    ResolutionOutcome, ResolutionRule, ResolutionSignal,
+    ResolutionOutcome, ResolutionRule, ResolutionSignal, UnresolvedReason,
 };
 
 struct Context<'a> {
@@ -29,17 +32,29 @@ struct Declaration<'a> {
     owners: Vec<&'a EntityRecord>,
 }
 
+struct QualifiedHeader<'a> {
+    envelope: &'a rootlight_ir::ExtensionEnvelope,
+    owner: &'a EntityRecord,
+    target: Option<Arc<Declaration<'a>>>,
+}
+
 pub(crate) struct Proof<'a, 'index> {
     pub(crate) target: &'a EntityRecord,
     pub(crate) owners: &'index [&'a EntityRecord],
     pub(crate) coverage: [&'a CoverageRecord; 4],
     pub(crate) binding: Option<&'a rootlight_ir::ExtensionEnvelope>,
+    pub(crate) qualified_header: Option<(&'a rootlight_ir::ExtensionEnvelope, &'a EntityRecord)>,
 }
 
 #[derive(Default)]
 pub(crate) struct GroovyIndex<'a> {
+    inherited: BTreeMap<FactId, hierarchy::Entry<'a>>,
+    qualified_headers: BTreeMap<FactId, Option<QualifiedHeader<'a>>>,
     contexts: BTreeMap<FileId, Context<'a>>,
-    declarations: BTreeMap<ContentHash, Option<Declaration<'a>>>,
+    declarations: BTreeMap<ContentHash, Option<Arc<Declaration<'a>>>>,
+    ranked_declarations: BTreeMap<ContentHash, BTreeMap<usize, Option<Arc<Declaration<'a>>>>>,
+    declaration_sources: BTreeMap<rootlight_ir::SourceSpan, Option<Arc<Declaration<'a>>>>,
+    derived_sites: BTreeSet<FactId>,
     unavailable: bool,
     uses: BTreeMap<
         rootlight_ir::SourceSpan,
@@ -57,6 +72,7 @@ impl<'a> GroovyIndex<'a> {
         provenance: &BTreeMap<FactId, &'a ProvenanceRecord>,
         coverage: &'a [CoverageRecord],
         extensions: &'a [rootlight_ir::ExtensionEnvelope],
+        occurrences: &[OccurrenceRecord],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         cancellation.check()?;
@@ -154,6 +170,26 @@ impl<'a> GroovyIndex<'a> {
             if let Some((name, declaration)) =
                 declaration_path(entity, context, entities, cancellation)?
             {
+                let depth = declaration
+                    .owners
+                    .iter()
+                    .filter(|owner| is_type(owner.kind))
+                    .count();
+                let declaration = Arc::new(declaration);
+                index
+                    .ranked_declarations
+                    .entry(name)
+                    .or_default()
+                    .entry(depth)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert_with(|| Some(Arc::clone(&declaration)));
+                if let Some(source) = &entity.evidence.source {
+                    index
+                        .declaration_sources
+                        .entry(source.span())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert_with(|| Some(Arc::clone(&declaration)));
+                }
                 index
                     .declarations
                     .entry(name)
@@ -199,7 +235,175 @@ impl<'a> GroovyIndex<'a> {
                 .and_modify(|prior| *prior = None)
                 .or_insert(binding);
         }
+        for site in occurrences {
+            cancellation.check()?;
+            if let Some(context) = index.contexts.get(&site.file)
+                && let Some(record) = provenance.get(&site.provenance)
+                && source_owned_derived_site(site, context, record)
+            {
+                index.derived_sites.insert(site.id);
+            }
+        }
+        index.collect_qualified_headers(entities, extensions, occurrences, cancellation)?;
+        index.inherited = hierarchy::build(
+            &index,
+            entities,
+            coverage,
+            extensions,
+            occurrences,
+            cancellation,
+        )?;
         Ok(index)
+    }
+
+    fn collect_qualified_headers(
+        &mut self,
+        entities: &BTreeMap<SymbolId, &'a EntityRecord>,
+        extensions: &'a [rootlight_ir::ExtensionEnvelope],
+        occurrences: &[OccurrenceRecord],
+        cancellation: &Cancellation,
+    ) -> Result<(), ResolutionError> {
+        let mut sites = BTreeMap::new();
+        for site in occurrences.iter().filter(|site| is_header(site)) {
+            cancellation.check()?;
+            sites
+                .entry(site.source.span())
+                .and_modify(|prior| *prior = None)
+                .or_insert(Some(site));
+        }
+        for envelope in extensions
+            .iter()
+            .filter(|item| item.namespace == rootlight_ir::GROOVY_TYPE_LOOKUP_NAMESPACE)
+        {
+            cancellation.check()?;
+            let Some(source) = &envelope.evidence.source else {
+                continue;
+            };
+            let Some(site) = sites.get(&source.span()).copied().flatten() else {
+                continue;
+            };
+            let proof = (|| {
+                let lookup = rootlight_ir::decode_groovy_type_lookup_envelope(envelope).ok()?;
+                let context = self.contexts.get(&site.file)?;
+                let owner = entities.get(&site.enclosing?).copied()?;
+                let owner_source = owner.evidence.source.as_ref()?;
+                (lookup.name.contains('.')
+                    && lookup.fallback_import.is_none()
+                    && content_hash(lookup.name.as_bytes()) == site.syntactic_text_hash
+                    && site.source == *source
+                    && self.has_source_owned_provenance(site)
+                    && envelope.provenance == context.file.provenance
+                    && source.content_hash() == context.file.content_hash
+                    && owner.language == "groovy"
+                    && is_type(owner.kind)
+                    && owner.provenance == context.file.provenance
+                    && owner_source.span() == lookup.owner
+                    && owner_source.content_hash() == context.file.content_hash
+                    && lookup.owner.end_byte() <= context.file.byte_length)
+                    .then_some((owner, lookup))
+            })();
+            let proof = if let Some((owner, lookup)) = proof {
+                Some(QualifiedHeader {
+                    envelope,
+                    owner,
+                    target: self.select_qualified_header(owner, &lookup, cancellation)?,
+                })
+            } else {
+                None
+            };
+            self.qualified_headers
+                .entry(site.id)
+                .and_modify(|prior| *prior = None)
+                .or_insert(proof);
+        }
+        Ok(())
+    }
+
+    fn select_qualified_header(
+        &self,
+        owner: &EntityRecord,
+        lookup: &rootlight_ir::GroovyTypeLookup,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Arc<Declaration<'a>>>, ResolutionError> {
+        cancellation.check()?;
+        let Some(owner_declaration) = owner
+            .evidence
+            .source
+            .as_ref()
+            .and_then(|source| self.declaration_sources.get(&source.span()))
+            .and_then(Option::as_ref)
+        else {
+            return Ok(None);
+        };
+        let fallback = if let Some(span) = lookup.fallback_local {
+            let Some(declaration) = self.declaration_sources.get(&span).and_then(Option::as_ref)
+            else {
+                return Ok(None);
+            };
+            Some(declaration)
+        } else {
+            None
+        };
+        let literal = content_hash(lookup.name.as_bytes());
+        if let Some(Some(target)) = self
+            .ranked_declarations
+            .get(&literal)
+            .and_then(|ranks| ranks.get(&0))
+            && target
+                .entity
+                .evidence
+                .source
+                .as_ref()
+                .map(|source| source.span().file())
+                == owner
+                    .evidence
+                    .source
+                    .as_ref()
+                    .map(|source| source.span().file())
+        {
+            return Ok(Some(Arc::clone(target)));
+        }
+        // Package-qualified source names are tried before right-to-left nested
+        // class substitutions. Keep duplicate identities at the first matching
+        // depth unavailable instead of falling through to a less preferred type.
+        let mut package_ranks = None;
+        if let Some(package) = owner_declaration.owners.iter().find(|item| {
+            item.kind == EntityKind::Module
+                && matches!(item.container, Some(ContainerRef::Entity(_)))
+        }) {
+            let length = package
+                .canonical_name
+                .len()
+                .checked_add(1)
+                .and_then(|length| length.checked_add(lookup.name.len()))
+                .ok_or(ResolutionError::CountOverflow)?;
+            if length > IrLimits::default().max_string_bytes {
+                return Ok(None);
+            }
+            let prefixed =
+                content_hash(format!("{}.{}", package.canonical_name, lookup.name).as_bytes());
+            package_ranks = self.ranked_declarations.get(&prefixed);
+            if let Some(target) = package_ranks.and_then(|ranks| ranks.get(&0)) {
+                return Ok(target.as_ref().map(Arc::clone));
+            }
+        }
+        if let Some((_, target)) = self
+            .ranked_declarations
+            .get(&literal)
+            .and_then(BTreeMap::first_key_value)
+        {
+            return Ok(target.as_ref().map(Arc::clone));
+        }
+        if let Some(target) = fallback {
+            return Ok(Some(Arc::clone(target)));
+        }
+        // Groovy retries nested names with module imports only after literal
+        // binary names and enclosing lexical types have failed. The current
+        // package can then supply a nested declaration from another source unit.
+        Ok(package_ranks
+            .and_then(BTreeMap::first_key_value)
+            .and_then(|(_, target)| target.as_ref())
+            .map(Arc::clone))
     }
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<Proof<'a, '_>> {
@@ -207,13 +411,23 @@ impl<'a> GroovyIndex<'a> {
             return None;
         }
         let source = self.contexts.get(&occurrence.file)?;
-        if occurrence.provenance != source.file.provenance
+        if !self.has_source_owned_provenance(occurrence)
             || occurrence.source.content_hash() != source.file.content_hash
         {
             return None;
         }
-        let (name, binding) = if occurrence.role == OccurrenceRole::ImportUse
-            && occurrence.syntax_kind == "groovy.type_import.reference"
+        let qualified_header = self
+            .qualified_headers
+            .get(&occurrence.id)
+            .and_then(Option::as_ref);
+        if self.qualified_headers.contains_key(&occurrence.id)
+            && (qualified_header.is_none() || self.uses.contains_key(&occurrence.source.span()))
+        {
+            return None;
+        }
+        let (name, binding) = if (is_header(occurrence) && qualified_header.is_some())
+            || (occurrence.role == OccurrenceRole::ImportUse
+                && occurrence.syntax_kind == "groovy.type_import.reference")
         {
             (occurrence.syntactic_text_hash, None)
         } else if (occurrence.role == OccurrenceRole::TypeUse
@@ -234,13 +448,18 @@ impl<'a> GroovyIndex<'a> {
         } else {
             return None;
         };
-        let target = self.declarations.get(&name)?.as_ref()?;
+        let target = if let Some(header) = qualified_header {
+            header.target.as_ref()?
+        } else {
+            self.declarations.get(&name)?.as_ref()?
+        };
         let destination = self
             .contexts
             .get(&target.entity.evidence.source.as_ref()?.span().file())?;
         Some(Proof {
             target: target.entity,
             binding,
+            qualified_header: qualified_header.map(|header| (header.envelope, header.owner)),
             owners: &target.owners,
             coverage: [
                 source.coverage[0],
@@ -252,22 +471,57 @@ impl<'a> GroovyIndex<'a> {
     }
 
     pub(crate) fn resolve(&self, occurrence: &OccurrenceRecord) -> Option<ResolutionDecision> {
-        let symbol = self.proof(occurrence)?.target.id;
+        let inherited = self.inherited.get(&occurrence.id);
+        let (symbol, rule, signal) = if let Some(entry) = inherited {
+            (
+                entry.selection.target.map(|target| target.id),
+                ResolutionRule::GroovyInheritedType,
+                ResolutionSignal::NativeInheritance,
+            )
+        } else {
+            let proof = self.proof(occurrence)?;
+            (
+                Some(proof.target.id),
+                if proof.qualified_header.is_some() {
+                    ResolutionRule::GroovyQualifiedHeader
+                } else {
+                    ResolutionRule::GroovyTypeImport
+                },
+                if proof.qualified_header.is_some() {
+                    ResolutionSignal::NativeQualifiedHeader
+                } else {
+                    ResolutionSignal::NativeTypeImport
+                },
+            )
+        };
         let confidence =
             rootlight_ir::Confidence::new(900).expect("fixed structural confidence is valid");
+        // An unproven hierarchy is a language-owned negative decision, not
+        // permission to recover a same-spelling candidate through generic scoring.
+        let outcome = symbol.map_or(
+            ResolutionOutcome::Unresolved {
+                reason: UnresolvedReason::MissingDependency,
+                confidence: rootlight_ir::Confidence::new(0)
+                    .expect("zero unresolved confidence is valid"),
+            },
+            |symbol| ResolutionOutcome::Resolved { symbol, confidence },
+        );
         Some(ResolutionDecision {
             occurrence: occurrence.id,
-            outcome: ResolutionOutcome::Resolved { symbol, confidence },
+            outcome,
             explanation: ResolutionExplanation {
-                rule: ResolutionRule::GroovyTypeImport,
+                rule,
                 provider_name: RESOLVER_PROVIDER_NAME,
                 provider_version: RESOLVER_PROVIDER_VERSION,
-                candidates: vec![CandidateExplanation {
-                    symbol,
-                    score: confidence,
-                    positive_signals: vec![ResolutionSignal::NativeTypeImport],
-                    penalties: Vec::new(),
-                }],
+                candidates: symbol
+                    .into_iter()
+                    .map(|symbol| CandidateExplanation {
+                        symbol,
+                        score: confidence,
+                        positive_signals: vec![signal],
+                        penalties: Vec::new(),
+                    })
+                    .collect(),
                 rejected_candidates: Vec::new(),
                 rejected_total: 0,
                 completeness_assumptions: vec![
@@ -279,6 +533,95 @@ impl<'a> GroovyIndex<'a> {
             },
         })
     }
+
+    pub(crate) fn inherited_entry(
+        &self,
+        occurrence: &OccurrenceRecord,
+    ) -> Option<&hierarchy::Entry<'a>> {
+        self.inherited.get(&occurrence.id)
+    }
+
+    fn has_source_owned_provenance(&self, site: &OccurrenceRecord) -> bool {
+        self.contexts.get(&site.file).is_some_and(|context| {
+            site.provenance == context.file.provenance || self.derived_sites.contains(&site.id)
+        })
+    }
+}
+
+fn source_owned_derived_site(
+    site: &OccurrenceRecord,
+    context: &Context<'_>,
+    record: &ProvenanceRecord,
+) -> bool {
+    let OccurrenceTarget::Resolved { symbol } = site.target else {
+        return false;
+    };
+    // Bounded passes replace native occurrence provenance. A later pass may
+    // reuse that source inventory only when the persisted resolver identity,
+    // exact source and complete file/entity coverage still agree. Parent targets
+    // are independently selected again before they enter the hierarchy.
+    let rule_matches = match (site.role, record.rule.as_deref()) {
+        (
+            OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse,
+            Some("groovy-qualified-header-v1.indexed_snapshot"),
+        ) => is_header(site),
+        (OccurrenceRole::TypeUse, Some("groovy-inherited-type-v1.indexed_snapshot")) => matches!(
+            site.syntax_kind.as_str(),
+            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+        ),
+        (OccurrenceRole::ImportUse, Some("groovy-type-import-v1.indexed_snapshot")) => {
+            site.syntax_kind == "groovy.type_import.reference"
+        }
+        (
+            OccurrenceRole::TypeUse
+            | OccurrenceRole::InheritanceUse
+            | OccurrenceRole::ImplementationUse,
+            Some("groovy-type-import-v1.indexed_snapshot"),
+        ) => {
+            is_header(site)
+                || matches!(
+                    site.syntax_kind.as_str(),
+                    "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+                )
+        }
+        _ => false,
+    };
+    rule_matches
+        && record.producer_kind == ProducerKind::Rule
+        && record.producer.name() == RESOLVER_PROVIDER_NAME
+        && record.producer.version() == env!("CARGO_PKG_VERSION")
+        && record.frontend_version.as_deref() == Some(RESOLVER_PROVIDER_VERSION)
+        && record.language == "groovy"
+        && site.source.content_hash() == context.file.content_hash
+        && site.evidence.source.as_ref() == Some(&site.source)
+        && record.input_sources == record.evidence_sources
+        && record.evidence_sources.contains(&site.source)
+        && record.derivation_parents.contains(&FactRef::Entity(symbol))
+        && context.coverage.iter().all(|coverage| {
+            record
+                .derivation_parents
+                .contains(&FactRef::Fact(coverage.id))
+                && coverage
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| record.evidence_sources.contains(source))
+        })
+        && rootlight_ir::derive_provenance_record_id(record).ok() == Some(record.id)
+        && rootlight_ir::derive_occurrence_record_id(site).ok() == Some(site.id)
+}
+
+fn is_header(site: &OccurrenceRecord) -> bool {
+    matches!(
+        (site.role, site.syntax_kind.as_str()),
+        (
+            OccurrenceRole::InheritanceUse,
+            "groovy.extends_type.reference"
+        ) | (
+            OccurrenceRole::ImplementationUse,
+            "groovy.implements_type.reference"
+        )
+    )
 }
 
 fn is_type(kind: EntityKind) -> bool {

@@ -1364,6 +1364,16 @@ fn verify_snapshot_identities(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         match envelope.namespace.as_str() {
+            rootlight_ir::GROOVY_TYPE_LOOKUP_NAMESPACE => {
+                rootlight_ir::decode_groovy_type_lookup_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             rootlight_ir::GROOVY_BINDING_NAMESPACE => {
                 rootlight_ir::decode_groovy_binding_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(
@@ -2541,6 +2551,69 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn groovy_type_lookup_identity_is_verified_before_snapshot_admission() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let envelope = rootlight_ir::new_groovy_type_lookup_envelope(
+            document.repository,
+            document.generation,
+            file.provenance,
+            SourceRef::new(
+                document.repository,
+                document.generation,
+                SourceSpan::new(file.id, 2, 3).unwrap(),
+                file.content_hash,
+                None,
+            ),
+            rootlight_ir::GroovyTypeLookup {
+                owner: SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+                name: "Item".into(),
+                fallback_import: None,
+                fallback_local: None,
+            },
+        )
+        .unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("canonical lookup identity verifies without asserting language semantics");
+        for mutate in [
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.payload.push(' '),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.version = "2".into(),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.id = FactId::from_bytes([99; 20]),
+        ] {
+            let mut changed = document.clone();
+            let extension = changed
+                .extensions
+                .iter_mut()
+                .find(|item| item.id == envelope.id)
+                .unwrap();
+            mutate(extension);
+            assert_eq!(
+                IdentityVerifiedGeneration::verify_with_source_files(
+                    metadata,
+                    changed,
+                    catalog.clone(),
+                    &IrLimits::default(),
+                    &ExtensionSupport::default(),
+                    &context,
+                ),
+                Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope
+                ))
+            );
+        }
     }
 
     #[test]

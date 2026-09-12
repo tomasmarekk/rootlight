@@ -27,6 +27,71 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_inherited_lookup_retains_exact_unresolved_owner_context() {
+    for written in ["Item", "Outer.Inner"] {
+        let source = format!(
+            "import base.Parent as Selected\nclass Holder extends Selected {{ {written} item }}"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let contexts: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::GROOVY_TYPE_LOOKUP_NAMESPACE)
+            .collect();
+        assert_eq!(contexts.len(), 1);
+        let context = rootlight_ir::decode_groovy_type_lookup_envelope(contexts[0]).unwrap();
+        assert_eq!(context.name, written);
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Holder")
+            .unwrap();
+        assert_eq!(
+            owner.evidence.source.as_ref().unwrap().span(),
+            context.owner
+        );
+        let site = contexts[0].evidence.source.as_ref().unwrap();
+        assert_eq!(
+            site.span().start_byte(),
+            u64::try_from(source.rfind(written).unwrap()).unwrap()
+        );
+        let occurrence = document
+            .occurrences
+            .iter()
+            .find(|item| item.source == *site)
+            .unwrap();
+        assert_eq!(occurrence.role, OccurrenceRole::TypeUse);
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+}
+
+#[test]
+fn groovy_inherited_lookup_does_not_override_local_generic_or_qualified_imports() {
+    for source in [
+        "import base.Parent\nclass Holder<Item> extends Parent { Item item }",
+        "import base.Parent\nclass Holder extends Parent { static class Item {}\nItem item }",
+        "import base.Parent\nimport other.Outer\nclass Holder extends Parent { Outer.Inner item }",
+        "import base.Parent\nclass Holder extends Parent { Holder item }",
+        "class Holder { Item item }",
+        "import base.Parent\nclass Holder extends Parent { def read() { item } }",
+    ] {
+        let result = output(source);
+        assert!(
+            result
+                .document()
+                .extensions
+                .iter()
+                .all(|envelope| envelope.namespace != rootlight_ir::GROOVY_TYPE_LOOKUP_NAMESPACE),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn groovy_inherited_types_follow_compiler_hierarchy_and_visibility() {
     for (source, written, expected) in [
         (

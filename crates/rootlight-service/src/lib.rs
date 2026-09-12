@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/107";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/13";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/110";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/18";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -28256,6 +28256,71 @@ mod tests {
     }
 
     #[test]
+    fn groovy_imported_parents_expose_source_owned_inherited_types() {
+        use rootlight_ir::{OccurrenceTarget, RelationEndpoint, RelationPredicate};
+        let fixture = TempDir::new().unwrap();
+        let client =
+            "import base.Parent as Selected\nclass Holder extends Selected { Item item }\n";
+        fs::write(fixture.path().join("client.groovy"), client).unwrap();
+        fs::write(
+            fixture.path().join("parent.groovy"),
+            "package base\nclass Parent { static class Item {} }\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Item")
+            .unwrap();
+        let start = u64::try_from(client.rfind("Item").unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.syntax_kind == "groovy.type_identifier.reference"
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::UsesType
+                    && relation.subject == RelationEndpoint::Occurrence(site.id)
+                    && relation.object == RelationEndpoint::Entity(target.id))
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"Item");
+    }
+
+    #[test]
     fn groovy_inherited_types_rebind_after_parent_and_visibility_edits() {
         use rootlight_ir::{OccurrenceTarget, RelationEndpoint, RelationPredicate};
 
@@ -28359,12 +28424,294 @@ mod tests {
     }
 
     #[test]
+    fn groovy_cross_file_inherited_types_follow_visibility_and_precedence() {
+        use rootlight_ir::{ContainerRef, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+        let parent = "package base\nclass Parent { static class Item {} }";
+        for (client, dependency, extra, written, file, owner) in [
+            (
+                "import base.Parent\nclass Holder extends Parent { Item item }",
+                parent,
+                "",
+                "Item",
+                "dependency.groovy",
+                "Parent",
+            ),
+            (
+                "class Holder extends base.Parent { Item item }",
+                parent,
+                "",
+                "Item",
+                "dependency.groovy",
+                "Parent",
+            ),
+            (
+                "import base.Parent\nimport other.Item\nclass Holder extends Parent { Item item }",
+                parent,
+                "package other\nclass Item {}",
+                "Item",
+                "dependency.groovy",
+                "Parent",
+            ),
+            (
+                "import base.Parent\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent { protected static class Item {} }",
+                "",
+                "Item",
+                "dependency.groovy",
+                "Parent",
+            ),
+            (
+                "import base.Parent\nimport other.Item\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent { private static class Item {} }",
+                "package other\nclass Item {}",
+                "Item",
+                "extra.groovy",
+                "other",
+            ),
+            (
+                "import base.Parent\nclass Item {}\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent { private static class Item {} }",
+                "",
+                "Item",
+                "client.groovy",
+                "client.groovy",
+            ),
+            (
+                "import base.Parent\nclass Holder extends Parent { Item item }",
+                "package base\nimport ancestor.Root\nclass Parent extends Root {}",
+                "package ancestor\nclass Root { static class Item {} }",
+                "Item",
+                "extra.groovy",
+                "Root",
+            ),
+            (
+                "import base.Parent\nimport other.Face\nclass Holder extends Parent implements Face { Item item }",
+                parent,
+                "package other\ninterface Face { class Item {} }",
+                "Item",
+                "extra.groovy",
+                "Face",
+            ),
+            (
+                "import base.Parent\nclass Holder extends Parent { Outer.Inner item }",
+                "package base\nclass Parent { static class Outer { static class Inner {} } }",
+                "",
+                "Outer.Inner",
+                "dependency.groovy",
+                "Outer",
+            ),
+            (
+                "import base.Mixed\nimport other.Face\nclass Holder extends Mixed implements Face { Item item }",
+                "package base\ntrait Mixed { static class Item {} }",
+                "package other\ninterface Face { class Item {} }",
+                "Item",
+                "extra.groovy",
+                "Face",
+            ),
+            (
+                "import base.Mixed\nclass Holder implements Mixed { Item item }",
+                "package base\ntrait Mixed { private static class Item {} }",
+                "",
+                "Item",
+                "dependency.groovy",
+                "Mixed",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), client).unwrap();
+            fs::write(fixture.path().join("dependency.groovy"), dependency).unwrap();
+            if !extra.is_empty() {
+                fs::write(fixture.path().join("extra.groovy"), extra).unwrap();
+            }
+            let mut service = FirstSliceService::new(3).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let client_file = document
+                .files
+                .iter()
+                .find(|item| item.path == "client.groovy")
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == client_file.id
+                        && site.source.span().start_byte()
+                            == u64::try_from(client.rfind(written).unwrap()).unwrap()
+                        && matches!(
+                            site.syntax_kind.as_str(),
+                            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+                        )
+                })
+                .unwrap();
+            let OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("unresolved {client}")
+            };
+            let target = document
+                .entities
+                .iter()
+                .find(|item| item.id == symbol)
+                .unwrap();
+            let target_file = document
+                .files
+                .iter()
+                .find(|item| item.id == target.evidence.source.as_ref().unwrap().span().file())
+                .unwrap();
+            assert_eq!(target_file.path, file, "{client}");
+            let Some(ContainerRef::Entity(container)) = target.container else {
+                panic!("missing target owner")
+            };
+            assert_eq!(
+                document
+                    .entities
+                    .iter()
+                    .find(|item| item.id == container)
+                    .unwrap()
+                    .canonical_name,
+                owner,
+                "{client}"
+            );
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::UsesType
+                        && relation.subject == RelationEndpoint::Occurrence(site.id)
+                        && relation.object == RelationEndpoint::Entity(symbol))
+            );
+            let provenance = document
+                .provenance
+                .iter()
+                .find(|item| item.id == site.provenance)
+                .unwrap();
+            assert_eq!(
+                provenance.rule.as_deref(),
+                Some("groovy-inherited-type-v1.indexed_snapshot")
+            );
+            assert!(
+                provenance
+                    .evidence_sources
+                    .iter()
+                    .any(|source| source.span().file() == target_file.id)
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+        }
+    }
+
+    #[test]
+    fn groovy_cross_file_unknown_hierarchies_do_not_promote_unrelated_types() {
+        use rootlight_ir::OccurrenceTarget;
+        for (client, dependency, extra, written) in [
+            (
+                "import base.Parent\nclass Item {}\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent extends Missing {}",
+                "",
+                "Item",
+            ),
+            (
+                "import base.Parent\nclass Item {}\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent extends Other {}\nclass Other extends Parent {}",
+                "",
+                "Item",
+            ),
+            (
+                "import base.Parent\nclass Item {}\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent { @Marker static class Item {} }",
+                "",
+                "Item",
+            ),
+            (
+                "import base.Parent\nclass Item {}\nclass Holder extends Parent { Item item }",
+                "package base\nclass Parent { static class Item {} }",
+                "package base\nclass Parent { static class Item {} }",
+                "Item",
+            ),
+            (
+                "import base.Child\nclass Holder { Child.Item item }",
+                "package base\nclass Parent { static class Item {} }\nclass Child extends Parent {}",
+                "",
+                "Child.Item",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), client).unwrap();
+            fs::write(fixture.path().join("dependency.groovy"), dependency).unwrap();
+            if !extra.is_empty() {
+                fs::write(fixture.path().join("extra.groovy"), extra).unwrap();
+            }
+            let mut service = FirstSliceService::new(3).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|item| item.path == "client.groovy")
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.source.span().start_byte()
+                            == u64::try_from(client.rfind(written).unwrap()).unwrap()
+                        && matches!(
+                            site.syntax_kind.as_str(),
+                            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+                        )
+                })
+                .unwrap();
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{client}: {:?}",
+                site.target
+            );
+        }
+    }
+
+    #[test]
     fn groovy_inheritance_headers_publish_exact_type_relationships() {
         use rootlight_ir::{
             EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
         };
 
         for (source, companion, written, target_name, target_path, predicate) in [
+            (
+                "class Holder extends other.Base {}",
+                "package other\nclass Base {}",
+                "other.Base",
+                "Base",
+                "definition.groovy",
+                RelationPredicate::Extends,
+            ),
+            (
+                "class Holder implements other.Face {}",
+                "package other\ninterface Face {}",
+                "other.Face",
+                "Face",
+                "definition.groovy",
+                RelationPredicate::Implements,
+            ),
             (
                 "class Base {}\nclass Holder extends Base {}",
                 "",
@@ -28603,6 +28950,340 @@ mod tests {
                 .unwrap();
             assert!(receipt.logical_snapshot.is_some());
             assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+
+    #[test]
+    fn groovy_qualified_parents_rebind_inherited_types_after_dependency_edits() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationPredicate};
+        for (client, definition_prefix, definition_suffix) in [
+            (
+                "class Holder extends sample.Base { Item item }\n",
+                "package sample\n",
+                "",
+            ),
+            (
+                "package client\nclass Holder extends sample.Base { Item item }\n",
+                "package client\nclass sample { static ",
+                "}",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), client).unwrap();
+            let mut service = FirstSliceService::new(3).unwrap();
+            for (ordinal, (parent, member, header_resolved, member_resolved)) in [
+                ("Base", "Item", true, true),
+                ("Base", "Other", true, false),
+                ("Absent", "Item", false, false),
+                ("Base", "Item", true, true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                fs::write(
+                fixture.path().join("definition.groovy"),
+                format!("{definition_prefix}class {parent} {{ static class {member} {{}} }}{definition_suffix}\n"),
+            )
+            .unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                if ordinal > 0 {
+                    let work = service.incremental_evidence(receipt.generation).unwrap();
+                    assert_eq!(work.parsed_files(), 1);
+                    assert!(work.reused_parser_artifacts() >= 1);
+                }
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                for (role, written, resolved, predicate) in [
+                    (
+                        OccurrenceRole::InheritanceUse,
+                        "sample.Base",
+                        header_resolved,
+                        RelationPredicate::Extends,
+                    ),
+                    (
+                        OccurrenceRole::TypeUse,
+                        "Item",
+                        member_resolved,
+                        RelationPredicate::UsesType,
+                    ),
+                ] {
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| site.role == role)
+                        .unwrap();
+                    assert_eq!(
+                        matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                        resolved,
+                        "state {ordinal}: {written}"
+                    );
+                    if !resolved {
+                        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                    }
+                    assert_eq!(site.source.generation(), receipt.generation);
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|relation| relation.predicate == predicate)
+                            .count(),
+                        usize::from(resolved)
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![site.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, written.as_bytes());
+                }
+                let noop = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(noop.generation, receipt.generation);
+                drop(snapshot);
+                let prepared = service
+                    .prepare_repository_with_options(
+                        fixture.path(),
+                        FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                        &deadline(),
+                    )
+                    .unwrap();
+                let clean = service
+                    .publish_prepared_with_metrics(prepared, &deadline())
+                    .unwrap();
+                assert!(receipt.logical_snapshot.is_some());
+                assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
+            }
+        }
+    }
+
+    #[test]
+    fn groovy_qualified_header_packages_precede_local_nested_prefixes() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("client.groovy"),
+            "class other { static class Base {} }\nclass Holder extends other.Base {}\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("definition.groovy"),
+            "package other\nclass Base {}\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let target_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "definition.groovy")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "Base"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == target_file.id)
+            })
+            .unwrap();
+        let header = document
+            .occurrences
+            .iter()
+            .find(|site| site.role == OccurrenceRole::InheritanceUse)
+            .unwrap();
+        assert_eq!(
+            header.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Extends
+                    && relation.object == RelationEndpoint::Entity(target.id))
+        );
+    }
+
+    #[test]
+    fn groovy_qualified_header_precedence_preserves_source_local_fallbacks() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+        for (client, dependency, extra, target_path) in [
+            (
+                "package client\nclass Holder extends other.Base {}",
+                "package client\nclass other { static class Base {} }",
+                "",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass Holder extends other.Base {}",
+                "package client\nclass other { static class Base {} }",
+                "class other { static class Base {} }",
+                "extra.groovy",
+            ),
+            (
+                "package client\nclass Holder extends a.b.Base {}",
+                "package client.a\nclass b { static class Base {} }",
+                "class a { static class b { static class Base {} } }",
+                "extra.groovy",
+            ),
+            (
+                "package client\nclass Outer { static class other { static class Base {} }\nstatic class Holder extends other.Base {} }",
+                "package client\nclass other { static class Base {} }",
+                "",
+                "client.groovy",
+            ),
+            (
+                "package client\nclass Holder extends a.b.Base {}",
+                "package client.a\nclass b { static class Base {} }",
+                "package client\nclass a { static class b { static class Base {} } }",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass Holder extends a.b.Base {}",
+                "package client\nclass a { static class b { static class Base {} } }",
+                "",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass Holder extends other.Base {}",
+                "package client.other\nclass Base {}",
+                "class other { static class Base {} }",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass Holder extends other.Base {}",
+                "package client\nclass other { static class Base {} }",
+                "package other\nclass Base {}",
+                "extra.groovy",
+            ),
+            (
+                "class other { static class Base {} }\nclass Holder extends other.Base {}",
+                "",
+                "",
+                "client.groovy",
+            ),
+            (
+                "class Outer { static class Inner { static class Base {} }\nstatic class Holder extends Inner.Base {} }",
+                "",
+                "",
+                "client.groovy",
+            ),
+            (
+                "class Outer { static class Inner { static class Base {} }\nstatic class Holder extends Inner.Base {} }",
+                "package Inner\nclass Base {}",
+                "",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass Holder extends other.Base {}",
+                "package client.other\nclass Base {}",
+                "package other\nclass Base {}",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass other { static class Base {} }\nclass Holder extends other.Base {}",
+                "package other\nclass Base {}",
+                "",
+                "definition.groovy",
+            ),
+            (
+                "package client\nclass other { static class Base {} }\nclass Holder extends other.Base {}",
+                "",
+                "",
+                "client.groovy",
+            ),
+            (
+                "class Holder extends a.b.Base {}",
+                "package a\nclass b { static class Base {} }",
+                "class a { static class b { static class Base {} } }",
+                "definition.groovy",
+            ),
+            (
+                "class Holder extends a.b.Base {}",
+                "package a\nclass b { static class Base {} }",
+                "package a.b\nclass Base {}",
+                "extra.groovy",
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("client.groovy"), client).unwrap();
+            for (path, source) in [("definition.groovy", dependency), ("extra.groovy", extra)] {
+                if !source.is_empty() {
+                    fs::write(fixture.path().join(path), source).unwrap();
+                }
+            }
+            let mut service = FirstSliceService::new(3).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let target_file = document
+                .files
+                .iter()
+                .find(|file| file.path == target_path)
+                .unwrap();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Base"
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == target_file.id)
+                })
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.role == OccurrenceRole::InheritanceUse)
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{client}"
+            );
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Extends
+                        && relation.object == RelationEndpoint::Entity(target.id)),
+                "{client}"
+            );
+            let proof = document
+                .provenance
+                .iter()
+                .find(|proof| proof.id == site.provenance)
+                .unwrap();
+            assert_eq!(
+                proof.rule.as_deref(),
+                Some("groovy-qualified-header-v1.indexed_snapshot")
+            );
         }
     }
 

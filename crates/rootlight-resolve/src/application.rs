@@ -52,6 +52,7 @@ impl ResolutionEngine {
             &document.provenance,
             &document.extensions,
             &document.coverage_records,
+            &document.occurrences,
             cancellation,
         )?;
         let occurrence_indexes = document
@@ -188,6 +189,7 @@ impl ResolutionEngine {
             &document.provenance,
             &document.extensions,
             &document.coverage_records,
+            &document.occurrences,
             cancellation,
         )?;
         let mut required = 0_usize;
@@ -309,6 +311,7 @@ impl ResolutionEngine {
             &document.provenance,
             &document.extensions,
             &document.coverage_records,
+            &document.occurrences,
             cancellation,
         )?;
         let producer = resolver_producer(self.limits, &self.policy)?;
@@ -783,11 +786,35 @@ fn build_provenance(
             }
         }
     }
-    if matches!(decision.explanation.rule, ResolutionRule::GroovyTypeImport) {
+    if matches!(
+        decision.explanation.rule,
+        ResolutionRule::GroovyInheritedType
+    ) {
+        let entry = lookup
+            .groovy
+            .inherited_entry(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        sources.extend(entry.selection.sources.iter().cloned());
+        derivation_parents.extend(entry.selection.facts.iter().copied());
+        derivation_parents.push(FactRef::Fact(entry.envelope.id));
+        if let Some(source) = &entry.envelope.evidence.source {
+            sources.push(source.clone());
+        }
+    }
+    if matches!(
+        decision.explanation.rule,
+        ResolutionRule::GroovyTypeImport | ResolutionRule::GroovyQualifiedHeader
+    ) {
         let proof = lookup
             .groovy
             .proof(occurrence)
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        if let Some((envelope, owner)) = proof.qualified_header {
+            derivation_parents.push(FactRef::Fact(envelope.id));
+            derivation_parents.push(FactRef::Entity(owner.id));
+            sources.extend(envelope.evidence.source.iter().cloned());
+            sources.extend(owner.evidence.source.iter().cloned());
+        }
         for entity in proof.owners {
             derivation_parents.push(FactRef::Entity(entity.id));
             if let Some(source) = &entity.evidence.source {
@@ -833,6 +860,8 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",
+        ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
         ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
         ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
         ResolutionRule::LexicalScope => "scope-v1.lexical_scope",

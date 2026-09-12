@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact, SyntaxFactKind};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{SymbolId, content_hash};
-use rootlight_ir::{EntityVisibility, GroovyImportedType};
+use rootlight_ir::{EntityVisibility, GroovyImportedType, GroovyTypeLookup};
 
 struct Binding {
     visible_from: u64,
@@ -47,6 +47,7 @@ pub(super) struct GroovyBindings<'a> {
     local_types: BTreeMap<(u64, &'a str), Option<LocalType>>,
     module_packages: BTreeMap<u64, Option<String>>,
     type_names: BTreeMap<u64, (&'a str, Option<SymbolId>)>,
+    type_declarations: BTreeMap<SymbolId, Option<u64>>,
     inherited_scopes: BTreeSet<u64>,
     parents: BTreeMap<u64, Option<Parents>>,
     complete_hierarchies: BTreeSet<u64>,
@@ -76,6 +77,7 @@ impl<'a> GroovyBindings<'a> {
             local_types: BTreeMap::new(),
             module_packages: BTreeMap::new(),
             type_names: BTreeMap::new(),
+            type_declarations: BTreeMap::new(),
             inherited_scopes: BTreeSet::new(),
             parents: BTreeMap::new(),
             complete_hierarchies: BTreeSet::new(),
@@ -156,6 +158,16 @@ impl<'a> GroovyBindings<'a> {
                 .or_insert(binding);
         }
         result.collect_type_context(source, symbols, maximum_name_bytes, cancellation)?;
+        for (&owner, &(_, symbol)) in &result.type_names {
+            cancellation.check()?;
+            if let Some(symbol) = symbol {
+                result
+                    .type_declarations
+                    .entry(symbol)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(owner));
+            }
+        }
         result.collect_hierarchy(source, cancellation)?;
         Ok(result)
     }
@@ -166,15 +178,8 @@ impl<'a> GroovyBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<(), AdapterError> {
         let mut parents = BTreeMap::new();
-        let mut by_symbol = BTreeMap::new();
         for (&owner, &(_, symbol)) in &self.type_names {
             cancellation.check()?;
-            if let Some(symbol) = symbol {
-                by_symbol
-                    .entry(symbol)
-                    .and_modify(|prior| *prior = None)
-                    .or_insert(Some(owner));
-            }
             parents.insert(owner, symbol.map(|_| Parents::default()));
         }
         let mut headers = Vec::new();
@@ -207,9 +212,22 @@ impl<'a> GroovyBindings<'a> {
                 continue;
             };
             owners_with_headers.insert(owner);
-            let target = self
-                .resolve(fact, self.source_name(fact, source)?, cancellation)?
-                .and_then(|symbol| by_symbol.get(&symbol).copied().flatten());
+            let written = self.source_name(fact, source)?;
+            // Dotted parents need the project package inventory before their
+            // local nested fallback can supply inherited members.
+            let qualified = rootlight_adapter_sdk::structural_captured_name_for_fact(
+                "groovy",
+                fact,
+                written,
+                self.maximum_name_bytes,
+            )
+            .is_some_and(|name| name.contains('.'));
+            let target = if qualified {
+                None
+            } else {
+                self.resolve(fact, written, cancellation)?
+                    .and_then(|symbol| self.type_declarations.get(&symbol).copied().flatten())
+            };
             let Some(target) = target else {
                 parents.insert(owner, None);
                 continue;
@@ -614,6 +632,108 @@ impl<'a> GroovyBindings<'a> {
             evidence.target = content_hash(target.as_bytes());
         }
         Ok(Some(evidence))
+    }
+
+    /// Retains source-owned context for qualified headers and inherited type uses.
+    ///
+    /// # Errors
+    /// Returns cancellation or malformed capture ancestry. A context is not a
+    /// resolved target: project lookup must prove parent identities and precedence.
+    pub(super) fn type_lookup(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<GroovyTypeLookup>, AdapterError> {
+        cancellation.check()?;
+        if is_header_type(fact) {
+            let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+                "groovy",
+                fact,
+                name,
+                self.maximum_name_bytes,
+            ) else {
+                return Ok(None);
+            };
+            let Some((root, _)) = name.split_once('.') else {
+                return Ok(None);
+            };
+            // A dotted header can still start with an import alias. Missing or
+            // ambiguous alias identity must not become a literal package lookup.
+            if self.imports.contains_key(root)
+                || self.unresolved_imports
+                || !self.header_has_identity(fact, cancellation)?
+            {
+                return Ok(None);
+            }
+            let Some(owner) = self.type_context(fact.parent(), cancellation)? else {
+                return Ok(None);
+            };
+            return Ok(Some(GroovyTypeLookup {
+                owner: self.fact(owner)?.span(),
+                fallback_local: self
+                    .qualified_local_type(fact, &name, cancellation)?
+                    .and_then(|symbol| self.type_declarations.get(&symbol).copied().flatten())
+                    .map(|declaration| self.fact(declaration).map(SyntaxFact::span))
+                    .transpose()?,
+                name: name.into_owned(),
+                fallback_import: None,
+            }));
+        }
+        if !matches!(
+            fact.syntax_kind().as_str(),
+            "groovy.type_identifier.reference" | "groovy.qualified_type.reference"
+        ) {
+            return Ok(None);
+        }
+        let Some(name) = rootlight_adapter_sdk::structural_captured_name_for_fact(
+            "groovy",
+            fact,
+            name,
+            self.maximum_name_bytes,
+        ) else {
+            return Ok(None);
+        };
+        if let Some((root, _)) = name.split_once('.') {
+            if self.module_type(fact, &name, cancellation)?.is_some()
+                || self.imports.contains_key(root)
+                || self.unresolved_imports
+            {
+                return Ok(None);
+            }
+        } else if self.type_parameter(fact, &name, cancellation)?.is_some() {
+            return Ok(None);
+        }
+        let (owners, _) = self.type_owners(fact, cancellation)?;
+        let Some(&owner) = owners.first() else {
+            return Ok(None);
+        };
+        let Some(&(owner_name, Some(_))) = self.type_names.get(&owner) else {
+            return Ok(None);
+        };
+        if owner_name == name
+            || self
+                .declared_type_path(owner, &name, cancellation)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        if !owners
+            .iter()
+            .any(|owner| !self.complete_hierarchies.contains(owner))
+        {
+            return Ok(None);
+        }
+        Ok(Some(GroovyTypeLookup {
+            owner: self.fact(owner)?.span(),
+            fallback_local: None,
+            fallback_import: self
+                .imports
+                .get(name.as_ref())
+                .and_then(Option::as_ref)
+                .map(|import| import.evidence),
+            name: name.into_owned(),
+        }))
     }
 
     fn file_module(

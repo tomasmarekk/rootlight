@@ -81,6 +81,7 @@ impl ResolutionEngine {
             &document.provenance,
             &document.extensions,
             &document.coverage_records,
+            &document.occurrences,
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
@@ -132,6 +133,7 @@ impl ResolutionEngine {
                 &document.provenance,
                 &document.extensions,
                 &document.coverage_records,
+                &document.occurrences,
                 cancellation,
             )?;
             let mut required = 0_usize;
@@ -196,6 +198,9 @@ impl ResolutionEngine {
     ) -> Result<ResolutionDecision, ResolutionError> {
         if let Some(decision) = index.perl.resolve(occurrence) {
             return Ok(decision);
+        }
+        if let Some(entry) = index.groovy.inherited_entry(occurrence) {
+            work.consume_many(entry.selection.work)?;
         }
         if let Some(decision) = index.groovy.resolve(occurrence) {
             return Ok(decision);
@@ -467,9 +472,13 @@ impl ResolutionWorkBudget {
     }
 
     pub(crate) fn consume(&mut self) -> Result<(), ResolutionError> {
+        self.consume_many(1)
+    }
+
+    fn consume_many(&mut self, amount: usize) -> Result<(), ResolutionError> {
         self.remaining = self
             .remaining
-            .checked_sub(1)
+            .checked_sub(amount)
             .ok_or(ResolutionError::WorkLimit {
                 maximum: self.maximum,
             })?;
@@ -512,6 +521,7 @@ impl<'a> CandidateIndex<'a> {
         provenance_records: &'a [ProvenanceRecord],
         extension_records: &'a [rootlight_ir::ExtensionEnvelope],
         coverage_records: &'a [rootlight_ir::CoverageRecord],
+        occurrence_records: &[OccurrenceRecord],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
@@ -559,6 +569,7 @@ impl<'a> CandidateIndex<'a> {
                 &provenance,
                 coverage_records,
                 extension_records,
+                occurrence_records,
                 cancellation,
             )?,
             perl: crate::perl::PerlIndex::build(
@@ -579,6 +590,16 @@ impl<'a> CandidateIndex<'a> {
         &self,
         occurrence: &OccurrenceRecord,
     ) -> Result<Option<usize>, ResolutionError> {
+        if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            && let Some(entry) = self.groovy.inherited_entry(occurrence)
+        {
+            return entry
+                .selection
+                .work
+                .checked_add(1)
+                .map(Some)
+                .ok_or(ResolutionError::CountOverflow);
+        }
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
             && (self.perl.eligible(occurrence) || self.groovy.proof(occurrence).is_some())
         {

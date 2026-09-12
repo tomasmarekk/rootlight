@@ -1794,6 +1794,50 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         skipped.insert(gap.id, gap);
                     }
                 }
+                if let Some(bindings) = &groovy_bindings
+                    && (matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                        || matches!(
+                            occurrence.role,
+                            OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse
+                        ))
+                    && let Some(lookup) = bindings.type_lookup(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Unresolved {
+                        text_hash: occurrence.syntactic_text_hash,
+                    };
+                    let envelope = rootlight_ir::new_groovy_type_lookup_envelope(
+                        self.full_source.repository(),
+                        self.full_source.generation(),
+                        provenance_id,
+                        occurrence.source.clone(),
+                        lookup,
+                    )
+                    .map_err(|_| provider_failure("groovy-type-lookup-evidence"))?;
+                    if !matches!(
+                        occurrence.role,
+                        OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse
+                    ) {
+                        occurrence.role = OccurrenceRole::TypeUse;
+                    }
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    if !insert_optional_extension(
+                        envelope,
+                        &mut extensions,
+                        &mut extension_bytes,
+                        self.request.limits().ir(),
+                    )? {
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "groovy-type-lookup-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                }
                 if let Some(bindings) = &nix_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {

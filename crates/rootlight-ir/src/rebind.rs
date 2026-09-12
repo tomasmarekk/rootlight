@@ -28,6 +28,10 @@ use crate::{
 use crate::{
     GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
 };
+use crate::{
+    GROOVY_TYPE_LOOKUP_NAMESPACE, decode_groovy_type_lookup_envelope,
+    new_groovy_type_lookup_envelope,
+};
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 
 const GENERATION_NEUTRAL_ID: GenerationId = GenerationId::from_bytes([0; 20]);
@@ -690,6 +694,7 @@ fn require_supported_extensions_with_checkpoint(
                 | LEXICAL_EXTENSION_NAMESPACE
                 | PERL_BINDING_NAMESPACE
                 | GROOVY_BINDING_NAMESPACE
+                | GROOVY_TYPE_LOOKUP_NAMESPACE
         ) {
             return Err(NormalizedRebindError::UnsupportedExtension);
         }
@@ -1230,6 +1235,12 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        GROOVY_TYPE_LOOKUP_NAMESPACE => {
+            let evidence = decode_groovy_type_lookup_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_type_lookup_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         GROOVY_BINDING_NAMESPACE => {
             let evidence = decode_groovy_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -1713,6 +1724,74 @@ mod tests {
                 .digest()
         );
         validate_ir_document(&rebound, &limits, &support).unwrap();
+    }
+
+    #[test]
+    fn groovy_type_lookup_rebinds_owner_context_without_changing_chunk_identity() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let local_lookup = crate::GroovyTypeLookup {
+            owner: crate::SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+            name: "Outer.Inner".into(),
+            fallback_import: None,
+            fallback_local: Some(crate::SourceSpan::new(file.id, 0, 1).unwrap()),
+        };
+        let import_lookup = crate::GroovyTypeLookup {
+            name: "Inner".into(),
+            fallback_import: Some(crate::GroovyImportedType {
+                import: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+                target: rootlight_ids::content_hash(b"sample.Inner"),
+            }),
+            fallback_local: None,
+            ..local_lookup.clone()
+        };
+        for lookup in [local_lookup, import_lookup] {
+            let mut document = document.clone();
+            let file = &document.files[0];
+            document.extensions.push(
+                new_groovy_type_lookup_envelope(
+                    document.repository,
+                    document.generation,
+                    file.provenance,
+                    SourceRef::new(
+                        document.repository,
+                        document.generation,
+                        crate::SourceSpan::new(file.id, 2, 3).unwrap(),
+                        file.content_hash,
+                        None,
+                    ),
+                    lookup.clone(),
+                )
+                .unwrap(),
+            );
+            let limits = IrLimits::default();
+            let support = ExtensionSupport::default();
+            let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+            let generation = GenerationId::from_bytes([87; 20]);
+            let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+            let envelope = &rebound.extensions[0];
+            assert_eq!(
+                decode_groovy_type_lookup_envelope(envelope).unwrap(),
+                lookup
+            );
+            assert_eq!(envelope.generation, generation);
+            assert_eq!(
+                envelope.evidence.source.as_ref().unwrap().generation(),
+                generation
+            );
+            assert_ne!(envelope.id, document.extensions[0].id);
+            assert_eq!(
+                chunk.digest(),
+                CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                    .unwrap()
+                    .digest()
+            );
+            validate_ir_document(&rebound, &limits, &support).unwrap();
+            let mut tampered = document.clone();
+            tampered.extensions[0].payload.push(' ');
+            assert!(CanonicalNormalizedFileChunk::new(&tampered, &limits, &support).is_err());
+        }
     }
 
     #[test]

@@ -249,6 +249,10 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// Native fully qualified Groovy parent type with source-owned lexical context.
+    GroovyQualifiedHeader,
+    /// Source-owned Groovy hierarchy and lexical type selection across files.
+    GroovyInheritedType,
     /// Native Groovy type import with source-owned package and type containers.
     GroovyTypeImport,
     /// Native Perl package CODE storage in the indexed dependency snapshot.
@@ -263,6 +267,10 @@ pub enum ResolutionRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionSignal {
+    /// A native qualified header selects an exact package/type declaration path.
+    NativeQualifiedHeader,
+    /// Native parent headers and lexical owner context identify the selected type.
+    NativeInheritance,
     /// Native import target and canonical declaration ownership identify one type.
     NativeTypeImport,
     /// Source-bound native package/storage identities match without name scoring.

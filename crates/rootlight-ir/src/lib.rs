@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod groovy_binding;
+mod groovy_type_lookup;
 mod identity;
 mod lexical;
 mod normalized;
@@ -26,6 +27,10 @@ mod validation;
 pub use groovy_binding::{
     GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,
     decode_groovy_binding_envelope, new_groovy_binding_envelope,
+};
+pub use groovy_type_lookup::{
+    GROOVY_TYPE_LOOKUP_NAMESPACE, GroovyTypeLookup, GroovyTypeLookupError,
+    decode_groovy_type_lookup_envelope, new_groovy_type_lookup_envelope,
 };
 pub use identity::{
     FILE_IDENTITY_CLAIM_NAMESPACE, FactIdentityRecipeError, FileIdentityClaim,
