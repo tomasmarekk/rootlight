@@ -234,6 +234,42 @@ fn closure_parameters_allow_newlines() {
 }
 
 #[test]
+fn closure_arrow_trivia_preserves_parameters_and_body_ownership() {
+    for header in ["->", "value ->", "String value ->"] {
+        for trivia in [
+            "\n",
+            " // note\n",
+            " // note\r\n\r\n",
+            " /* note */\n",
+            "\n// first\n/* second */\n",
+        ] {
+            for body in ["", "sink(value)"] {
+                let closure = format!("{{ {header}{trivia}{body} }}");
+                for source in [
+                    format!("def action = {closure}\nfinish()\n"),
+                    format!("items.each {closure}\nfinish()\n"),
+                ] {
+                    let tree = valid(&source);
+                    exact(&tree, &source, "closure", &closure);
+                    exact(&tree, &source, "closure_parameters", header);
+                    exact(&tree, &source, "method_invocation", "finish()");
+                    if !body.is_empty() {
+                        let owner = nodes(tree.root_node())
+                            .into_iter()
+                            .find(|node| node.kind() == "closure")
+                            .unwrap();
+                        assert!(nodes(owner).iter().any(|node| {
+                            node.kind() == "method_invocation"
+                                && node.utf8_text(source.as_bytes()).unwrap() == body
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn leading_member_access_continues_expression() {
     let source = "def result = value\n.toString()\n";
     let tree = valid(source);

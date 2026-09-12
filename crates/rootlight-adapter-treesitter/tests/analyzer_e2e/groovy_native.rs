@@ -229,6 +229,20 @@ fn groovy_lexical_reads_respect_initializers_and_closure_parameters() {
 }
 
 #[test]
+fn groovy_closure_arrow_comments_preserve_parameter_and_capture_bindings() {
+    for header in ["->", "value ->", "String value ->"] {
+        for trivia in [" // note\n", "\n// first\r\n/* second */\r\n"] {
+            let source = format!(
+                "def value = 'outer'; def action = {{ {header}{trivia}sink(value); def nested = {{ -> sink(value) }} }}; sink(value)\n"
+            );
+            let outer = Some(source.find("value =").unwrap());
+            let inner = source.find("value ->").or(outer);
+            assert_lexical_reads(&source, "value", &[inner, inner, outer]);
+        }
+    }
+}
+
+#[test]
 fn groovy_lexical_reads_keep_control_bindings_inside_their_visibility() {
     let source = "def examine(items) { for (item in items) { sink(item) }; sink(item); for (int index = 0; index < 2; index++) { sink(index) }; sink(index); try (Reader handle = open(); Reader second = wrap(handle)) { sink(handle, second) } catch (IOException problem) { sink(handle, second, problem) } finally { sink(handle, second, problem) } }\n";
     assert_lexical_reads(source, "items", &[Some(source.find("items").unwrap())]);

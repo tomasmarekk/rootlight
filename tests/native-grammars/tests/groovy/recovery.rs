@@ -4,6 +4,8 @@ use std::ops::ControlFlow;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const SOURCES: &[&str] = &[
+    "def action = { value ->\r\n// λ\r\n/* note */\r\nsink(value) }\r\nfinish()\r\n",
+    "items.each { ->\n// first\n/* second */\n }\nfinish()\n",
     "class Holder { def consume(@Deprecated final String value, final def other = 'λ') { value + other } }\r\n",
     "try { work() } catch (@Deprecated final def problem) { sink(problem) }\r\nfinally { finish() }\n",
     "def value = 1\nvalue\n/* a */\n/* b */\n.member()\nfinish()\n",

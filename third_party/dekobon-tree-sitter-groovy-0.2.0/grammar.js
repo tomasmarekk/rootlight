@@ -1458,11 +1458,12 @@ module.exports = grammar({
     // form; `{ a, b -> body }` has identifier parameters;
     // `{ String a, int b -> body }` has typed parameters; `{ body }`
     // has no `->` and an implicit `it` parameter (we do NOT emit a
-    // synthetic `it` per §5.8). Default values and varargs land later.
+    // synthetic `it` per §5.8). This rule does not recognize defaults or varargs.
+    // Trivia after the arrow belongs to the closure, not its parameter span.
     closure: $ => seq(
       '{',
       optional($._separator),
-      optional($.closure_parameters),
+      optional(seq($.closure_parameters, optional($._separator))),
       optional($._statement_sequence),
       '}',
     ),
