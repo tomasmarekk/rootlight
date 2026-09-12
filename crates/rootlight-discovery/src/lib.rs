@@ -37,7 +37,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.5";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.6";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1854,19 +1854,43 @@ fn content_language_with_scripts(content: &[u8], matlab_scripts: bool) -> Option
         Some("rust")
     } else if text.contains("package main") && text.contains("func ") {
         Some("go")
-    } else if text.lines().any(|line| {
-        let statement = line.trim_start();
-        // Substring matches also accept C header guards and typedefs.
-        (statement.starts_with("def ") || statement.starts_with("async def "))
-            && statement.contains('(')
-            && statement.contains(':')
-    }) {
+    } else if text.lines().any(has_python_function_hint) {
         Some("python")
     } else if looks_like_cpp(&text) {
         Some("cpp")
     } else {
         None
     }
+}
+
+fn has_python_function_hint(line: &str) -> bool {
+    let statement = line.trim_start();
+    let Some(declaration) = statement
+        .strip_prefix("def ")
+        .or_else(|| statement.strip_prefix("async def "))
+    else {
+        return false;
+    };
+    let declaration = declaration.trim_start();
+    if !declaration
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_' || !byte.is_ascii())
+    {
+        return false;
+    }
+    // This is a routing hint, not Python identifier validation. Keep Unicode
+    // names intact while rejecting assignments and member expressions before
+    // the parameter list; a colon inside a Groovy initializer is not evidence.
+    let name_bytes = declaration
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || !byte.is_ascii())
+        .count();
+    let Some(signature) = declaration.get(name_bytes..).map(str::trim_start) else {
+        return false;
+    };
+    // Type parameters may precede the value parameters in Python signatures.
+    signature.starts_with(['(', '[']) && signature.contains('(') && signature.contains(':')
 }
 
 fn looks_like_cpp(text: &str) -> bool {
@@ -2636,6 +2660,75 @@ max_source_file_bytes = 2097152
             assert_eq!(content_language(source), Some("python"));
         }
         assert_eq!(extension_language("include/reader.h"), Some("c"));
+    }
+
+    #[test]
+    fn python_content_hints_reject_initializers_and_non_function_names() {
+        for source in [
+            "def value = factory(option: false)\n",
+            "def value = factory(option: false, nested: create())\n",
+            "def value = 'factory(option: false)'\n",
+            "def value // factory(option: false)\n",
+            "def value /* factory(option: false) */\n",
+            "def owner.read(value):\n",
+            "def Result read(value):\n",
+            "def 12read(value):\n",
+            "# def read(value):\n",
+            "// def read(value):\n",
+            "text = 'def read(value):'\n",
+        ] {
+            assert_eq!(content_language(source.as_bytes()), None, "{source}");
+            let path = RelativePath::parse(Path::new("script.unknown")).unwrap();
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert!(signals.is_empty(), "{source}: {signals:?}");
+        }
+    }
+
+    #[test]
+    fn python_content_hints_preserve_function_signature_forms() {
+        for source in [
+            "def read(value):\n    return value\n",
+            "async def read(value: str) -> str:\n    return value\n",
+            "    def _read (value = factory(option=False)): return value\n",
+            "@decorator\ndef read(value: 'Item') -> 'Item': return value\n",
+            "def read[T: Item](value: T) -> T: return value\n",
+            "def read[T: tuple[Item, ...]](value: T): return value\n",
+            "def λ(value): return value\n",
+            "def e\u{301}(value): return value\n",
+        ] {
+            assert_eq!(
+                content_language(source.as_bytes()),
+                Some("python"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn groovy_initializers_keep_only_their_extension_evidence() {
+        let path = RelativePath::parse(Path::new("script.groovy")).unwrap();
+        let (class, signals) = classify(&path, b"def value = factory(option: false)\n");
+        assert_eq!(class, InputClass::Source);
+        assert_eq!(
+            signals,
+            vec![LanguageSignal {
+                language: "groovy".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }]
+        );
+    }
+
+    #[test]
+    fn python_content_hints_respect_the_existing_byte_prefix_bound() {
+        let mut source = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        source.extend_from_slice(b"def read(value): return value\n");
+        assert_eq!(content_language(&source), None);
+        for byte in 0..=u8::MAX {
+            let mut source = b"def ".to_vec();
+            source.resize(MAX_CLASSIFICATION_BYTES - 1, byte);
+            source.extend_from_slice(b"\xf0\x9f\x98\x80(value): return value\n");
+            assert_eq!(content_language(&source), None);
+        }
     }
 
     #[test]
