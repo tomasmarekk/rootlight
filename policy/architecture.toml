@@ -354,6 +354,7 @@ name = "rootlight-search"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 

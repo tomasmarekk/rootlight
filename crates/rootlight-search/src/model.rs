@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use rootlight_cancel::CancellationReason;
 use rootlight_ids::{FileId, GenerationId, SymbolId};
+use rootlight_vfs::TextEncoding;
 
 /// Maximum UTF-8 bytes accepted for one indexed term.
 pub(crate) const MAX_TERM_BYTES: usize = 240;
@@ -20,15 +21,15 @@ pub struct SourceLexicalCoverage {
     pub omitted_word_bytes: u64,
     /// Number of excluded word occurrences, including repetitions.
     pub omitted_words: u64,
-    /// Whether the entire input could be decoded as UTF-8.
-    pub valid_utf8: bool,
+    /// Verified whole-input encoding; absent when the source cannot be decoded.
+    pub encoding: Option<TextEncoding>,
 }
 
 impl SourceLexicalCoverage {
     /// Whether every source word was admitted to the lexical vocabulary.
     #[must_use]
     pub const fn is_complete(self) -> bool {
-        self.valid_utf8 && self.omitted_words == 0
+        self.encoding.is_some() && self.omitted_words == 0
     }
 }
 

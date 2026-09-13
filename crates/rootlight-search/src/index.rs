@@ -9,6 +9,7 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FileId, GenerationId, SymbolId};
+use rootlight_vfs::SourceText;
 use tantivy::{
     DocAddress, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TERMINATED, TantivyDocument,
     Term,
@@ -1984,9 +1985,10 @@ pub fn project_source_term_chunks(
         .map(|projection| projection.chunks)
 }
 
-/// Scans the entire source once, retaining bounded words and exact omission counts.
+/// Validates the whole source and retains bounded words with exact omission counts.
 ///
-/// Invalid UTF-8 retains no vocabulary and reports its encoding explicitly.
+/// UTF-8 and BOM-backed UTF-16 preserve their original-byte omission counts.
+/// Unsupported encodings retain no vocabulary and report missing encoding evidence.
 /// Budget exhaustion fails construction instead of silently dropping batches.
 ///
 /// # Errors
@@ -2005,40 +2007,35 @@ pub fn project_source_terms_with_coverage(
         })?,
         omitted_word_bytes: 0,
         omitted_words: 0,
-        valid_utf8: true,
+        encoding: None,
     };
-    let Ok(source) = std::str::from_utf8(source) else {
-        coverage.valid_utf8 = false;
+    let Some(source) = SourceText::parse(source, cancellation)? else {
         return Ok(SourceTermProjection {
             chunks: Vec::new(),
             coverage,
         });
     };
+    coverage.encoding = Some(source.encoding());
     let maximum_text_bytes = maximum_text_bytes.min(HARD_MAX_TEXT_BYTES);
     let mut chunks = Vec::new();
     let mut words = BTreeSet::new();
     let mut chunk_bytes = 0usize;
     let mut total_bytes = 0usize;
-    for word in source.split(|character: char| {
-        !(character == '_' || character.is_alphanumeric() || is_mark(character))
-    }) {
-        cancellation.check()?;
-        if word.is_empty() {
-            continue;
-        }
-        if word.len() > MAX_SOURCE_IDENTIFIER_BYTES
-            || normalize_text(word).len() > MAX_SOURCE_IDENTIFIER_BYTES
-        {
-            // Disjoint nonempty input slices bound both counters by source_bytes.
+    visit_source_words(source, cancellation, None, |word, original_bytes| {
+        let Some(word) =
+            word.filter(|word| normalize_text(word).len() <= MAX_SOURCE_IDENTIFIER_BYTES)
+        else {
+            // Disjoint original words bound both counters, even when decoded
+            // UTF-16 words have a different UTF-8 byte length.
             coverage.omitted_word_bytes +=
-                u64::try_from(word.len()).map_err(|_| SearchError::BuildBudgetExceeded {
+                u64::try_from(original_bytes).map_err(|_| SearchError::BuildBudgetExceeded {
                     resource: "text_bytes",
                 })?;
             coverage.omitted_words += 1;
-            continue;
-        }
+            return Ok(false);
+        };
         if words.contains(word) {
-            continue;
+            return Ok(false);
         }
         let additional = word
             .len()
@@ -2084,7 +2081,8 @@ pub fn project_source_terms_with_coverage(
         owned.push_str(word);
         words.insert(owned);
         chunk_bytes += text_addition;
-    }
+        Ok(false)
+    })?;
     if !words.is_empty() {
         if chunks.len() >= MAX_SOURCE_TERM_CHUNKS {
             return Err(SearchError::BuildBudgetExceeded {
@@ -2120,6 +2118,55 @@ pub fn select_query_source_text(
     budget: SearchBudget,
     cancellation: &Cancellation,
 ) -> Result<String, SearchError> {
+    select_query_source_view(
+        SourceText::from_utf8(source),
+        query,
+        maximum_bytes,
+        budget,
+        cancellation,
+        Instant::now(),
+    )
+}
+
+/// Selects bounded query witnesses from original UTF-8 or BOM-backed UTF-16 bytes.
+///
+/// Returns `None` when whole-input decoding is unavailable. Witnesses are UTF-8
+/// text for lexical matching, not replacement source bytes or source offsets.
+///
+/// # Errors
+/// Returns [`SearchError`] for cancellation, invalid query budgets, elapsed
+/// query duration, allocation failure, or a selection exceeding its bound.
+pub fn select_query_source_bytes(
+    source: &[u8],
+    query: &str,
+    maximum_bytes: usize,
+    budget: SearchBudget,
+    cancellation: &Cancellation,
+) -> Result<Option<String>, SearchError> {
+    let started = Instant::now();
+    cancellation.check()?;
+    validate_search_budget(budget)?;
+    let Some(source) = SourceText::parse_with_check(source, || {
+        cancellation.check()?;
+        if started.elapsed() >= budget.max_duration {
+            return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
+        }
+        Ok(())
+    })?
+    else {
+        return Ok(None);
+    };
+    select_query_source_view(source, query, maximum_bytes, budget, cancellation, started).map(Some)
+}
+
+fn select_query_source_view(
+    source: SourceText<'_>,
+    query: &str,
+    maximum_bytes: usize,
+    budget: SearchBudget,
+    cancellation: &Cancellation,
+    started: Instant,
+) -> Result<String, SearchError> {
     cancellation.check()?;
     if query.len() > HARD_MAX_QUERY_BYTES || query.len() > budget.max_query_bytes {
         return Err(SearchError::InvalidQuery(QueryViolation::TooLong));
@@ -2144,33 +2191,17 @@ pub fn select_query_source_text(
         maximum_bytes: maximum_bytes.min(MAX_SOURCE_TEXT_BYTES),
         complete: false,
     };
-    let started = Instant::now();
-    let mut next_check = 0usize;
-    let mut start = None;
-    for (offset, character) in source.char_indices() {
-        if offset >= next_check {
-            cancellation.check()?;
-            if started.elapsed() >= budget.max_duration {
-                return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
+    visit_source_words(
+        source,
+        cancellation,
+        Some((started, budget.max_duration)),
+        |word, _| {
+            if let Some(word) = word {
+                selection.observe(word)?;
             }
-            next_check = offset.saturating_add(4096);
-        }
-        if character == '_' || character.is_alphanumeric() || is_mark(character) {
-            start.get_or_insert(offset);
-        } else if let Some(begin) = start.take() {
-            selection.observe(
-                source
-                    .get(begin..offset)
-                    .ok_or(SearchError::IncompatibleIndex)?,
-            )?;
-            if selection.complete {
-                break;
-            }
-        }
-    }
-    if let Some(begin) = start {
-        selection.observe(source.get(begin..).ok_or(SearchError::IncompatibleIndex)?)?;
-    }
+            Ok(selection.complete)
+        },
+    )?;
     cancellation.check()?;
     if started.elapsed() >= budget.max_duration {
         return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
@@ -2186,6 +2217,94 @@ struct SourceQuerySelection {
     output: String,
     maximum_bytes: usize,
     complete: bool,
+}
+
+// UTF-8 borrows each word; UTF-16 reuses one bounded word buffer. Oversized
+// words carry only their original byte count, never an unbounded decoded copy.
+fn visit_source_words(
+    source: SourceText<'_>,
+    cancellation: &Cancellation,
+    timing: Option<(Instant, Duration)>,
+    mut observe: impl FnMut(Option<&str>, usize) -> Result<bool, SearchError>,
+) -> Result<(), SearchError> {
+    let check = || -> Result<(), SearchError> {
+        cancellation.check()?;
+        if timing.is_some_and(|(started, duration)| started.elapsed() >= duration) {
+            return Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded));
+        }
+        Ok(())
+    };
+    check()?;
+    if let Some(text) = source.utf8() {
+        let mut begin = None;
+        let mut next_check = 0;
+        for (offset, character) in text.char_indices() {
+            if offset >= next_check {
+                check()?;
+                next_check = offset.saturating_add(4096);
+            }
+            if source_word_character(character) {
+                begin.get_or_insert(offset);
+            } else if let Some(start) = begin.take() {
+                let word = text
+                    .get(start..offset)
+                    .ok_or(SearchError::IncompatibleIndex)?;
+                if observe(
+                    (word.len() <= MAX_SOURCE_IDENTIFIER_BYTES).then_some(word),
+                    word.len(),
+                )? {
+                    return check();
+                }
+            }
+        }
+        if let Some(start) = begin {
+            let word = text.get(start..).ok_or(SearchError::IncompatibleIndex)?;
+            observe(
+                (word.len() <= MAX_SOURCE_IDENTIFIER_BYTES).then_some(word),
+                word.len(),
+            )?;
+        }
+    } else {
+        let mut word = String::new();
+        word.try_reserve_exact(MAX_SOURCE_IDENTIFIER_BYTES)
+            .map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            })?;
+        let mut original_bytes = 0_usize;
+        let mut oversized = false;
+        for (index, character) in source.chars().enumerate() {
+            if index % 1024 == 0 {
+                check()?;
+            }
+            if source_word_character(character) {
+                original_bytes = original_bytes
+                    .checked_add(source.encoding().character_bytes(character))
+                    .ok_or(SearchError::BuildBudgetExceeded {
+                        resource: "text_bytes",
+                    })?;
+                oversized |=
+                    word.len().saturating_add(character.len_utf8()) > MAX_SOURCE_IDENTIFIER_BYTES;
+                if !oversized {
+                    word.push(character);
+                }
+            } else if original_bytes != 0 {
+                if observe((!oversized).then_some(word.as_str()), original_bytes)? {
+                    return check();
+                }
+                word.clear();
+                original_bytes = 0;
+                oversized = false;
+            }
+        }
+        if original_bytes != 0 {
+            observe((!oversized).then_some(word.as_str()), original_bytes)?;
+        }
+    }
+    check()
+}
+
+fn source_word_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric() || is_mark(character)
 }
 
 impl SourceQuerySelection {
@@ -2338,7 +2457,15 @@ fn validate_document(
             || coverage.omitted_word_bytes > coverage.source_bytes
             || coverage.omitted_words > coverage.omitted_word_bytes
             || (coverage.omitted_words == 0) != (coverage.omitted_word_bytes == 0)
-            || (!coverage.valid_utf8
+            || (matches!(
+                coverage.encoding,
+                Some(rootlight_vfs::TextEncoding::Utf16Le | rootlight_vfs::TextEncoding::Utf16Be)
+            ) && (coverage.source_bytes < 2
+                || coverage.source_bytes % 2 != 0
+                || coverage.omitted_word_bytes % 2 != 0
+                || coverage.omitted_word_bytes > coverage.source_bytes.saturating_sub(2)
+                || coverage.omitted_words > coverage.omitted_word_bytes / 2))
+            || (coverage.encoding.is_none()
                 && (!document.source_term_chunks.is_empty() || coverage.omitted_words != 0)))
     {
         return Err(SearchError::InvalidDocument {
@@ -2960,6 +3087,153 @@ mod tests {
     }
 
     #[test]
+    fn utf16_vocabulary_preserves_terms_and_original_omission_bytes() {
+        let cancellation = Cancellation::new();
+        let oversized = "x".repeat(241);
+        let expanded = "İ".repeat(81);
+        let text = format!("needle needle {oversized} {oversized} {expanded} tail e\u{301} λ");
+        let utf8 =
+            project_source_terms_with_coverage(text.as_bytes(), 4096, &cancellation).unwrap();
+        for (little_endian, encoding) in [
+            (true, rootlight_vfs::TextEncoding::Utf16Le),
+            (false, rootlight_vfs::TextEncoding::Utf16Be),
+        ] {
+            let bytes = std::iter::once(0xfeff_u16)
+                .chain(text.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let projection =
+                project_source_terms_with_coverage(&bytes, 4096, &cancellation).unwrap();
+            assert_eq!(projection.chunks, utf8.chunks);
+            assert_eq!(projection.coverage.encoding, Some(encoding));
+            assert_eq!(
+                projection.coverage.source_bytes,
+                u64::try_from(bytes.len()).unwrap()
+            );
+            assert_eq!(projection.coverage.omitted_words, 3);
+            assert_eq!(projection.coverage.omitted_word_bytes, 1126);
+            assert!(!projection.coverage.is_complete());
+            assert!(project_source_terms_with_coverage(&bytes, 1, &cancellation).is_err());
+        }
+    }
+
+    #[test]
+    fn utf16_query_witnesses_reach_the_tail_without_accepting_invalid_suffixes() {
+        let text = format!("{} tail_marker λ_value", " ".repeat(40_000));
+        for little_endian in [true, false] {
+            let mut bytes = std::iter::once(0xfeff_u16)
+                .chain(text.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            for query in ["tail_marker", "λ_value", "missing"] {
+                let expected = select_query_source_text(
+                    &text,
+                    query,
+                    256,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                let actual = select_query_source_bytes(
+                    &bytes,
+                    query,
+                    256,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                assert_eq!(actual, Some(expected));
+            }
+            let projection =
+                project_source_terms_with_coverage(&bytes, 4096, &Cancellation::new()).unwrap();
+            assert!(projection.coverage.is_complete());
+            bytes.extend_from_slice(&if little_endian {
+                0xd800_u16.to_le_bytes()
+            } else {
+                0xd800_u16.to_be_bytes()
+            });
+            let invalid =
+                project_source_terms_with_coverage(&bytes, 4096, &Cancellation::new()).unwrap();
+            assert!(invalid.chunks.is_empty());
+            assert!(invalid.coverage.encoding.is_none());
+            assert!(
+                select_query_source_bytes(
+                    &bytes,
+                    "tail_marker",
+                    256,
+                    SearchBudget::default(),
+                    &Cancellation::new()
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_query_validation_preserves_budget_errors_with_invalid_sources() {
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(std::iter::repeat_n([b'a', 0], 65_536).flatten());
+        bytes.extend([0, 0xd8]);
+        for (duration, expected) in [
+            (
+                Duration::ZERO,
+                SearchError::InvalidQueryBudget {
+                    resource: "duration",
+                },
+            ),
+            (
+                Duration::from_nanos(1),
+                SearchError::Cancelled(CancellationReason::DeadlineExceeded),
+            ),
+        ] {
+            assert_eq!(
+                select_query_source_bytes(
+                    &bytes,
+                    "marker",
+                    256,
+                    SearchBudget {
+                        max_duration: duration,
+                        ..SearchBudget::default()
+                    },
+                    &Cancellation::new()
+                ),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_oversized_words_keep_bounded_buffers_and_complete_omission_counts() {
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(std::iter::repeat_n([b'x', 0], 1_000_000).flatten());
+        bytes.extend(" tail".encode_utf16().flat_map(u16::to_le_bytes));
+        let projection =
+            project_source_terms_with_coverage(&bytes, 4096, &Cancellation::new()).unwrap();
+        assert_eq!(projection.chunks.concat(), ["tail"]);
+        assert_eq!(projection.coverage.omitted_words, 1);
+        assert_eq!(projection.coverage.omitted_word_bytes, 2_000_000);
+        let cancelled = Cancellation::with_deadline(Instant::now());
+        assert!(project_source_terms_with_coverage(&bytes, 4096, &cancelled).is_err());
+        assert!(
+            select_query_source_bytes(&bytes, "tail", 256, SearchBudget::default(), &cancelled)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn source_projection_accounts_for_omitted_occurrences_and_encoding() {
         let cancellation = Cancellation::new();
         let oversized = "x".repeat(241);
@@ -2983,7 +3257,7 @@ mod tests {
         }
         let invalid = project_source_terms_with_coverage(&[b'a', 0xff], 4096, &cancellation)
             .expect("encoding accounting");
-        assert!(!invalid.coverage.valid_utf8);
+        assert!(invalid.coverage.encoding.is_none());
         assert!(!invalid.coverage.is_complete());
         assert_eq!(invalid.coverage.source_bytes, 2);
         assert_eq!(invalid.coverage.omitted_words, 0);
@@ -3006,12 +3280,53 @@ mod tests {
     }
 
     #[test]
+    fn utf16_accounting_rejects_impossible_code_unit_counts() {
+        let mut doc = document(49, "encoded.txt", "encoded.txt");
+        doc.symbol_id = None;
+        let coverage = SourceLexicalCoverage {
+            source_bytes: 6,
+            omitted_word_bytes: 4,
+            omitted_words: 1,
+            encoding: Some(rootlight_vfs::TextEncoding::Utf16Le),
+        };
+        doc.source_coverage = Some(coverage);
+        assert!(validate_document(&doc, &Cancellation::new()).is_ok());
+        for invalid in [
+            SourceLexicalCoverage {
+                source_bytes: 1,
+                omitted_word_bytes: 0,
+                omitted_words: 0,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                source_bytes: 7,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                omitted_word_bytes: 3,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                omitted_word_bytes: 6,
+                ..coverage
+            },
+            SourceLexicalCoverage {
+                omitted_words: 3,
+                ..coverage
+            },
+        ] {
+            doc.source_coverage = Some(invalid);
+            assert!(validate_document(&doc, &Cancellation::new()).is_err());
+        }
+    }
+
+    #[test]
     fn source_accounting_rejects_inconsistent_counts_and_symbol_claims() {
         let coverage = SourceLexicalCoverage {
             source_bytes: 241,
             omitted_word_bytes: 241,
             omitted_words: 1,
-            valid_utf8: true,
+            encoding: Some(rootlight_vfs::TextEncoding::Utf8),
         };
         let mut doc = document(47, "config.yaml", "config.yaml");
         doc.source_coverage = Some(coverage);
@@ -3032,7 +3347,7 @@ mod tests {
                 ..coverage
             },
             SourceLexicalCoverage {
-                valid_utf8: false,
+                encoding: None,
                 ..coverage
             },
         ] {

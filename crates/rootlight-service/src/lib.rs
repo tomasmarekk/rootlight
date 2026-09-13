@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/130";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/131";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -227,7 +227,7 @@ const DERIVED_PASS_ID: &str = "first-slice.derived";
 const SEARCH_PASS_ID: &str = "first-slice.search";
 const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/3";
 const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
-const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/3";
+const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/4";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
@@ -41096,6 +41096,167 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "discovery-source-bytes-truncated")
         );
+    }
+
+    #[test]
+    fn utf16_text_locate_is_generation_bound_across_restart_and_mutation() {
+        for little_endian in [true, false] {
+            let fixture = TempDir::new().unwrap();
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let mut previous = None;
+            for marker in ["originaltoken", "replacementtoken"] {
+                let text = format!("{} {marker} λ_value\r\n", " ".repeat(40_000));
+                let bytes = std::iter::once(0xfeff_u16)
+                    .chain(text.encode_utf16())
+                    .flat_map(|unit| {
+                        if little_endian {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                fs::write(fixture.path().join("encoded.txt"), &bytes).unwrap();
+                let policy = FirstSliceStoragePolicy::resolve_user_config(None, 2).unwrap();
+                let mut service = FirstSliceService::new_durable_with_policy(
+                    policy,
+                    paths.state_dir(),
+                    &deadline(),
+                )
+                .unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                if let Some(prior) = previous {
+                    assert_ne!(receipt.generation, prior);
+                }
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let file = snapshot
+                    .document()
+                    .files
+                    .iter()
+                    .find(|file| file.path == "encoded.txt")
+                    .unwrap();
+                drop(service);
+                let policy = FirstSliceStoragePolicy::resolve_user_config(None, 2).unwrap();
+                let mut service = FirstSliceService::new_durable_with_policy(
+                    policy,
+                    paths.state_dir(),
+                    &deadline(),
+                )
+                .unwrap();
+                let lexical = service
+                    .source_file_lexical_coverage_until(receipt.generation, file.id, &deadline())
+                    .unwrap()
+                    .unwrap();
+                assert!(lexical.is_complete());
+                assert_eq!(lexical.source_bytes, u64::try_from(bytes.len()).unwrap());
+                assert_eq!(
+                    lexical.encoding.unwrap().as_str(),
+                    if little_endian {
+                        "utf-16le"
+                    } else {
+                        "utf-16be"
+                    }
+                );
+                let structural = service
+                    .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                    .unwrap();
+                assert_eq!(
+                    structural.reason,
+                    Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+                );
+                for query in [marker, "λ_value"] {
+                    for scoped in [false, true] {
+                        let hits = service
+                            .code_locate_with_filters_and_budget(
+                                receipt.generation,
+                                query.to_owned(),
+                                LocateMode::Text,
+                                Vec::new(),
+                                if scoped {
+                                    vec!["encoded.txt".to_owned()]
+                                } else {
+                                    Vec::new()
+                                },
+                                10,
+                                0,
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert_eq!(hits.data.hits.len(), 1);
+                        let hit = &hits.data.hits[0];
+                        assert_eq!(hit.file, file.id);
+                        assert!(hit.symbol.is_none());
+                        let reference = hit.source.as_ref().unwrap();
+                        assert_eq!(reference.generation(), receipt.generation);
+                        assert_eq!(reference.content_hash(), content_hash(&bytes));
+                        assert_eq!(reference.span().start_byte(), 0);
+                        assert_eq!(
+                            reference.span().end_byte(),
+                            u64::try_from(bytes.len()).unwrap()
+                        );
+                        let start = 2 + text
+                            .get(..text.find(query).unwrap())
+                            .unwrap()
+                            .encode_utf16()
+                            .count()
+                            * 2;
+                        let end = start + query.encode_utf16().count() * 2;
+                        let selection = SourceRef::new(
+                            reference.repository(),
+                            receipt.generation,
+                            SourceSpan::new(
+                                file.id,
+                                u64::try_from(start).unwrap(),
+                                u64::try_from(end).unwrap(),
+                            )
+                            .unwrap(),
+                            reference.content_hash(),
+                            None,
+                        );
+                        let read = service
+                            .source_read_with_options_and_budget(
+                                receipt.generation,
+                                vec![selection],
+                                SourceReadOptions::new()
+                                    .with_context_lines_before(0)
+                                    .with_context_lines_after(0)
+                                    .with_encoding(rootlight_source::SourceEncoding::Bytes),
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert_eq!(read.data.chunks[0].bytes, bytes.get(start..end).unwrap());
+                    }
+                }
+                if previous.is_some() {
+                    let stale = service
+                        .code_locate(
+                            receipt.generation,
+                            "originaltoken".to_owned(),
+                            LocateMode::Text,
+                            10,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(stale.data.hits.is_empty());
+                }
+                let noop = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(noop.generation, receipt.generation);
+                previous = Some(receipt.generation);
+            }
+        }
     }
 
     #[test]

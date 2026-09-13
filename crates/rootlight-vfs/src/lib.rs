@@ -35,6 +35,9 @@ use rootlight_ir::{
 };
 
 pub mod platform;
+mod text;
+
+pub use text::{SourceText, TextEncoding};
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;

@@ -284,10 +284,21 @@ fn fixture_snapshot() -> GenerationSnapshot {
 }
 
 fn fallback_fixture(path: &str) -> (GenerationSnapshot, SourceSnapshot) {
+    fallback_fixture_with_bytes(
+        path,
+        b"fallback_identifier { color: green; }\n".to_vec(),
+        "utf-8",
+    )
+}
+
+fn fallback_fixture_with_bytes(
+    path: &str,
+    content: Vec<u8>,
+    encoding: &str,
+) -> (GenerationSnapshot, SourceSnapshot) {
     let base = fixture_snapshot();
     let metadata = base.metadata();
     let mut document = base.document().clone();
-    let content = b"fallback_identifier { color: green; }\n".to_vec();
     let path = RelativePath::parse(Path::new(path)).expect("synthetic fallback path is valid");
     let file = derive_file(FileIdentity {
         repository: document.repository,
@@ -313,7 +324,7 @@ fn fallback_fixture(path: &str) -> (GenerationSnapshot, SourceSnapshot) {
         content_hash,
         byte_length,
         language: "synthetic".to_owned(),
-        encoding: "utf-8".to_owned(),
+        encoding: encoding.to_owned(),
         generated: false,
         provenance,
         evidence: FactEvidence {
@@ -352,6 +363,71 @@ fn fallback_fixture(path: &str) -> (GenerationSnapshot, SourceSnapshot) {
     )
     .expect("fallback source identity is canonical");
     (snapshot, source)
+}
+
+#[test]
+fn scoped_utf16_projection_finds_words_beyond_the_stored_prefix() {
+    let text = format!("heading {} suffix_word λ_value", " ".repeat(40_000));
+    for (little_endian, encoding) in [(true, "utf-16le"), (false, "utf-16be")] {
+        let bytes = std::iter::once(0xfeff_u16)
+            .chain(text.encode_utf16())
+            .flat_map(|unit| {
+                if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                }
+            })
+            .collect::<Vec<_>>();
+        let (snapshot, source) = fallback_fixture_with_bytes("encoded.sourceblob", bytes, encoding);
+        let prefix = project_lexical_documents_with_sources(
+            &snapshot,
+            &[&source],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let file = prefix
+            .iter()
+            .find(|document| document.file_id == source.file())
+            .unwrap();
+        assert!(file.source_text.as_ref().unwrap().contains("heading"));
+        assert!(!file.source_text.as_ref().unwrap().contains("suffix_word"));
+        for query in ["suffix_word", "λ_value"] {
+            let scoped = rootlight_query::project_scoped_lexical_documents_for_query(
+                &snapshot,
+                &source,
+                query,
+                SearchBudget::default(),
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            let file = scoped
+                .iter()
+                .find(|document| document.file_id == source.file())
+                .unwrap();
+            assert!(file.symbol_id.is_none());
+            assert_eq!(file.source_text.as_deref(), Some(query));
+            assert!(
+                file.source_identifiers
+                    .iter()
+                    .any(|identifier| identifier == query)
+            );
+        }
+        let cancelled = Cancellation::with_deadline(std::time::Instant::now());
+        assert!(
+            rootlight_query::project_scoped_lexical_documents_for_query(
+                &snapshot,
+                &source,
+                "suffix_word",
+                SearchBudget::default(),
+                BuildBudget::default(),
+                &cancelled
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

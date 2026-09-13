@@ -13,6 +13,7 @@ cap-fs-ext.workspace = true
 cap-std.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 tantivy.workspace = true
 tantivy-fst.workspace = true
 thiserror.workspace = true

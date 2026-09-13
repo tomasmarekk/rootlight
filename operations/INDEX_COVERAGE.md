@@ -45,10 +45,15 @@ neither zero recorded gaps nor high occurrence counts prove semantic completenes
 This diagnostic does not qualify an installed package or the MCP transport.
 
 BOM-backed, strictly valid UTF-16LE/BE text is retained with its original encoding,
-hash and byte ranges. A bounded decoded prefix can supply discovery signals, but
-this does not provide UTF-16 lexical search or structural analysis. Such files
-retain explicit unsupported-encoding coverage gaps and must not count as
-structurally indexed language support. Malformed UTF-16 and decoded NUL remain
+hash and byte ranges. A bounded decoded prefix supplies discovery signals.
+File-level lexical vocabulary scans the complete UTF-8 or UTF-16 text with the
+same word-size and aggregate bounds. Exact omission counts use original encoded
+bytes, including repeated oversized words; decoding does not replace source
+snapshots. Scoped text queries can select witnesses beyond the stored prefix.
+These lexical capabilities do not provide UTF-16 structural analysis: such files
+retain explicit unsupported-encoding coverage gaps and do not count as
+structurally indexed language support. Exact source reads use raw-byte mode;
+the UTF-8 presentation mode does not silently transcode. Malformed UTF-16 and decoded NUL remain
 excluded; this admission rule does not recognize arbitrary legacy code pages or
 embedded container sources.
 

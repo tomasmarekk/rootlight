@@ -18,61 +18,37 @@ pub(super) fn classify(
     cancellation: &Cancellation,
 ) -> Result<Option<SourceClassification>, DiscoveryError> {
     cancellation.check()?;
-    let (encoding, decode): (&str, fn([u8; 2]) -> u16) = match content {
-        [0xff, 0xfe, ..] => ("utf-16le", u16::from_le_bytes),
-        [0xfe, 0xff, ..] => ("utf-16be", u16::from_be_bytes),
-        _ => {
-            let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
-            return Ok(
-                (!sample.is_some_and(|sample| sample.contains(&0))).then_some(
-                    SourceClassification {
-                        encoding: "utf-8",
-                        decoded_prefix: None,
-                    },
-                ),
-            );
-        }
-    };
-    let Some(body) = content.get(2..) else {
-        return Ok(None);
-    };
-    let (units, remainder) = body.as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Ok(None);
+    if !matches!(content, [0xff, 0xfe, ..] | [0xfe, 0xff, ..]) {
+        let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
+        return Ok(
+            (!sample.is_some_and(|sample| sample.contains(&0))).then_some(SourceClassification {
+                encoding: "utf-8",
+                decoded_prefix: None,
+            }),
+        );
     }
+    let Some(text) = rootlight_vfs::SourceText::parse(content, cancellation)? else {
+        return Ok(None);
+    };
     let mut prefix = String::new();
     prefix
         .try_reserve_exact(MAX_CLASSIFICATION_BYTES)
         .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
     let mut original_offset = 2_usize;
-    let mut prefix_complete = false;
-    for (index, decoded) in char::decode_utf16(units.iter().copied().map(decode)).enumerate() {
-        if index % 1024 == 0 {
-            cancellation.check()?;
-        }
-        let Ok(character) = decoded else {
-            return Ok(None);
-        };
-        // UTF-32LE shares the UTF-16LE BOM prefix. Decoded NUL must not let
-        // that format or ordinary NUL-bearing binary data enter as UTF-16 text.
-        if character == '\0' {
-            return Ok(None);
-        }
+    for character in text.chars() {
         original_offset = original_offset
-            .checked_add(character.len_utf16() * 2)
+            .checked_add(text.encoding().character_bytes(character))
             .ok_or(DiscoveryError::IncrementalDrift)?;
         if original_offset > MAX_CLASSIFICATION_BYTES
             || prefix.len().saturating_add(character.len_utf8()) > MAX_CLASSIFICATION_BYTES
         {
-            prefix_complete = true;
+            break;
         }
-        if !prefix_complete {
-            prefix.push(character);
-        }
+        prefix.push(character);
     }
     cancellation.check()?;
     Ok(Some(SourceClassification {
-        encoding,
+        encoding: text.encoding().as_str(),
         decoded_prefix: Some(prefix),
     }))
 }

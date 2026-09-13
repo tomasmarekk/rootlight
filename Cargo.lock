@@ -2680,6 +2680,7 @@ dependencies = [
  "nix",
  "rootlight-cancel",
  "rootlight-ids",
+ "rootlight-vfs",
  "tantivy",
  "tantivy-fst",
  "tempfile",

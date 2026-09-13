@@ -5,10 +5,10 @@ use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
     BuildBudget, LexicalDocument, SearchBudget, SearchError, project_source_terms_with_coverage,
-    select_query_source_text, validate_build_admission,
+    select_query_source_bytes, validate_build_admission,
 };
 use rootlight_storage::GenerationSnapshot;
-use rootlight_vfs::SourceSnapshot;
+use rootlight_vfs::{SourceSnapshot, SourceText};
 use serde::Serialize;
 
 use crate::QueryError;
@@ -395,7 +395,7 @@ fn project_source_document(
             (!text.is_empty()).then(|| try_clone(text)).transpose()?,
         )
     } else {
-        bounded_utf8_prefix(source.content(), maximum_source_text_bytes)
+        bounded_source_prefix(source.content(), maximum_source_text_bytes, cancellation)?
             .as_deref()
             .map(bounded_source_projection)
             .map(|(identifiers, text)| {
@@ -607,18 +607,13 @@ pub fn project_scoped_lexical_documents_for_query(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
-    let selected = std::str::from_utf8(source.content())
-        .ok()
-        .map(|text| {
-            select_query_source_text(
-                text,
-                query,
-                SOURCE_FALLBACK_TEXT_BYTES,
-                search_budget,
-                cancellation,
-            )
-        })
-        .transpose()?;
+    let selected = select_query_source_bytes(
+        source.content(),
+        query,
+        SOURCE_FALLBACK_TEXT_BYTES,
+        search_budget,
+        cancellation,
+    )?;
     project_scoped_source_documents(
         generation,
         source,
@@ -788,13 +783,35 @@ fn analysis_tier_for_file(
         .ok_or(QueryError::IndexDrift)
 }
 
-fn bounded_utf8_prefix(content: &[u8], maximum: usize) -> Option<String> {
-    let text = std::str::from_utf8(content).ok()?;
-    let mut end = text.len().min(maximum);
-    while !text.is_char_boundary(end) {
-        end = end.saturating_sub(1);
+fn bounded_source_prefix(
+    content: &[u8],
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<Option<String>, QueryError> {
+    if maximum == 0 {
+        return Ok(None);
     }
-    Some(text[..end].to_owned())
+    let Some(text) = SourceText::parse(content, cancellation)
+        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?
+    else {
+        return Ok(None);
+    };
+    let mut prefix = String::new();
+    prefix
+        .try_reserve_exact(maximum)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    for (index, character) in text.chars().enumerate() {
+        if index % 1024 == 0 {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+        }
+        if prefix.len().saturating_add(character.len_utf8()) > maximum {
+            break;
+        }
+        prefix.push(character);
+    }
+    Ok(Some(prefix))
 }
 
 fn bounded_source_projection(source: &str) -> (Vec<String>, String) {
@@ -884,15 +901,45 @@ fn try_clone(value: &str) -> Result<String, QueryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_source_projection, bounded_utf8_prefix};
+    use super::{bounded_source_prefix, bounded_source_projection};
 
     #[test]
     fn fallback_prefix_respects_tighter_utf8_boundaries() {
         let source = "abé".as_bytes();
 
-        assert_eq!(bounded_utf8_prefix(source, 0).as_deref(), Some(""));
-        assert_eq!(bounded_utf8_prefix(source, 3).as_deref(), Some("ab"));
-        assert_eq!(bounded_utf8_prefix(source, 4).as_deref(), Some("abé"));
+        let cancellation = rootlight_cancel::Cancellation::new();
+        assert_eq!(
+            bounded_source_prefix(source, 0, &cancellation).unwrap(),
+            None
+        );
+        assert_eq!(
+            bounded_source_prefix(source, 3, &cancellation)
+                .unwrap()
+                .as_deref(),
+            Some("ab")
+        );
+        assert_eq!(
+            bounded_source_prefix(source, 4, &cancellation)
+                .unwrap()
+                .as_deref(),
+            Some("abé")
+        );
+        let bytes = std::iter::once(0xfeff_u16)
+            .chain("abé𝄞".encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bounded_source_prefix(&bytes, 7, &cancellation)
+                .unwrap()
+                .as_deref(),
+            Some("abé")
+        );
+        assert_eq!(
+            bounded_source_prefix(&bytes, 8, &cancellation)
+                .unwrap()
+                .as_deref(),
+            Some("abé𝄞")
+        );
     }
 
     #[test]
