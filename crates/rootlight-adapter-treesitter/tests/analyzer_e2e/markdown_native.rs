@@ -1232,7 +1232,67 @@ fn markdown_code_labels_require_declared_languages_without_content_inference() {
 }
 
 #[test]
-fn markdown_foreign_code_keeps_its_range_budget_after_native_paragraphs() {
+fn markdown_independent_fences_reuse_fragment_capacity_with_exact_sources() {
+    let source = format!(
+        "# Examples λ😀\r\n\r\n{}",
+        (0..40)
+            .map(|index| format!("~~~rust\r\nfn example_{index}() {{}}\r\n~~~\r\n\r\n"))
+            .collect::<String>()
+    );
+    let result = output(&source);
+    let functions: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect();
+    assert_eq!(functions.len(), 40);
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "markdown-code-budget-unavailable" })
+    );
+    for index in 0..40 {
+        let name = format!("example_{index}");
+        let function = functions
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: function.id,
+                        }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name.as_str())
+        );
+        assert_eq!(
+            definition.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(
+            definition.syntactic_text_hash,
+            content_hash(name.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn markdown_foreign_code_reuses_range_capacity_after_native_paragraphs() {
     let source = format!(
         "{}{}",
         "Paragraph.\n\n".repeat(31),
@@ -1248,9 +1308,33 @@ fn markdown_foreign_code_keeps_its_range_budget_after_native_paragraphs() {
         .filter(|entity| entity.kind == EntityKind::Function)
         .map(|entity| entity.canonical_name.as_str())
         .collect();
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 33);
     assert!(names.contains("item_0"));
-    assert!(!names.contains("item_32"));
+    assert!(names.contains("item_32"));
+    let gaps: Vec<_> = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-code-budget-unavailable")
+        .collect();
+    assert!(gaps.is_empty());
+}
+
+#[test]
+fn markdown_fragment_overflow_stays_scoped_to_one_fence() {
+    let source = format!(
+        "> ~~~rust\n> fn blocked() {{\n{}> }}\n> ~~~\n\n~~~rust\nfn healthy() {{}}\n~~~\n",
+        "> let value = 1;\n".repeat(33)
+    );
+    let result = output(&source);
+    let names: Vec<_> = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .map(|entity| entity.canonical_name.as_str())
+        .collect();
+    assert_eq!(names, ["healthy"]);
     let gaps: Vec<_> = result
         .document()
         .skipped_regions
@@ -1259,12 +1343,66 @@ fn markdown_foreign_code_keeps_its_range_budget_after_native_paragraphs() {
         .collect();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].reason, SkippedRegionReason::ResourceLimit);
-    let span = gaps[0].source.span();
     assert_eq!(
-        &source[usize::try_from(span.start_byte()).unwrap()
-            ..usize::try_from(span.end_byte()).unwrap()],
-        "~~~rust\nfn item_32() {}\n~~~\n"
+        gaps[0].source.content_hash(),
+        content_hash(source.as_bytes())
     );
+    assert!(
+        usize::try_from(gaps[0].source.span().end_byte()).unwrap()
+            < source.find("fn healthy").unwrap()
+    );
+}
+
+#[test]
+fn markdown_sequential_fences_preserve_document_node_and_disabled_range_limits() {
+    let source = (0..40)
+        .map(|index| format!("~~~rust\nfn item_{index}() {{}}\n~~~\n\n"))
+        .collect::<String>();
+    let full = output(&source);
+    let defaults = limits();
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    for (nodes, ranges) in [
+        (
+            full.report().resources().syntax_nodes() - 16,
+            defaults.max_embedded_ranges(),
+        ),
+        (defaults.max_syntax_nodes(), 0),
+    ] {
+        let budget = AnalysisLimits::new(
+            defaults.max_source_bytes(),
+            nodes,
+            defaults.max_syntax_depth(),
+            ranges,
+            defaults.max_reported_memory_bytes(),
+            defaults.syntax_stream().clone(),
+            defaults.ir_stream().clone(),
+            defaults.ir().clone(),
+        )
+        .unwrap();
+        let result = analyze(
+            &analyzer(&provider, MARKDOWN),
+            &request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget),
+            &ExtensionSupport::default(),
+        );
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        let count = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Function)
+            .count();
+        assert!(result.report().resources().syntax_nodes() <= nodes);
+        if ranges == 0 {
+            assert_eq!(count, 0);
+        } else {
+            assert!(count > 0 && count < 40);
+        }
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.detail == "markdown-code-budget-unavailable"
+                && gap.reason == SkippedRegionReason::ResourceLimit
+        }));
+    }
 }
 
 #[test]
@@ -2161,9 +2299,13 @@ fn markdown_excessive_heading_name_remains_a_source_scoped_gap() {
 
 #[test]
 fn markdown_bounded_examples_keep_preflight_and_artifact_identity_demand_equal() {
-    let source = (0..40)
+    let mut source = (0..40)
         .map(|index| format!("~~~rust\nfn example_{index}() {{}}\n~~~\n\n"))
         .collect::<String>();
+    source.push_str(&format!(
+        "> ~~~rust\n{}> ~~~\n",
+        "> let value = 1;\n".repeat(33)
+    ));
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, MARKDOWN);
     let fixture = Fixture::new(MARKDOWN, source.as_bytes());

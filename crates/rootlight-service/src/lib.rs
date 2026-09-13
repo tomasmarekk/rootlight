@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/123";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/124";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/31";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -38778,9 +38778,13 @@ mod tests {
     #[test]
     fn body_edit_reuses_unchanged_bounded_markdown() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let markdown = (0..40)
+        let mut markdown = (0..40)
             .map(|index| format!("~~~rust\nfn example_{index}() {{}}\n~~~\n\n"))
             .collect::<String>();
+        markdown.push_str(&format!(
+            "> ~~~rust\n{}> ~~~\n",
+            "> let value = 1;\n".repeat(33)
+        ));
         fs::write(fixture.path().join("guide.md"), markdown).expect("independent document writes");
         fs::write(fixture.path().join("value.rs"), "fn value() -> u32 { 1 }\n")
             .expect("initial function writes");

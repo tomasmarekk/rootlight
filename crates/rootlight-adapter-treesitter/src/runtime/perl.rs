@@ -22,6 +22,7 @@ impl TreeSitterProvider {
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
         used_ranges: &mut usize,
+        context: Option<&mut NativeParseContext>,
         cancellation: &Cancellation,
     ) -> Result<EmbeddedExtractionLimits, AdapterError> {
         let scopes = replacement_scopes(candidates, cancellation)?;
@@ -37,7 +38,7 @@ impl TreeSitterProvider {
             .max_embedded_ranges()
             .min(self.config.max_included_ranges());
         let mut limited = EmbeddedExtractionLimits::default();
-        let mut context = NativeParseContext {
+        let mut local_context = NativeParseContext {
             expression_envelope: None,
             range_origin: (0, Point::new(0, 0)),
             remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
@@ -48,6 +49,7 @@ impl TreeSitterProvider {
             )
             .max_progress_checks,
         };
+        let context = context.unwrap_or(&mut local_context);
         let pack = self
             .query_packs
             .get(GrammarFamily::Perl)
@@ -129,14 +131,28 @@ impl TreeSitterProvider {
                     &limits,
                 )?;
                 context.range_origin = (body.start_byte(), body.start_position());
-                let child_tree = self.parse_native_tree(
+                let child_tree = match self.parse_native_tree(
                     &child_request,
                     &language_for(GrammarFamily::Perl),
                     None,
                     self.config.default_settings(),
-                    Some(&mut context),
+                    Some(&mut *context),
                     cancellation,
-                )?;
+                ) {
+                    Ok(tree) => tree,
+                    Err(AdapterError::ProviderFailed { code })
+                        if matches!(
+                            code.as_str(),
+                            "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"
+                        ) =>
+                    {
+                        cancellation.check()?;
+                        context.remaining_progress_checks = 0;
+                        limited.context = true;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let child = inspect_tree(
                     &child_tree,
                     &child_request,

@@ -17,15 +17,33 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<EmbeddedExtractionLimits, AdapterError> {
-        let inline_limited =
-            self.extract_markdown_inline(tree, request, traversal, candidates, cancellation)?;
+        let mut context = NativeParseContext {
+            expression_envelope: None,
+            range_origin: (0, Point::new(0, 0)),
+            remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
+                request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_sub(traversal.processed_nodes),
+                request.limits().max_syntax_depth(),
+            )
+            .max_progress_checks,
+        };
+        let inline_limited = self.extract_markdown_inline(
+            tree,
+            request,
+            traversal,
+            candidates,
+            &mut context,
+            cancellation,
+        )?;
         self.extract_markdown_code(
             tree,
             request,
             traversal,
             candidates,
             max_facts,
-            0,
+            &mut context,
             cancellation,
         )
         .map(|mut limits| {
@@ -34,12 +52,14 @@ impl TreeSitterProvider {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_markdown_inline(
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
+        context: &mut NativeParseContext,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
         sort_cancellable_by(candidates, cancellation, |left, right| {
@@ -54,15 +74,6 @@ impl TreeSitterProvider {
         // Inline blocks are the second phase of the host grammar, not foreign
         // language injections. Each parse retains its fragment cap, while all
         // blocks share syntax-node and native-work budgets for the document.
-        let mut context = NativeParseContext {
-            expression_envelope: None,
-            range_origin: (0, Point { row: 0, column: 0 }),
-            remaining_progress_checks: ParseWorkLimit::from_syntax_limits(
-                request.limits().max_syntax_nodes(),
-                request.limits().max_syntax_depth(),
-            )
-            .max_progress_checks,
-        };
         let mut limited = false;
         for index in 0..host_count {
             cancellation.check()?;
@@ -111,7 +122,7 @@ impl TreeSitterProvider {
                 &tree_sitter_md::INLINE_LANGUAGE.into(),
                 None,
                 self.config.default_settings(),
-                Some(&mut context),
+                Some(&mut *context),
                 cancellation,
             ) {
                 Ok(child) => child,

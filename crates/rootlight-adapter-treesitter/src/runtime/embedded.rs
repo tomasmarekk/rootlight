@@ -27,6 +27,7 @@ impl TreeSitterProvider {
                 candidates,
                 max_facts,
                 &mut used_ranges,
+                None,
                 cancellation,
             );
         }
