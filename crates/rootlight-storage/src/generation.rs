@@ -2804,6 +2804,7 @@ mod tests {
             ),
             rootlight_ir::GroovyCallable {
                 name: SourceSpan::new(file.id, 0, 1).unwrap(),
+                name_identity: None,
                 parameters: SourceSpan::new(file.id, 1, 3).unwrap(),
                 parameter_count: 0,
                 required_parameter_count: 0,

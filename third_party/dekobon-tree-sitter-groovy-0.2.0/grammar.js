@@ -204,6 +204,7 @@ module.exports = grammar({
     // Newlines after enum constants can introduce another comma or members;
     // constant arguments and constructor parameters also share their prefix.
     [$._enum_constants],
+    [$.enum_constant, $._property_name],
     [$.formal_parameters, $.argument_list],
     [$.formal_parameter, $._expression],
     // See SPECIFICATION.md §7. Populated as rules accumulate.
@@ -567,7 +568,7 @@ module.exports = grammar({
       optional(field('type_parameters', $.type_parameters)),
       optional($.extends_interfaces),
       optional($.permits_clause),
-      field('body', $.class_body),
+      field('body', alias($._interface_body, $.class_body)),
     ),
 
     // §4 / §5.14 — generic type parameter list on a class /
@@ -641,8 +642,32 @@ module.exports = grammar({
       '@',
       'interface',
       field('name', $.identifier),
-      field('body', $.class_body),
+      field('body', alias($._interface_body, $.class_body)),
     ),
+
+    // Only interface-like owners admit a bare, bodyless method header. Keep
+    // the existing named nodes so declaration fields retain a uniform shape.
+    _interface_body: $ => seq(
+      '{',
+      optional($._separator),
+      optional(seq(
+        $._interface_member,
+        repeat(seq($._separator, $._interface_member)),
+        optional($._separator),
+      )),
+      '}',
+    ),
+
+    _interface_member: $ => choice(
+      $._class_member,
+      alias($._interface_method_declaration, $.method_declaration),
+    ),
+
+    _interface_method_declaration: $ => prec.right(2, seq(
+      field('name', $._property_name),
+      field('parameters', $.formal_parameters),
+      optional(seq(repeat($._newline), $.throws_clause)),
+    )),
 
     // Member boundaries follow the same newline/semicolon contract as scripts.
     class_body: $ => seq(
@@ -671,17 +696,13 @@ module.exports = grammar({
       $.static_initializer,
     ),
 
-    // §4 — constructors share the method_declaration shape but have
-    // no return type and the name matches the enclosing class. We
-    // don't enforce the name match (downstream tooling can), but we
-    // emit a distinct node kind so IDE features (rename, jump) can
-    // tell constructors apart from methods. `prec(3, …)` wins over
-    // both field and method when the identifier is followed by `(`
-    // and no return type precedes it.
+    // This shape also admits modifier-only methods. The analyzer compares
+    // the authored name with its direct type owner before assigning a kind;
+    // native node spelling alone cannot distinguish an omitted return type.
     constructor_declaration: $ => prec.right(3, seq(
       repeat($._annotation_modifier),
       repeat($._modifier),
-      field('name', $.identifier),
+      field('name', $._property_name),
       field('parameters', $.formal_parameters),
       optional(seq(repeat($._newline), $.throws_clause)),
       field('body', $.block),
@@ -708,21 +729,32 @@ module.exports = grammar({
       repeat(seq(',', $.variable_declarator)),
     ),
 
-    // Prefer a method over a variable/call when its parameter list follows.
-    // Before generic parameters, def permits an omitted authored return type;
-    // it must not itself become a return-type field.
+    // A modifier or annotation admits an omitted return type, but an ordinary
+    // bare script call followed by a closure must stay an expression. Dynamic
+    // def is not an authored return-type field, including generic headers.
     method_declaration: $ => prec(2, seq(
-      repeat($._annotation_modifier),
-      repeat($._modifier),
       choice(
         seq(
-          optional(field('type_parameters', $.method_type_parameters)),
-          choice('def', field('return_type', $._type)),
+          repeat($._annotation_modifier),
+          repeat($._modifier),
+          choice(
+            seq(
+              optional(field('type_parameters', $.method_type_parameters)),
+              choice('def', field('return_type', $._type)),
+            ),
+            seq(
+              'def',
+              field('type_parameters', $.method_type_parameters),
+              optional(field('return_type', $._type)),
+            ),
+          ),
         ),
         seq(
-          'def',
-          field('type_parameters', $.method_type_parameters),
-          optional(field('return_type', $._type)),
+          choice(
+            seq(repeat1($._annotation_modifier), repeat($._modifier)),
+            repeat1($._modifier),
+          ),
+          optional(field('type_parameters', $.method_type_parameters)),
         ),
       ),
       field('name', $._property_name),

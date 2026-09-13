@@ -7,6 +7,171 @@ use rootlight_cancel::Cancellation;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
+/// Shares callable classification across declaration, scope and parameter captures.
+#[derive(Default)]
+pub(super) struct CallableKinds {
+    declarations: HashMap<usize, &'static str>,
+}
+
+impl CallableKinds {
+    /// Retains method metadata only for its source-identified native declaration.
+    ///
+    /// # Errors
+    /// Returns cancellation, allocation, or inconsistent native-span errors.
+    pub(super) fn adjust(
+        &mut self,
+        node: Node<'_>,
+        candidate: &mut super::QueryCandidate,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        cancellation.check()?;
+        let mut declaration = node;
+        if candidate.role == StructuralRole::Expression {
+            // Only direct parameter-list, parameter and parameter-annotation
+            // captures belong to this header; never walk through a nested body.
+            for kind in ["annotation", "formal_parameter", "formal_parameters"] {
+                if declaration.kind() == kind {
+                    let Some(parent) = declaration.parent() else {
+                        return Ok(false);
+                    };
+                    declaration = parent;
+                }
+            }
+        }
+        if !matches!(
+            declaration.kind(),
+            "method_declaration" | "constructor_declaration"
+        ) {
+            return Ok(true);
+        }
+        let kind = if let Some(kind) = self.declarations.get(&declaration.id()) {
+            *kind
+        } else {
+            let kind = callable_kind(declaration, source, cancellation)?;
+            self.declarations
+                .try_reserve(1)
+                .map_err(|_| super::query_failure("query-groovy-callable-allocation"))?;
+            self.declarations.insert(declaration.id(), kind);
+            kind
+        };
+        match candidate.role {
+            StructuralRole::Expression => {
+                if kind != "groovy.function" {
+                    return Ok(false);
+                }
+                if declaration == node {
+                    candidate.syntax = callable_header(node, cancellation)?;
+                }
+            }
+            StructuralRole::Declaration | StructuralRole::Scope => candidate.syntax = kind,
+            _ => {}
+        }
+        Ok(true)
+    }
+}
+
+fn callable_kind(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    cancellation.check()?;
+    if node.child_by_field_name("return_type").is_some() {
+        return Ok("groovy.function");
+    }
+    let name = node
+        .child_by_field_name("name")
+        .ok_or_else(|| super::query_failure("query-groovy-callable-name"))?;
+    let owner = node
+        .parent()
+        .filter(|body| matches!(body.kind(), "class_body" | "enum_body"))
+        .and_then(|body| {
+            body.parent()
+                .filter(|owner| owner.child_by_field_name("body") == Some(body))
+        });
+    // Interfaces and annotation types do not declare constructors, even when
+    // an omitted-return method has exactly the same name as its type owner.
+    if owner.is_some_and(|owner| {
+        matches!(
+            owner.kind(),
+            "interface_declaration" | "annotation_type_declaration"
+        )
+    }) {
+        return Ok("groovy.function");
+    }
+    let mut has_prefix = false;
+    let mut invalid_constructor_modifier = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.start_byte() >= name.start_byte() {
+            break;
+        }
+        match child.kind() {
+            "annotation" | "public" | "protected" | "private" | "def" | "synchronized"
+            | "transient" | "strictfp" => has_prefix = true,
+            "static" | "final" | "abstract" | "native" | "volatile" => {
+                has_prefix = true;
+                invalid_constructor_modifier = true;
+            }
+            _ => {}
+        }
+    }
+    if let Some(owner) = owner.filter(|owner| {
+        matches!(
+            owner.kind(),
+            "class_declaration" | "trait_declaration" | "record_declaration" | "enum_declaration"
+        )
+    }) {
+        let owner_name = owner
+            .child_by_field_name("name")
+            .ok_or_else(|| super::query_failure("query-groovy-callable-owner-name"))?;
+        let text = |node: Node<'_>| {
+            source
+                .get(node.byte_range())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        };
+        let (Some(name_text), Some(owner_text)) = (text(name), text(owner_name)) else {
+            return Ok("groovy.invalid_callable");
+        };
+        let canonical = |text| {
+            rootlight_adapter_sdk::structural_captured_name_for_language(
+                "groovy",
+                text,
+                source.len(),
+            )
+        };
+        let (Some(name), Some(owner_name)) = (canonical(name_text), canonical(owner_text)) else {
+            // Keep an established callable boundary even if its quoted name
+            // is unavailable. Lowering reports the exact name gap and prevents
+            // parameters or locals from leaking into a different owner.
+            return Ok(if has_prefix {
+                "groovy.function"
+            } else {
+                "groovy.invalid_callable"
+            });
+        };
+        cancellation.check()?;
+        if name == owner_name {
+            // Dynamic def is not a real return type. Conversely, the early
+            // authored return-field branch keeps Object Owner() a method.
+            return Ok(
+                if invalid_constructor_modifier || node.child_by_field_name("body").is_none() {
+                    "groovy.invalid_callable"
+                } else {
+                    "groovy.constructor"
+                },
+            );
+        }
+    }
+    Ok(if has_prefix {
+        "groovy.function"
+    } else {
+        "groovy.invalid_callable"
+    })
+}
+
 /// Finds the single leading package that can own the rest of this source unit.
 ///
 /// # Errors
@@ -469,9 +634,6 @@ pub(super) fn adjust_candidate(
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
-    if candidate.role == StructuralRole::Expression && node.kind() == "method_declaration" {
-        candidate.syntax = callable_header(node, cancellation)?;
-    }
     if candidate.role == StructuralRole::Expression && node.kind() == "field_declaration" {
         candidate.syntax = member_header(node, cancellation)?;
     }
@@ -565,6 +727,9 @@ pub(super) fn adjust_candidate(
     if candidate.role != StructuralRole::Scope {
         return Ok(());
     }
+    if candidate.syntax == "groovy.function" && static_context(node, cancellation)? {
+        candidate.syntax = "groovy.static_function";
+    }
     if matches!(
         node.kind(),
         "class_declaration"
@@ -573,15 +738,10 @@ pub(super) fn adjust_candidate(
             | "trait_declaration"
             | "record_declaration"
             | "enum_declaration"
-            | "method_declaration"
             | "field_declaration"
     ) && static_context(node, cancellation)?
     {
-        candidate.syntax = if node.kind() == "method_declaration" {
-            "groovy.static_function"
-        } else {
-            "groovy.static_context"
-        };
+        candidate.syntax = "groovy.static_context";
     }
     if node.kind() == "try_statement" {
         // Resource bindings end with the try body, not with its catch/finally clauses.

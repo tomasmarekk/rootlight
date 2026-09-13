@@ -20,6 +20,8 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 - Statement separators, compound statements, newline continuations and comments.
 - Typed declarations, command calls, command chains and competing expressions.
 - Modifier-only field declarations with omitted types, preserving each declarator and initializer.
+- Modifier/annotation-only method headers, quoted constructor-shaped names and bare bodyless interface methods.
+- Native callable shape remains separate from owner/name/return-type classification in the analyzer.
 - Nested type declarations as class members, retaining their own bodies and names.
 - Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
 - Formal parameter annotations and `final` without changing name, type or default spans.

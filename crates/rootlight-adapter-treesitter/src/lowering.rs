@@ -1682,12 +1682,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     skipped.insert(gap.id, gap);
                 }
                 if let Some(callable) = groovy_callables.get(&fact.local_id()) {
+                    let mut callable = *callable;
+                    callable.name_identity = Some(rootlight_ir::GroovyCallableName {
+                        spelling_hash: content_hash(self.text_for_span(callable.name)?.as_bytes()),
+                        canonical_hash: content_hash(entity.record.canonical_name.as_bytes()),
+                    });
                     let envelope = rootlight_ir::new_groovy_callable_envelope(
                         self.full_source.repository(),
                         self.full_source.generation(),
                         provenance_id,
                         entity_source.clone(),
-                        *callable,
+                        callable,
                     )
                     .map_err(|_| provider_failure("groovy-callable-evidence"))?;
                     if !insert_optional_extension(
@@ -3954,6 +3959,9 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "groovy.invalid_callable.scope" => {
+            Some((FactDomain::Entities, "groovy-callable-identity-unavailable"))
+        }
         "groovy.import.scope" => Some((FactDomain::Relations, "unresolved-import-target")),
         "groovy.file.module" => Some((
             FactDomain::Relations,

@@ -3362,6 +3362,10 @@
           {
             "type": "identifier",
             "named": true
+          },
+          {
+            "type": "quoted_identifier",
+            "named": true
           }
         ]
       },

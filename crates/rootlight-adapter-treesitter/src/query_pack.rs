@@ -605,6 +605,7 @@ impl QueryPack {
         let mut limit = None;
         let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
         let mut groovy_members = groovy::MemberKinds::default();
+        let mut groovy_callables = groovy::CallableKinds::default();
         let mut groovy_calls = groovy::Calls::default();
 
         'query: while let Some(query_match) = matches.next() {
@@ -751,6 +752,14 @@ impl QueryPack {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
                 }
                 if input.family == GrammarFamily::Groovy {
+                    if !groovy_callables.adjust(
+                        capture.node,
+                        &mut candidate,
+                        input.source,
+                        input.cancellation,
+                    )? {
+                        continue;
+                    }
                     groovy_calls.adjust(capture.node, &mut candidate, input.cancellation)?;
                     groovy::adjust_candidate(
                         capture.node,
@@ -811,7 +820,11 @@ impl QueryPack {
                 }
                 if input.family == GrammarFamily::Groovy
                     && role == StructuralRole::Expression
-                    && capture.node.kind() == "method_declaration"
+                    && matches!(
+                        capture.node.kind(),
+                        "method_declaration" | "constructor_declaration"
+                    )
+                    && candidate.syntax.starts_with("groovy.callable_")
                 {
                     retain(QueryCandidate {
                         syntax: groovy::callable_return(

@@ -260,8 +260,11 @@ pub(super) fn build<'a>(
                         .flatten()
                         .is_some_and(|site| {
                             site.target == (OccurrenceTarget::Resolved { symbol: entity.id })
-                                && site.syntactic_text_hash
-                                    == content_hash(entity.canonical_name.as_bytes())
+                                && callable_name_matches(
+                                    method.shape.name_identity,
+                                    site.syntactic_text_hash,
+                                    &entity.canonical_name,
+                                )
                         })
             });
             graph.methods.insert(entity.id, shape);
@@ -1477,6 +1480,21 @@ impl<'a> Graph<'a, '_> {
     }
 }
 
+fn callable_name_matches(
+    identity: Option<rootlight_ir::GroovyCallableName>,
+    spelling_hash: ContentHash,
+    canonical_name: &str,
+) -> bool {
+    let canonical_hash = content_hash(canonical_name.as_bytes());
+    match identity {
+        Some(identity) => {
+            identity.spelling_hash == spelling_hash && identity.canonical_hash == canonical_hash
+        }
+        // Legacy evidence cannot establish a quoted spelling's decoded identity.
+        None => spelling_hash == canonical_hash,
+    }
+}
+
 fn accessor_property(name: &str) -> Option<(&'static str, String)> {
     for prefix in ["get", "set", "is"] {
         if let Some(rest) = name.strip_prefix(prefix) {
@@ -1532,4 +1550,25 @@ fn step(
         .checked_add(1)
         .ok_or(ResolutionError::CountOverflow)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rootlight_ir::GroovyCallableName;
+
+    #[test]
+    fn callable_names_require_matching_spelling_and_canonical_evidence() {
+        let bare = content_hash(b"fold");
+        let quoted = content_hash(b"'fold'");
+        let identity = GroovyCallableName {
+            spelling_hash: quoted,
+            canonical_hash: bare,
+        };
+        assert!(callable_name_matches(None, bare, "fold"));
+        assert!(!callable_name_matches(None, quoted, "fold"));
+        assert!(callable_name_matches(Some(identity), quoted, "fold"));
+        assert!(!callable_name_matches(Some(identity), bare, "fold"));
+        assert!(!callable_name_matches(Some(identity), quoted, "other"));
+    }
 }

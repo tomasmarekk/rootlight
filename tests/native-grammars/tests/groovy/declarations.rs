@@ -42,6 +42,54 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn omitted_return_headers_preserve_names_parameters_and_script_calls() {
+    for source in [
+        "public fold(value) { value }",
+        "static fold(value) { value }",
+        "@Deprecated fold(value) { value }",
+        "class Container { public 'fold'(value) { value } }",
+        "class Container { public <T> fold(T value) { value } }",
+        "abstract class Container { abstract fold(value) }",
+        "interface Container { fold(value) }",
+        "interface Container { Container() }",
+        "@interface Container { fold() }",
+        "class Container { public 'Container'() {} }",
+        "class Container { public <T> Container(T value) {} }",
+    ] {
+        let tree = valid(source);
+        let callables: Vec<_> = nodes(tree.root_node())
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    "method_declaration" | "constructor_declaration"
+                )
+            })
+            .collect();
+        assert_eq!(callables.len(), 1, "{source}");
+        let callable = callables[0];
+        assert!(
+            callable.child_by_field_name("return_type").is_none(),
+            "{source}"
+        );
+        assert!(callable.child_by_field_name("name").is_some(), "{source}");
+        assert!(
+            callable.child_by_field_name("parameters").is_some(),
+            "{source}"
+        );
+    }
+    let source = "fold(value) { value }";
+    let tree = valid(source);
+    exact(&tree, source, "method_invocation", source);
+    assert!(!nodes(tree.root_node()).iter().any(|node| {
+        matches!(
+            node.kind(),
+            "method_declaration" | "constructor_declaration"
+        )
+    }));
+}
+
+#[test]
 fn contextual_record_identifiers_preserve_declarations_and_expression_owners() {
     for statement in [
         "record.value = 1",

@@ -1,7 +1,7 @@
 //! Source-owned Groovy callable headers for indexed declaration selection.
 //! Native parameter shape is not an overload decision or a runtime dispatch proof.
 
-use rootlight_ids::{FactId, GenerationId, RepositoryId, derive_fact};
+use rootlight_ids::{ContentHash, FactId, GenerationId, RepositoryId, derive_fact};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -56,12 +56,25 @@ impl GroovyCallableReturnType {
     }
 }
 
+/// Paired parser evidence binding an authored spelling to its decoded name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroovyCallableName {
+    /// Hash of exact name bytes, including authored quotes and escapes.
+    pub spelling_hash: ContentHash,
+    /// Hash of the independently decoded, parser-attested canonical name.
+    pub canonical_hash: ContentHash,
+}
+
 /// Parser-attested header shape, without inferred parameter types or targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroovyCallable {
     /// Exact written method-name span, including quotes when present.
     pub name: SourceSpan,
+    /// Paired written/canonical name evidence; absent in legacy envelopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_identity: Option<GroovyCallableName>,
     /// Complete parenthesized formal parameter list.
     pub parameters: SourceSpan,
     /// Number of authored formal parameters, excluding nested closure parameters.
@@ -198,6 +211,7 @@ mod tests {
             ),
             GroovyCallable {
                 name: SourceSpan::new(file, 11, 15).unwrap(),
+                name_identity: None,
                 parameters: SourceSpan::new(file, 15, 35).unwrap(),
                 parameter_count: 2,
                 required_parameter_count: 1,
@@ -240,6 +254,51 @@ mod tests {
             forged.payload = current.payload;
             assert!(decode_groovy_callable_envelope(&forged).is_err());
         }
+    }
+
+    #[test]
+    fn callable_name_evidence_preserves_legacy_encoding_and_binds_both_hashes() {
+        let legacy = envelope();
+        assert!(!legacy.payload.contains("name_identity"));
+        let mut shape = decode_groovy_callable_envelope(&legacy).unwrap();
+        assert_eq!(shape.name_identity, None);
+        shape.name_identity = Some(GroovyCallableName {
+            spelling_hash: content_hash(b"'fold'"),
+            canonical_hash: content_hash(b"fold"),
+        });
+        let current = new_groovy_callable_envelope(
+            legacy.repository,
+            legacy.generation,
+            legacy.provenance,
+            legacy.evidence.source.clone().unwrap(),
+            shape,
+        )
+        .unwrap();
+        assert_ne!(current.id, legacy.id);
+        assert_eq!(decode_groovy_callable_envelope(&current).unwrap(), shape);
+        for field in ["spelling_hash", "canonical_hash"] {
+            let mut altered = current.clone();
+            let mut payload: serde_json::Value = serde_json::from_str(&altered.payload).unwrap();
+            payload["name_identity"][field] = serde_json::to_value(content_hash(b"other")).unwrap();
+            let changed: GroovyCallable = serde_json::from_value(payload).unwrap();
+            altered.payload = serde_json::to_string(&changed).unwrap();
+            assert!(decode_groovy_callable_envelope(&altered).is_err());
+        }
+        let mut explicit_null = legacy.clone();
+        explicit_null.payload = legacy.payload.replacen('{', "{\"name_identity\":null,", 1);
+        assert!(decode_groovy_callable_envelope(&explicit_null).is_err());
+        shape.name_identity = None;
+        assert_eq!(
+            new_groovy_callable_envelope(
+                legacy.repository,
+                legacy.generation,
+                legacy.provenance,
+                legacy.evidence.source.clone().unwrap(),
+                shape,
+            )
+            .unwrap(),
+            legacy
+        );
     }
 
     #[test]

@@ -41,8 +41,8 @@ pub use groovy_call_lookup::{
 };
 pub use groovy_callable::{
     GROOVY_CALLABLE_NAMESPACE, GroovyCallable, GroovyCallableDispatch, GroovyCallableError,
-    GroovyCallableReturnType, GroovyCallableVisibility, decode_groovy_callable_envelope,
-    new_groovy_callable_envelope,
+    GroovyCallableName, GroovyCallableReturnType, GroovyCallableVisibility,
+    decode_groovy_callable_envelope, new_groovy_callable_envelope,
 };
 pub use groovy_member::{
     GROOVY_MEMBER_NAMESPACE, GroovyMember, GroovyMemberError, GroovyMemberStorage,

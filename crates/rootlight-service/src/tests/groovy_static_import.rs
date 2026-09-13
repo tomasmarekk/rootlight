@@ -11,6 +11,36 @@ const SECOND: &str = "package sample\nclass Second { static def fold(value) { va
 const CLIENT: &str = "class Client { def inspect(value) { fold(value) } }";
 
 #[test]
+fn omitted_return_methods_preserve_imported_calls_and_exact_sources() {
+    for declaration in [
+        "static fold(value) { value }",
+        "public static fold(value = 1, Object... rest) { value }",
+        "static 'fold'(value) { value }",
+        "public static <T> fold(T value) { value }",
+    ] {
+        check(
+            "import static sample.First.fold\nclass Client { public inspect(value) { fold(value) } }",
+            &format!("package sample\nclass First {{ public First() {{}}; {declaration} }}"),
+            SECOND,
+            Some(("First", "fold")),
+            "fold(value)",
+        );
+    }
+    for declaration in [
+        "private static fold(value) { value }",
+        "@Deprecated static fold(value) { value }",
+    ] {
+        check(
+            &format!("import static sample.First.fold\n{CLIENT}"),
+            &format!("package sample\nclass First {{ {declaration} }}"),
+            SECOND,
+            None,
+            "fold(value)",
+        );
+    }
+}
+
+#[test]
 fn fenced_declarations_do_not_compete_with_compilation_units() {
     for example in [
         FIRST,
@@ -2153,7 +2183,17 @@ fn check(
         let owner = document
             .entities
             .iter()
-            .find(|entity| entity.canonical_name == owner)
+            .find(|entity| {
+                entity.canonical_name == owner
+                    && matches!(
+                        entity.kind,
+                        rootlight_ir::EntityKind::Class
+                            | rootlight_ir::EntityKind::Struct
+                            | rootlight_ir::EntityKind::Enum
+                            | rootlight_ir::EntityKind::Trait
+                            | rootlight_ir::EntityKind::Interface
+                    )
+            })
             .unwrap();
         let target = document
             .entities
@@ -2166,7 +2206,20 @@ fn check(
         assert_eq!(
             call.target,
             OccurrenceTarget::Resolved { symbol: target.id },
-            "{client}"
+            "{client}; provider: {first}; callable/lookup evidence: {:?}; gaps: {:?}",
+            document
+                .extensions
+                .iter()
+                .filter(|e| e.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE
+                    || (e.namespace == rootlight_ir::GROOVY_CALL_LOOKUP_NAMESPACE
+                        && e.evidence.source.as_ref() == Some(&call.source)))
+                .map(|e| (&e.namespace, &e.payload))
+                .collect::<Vec<_>>(),
+            document
+                .skipped_regions
+                .iter()
+                .map(|r| (r.domain, &r.detail))
+                .collect::<Vec<_>>()
         );
         assert!(
             document

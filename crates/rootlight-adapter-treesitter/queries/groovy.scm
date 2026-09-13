@@ -13,7 +13,7 @@
   (enum_declaration name: (identifier) @definition)
   (enum_constant name: (identifier) @definition)
   (method_declaration name: [(identifier) (quoted_identifier)] @definition)
-  (constructor_declaration name: (identifier) @definition)
+  (constructor_declaration name: [(identifier) (quoted_identifier)] @definition)
   (variable_declarator name: (identifier) @definition)
   (formal_parameter name: (identifier) @definition)
   (closure_parameter name: (identifier) @definition)
@@ -26,11 +26,14 @@
 (for_in_statement variable: (identifier) @declaration @definition)
 
 [(method_declaration) (constructor_declaration)] @signature
-(method_declaration) @expression
+[(method_declaration) (constructor_declaration)] @expression
 (field_declaration) @expression
 (method_declaration parameters: (formal_parameters) @expression)
 (method_declaration parameters: (formal_parameters (formal_parameter) @expression))
 (method_declaration parameters: (formal_parameters (formal_parameter (annotation) @expression)))
+(constructor_declaration parameters: (formal_parameters) @expression)
+(constructor_declaration parameters: (formal_parameters (formal_parameter) @expression))
+(constructor_declaration parameters: (formal_parameters (formal_parameter (annotation) @expression)))
 [(method_declaration) (constructor_declaration)] @scope
 [(class_declaration) (interface_declaration) (annotation_type_declaration)
  (trait_declaration) (record_declaration) (enum_declaration)

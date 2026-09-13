@@ -128,6 +128,7 @@ pub(super) fn collect(
             owner,
             GroovyCallable {
                 name,
+                name_identity: None,
                 parameters,
                 parameter_count,
                 required_parameter_count,

@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "8b09d0b544edf6c0c19100803665a03711bcdb1094ae98300ee6b4e464c3e2e8";
+    "18ccbd037106209c522daa0936accb13434f2fa6664315ff32068659ccd6c7ce";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -1000,6 +1000,12 @@ mod tests {
 
     #[test]
     fn checked_in_manifest_matches_the_reviewed_runtime_and_grammar_set() {
+        require_digest(
+            GRAMMAR_LOCK_PATH,
+            include_bytes!("../../adapters/grammars.lock"),
+            GRAMMAR_LOCK_SHA256,
+        )
+        .expect("grammar lock digest matches the reviewed pin");
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");

@@ -1947,6 +1947,10 @@ mod tests {
         let file = &document.files[0];
         let shape = crate::GroovyCallable {
             name: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            name_identity: Some(crate::GroovyCallableName {
+                spelling_hash: rootlight_ids::content_hash(b"f"),
+                canonical_hash: rootlight_ids::content_hash(b"f"),
+            }),
             parameters: crate::SourceSpan::new(file.id, 1, 3).unwrap(),
             parameter_count: 0,
             required_parameter_count: 0,

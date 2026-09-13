@@ -27,6 +27,273 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_omitted_returns_preserve_method_identity_and_callable_evidence() {
+    for (source, expected_kind, dispatch, visibility) in [
+        (
+            "class Container { public fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "class Container { static fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "static",
+            "public",
+        ),
+        (
+            "class Container { protected fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "protected",
+        ),
+        (
+            "class Container { @Deprecated fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "unknown",
+            "unknown",
+        ),
+        (
+            "class Container { public 'fold'(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "class Container { public <T> fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "abstract class Container { abstract fold(value = 1, Object... rest) }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "interface Container { fold(value = 1, Object... rest) }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "trait Container { public fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "enum Container { FIRST; public fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "record Container(String name) { public fold(value = 1, Object... rest) { value } }",
+            EntityKind::Method,
+            "instance",
+            "public",
+        ),
+        (
+            "public fold(value = 1, Object... rest) { value }",
+            EntityKind::Function,
+            "instance",
+            "public",
+        ),
+        (
+            "static fold(value = 1, Object... rest) { value }",
+            EntityKind::Function,
+            "static",
+            "public",
+        ),
+        (
+            "@Deprecated fold(value = 1, Object... rest) { value }",
+            EntityKind::Function,
+            "unknown",
+            "unknown",
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{source}: {:?}",
+            document.diagnostics
+        );
+        let methods: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|e| e.canonical_name == "fold")
+            .collect();
+        assert_eq!(methods.len(), 1, "{source}");
+        let method = methods[0];
+        assert_eq!(method.kind, expected_kind, "{source}");
+        let envelope = document
+            .extensions
+            .iter()
+            .find(|e| {
+                e.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE
+                    && e.evidence.source == method.evidence.source
+            })
+            .unwrap_or_else(|| panic!("missing callable evidence: {source}"));
+        let shape = rootlight_ir::decode_groovy_callable_envelope(envelope).unwrap();
+        assert_eq!(shape.parameter_count, 2, "{source}");
+        assert_eq!(shape.required_parameter_count, 1, "{source}");
+        assert!(shape.variadic, "{source}");
+        assert_eq!(
+            shape.return_type,
+            rootlight_ir::GroovyCallableReturnType::Other,
+            "{source}"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&envelope.payload).unwrap();
+        assert_eq!(payload["dispatch"], dispatch, "{source}");
+        assert_eq!(payload["visibility"], visibility, "{source}");
+        let evidence = method.evidence.source.as_ref().unwrap();
+        assert_eq!(evidence.generation(), document.generation);
+        let start = usize::try_from(shape.name.start_byte()).unwrap();
+        let end = usize::try_from(shape.name.end_byte()).unwrap();
+        assert!(matches!(&source[start..end], "fold" | "'fold'"));
+        assert_eq!(
+            shape.name_identity,
+            Some(rootlight_ir::GroovyCallableName {
+                spelling_hash: rootlight_ids::content_hash(&source.as_bytes()[start..end]),
+                canonical_hash: rootlight_ids::content_hash(method.canonical_name.as_bytes()),
+            }),
+            "{source}"
+        );
+        assert!(
+            document
+                .coverage_records
+                .iter()
+                .filter(|r| matches!(r.domain, FactDomain::Files | FactDomain::Entities))
+                .all(|r| r.status == CoverageStatus::Complete && r.skipped == 0),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn groovy_callable_kinds_use_authored_return_and_direct_type_owner() {
+    for (source, expected) in [
+        (
+            "class Container { synchronized Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { transient Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { strictfp Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { public Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { def Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { public 'Container'() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { public 'Cont\\u0061iner'() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { public <T> Container(T value) {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Container { Object Container() {} }",
+            EntityKind::Method,
+        ),
+        ("interface Container { Container() }", EntityKind::Method),
+        (
+            "interface Container { def Container() }",
+            EntityKind::Method,
+        ),
+        ("@interface Container { Container() }", EntityKind::Method),
+        (
+            "enum Container { FIRST; def Container() {} }",
+            EntityKind::Constructor,
+        ),
+        (
+            "record Container(String name) { def Container(String name) { this.name = name } }",
+            EntityKind::Constructor,
+        ),
+        (
+            "class Outer { class Container { public Container() {} } }",
+            EntityKind::Constructor,
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{source}: {:?}",
+            document.diagnostics
+        );
+        let members: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|e| {
+                e.canonical_name == "Container"
+                    && matches!(e.kind, EntityKind::Method | EntityKind::Constructor)
+            })
+            .collect();
+        assert_eq!(members.len(), 1, "{source}: {:?}", document.entities);
+        assert_eq!(members[0].kind, expected, "{source}");
+        assert_eq!(
+            document
+                .extensions
+                .iter()
+                .any(|e| e.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE
+                    && e.evidence.source == members[0].evidence.source),
+            expected == EntityKind::Method,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn groovy_invalid_bare_members_do_not_become_constructors() {
+    let result = output("class Container { fold(value) { value } }");
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|e| e.canonical_name == "fold"
+                && matches!(e.kind, EntityKind::Method | EntityKind::Constructor))
+    );
+    assert!(
+        result
+            .document()
+            .coverage_records
+            .iter()
+            .any(|r| r.domain == FactDomain::Entities && r.status != CoverageStatus::Complete)
+    );
+    let script = output("fold(value) { value }");
+    assert!(script.document().diagnostics.is_empty());
+    assert!(
+        !script
+            .document()
+            .entities
+            .iter()
+            .any(|e| e.canonical_name == "fold"
+                && matches!(
+                    e.kind,
+                    EntityKind::Method | EntityKind::Function | EntityKind::Constructor
+                ))
+    );
+}
+
+#[test]
 fn groovy_record_components_preserve_authored_identity_without_inventing_types() {
     for name in ["value", "String", "record"] {
         for component in [name.to_owned(), format!("String {name}")] {
