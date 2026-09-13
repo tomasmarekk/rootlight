@@ -363,13 +363,17 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
                 grammar.language.clone(),
             ));
         }
-        packages.insert(
-            grammar.crate_name.as_str(),
-            (
-                grammar.crate_version.as_str(),
-                grammar.crates_io_checksum.as_str(),
-            ),
+        let identity = (
+            grammar.crate_version.as_str(),
+            grammar.crates_io_checksum.as_deref(),
         );
+        if let Some(previous) = packages.insert(grammar.crate_name.as_str(), identity)
+            && previous != identity
+        {
+            return Err(GrammarLockError::PackageEvidence {
+                package: grammar.crate_name.clone(),
+            });
+        }
     }
     let expected_languages = BTreeSet::from([
         "astro",
@@ -410,7 +414,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         return Err(GrammarLockError::LanguageSet);
     }
     for (name, version, checksum) in EXPECTED_PACKAGES.iter().skip(1) {
-        if packages.get(name) != Some(&(*version, *checksum)) {
+        if packages.get(name) != Some(&(*version, Some(*checksum))) {
             return Err(GrammarLockError::PackageEvidence {
                 package: (*name).to_owned(),
             });
@@ -461,7 +465,7 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
     ] {
         require_nonempty(field, value)?;
     }
-    validate_sha256("grammar crate checksum", &grammar.crates_io_checksum)?;
+    validate_source_provenance(grammar)?;
     validate_sha256("generated parser", &grammar.parser_sha256)?;
     if grammar.scanner_sha256 != "none" {
         validate_sha256("generated scanner", &grammar.scanner_sha256)?;
@@ -519,6 +523,57 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         return Err(GrammarLockError::MissingAuditCaveat("ruby"));
     }
     Ok(())
+}
+
+fn validate_source_provenance(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
+    match (
+        grammar.crates_io_checksum.as_deref(),
+        grammar.vendored_source_sha256.as_deref(),
+        grammar.vendored.as_ref(),
+    ) {
+        (Some(checksum), None, _) => validate_sha256("grammar crate checksum", checksum),
+        (None, Some(checksum), Some(vendored)) => {
+            validate_sha256("vendored source manifest", checksum)?;
+            let observed = vendored_source_digest(&vendored.files)?;
+            if observed != checksum {
+                return Err(GrammarLockError::DigestMismatch {
+                    label: "vendored source manifest",
+                    expected: checksum.to_owned(),
+                    observed,
+                });
+            }
+            Ok(())
+        }
+        _ => Err(GrammarLockError::SourceProvenance {
+            package: grammar.crate_name.clone(),
+        }),
+    }
+}
+
+// A local binding need not have a published archive. Bind its source identity
+// to sorted UTF-8 paths and lowercase file hashes instead: domain prefix, then
+// path, NUL, hash, NUL for each entry. NUL-free paths make framing unambiguous.
+fn vendored_source_digest(files: &BTreeMap<String, String>) -> Result<String, GrammarLockError> {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"rootlight-vendored-source-v1\0");
+    for (path, checksum) in files {
+        if !is_source_relative_path(path) {
+            return Err(GrammarLockError::InvalidSourcePath(path.clone()));
+        }
+        validate_sha256("vendored source", checksum)?;
+        digest.update(path.as_bytes());
+        digest.update([0]);
+        digest.update(checksum.as_bytes());
+        digest.update([0]);
+    }
+    Ok(data_encoding::HEXLOWER.encode(&digest.finalize()))
+}
+
+fn is_source_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.split('/').any(|part| {
+            part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':', '\0'])
+        })
 }
 
 fn validate_direct_dependencies(metadata: &Metadata) -> Result<(), GrammarLockError> {
@@ -619,48 +674,44 @@ fn validate_cargo_lock(root: &Path, manifest: &GrammarLock) -> Result<(), Gramma
     })?;
     let lock: CargoLock =
         toml::from_str(&text).map_err(|source| GrammarLockError::Parse { path, source })?;
-    let observed: BTreeMap<_, _> = lock
-        .package
-        .iter()
-        .filter_map(|package| {
-            package
-                .checksum
-                .as_deref()
-                .map(|checksum| ((package.name.as_str(), package.version.as_str()), checksum))
-        })
-        .collect();
+    validate_locked_packages(&lock, manifest)
+}
+
+fn validate_locked_packages(
+    lock: &CargoLock,
+    manifest: &GrammarLock,
+) -> Result<(), GrammarLockError> {
     let mut expected = vec![(
         manifest.runtime.crate_name.as_str(),
         manifest.runtime.crate_version.as_str(),
-        manifest.runtime.crates_io_checksum.as_str(),
+        Some(manifest.runtime.crates_io_checksum.as_str()),
+        false,
     )];
-    expected.extend(manifest.grammars.iter().map(|grammar| {
-        (
+    for grammar in &manifest.grammars {
+        validate_source_provenance(grammar)?;
+        expected.push((
             grammar.crate_name.as_str(),
             grammar.crate_version.as_str(),
-            grammar.crates_io_checksum.as_str(),
-        )
-    }));
-    for (name, version, checksum) in expected {
-        if manifest
-            .grammars
+            grammar.crates_io_checksum.as_deref(),
+            grammar.vendored.is_some(),
+        ));
+    }
+    for (name, version, checksum, vendored) in expected {
+        let entries = lock
+            .package
             .iter()
-            .any(|grammar| grammar.crate_name == name && grammar.vendored.is_some())
-        {
-            let local = lock
-                .package
-                .iter()
-                .filter(|package| package.name == name && package.version == version)
-                .collect::<Vec<_>>();
-            if local.len() != 1 || local[0].checksum.is_some() || local[0].source.is_some() {
-                return Err(GrammarLockError::CargoLockChecksum {
-                    package: name.to_owned(),
-                    version: version.to_owned(),
-                });
+            .filter(|package| package.name == name && package.version == version)
+            .collect::<Vec<_>>();
+        let valid = match entries.as_slice() {
+            [package] if vendored => package.checksum.is_none() && package.source.is_none(),
+            [package] => {
+                checksum.is_some()
+                    && package.checksum.as_deref() == checksum
+                    && package.source.as_deref() == Some(CRATES_IO_SOURCE)
             }
-            continue;
-        }
-        if observed.get(&(name, version)) != Some(&checksum) {
+            _ => false,
+        };
+        if !valid {
             return Err(GrammarLockError::CargoLockChecksum {
                 package: name.to_owned(),
                 version: version.to_owned(),
@@ -712,6 +763,7 @@ fn validate_vendored_tree(
     grammar: &GrammarEvidence,
     vendored: &VendoredGrammarEvidence,
 ) -> Result<(), GrammarLockError> {
+    validate_source_provenance(grammar)?;
     let invalid = || GrammarLockError::PackageEvidence {
         package: grammar.crate_name.clone(),
     };
@@ -776,11 +828,7 @@ fn validate_vendored_tree(
     let scanner_path = vendored.scanner_path.as_deref().unwrap_or("src/scanner.c");
     let license_path = vendored.license_path.as_deref().unwrap_or("LICENSE");
     for path in [parser_path, scanner_path, license_path] {
-        if path.is_empty()
-            || path.split('/').any(|part| {
-                part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':'])
-            })
-        {
+        if !is_source_relative_path(path) {
             return Err(invalid());
         }
     }
@@ -886,7 +934,8 @@ struct GrammarEvidence {
     language: String,
     crate_name: String,
     crate_version: String,
-    crates_io_checksum: String,
+    crates_io_checksum: Option<String>,
+    vendored_source_sha256: Option<String>,
     repository: String,
     tag: String,
     commit: String,
@@ -977,6 +1026,10 @@ pub(crate) enum GrammarLockError {
     RuntimeEvidence,
     #[error("package evidence differs for {package}")]
     PackageEvidence { package: String },
+    #[error("grammar {package} requires exactly one archive or vendored source identity")]
+    SourceProvenance { package: String },
+    #[error("vendored source path is not a canonical relative path: {0:?}")]
+    InvalidSourcePath(String),
     #[error("grammar ABI {abi} is unsupported for {language}")]
     GrammarAbi { language: String, abi: usize },
     #[error("grammar {language} must remain at structural analysis tier D")]
@@ -1009,6 +1062,201 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn local_source_identity_requires_exactly_one_provenance_and_a_live_tree() {
+        let (directory, mut grammar) = vendored_fixture();
+        grammar.crates_io_checksum = None;
+        assert!(matches!(
+            validate_grammar(&grammar),
+            Err(GrammarLockError::SourceProvenance { .. })
+        ));
+        grammar.vendored_source_sha256 =
+            Some(vendored_source_digest(&grammar.vendored.as_ref().unwrap().files).unwrap());
+        validate_grammar(&grammar).unwrap();
+        validate_vendored_tree(
+            directory.path(),
+            &grammar,
+            grammar.vendored.as_ref().unwrap(),
+        )
+        .unwrap();
+        grammar.crates_io_checksum = Some(sha256_hex(b"archive"));
+        assert!(matches!(
+            validate_grammar(&grammar),
+            Err(GrammarLockError::SourceProvenance { .. })
+        ));
+        grammar.crates_io_checksum = None;
+        grammar.vendored = None;
+        assert!(matches!(
+            validate_grammar(&grammar),
+            Err(GrammarLockError::SourceProvenance { .. })
+        ));
+    }
+
+    #[test]
+    fn source_manifest_digest_binds_paths_and_content_with_portable_framing() {
+        let files = BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"source"))]);
+        // Independently computed from the documented UTF-8/NUL format, not TOML
+        // serialization or host-native path separators.
+        assert_eq!(
+            vendored_source_digest(&files).unwrap(),
+            "3cc9525c80eb1d734a3e307c9546bfc694f23a0f61fbfeef1d0a93c7d31d34a7"
+        );
+        let digest = vendored_source_digest(&files).unwrap();
+        for changed in [
+            BTreeMap::new(),
+            BTreeMap::from([("src/other.bas".into(), sha256_hex(b"source"))]),
+            BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"changed"))]),
+        ] {
+            assert_ne!(vendored_source_digest(&changed).unwrap(), digest);
+        }
+        for path in [
+            "", "/src/a", "../a", "src/./a", "src//a", "src\\a", "C:/a", "a\0b",
+        ] {
+            assert!(matches!(
+                vendored_source_digest(&BTreeMap::from([(path.into(), sha256_hex(b"source"))])),
+                Err(GrammarLockError::InvalidSourcePath(_))
+            ));
+        }
+        assert!(vendored_source_digest(&BTreeMap::from([("a".into(), "invalid".into())])).is_err());
+    }
+
+    #[test]
+    fn local_source_identity_rejects_rewritten_manifest_and_live_file_changes() {
+        let (directory, mut grammar) = vendored_fixture();
+        grammar.crates_io_checksum = None;
+        let vendored = grammar.vendored.as_mut().unwrap();
+        grammar.vendored_source_sha256 = Some(vendored_source_digest(&vendored.files).unwrap());
+        let original = vendored
+            .files
+            .insert("LICENSE".into(), sha256_hex(b"changed"));
+        assert!(matches!(
+            validate_grammar(&grammar),
+            Err(GrammarLockError::DigestMismatch {
+                label: "vendored source manifest",
+                ..
+            })
+        ));
+        grammar
+            .vendored
+            .as_mut()
+            .unwrap()
+            .files
+            .insert("LICENSE".into(), original.unwrap());
+        fs::write(directory.path().join("LICENSE"), b"changed").unwrap();
+        assert!(matches!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap()
+            ),
+            Err(GrammarLockError::DigestMismatch {
+                label: "vendored grammar source",
+                ..
+            })
+        ));
+        fs::write(directory.path().join("LICENSE"), b"license").unwrap();
+        fs::remove_file(directory.path().join("src/parser.c")).unwrap();
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap()
+            )
+            .is_err()
+        );
+        fs::write(directory.path().join("src/parser.c"), b"parser").unwrap();
+        fs::write(directory.path().join("extra.h"), b"extra").unwrap();
+        assert!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_admission_cannot_be_replaced_by_a_local_source_identity() {
+        let baseline: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        for (index, grammar) in baseline.grammars.iter().enumerate() {
+            if grammar.vendored.is_none() {
+                continue;
+            }
+            let mut manifest: GrammarLock =
+                toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+            let grammar = &mut manifest.grammars[index];
+            grammar.crates_io_checksum = None;
+            grammar.vendored_source_sha256 =
+                Some(vendored_source_digest(&grammar.vendored.as_ref().unwrap().files).unwrap());
+            validate_grammar(grammar).unwrap();
+            assert!(
+                matches!(
+                    validate_manifest(&manifest),
+                    Err(GrammarLockError::PackageEvidence { .. })
+                ),
+                "grammar index {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_lock_requires_one_exact_source_for_registry_and_local_grammars() {
+        for vendored in [false, true] {
+            for mutation in [
+                "none",
+                "missing",
+                "duplicate",
+                "source",
+                "checksum",
+                "version",
+            ] {
+                let (_directory, mut grammar) = vendored_fixture();
+                if vendored {
+                    grammar.crates_io_checksum = None;
+                    grammar.vendored_source_sha256 = Some(
+                        vendored_source_digest(&grammar.vendored.as_ref().unwrap().files).unwrap(),
+                    );
+                } else {
+                    grammar.vendored = None;
+                }
+                let mut manifest: GrammarLock =
+                    toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+                let mut lock: CargoLock = toml::from_str(include_str!("../../Cargo.lock")).unwrap();
+                let package = || LockedPackage {
+                    name: grammar.crate_name.clone(),
+                    version: grammar.crate_version.clone(),
+                    checksum: grammar.crates_io_checksum.clone(),
+                    source: (!vendored).then(|| CRATES_IO_SOURCE.to_owned()),
+                };
+                if mutation != "missing" {
+                    lock.package.push(package());
+                }
+                if mutation == "duplicate" {
+                    lock.package.push(package());
+                }
+                let last = lock.package.last_mut().unwrap();
+                match mutation {
+                    "source" => last.source = Some("registry+https://example.invalid/index".into()),
+                    "checksum" => last.checksum = Some(sha256_hex(b"unexpected")),
+                    "version" => last.version = "2.0.0".into(),
+                    _ => {}
+                }
+                manifest.grammars = vec![grammar];
+                let result = validate_locked_packages(&lock, &manifest);
+                if mutation == "none" {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        matches!(result, Err(GrammarLockError::CargoLockChecksum { .. })),
+                        "vendored={vendored}, mutation={mutation}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1213,7 +1461,8 @@ mod tests {
             language: "fixture".into(),
             crate_name: "tree-sitter-fixture".into(),
             crate_version: "1.0.0".into(),
-            crates_io_checksum: sha256_hex(b"archive"),
+            crates_io_checksum: Some(sha256_hex(b"archive")),
+            vendored_source_sha256: None,
             repository: "https://example.invalid/grammar".into(),
             tag: "v1.0.0".into(),
             commit: "fixture".into(),
