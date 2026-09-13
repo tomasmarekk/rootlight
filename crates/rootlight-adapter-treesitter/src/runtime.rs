@@ -541,7 +541,7 @@ impl TreeSitterProvider {
             max_facts,
             cancellation,
         )?;
-        let embedded_limited = self.extract_embedded(
+        let embedded_limits = self.extract_embedded(
             tree,
             request,
             traversal,
@@ -550,9 +550,11 @@ impl TreeSitterProvider {
             cancellation,
         )?;
         emit_primary_diagnostic(traversal, request, sink, cancellation)?;
-        let extraction_limited = extraction.limit.is_some() || embedded_limited;
-        if extraction_limited {
+        let mut partition_limited = extraction.limit.is_some() || embedded_limits.partition;
+        if partition_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
+        } else if embedded_limits.context {
+            emit_extraction_diagnostic("syntax-context-limit", request, sink, cancellation)?;
         }
         let normalization_fact_limit = extraction
             .fact_limit
@@ -563,14 +565,14 @@ impl TreeSitterProvider {
             normalization_fact_limit,
             cancellation,
         )?;
-        let query_limited = extraction_limited || normalized.limited;
-        if normalized.limited && !extraction_limited {
+        if normalized.limited && !partition_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
+            partition_limited = true;
         }
         let initial_plan =
             plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?;
         let sink_limited = initial_plan.emitted < normalized.facts.len();
-        let plan = if sink_limited && !query_limited {
+        let plan = if sink_limited && !partition_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
             plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?
         } else {
@@ -580,7 +582,10 @@ impl TreeSitterProvider {
         let fact_count = normalized.facts.len();
         emit_fact_plan(normalized.facts, plan, sink, cancellation)?;
         Ok(ExtractionReport {
-            limited: query_limited || sink_limited || emitted < fact_count,
+            limited: partition_limited
+                || embedded_limits.context
+                || sink_limited
+                || emitted < fact_count,
         })
     }
 
@@ -1431,6 +1436,22 @@ struct TraversalReport {
 #[derive(Debug, Clone, Copy)]
 struct ExtractionReport {
     limited: bool,
+}
+
+// A context cap (ranges, nodes or native work) does not depend on the syntax
+// record partition. Keep both causes when they overlap so replay cannot hide
+// query or sink clipping behind an unrelated embedded-resource diagnostic.
+#[derive(Debug, Default, Clone, Copy)]
+struct EmbeddedExtractionLimits {
+    context: bool,
+    partition: bool,
+}
+
+impl EmbeddedExtractionLimits {
+    fn merge(&mut self, other: Self) {
+        self.context |= other.context;
+        self.partition |= other.partition;
+    }
 }
 
 #[derive(Debug)]
@@ -2390,10 +2411,18 @@ fn emit_extraction_limit_diagnostic(
     sink: &mut dyn SyntaxFactSink,
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
+    emit_extraction_diagnostic("syntax-extraction-limit", request, sink, cancellation)
+}
+
+fn emit_extraction_diagnostic(
+    code: &str,
+    request: &ParseRequest<'_>,
+    sink: &mut dyn SyntaxFactSink,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
     cancellation.check()?;
     let diagnostic = AdapterDiagnostic::new(
-        DiagnosticCode::new("syntax-extraction-limit")
-            .map_err(|_| provider_failure("diagnostic-code"))?,
+        DiagnosticCode::new(code).map_err(|_| provider_failure("diagnostic-code"))?,
         DiagnosticSeverity::Warning,
         Some(request.source().source_ref().clone()),
         CoverageStatus::Bounded,

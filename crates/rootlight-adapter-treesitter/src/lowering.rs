@@ -130,8 +130,10 @@ impl TreeSitterStructuralArtifact {
     /// Returns whether this artifact can be replayed under the supplied limits.
     ///
     /// An exact limit match is always compatible. A changed syntax-record
-    /// partition is also compatible when the retained parse was complete,
-    /// still fits, and every other parser and lowering limit is unchanged.
+    /// partition is also compatible when no query or sink clipping occurred,
+    /// the retained facts still fit, and every other limit is unchanged.
+    /// Context-limited embedded analysis keeps its scoped incomplete coverage;
+    /// it is not made complete by replaying the same immutable evidence.
     #[must_use]
     pub fn is_compatible_with_limits(&self, limits: &AnalysisLimits) -> bool {
         self.limits == *limits
@@ -297,9 +299,9 @@ impl TreeSitterAnalyzer {
 
     /// Lowers one exact-match structural artifact into a new generation.
     ///
-    /// Repository, file, content, path, parse context, limits, producer,
-    /// frontend, and binary identity must all match. Only the generation may
-    /// differ.
+    /// Repository, file, content, path, parse context, producer, frontend, and
+    /// binary identity must match. The generation may differ; limits must
+    /// satisfy [`TreeSitterStructuralArtifact::is_compatible_with_limits`].
     ///
     /// # Errors
     ///

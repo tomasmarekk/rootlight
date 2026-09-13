@@ -16,7 +16,7 @@ impl TreeSitterProvider {
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
         cancellation: &Cancellation,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<EmbeddedExtractionLimits, AdapterError> {
         let inline_limited =
             self.extract_markdown_inline(tree, request, traversal, candidates, cancellation)?;
         self.extract_markdown_code(
@@ -28,7 +28,10 @@ impl TreeSitterProvider {
             0,
             cancellation,
         )
-        .map(|code_limited| inline_limited || code_limited)
+        .map(|mut limits| {
+            limits.context |= inline_limited;
+            limits
+        })
     }
 
     fn extract_markdown_inline(

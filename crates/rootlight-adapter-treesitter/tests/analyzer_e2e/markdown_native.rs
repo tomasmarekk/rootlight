@@ -2160,6 +2160,111 @@ fn markdown_excessive_heading_name_remains_a_source_scoped_gap() {
 }
 
 #[test]
+fn markdown_bounded_examples_keep_preflight_and_artifact_identity_demand_equal() {
+    let source = (0..40)
+        .map(|index| format!("~~~rust\nfn example_{index}() {{}}\n~~~\n\n"))
+        .collect::<String>();
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let demand = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    let (result, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(result.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "markdown-code-budget-unavailable"
+            && gap.reason == SkippedRegionReason::ResourceLimit
+    }));
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        demand,
+        "unchanged bounded source must not change repository identity reservations"
+    );
+    assert!(result.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "syntax-context-limit"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+    assert!(
+        !result
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+    );
+
+    let changed = fixture.next_generation();
+    let partition = limits_with_syntax_records(artifact.syntax_fact_count() + 128);
+    assert!(artifact.is_compatible_with_limits(&partition));
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &partition);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let (fresh, _) = analyzer
+        .analyze_and_capture(
+            &next,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+
+    // Intrinsic range exhaustion must not mask simultaneous record clipping.
+    let bounded = limits_with_syntax_records(demand);
+    let bounded_request = request(&fixture.snapshot, &fixture.source, MARKDOWN, &bounded);
+    let (clipped, clipped_artifact) = analyzer
+        .analyze_and_capture(
+            &bounded_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(
+        clipped
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+    );
+    assert!(
+        clipped
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "markdown-code-budget-unavailable" })
+    );
+    assert!(!clipped_artifact.is_compatible_with_limits(&partition));
+    assert!(
+        analyzer
+            .analyze_from_artifact(
+                &next,
+                &clipped_artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis() {
     let source =
         "# Guide\n\nUse [entry][ref].\n\n```rust\nfn embedded() {}\n```\n\n[ref]: entry.rs\n";

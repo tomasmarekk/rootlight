@@ -16,7 +16,7 @@ impl TreeSitterProvider {
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
         cancellation: &Cancellation,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<EmbeddedExtractionLimits, AdapterError> {
         if request.language().as_str() == "perl" {
             let mut used_ranges = 0;
             return self.extract_perl_replacements(
@@ -42,7 +42,7 @@ impl TreeSitterProvider {
         }
         let astro = request.language().as_str() == "astro";
         if !astro && request.language().as_str() != "html" {
-            return Ok(false);
+            return Ok(EmbeddedExtractionLimits::default());
         }
         sort_cancellable_by(candidates, cancellation, |left, right| {
             (
@@ -63,7 +63,7 @@ impl TreeSitterProvider {
         dedup_query_candidates(candidates, cancellation)?;
         let mut parsed_ranges = 0usize;
         let mut covered_expression_end = 0usize;
-        let mut limited = false;
+        let mut limited = EmbeddedExtractionLimits::default();
         let host_count = candidates.len();
         for index in 0..host_count {
             cancellation.check()?;
@@ -131,7 +131,7 @@ impl TreeSitterProvider {
                 } else {
                     "html.embedded_limit"
                 };
-                limited = true;
+                limited.context = true;
                 continue;
             }
             parsed_ranges += 1;
@@ -247,7 +247,7 @@ impl TreeSitterProvider {
                     } else {
                         "html.embedded_limit"
                     };
-                    limited = true;
+                    limited.context = true;
                     continue;
                 }
                 candidates[index].syntax = if astro {
@@ -279,7 +279,7 @@ impl TreeSitterProvider {
                     maximum.saturating_sub(candidates.len()),
                     cancellation,
                 )?;
-                limited |= extraction.limit.is_some();
+                limited.partition |= extraction.limit.is_some();
                 extraction.candidates
             } else {
                 pack.extract_identity(

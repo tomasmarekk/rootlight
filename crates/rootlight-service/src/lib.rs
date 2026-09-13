@@ -211,7 +211,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/122";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/123";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/31";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -38772,6 +38772,62 @@ mod tests {
                 observed: 21,
                 limit: 20,
             })
+        );
+    }
+
+    #[test]
+    fn body_edit_reuses_unchanged_bounded_markdown() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let markdown = (0..40)
+            .map(|index| format!("~~~rust\nfn example_{index}() {{}}\n~~~\n\n"))
+            .collect::<String>();
+        fs::write(fixture.path().join("guide.md"), markdown).expect("independent document writes");
+        fs::write(fixture.path().join("value.rs"), "fn value() -> u32 { 1 }\n")
+            .expect("initial function writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        let baseline = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .expect("baseline publishes");
+        let snapshot = service
+            .loaded_generation_snapshot(baseline.generation)
+            .expect("baseline remains readable");
+        assert!(
+            snapshot
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "markdown-code-budget-unavailable" })
+        );
+        drop(snapshot);
+        // Cross a source-weight bucket without changing the callable's surface.
+        fs::write(
+            fixture.path().join("value.rs"),
+            format!("fn value() -> u32 {{ {}2 }}\n", " ".repeat(48)),
+        )
+        .expect("body-only edit writes");
+        let successor = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .expect("successor publishes");
+        let evidence = service
+            .incremental_evidence(successor.generation)
+            .expect("incremental work remains observable");
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 1);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            baseline.generation,
+            &successor,
+            &cancellation,
         );
     }
 

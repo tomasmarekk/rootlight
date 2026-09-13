@@ -15,12 +15,12 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         mut used_ranges: usize,
         cancellation: &Cancellation,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<EmbeddedExtractionLimits, AdapterError> {
         let maximum_ranges = request
             .limits()
             .max_embedded_ranges()
             .min(self.config.max_included_ranges());
-        let mut limited = false;
+        let mut limited = EmbeddedExtractionLimits::default();
         for index in 0..candidates.len() {
             cancellation.check()?;
             let candidate = candidates[index];
@@ -68,12 +68,12 @@ impl TreeSitterProvider {
             )?
             else {
                 candidates[index].syntax = "markdown.code_limit";
-                limited = true;
+                limited.context = true;
                 continue;
             };
             if remaining_nodes == 0 {
                 candidates[index].syntax = "markdown.code_limit";
-                limited = true;
+                limited.context = true;
                 continue;
             }
             used_ranges = used_ranges
@@ -121,7 +121,7 @@ impl TreeSitterProvider {
                     "markdown.code_limit"
                 };
                 if !child.traversal.fully_traversed {
-                    limited = true;
+                    limited.context = true;
                     continue;
                 }
             } else {
@@ -140,7 +140,7 @@ impl TreeSitterProvider {
                     maximum.saturating_sub(candidates.len()),
                     cancellation,
                 )?;
-                limited |= extraction.limit.is_some();
+                limited.partition |= extraction.limit.is_some();
                 extraction.candidates
             } else {
                 pack.extract_identity(
@@ -152,7 +152,7 @@ impl TreeSitterProvider {
                 )?
             };
             if child.family == GrammarFamily::Perl {
-                limited |= self.extract_perl_replacements(
+                limited.merge(self.extract_perl_replacements(
                     &child.tree,
                     &child_request,
                     request.limits(),
@@ -161,7 +161,7 @@ impl TreeSitterProvider {
                     max_facts.map(|maximum| maximum.saturating_sub(candidates.len())),
                     &mut used_ranges,
                     cancellation,
-                )?;
+                )?);
             }
             captures.retain(|capture| capture.role != StructuralRole::Root);
             for capture in &mut captures {

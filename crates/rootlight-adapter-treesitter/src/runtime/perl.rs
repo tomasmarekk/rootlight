@@ -23,10 +23,10 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         used_ranges: &mut usize,
         cancellation: &Cancellation,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<EmbeddedExtractionLimits, AdapterError> {
         let scopes = replacement_scopes(candidates, cancellation)?;
         if scopes.is_empty() {
-            return Ok(false);
+            return Ok(EmbeddedExtractionLimits::default());
         }
         let mut pending = vec![ReplacementJob {
             tree: tree.clone(),
@@ -36,7 +36,7 @@ impl TreeSitterProvider {
         let maximum_ranges = budget
             .max_embedded_ranges()
             .min(self.config.max_included_ranges());
-        let mut limited = false;
+        let mut limited = EmbeddedExtractionLimits::default();
         let mut context = NativeParseContext {
             expression_envelope: None,
             range_origin: (0, Point::new(0, 0)),
@@ -107,7 +107,7 @@ impl TreeSitterProvider {
                     || depth_budget == 0
                     || context.remaining_progress_checks == 0
                 {
-                    limited = true;
+                    limited.context = true;
                     continue;
                 }
                 *used_ranges += 1;
@@ -164,7 +164,7 @@ impl TreeSitterProvider {
                         }
                         _ => CoverageStatus::Bounded,
                     };
-                    limited |= !child.fully_traversed;
+                    limited.context |= !child.fully_traversed;
                     continue;
                 }
                 let mut captures = if let Some(maximum) = max_facts {
@@ -177,7 +177,7 @@ impl TreeSitterProvider {
                         cancellation,
                     )?;
                     if extraction.limit.is_some() {
-                        limited = true;
+                        limited.partition = true;
                         continue;
                     }
                     extraction.candidates
