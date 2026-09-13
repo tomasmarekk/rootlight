@@ -1,0 +1,21 @@
+# Local Rust binding for the pinned MIT VBA grammar; not a crates.io release.
+# Native inputs are checked in so compilation never fetches or regenerates code.
+[package]
+name = "tree-sitter-vba"
+version = "0.14.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/harumiWeb/tree-sitter-vba"
+description = "Pinned VBA grammar with a local Rust binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.2"

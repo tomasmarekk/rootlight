@@ -62,6 +62,7 @@ exclude = [
     "third_party/tree-sitter-swift-0.7.3",
     "third_party/tree-sitter-toml-ng-0.7.0",
     "third_party/tree-sitter-typescript-0.23.2",
+    "third_party/tree-sitter-vba-0.14.1",
     "third_party/tree-sitter-yaml-0.7.2",
     "third_party/ts-parser-perl-2.0.0",
 ]
