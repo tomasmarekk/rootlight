@@ -11,6 +11,19 @@ const SECOND: &str = "package sample\nclass Second { static def fold(value) { va
 const CLIENT: &str = "class Client { def inspect(value) { fold(value) } }";
 
 #[test]
+fn modifier_only_fields_preserve_cross_file_static_import_calls() {
+    for modifier in ["public", "protected", "private", "static", "final"] {
+        check(
+            &format!("import static sample.First.fold\n{CLIENT}"),
+            FIRST,
+            &format!("class Holder {{ {modifier} handler = {{ value -> value }} }}"),
+            Some(("First", "fold")),
+            "fold(value)",
+        );
+    }
+}
+
+#[test]
 fn imported_assignments_select_authored_setters_and_exact_sources() {
     for (declaration, import, expression, name, expected) in [
         (
@@ -2046,6 +2059,43 @@ fn check(
                     && relation.object == RelationEndpoint::Entity(target.id)),
             "{client}"
         );
+        for (seed, family, direction, destination) in [
+            (
+                caller.id,
+                RelationFamily::Calls,
+                rootlight_query::RelationDirection::Outbound,
+                target.id,
+            ),
+            (
+                target.id,
+                RelationFamily::CalledBy,
+                rootlight_query::RelationDirection::Inbound,
+                caller.id,
+            ),
+        ] {
+            let response = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([seed]),
+                    vec![family],
+                    Some(direction),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                response
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .any(|edge| edge.symbol == destination
+                        && edge.source_refs.contains(&call.source)),
+                "{client}: {family:?}"
+            );
+        }
     } else {
         // These cases prove that an import cannot override compiler-owned local lookup.
         let client_file = document

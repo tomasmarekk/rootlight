@@ -695,15 +695,15 @@ module.exports = grammar({
       field('body', $.block),
     ),
 
-    // §4 — class / interface / trait field. Java-style shape: optional
-    // annotations, optional modifiers, `def` or a `_type`, then one or
-    // more declarators (each with optional initializer). Method
-    // declarations share the same prefix; `prec(2, …)` on
-    // `method_declaration` and the trailing `(` discriminate.
+    // A modifier permits omitted field types; the following identifier then
+    // belongs to the declarator, not an incomplete type/name pair. Methods
+    // share this prefix but retain their parameter-list precedence.
     field_declaration: $ => seq(
       repeat($._annotation_modifier),
-      repeat($._modifier),
-      choice('def', field('type', $._type)),
+      choice(
+        seq(repeat($._modifier), choice('def', field('type', $._type))),
+        repeat1($._modifier),
+      ),
       $.variable_declarator,
       repeat(seq(',', $.variable_declarator)),
     ),
@@ -805,10 +805,10 @@ module.exports = grammar({
       optional(field('arguments', $.argument_list)),
     ),
 
-    // §4 — record (Groovy 4+). `record Name(Type a, Type b) [{ body }]`.
-    // `record` is a contextual keyword — tree-sitter's word: directive
-    // keeps `record` usable as a plain identifier elsewhere.
-    record_declaration: $ => prec.right(seq(
+    // Record declarations share their leading token with ordinary identifiers.
+    // The explicit identifier alternative retains expressions; a complete record
+    // header outranks the competing method with an apparent `record` return type.
+    record_declaration: $ => prec.right(3, seq(
       repeat($._annotation_modifier),
       'record',
       field('name', $.identifier),
@@ -826,7 +826,7 @@ module.exports = grammar({
     ),
 
     record_component: $ => seq(
-      field('type', $._type),
+      optional(field('type', $._type)),
       field('name', $.identifier),
     ),
 
@@ -1801,8 +1801,8 @@ module.exports = grammar({
       /[0-9][0-9_]*[GgLlIiDdFf]?/,
     )),
 
-    // Var is contextual; declaration/handler words require explicit property contexts.
-    identifier: $ => choice('var', reserved('values', $._word_identifier), $._capitalized_identifier, $._primitive_type),
+    // Var and record are contextual; declaration/handler words require explicit property contexts.
+    identifier: $ => choice('var', 'record', reserved('values', $._word_identifier), $._capitalized_identifier, $._primitive_type),
     // Java identifier categories, excluding Groovy's forbidden ignorable controls.
     // Property data is fixed by the pinned parser generator, not the host locale.
     _word_identifier: _ => new RustRegex('[\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}][\\p{L}\\p{Nl}\\p{Sc}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Nd}]*'),

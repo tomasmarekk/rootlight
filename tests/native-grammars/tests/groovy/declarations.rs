@@ -42,6 +42,133 @@ fn exact(tree: &Tree, source: &str, kind: &str, text: &str) {
 }
 
 #[test]
+fn contextual_record_identifiers_preserve_declarations_and_expression_owners() {
+    for statement in [
+        "record.value = 1",
+        "def result = record.value",
+        "record(1)",
+        "def action = { record -> record.value }",
+        "def data = [record: record, recordValue: record.value]",
+        "def text = \"${record}\"",
+        "if (record) { record.value = 1 }; record.value = 2",
+        "try { record.value = 1 } catch (Exception error) { throw error }",
+    ] {
+        let source = format!(
+            "record Pair(String record) {{}}\nclass Store {{ Object record; def read(record) {{ {statement} }}; def record(value) {{ value }} }}"
+        );
+        let tree = valid(&source);
+        exact(
+            &tree,
+            &source,
+            "record_declaration",
+            "record Pair(String record) {}",
+        );
+        exact(&tree, &source, "record_component", "String record");
+        exact(&tree, &source, "variable_declarator", "record");
+        exact(&tree, &source, "formal_parameter", "record");
+        exact(
+            &tree,
+            &source,
+            "method_declaration",
+            "def record(value) { value }",
+        );
+        assert_eq!(
+            nodes(tree.root_node())
+                .iter()
+                .filter(|node| node.kind() == "record_declaration")
+                .count(),
+            1
+        );
+    }
+    for source in ["record Broken(", "record Broken(String value"] {
+        assert!(parse(source).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn record_components_with_omitted_types_retain_exact_names() {
+    for name in ["value", "String", "record"] {
+        for component in [name.to_owned(), format!("String {name}")] {
+            let source = format!("record Pair({component}) {{}}");
+            let tree = valid(&source);
+            exact(&tree, &source, "record_declaration", &source);
+            let components: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "record_component")
+                .collect();
+            assert_eq!(components.len(), 1, "{source}");
+            let node = components[0];
+            assert_eq!(node.utf8_text(source.as_bytes()).unwrap(), component);
+            assert_eq!(
+                node.child_by_field_name("name")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                name
+            );
+            assert_eq!(
+                node.child_by_field_name("type")
+                    .map(|ty| ty.utf8_text(source.as_bytes()).unwrap()),
+                (component != name).then_some("String")
+            );
+        }
+    }
+}
+
+#[test]
+fn modifier_only_fields_keep_declarators_separate_from_types_and_methods() {
+    for modifier in [
+        "public",
+        "protected",
+        "private",
+        "static",
+        "final",
+        "public static final",
+    ] {
+        for ty in ["", "def ", "Object "] {
+            let source = format!(
+                "class Container {{ {modifier} {ty}handler = {{ value -> value }}, count = 1; public def run() {{ count }} }}"
+            );
+            let tree = valid(&source);
+            let declarations: Vec<_> = nodes(tree.root_node())
+                .into_iter()
+                .filter(|node| node.kind() == "variable_declarator")
+                .collect();
+            assert_eq!(
+                declarations.len(),
+                2,
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+            for expected in ["handler", "count"] {
+                let declaration = declarations
+                    .iter()
+                    .find(|node| {
+                        node.child_by_field_name("name").is_some_and(|name| {
+                            name.utf8_text(source.as_bytes()).unwrap() == expected
+                        })
+                    })
+                    .unwrap_or_else(|| panic!("{source}: {}", tree.root_node().to_sexp()));
+                assert_eq!(declaration.parent().unwrap().kind(), "field_declaration");
+                assert!(
+                    !declaration
+                        .child_by_field_name("name")
+                        .unwrap()
+                        .is_missing()
+                );
+                assert!(declaration.child_by_field_name("value").is_some());
+            }
+            exact(
+                &tree,
+                &source,
+                "method_declaration",
+                "public def run() { count }",
+            );
+        }
+    }
+}
+
+#[test]
 fn annotated_imports_preserve_names_aliases_and_annotation_ownership() {
     for (declaration, name, alias) in [
         ("import sample.Widget", "sample.Widget", None),

@@ -19,11 +19,13 @@ The grammar and scanner changes preserve source boundaries and distinguish:
 
 - Statement separators, compound statements, newline continuations and comments.
 - Typed declarations, command calls, command chains and competing expressions.
+- Modifier-only field declarations with omitted types, preserving each declarator and initializer.
 - Nested type declarations as class members, retaining their own bodies and names.
 - Catch parameters with omitted types, `def`, `final`, annotations and multi-catch.
 - Formal parameter annotations and `final` without changing name, type or default spans.
 - Closure-arrow comment sequences without changing parameter or body ownership.
 - Contextual `var` identifiers and closure annotation, varargs and default fields.
+- Contextual `record` identifiers and optionally typed record components without losing declarations.
 - Annotation-to-declaration and list/map comma trivia without detaching source nodes.
 - Annotated imports with static, wildcard and alias forms, retaining annotation ownership.
 - Reserved import declarations versus member names and literal map labels.

@@ -27,6 +27,186 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_record_components_preserve_authored_identity_without_inventing_types() {
+    for name in ["value", "String", "record"] {
+        for component in [name.to_owned(), format!("String {name}")] {
+            let source = format!("record Entry({component}) {{}}");
+            let result = output(&source);
+            let doc = result.document();
+            assert!(
+                doc.diagnostics.is_empty(),
+                "{source}: {:?}",
+                doc.diagnostics
+            );
+            let owner = doc
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Entry")
+                .unwrap();
+            let properties: Vec<_> = doc
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Property)
+                .collect();
+            assert_eq!(properties.len(), 1, "{source}: {:?}", doc.entities);
+            let property = properties[0];
+            assert_eq!(property.canonical_name, name);
+            assert_eq!(
+                property.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+            let evidence = property.evidence.source.as_ref().unwrap();
+            let span = evidence.span();
+            assert_eq!(evidence.generation(), doc.generation);
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(component.as_str())
+            );
+            let definitions: Vec<_> = doc
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: property.id,
+                            }
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let definition = definitions[0];
+            let span = definition.source.span();
+            assert_eq!(definition.source.generation(), doc.generation);
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some(name)
+            );
+            assert!(
+                doc.coverage_records
+                    .iter()
+                    .filter(|record| matches!(
+                        record.domain,
+                        FactDomain::Files | FactDomain::Entities
+                    ))
+                    .all(|record| record.status == CoverageStatus::Complete && record.skipped == 0)
+            );
+            assert!(
+                !doc.occurrences
+                    .iter()
+                    .any(|site| site.syntactic_text_hash == content_hash(b"Object"))
+            );
+        }
+    }
+}
+
+#[test]
+fn groovy_contextual_record_references_keep_parameter_identity_and_exact_sources() {
+    let source = "record Pair(String value) {}\nclass Store { def read(record) { record.value = 1; return record } }";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Pair")
+    );
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "record")
+        .unwrap();
+    let references: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.syntactic_text_hash == content_hash(b"record")
+        })
+        .collect();
+    assert_eq!(references.len(), 2);
+    for reference in references {
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+        assert_eq!(reference.source.generation(), document.generation);
+        let start = usize::try_from(reference.source.span().start_byte()).unwrap();
+        let end = usize::try_from(reference.source.span().end_byte()).unwrap();
+        assert_eq!(&source[start..end], "record");
+    }
+    assert!(
+        document
+            .coverage_records
+            .iter()
+            .filter(|record| matches!(record.domain, FactDomain::Files | FactDomain::Entities))
+            .all(|record| record.status == CoverageStatus::Complete && record.skipped == 0)
+    );
+}
+
+#[test]
+fn groovy_untyped_visibility_fields_preserve_names_and_closure_initializers() {
+    for (modifier, kind) in [
+        ("public", EntityKind::Field),
+        ("protected", EntityKind::Field),
+        ("private", EntityKind::Field),
+        ("static", EntityKind::Property),
+        ("final", EntityKind::Property),
+        ("public static final", EntityKind::Field),
+    ] {
+        for ty in ["", "def ", "Object "] {
+            let source =
+                format!("class Container {{ {modifier} {ty}handler = {{ value -> value }} }}");
+            let result = output(&source);
+            let document = result.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{modifier}: {:?}",
+                document.diagnostics
+            );
+            let fields: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == kind && entity.canonical_name == "handler")
+                .collect();
+            assert_eq!(fields.len(), 1, "{modifier}: {:?}", document.entities);
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .all(|region| region.domain != FactDomain::Entities),
+                "{modifier}: {:?}",
+                document.skipped_regions
+            );
+            let field_source = fields[0].evidence.source.as_ref().unwrap();
+            assert_eq!(field_source.generation(), document.generation);
+            let start = usize::try_from(field_source.span().start_byte()).unwrap();
+            let end = usize::try_from(field_source.span().end_byte()).unwrap();
+            assert_eq!(&source[start..end], "handler = { value -> value }");
+            assert!(
+                document
+                    .coverage_records
+                    .iter()
+                    .filter(|record| record.domain == FactDomain::Entities)
+                    .all(|record| record.status == CoverageStatus::Complete && record.skipped == 0)
+            );
+        }
+    }
+}
+
+#[test]
 fn groovy_write_context_distinguishes_assignment_compound_update_and_tuple_targets() {
     use rootlight_ir::GroovyValueWrite as Write;
     for (expression, expected) in [
