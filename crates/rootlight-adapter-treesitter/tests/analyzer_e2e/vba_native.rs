@@ -27,6 +27,145 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_direct_procedure_calls_bind_written_names_across_invocation_forms() {
+    let source = "Sub Visit(ByVal value As Long)\nEnd Sub\nFunction Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nSub Clear()\nEnd Sub\nSub Run()\nCall VISIT(1)\nvisit 2\nDim result As Long\nresult = MEASURE(3)\nClear\nCall CLEAR\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let mut calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    calls.sort_by_key(|site| site.source.span().start_byte());
+    assert_eq!(calls.len(), 5, "{:?}", document.occurrences);
+    for (site, (marker, target)) in calls.into_iter().zip([
+        ("VISIT(1)", "Visit"),
+        ("visit 2", "Visit"),
+        ("MEASURE(3)", "Measure"),
+        ("Clear\n", "Clear"),
+        ("CLEAR\n", "Clear"),
+    ]) {
+        let symbol = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == target)
+            .unwrap()
+            .id;
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol });
+        let start = source.find(marker).unwrap();
+        assert_eq!(
+            site.source.span().start_byte(),
+            u64::try_from(start).unwrap()
+        );
+        assert_eq!(
+            site.source.span().end_byte(),
+            u64::try_from(start + target.len()).unwrap()
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.object == RelationEndpoint::Entity(symbol)
+                    && edge.subject == RelationEndpoint::Occurrence(site.id))
+        );
+    }
+}
+
+#[test]
+fn vba_recursive_function_invocation_is_not_its_result_variable() {
+    let source = "Function Reduce(ByVal value As Long) As Long\nIf value > 0 Then\nReduce = REDUCE(value - 1)\nElse\nReduce = 0\nEnd If\nEnd Function\n";
+    let result = output(source);
+    let document = result.document();
+    let symbol = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Reduce")
+        .unwrap()
+        .id;
+    let calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].target, OccurrenceTarget::Resolved { symbol });
+    assert_eq!(
+        calls[0].source.span().start_byte(),
+        u64::try_from(source.find("REDUCE(").unwrap()).unwrap()
+    );
+    for site in document.occurrences.iter().filter(|site| {
+        site.syntax_kind == "vba.identifier.reference"
+            && source.get(
+                usize::try_from(site.source.span().start_byte()).unwrap()
+                    ..usize::try_from(site.source.span().end_byte()).unwrap(),
+            ) == Some("Reduce")
+    }) {
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
+fn vba_conditional_procedure_declarations_do_not_become_unconditional_targets() {
+    let source =
+        "#If Available Then\nSub Visit()\nEnd Sub\n#End If\nSub Run()\nCall VISIT()\nEnd Sub\n";
+    let result = output(source);
+    let start = u64::try_from(source.find("VISIT()").unwrap()).unwrap();
+    let site = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start && site.source.span().end_byte() == start + 5
+        })
+        .unwrap();
+    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn vba_callable_spelling_does_not_bypass_local_value_shadowing() {
+    let source = "Sub Visit(ByVal value As Long)\nEnd Sub\nSub Run(ByVal visit As Object)\nCall VISIT(1)\nEnd Sub\nSub Read()\nDim Visit(2) As Long\nVisit(1) = 2\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::CallSite)
+    );
+    for marker in ["VISIT(1)", "Visit(1)"] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 5
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("callee value must retain its lexical binding")
+        };
+        assert!(document.entities.iter().any(|entity| entity.id == symbol
+            && matches!(entity.kind, EntityKind::Variable | EntityKind::Parameter)));
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span().start_byte() == start
+                    && gap.domain == FactDomain::Relations)
+        );
+    }
+}
+
+#[test]
 fn vba_authored_declarations_keep_exact_utf8_name_spans() {
     let source = "' λ😀 preserves UTF-8 coordinates\nOption Explicit\nPrivate total As Long, other As String\nPublic Const Limit As Long = 4\nPublic Type Sample\nValue As Long\nEnd Type\nPublic Enum Mode\nIdle = 0\nActive = 1\nEnd Enum\nPublic Event Changed(ByVal current As Long)\nPublic Sub Reset()\nLet total = 0\nEnd Sub\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value + Limit\nEnd Function\n";
     for source in [source.to_owned(), source.replace('\n', "\r\n")] {

@@ -10,9 +10,21 @@ use rootlight_adapter_sdk::{
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
 
+#[derive(Clone, Copy)]
+enum Binding {
+    Value(SymbolId),
+    Procedure(SymbolId),
+    FunctionResult(SymbolId),
+}
+
+pub(super) struct ResolvedBinding {
+    pub(super) symbol: SymbolId,
+    pub(super) is_call: bool,
+}
+
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
-    bindings: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
     maximum_name_bytes: usize,
@@ -56,36 +68,49 @@ impl<'a> VbaBindings<'a> {
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
                 .map_err(|_| invalid_capture())?;
             let name = structural_captured_name_for_fact("vba", fact, text, maximum_name_bytes);
-            let symbol = if !conditional
-                && matches!(
-                    declaration.syntax_kind().as_str(),
-                    "vba.parameter.declaration"
-                        | "vba.variable.declaration"
-                        | "vba.constant.declaration"
-                ) {
-                symbols.get(&fact.local_id()).copied()
-            } else {
+            let mut symbol = if conditional {
                 None
+            } else {
+                symbols.get(&fact.local_id()).copied().and_then(|symbol| {
+                    match declaration.syntax_kind().as_str() {
+                        "vba.parameter.declaration"
+                        | "vba.variable.declaration"
+                        | "vba.constant.declaration" => Some(Binding::Value(symbol)),
+                        "vba.sub_function.declaration"
+                        | "vba.function.declaration"
+                        | "vba.external_sub_function.declaration"
+                        | "vba.external_function.declaration" => Some(Binding::Procedure(symbol)),
+                        _ => None,
+                    }
+                })
             };
             if declaration.syntax_kind().as_str() == "vba.constant.declaration"
-                && let Some(symbol) = symbol
+                && let Some(Binding::Value(symbol)) = symbol
             {
                 result.constant_symbols.insert(symbol);
             }
             if owns_scope(declaration) {
-                // A function/Get name also denotes an implicit result variable.
-                // Its written procedure declaration is not that variable's identity.
+                // A function name denotes its result in value context, but the
+                // procedure in invocation context. Get dispatch remains unproven.
                 if matches!(
                     declaration.syntax_kind().as_str(),
                     "vba.function.declaration" | "vba.get_property.declaration"
                 ) {
-                    result.insert(owner, name.as_deref(), None);
+                    let result_binding = match symbol {
+                        Some(Binding::Procedure(symbol)) => Some(Binding::FunctionResult(symbol)),
+                        _ => None,
+                    };
+                    result.insert(owner, name.as_deref(), result_binding);
                 }
-                let Some((parent, _)) = result.scope(result.fact(owner)?.parent(), cancellation)?
+                let Some((parent, conditional)) =
+                    result.scope(result.fact(owner)?.parent(), cancellation)?
                 else {
                     continue;
                 };
                 owner = parent;
+                if conditional {
+                    symbol = None;
+                }
             }
             result.insert(owner, name.as_deref(), symbol);
         }
@@ -97,11 +122,15 @@ impl<'a> VbaBindings<'a> {
         fact: &SyntaxFact,
         text: &str,
         cancellation: &Cancellation,
-    ) -> Result<Option<SymbolId>, AdapterError> {
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
         cancellation.check()?;
         let default_constant =
             fact.syntax_kind().as_str() == "vba.default_constant_identifier.reference";
-        if fact.syntax_kind().as_str() != "vba.identifier.reference" && !default_constant {
+        let invoked = fact.syntax_kind().as_str() == "vba.invoked_identifier.reference";
+        if fact.syntax_kind().as_str() != "vba.identifier.reference"
+            && !default_constant
+            && !invoked
+        {
             return Ok(None);
         }
         let Some(name) =
@@ -127,9 +156,26 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
-            if let Some(symbol) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
-                return Ok(symbol
-                    .filter(|symbol| !default_constant || self.constant_symbols.contains(symbol)));
+            if let Some(binding) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
+                return Ok(match binding {
+                    Some(Binding::Value(symbol))
+                        if !default_constant || self.constant_symbols.contains(symbol) =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: false,
+                        })
+                    }
+                    Some(Binding::Procedure(symbol) | Binding::FunctionResult(symbol))
+                        if invoked =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: true,
+                        })
+                    }
+                    _ => None,
+                });
             }
             if scope.syntax_kind().as_str() == "vba.file.scope" {
                 return Ok(None);
@@ -139,7 +185,7 @@ impl<'a> VbaBindings<'a> {
         Err(invalid_capture())
     }
 
-    fn insert(&mut self, owner: u64, name: Option<&str>, symbol: Option<SymbolId>) {
+    fn insert(&mut self, owner: u64, name: Option<&str>, symbol: Option<Binding>) {
         let Some(name) = name.filter(|name| name.is_ascii()) else {
             // Foreign/undecodable names need the project's comparison profile.
             // Without it, an apparent miss must not expose a same-named outer binding.
@@ -324,7 +370,9 @@ mod tests {
                         .unwrap();
                 let reference = facts.iter().find(|fact| fact.local_id() == 7).unwrap();
                 assert_eq!(
-                    plan.resolve(reference, "COUNT", &cancellation).unwrap(),
+                    plan.resolve(reference, "COUNT", &cancellation)
+                        .unwrap()
+                        .map(|binding| binding.symbol),
                     present.then_some(inner)
                 );
             }

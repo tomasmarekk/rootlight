@@ -408,6 +408,7 @@ pub fn structural_captured_name_for_fact<'a>(
             "vba.identifier.definition"
                 | "vba.identifier.reference"
                 | "vba.default_constant_identifier.reference"
+                | "vba.invoked_identifier.reference"
         )
     {
         if text.is_empty() || text.len() > maximum_bytes {

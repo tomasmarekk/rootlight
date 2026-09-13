@@ -1965,12 +1965,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     skipped.insert(region.id, region);
                 }
                 if let Some(bindings) = &vba_bindings
-                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                    && let Some(binding) = bindings.resolve(fact, text, cancellation)?
                 {
-                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.target = OccurrenceTarget::Resolved {
+                        symbol: binding.symbol,
+                    };
+                    if binding.is_call {
+                        occurrence.role = OccurrenceRole::CallSite;
+                    }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
-                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    let mut relation = lexical_reference_relation(&occurrence, binding.symbol)?;
+                    if binding.is_call {
+                        relation.predicate = RelationPredicate::Calls;
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+                    }
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &lua_bindings
@@ -2169,7 +2179,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     relations.insert(relation.id, relation);
                 }
                 if let Some(detail) = source_reference_gap(fact)
-                    && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                    && (matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                        || (fact.syntax_kind().as_str() == "vba.invoked_identifier.reference"
+                            && occurrence.role != OccurrenceRole::CallSite))
                 {
                     let region = skipped_region(
                         self.full_source,
@@ -5153,6 +5165,7 @@ fn comment_text(text: &str) -> Option<&str> {
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "vba.identifier.reference" => Some("vba-binding-target-unavailable"),
+        "vba.invoked_identifier.reference" => Some("vba-call-or-index-target-unavailable"),
         "vba.default_constant_identifier.reference" => {
             Some("vba-default-constant-target-unavailable")
         }

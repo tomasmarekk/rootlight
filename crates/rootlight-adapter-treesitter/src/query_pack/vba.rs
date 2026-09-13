@@ -32,6 +32,8 @@ fn declaration_syntax(kind: &str) -> Option<&'static str> {
 }
 
 pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
+    // Keep application evidence even when its named procedure can be bound:
+    // argument compatibility and dispatch through returned values are separate.
     if role != StructuralRole::Reference || !matches!(node.kind(), "identifier" | "bang_identifier")
     {
         return true;
@@ -63,7 +65,9 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "preprocessor_if" | "type_preprocessor_if" => "vba.preprocessor",
         "identifier" | "bang_identifier" => "vba.identifier",
         "qualified_member_expression" | "implicit_member_expression" => "vba.member",
-        "call_expression" if role == StructuralRole::Reference => "vba.application",
+        "call_expression" | "call_statement" if role == StructuralRole::Reference => {
+            "vba.application"
+        }
         "comment" => "vba.comment",
         "string_literal" => "vba.string",
         _ => return None,
@@ -74,6 +78,12 @@ pub(super) fn reference_syntax(
     mut child: Node<'_>,
     cancellation: &Cancellation,
 ) -> Result<&'static str, AdapterError> {
+    let invoked = child.parent().is_some_and(|parent| {
+        (parent.kind() == "call_expression"
+            && parent.child_by_field_name("function") == Some(child))
+            || (parent.kind() == "call_statement"
+                && parent.child_by_field_name("callee") == Some(child))
+    });
     while let Some(parent) = child.parent() {
         cancellation.check()?;
         let kind = parent.kind();
@@ -118,7 +128,11 @@ pub(super) fn reference_syntax(
         }
         child = parent;
     }
-    Ok("vba.identifier")
+    Ok(if invoked {
+        "vba.invoked_identifier"
+    } else {
+        "vba.identifier"
+    })
 }
 
 pub(super) fn header_end(
