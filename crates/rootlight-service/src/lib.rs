@@ -212,11 +212,11 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/129";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/130";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
-const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
+const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
 const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
@@ -2155,7 +2155,12 @@ fn language_coverage(
     let unsupported_files = document
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.code == "unsupported-language")
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code.as_str(),
+                "unsupported-language" | "unsupported-encoding"
+            )
+        })
         .filter_map(|diagnostic| {
             diagnostic
                 .source
@@ -2404,6 +2409,7 @@ struct RustSourceInput {
 struct UnsupportedSourceInput {
     claim: FileIdentityClaim,
     language: String,
+    encoding: String,
     generated: bool,
 }
 
@@ -2437,6 +2443,8 @@ struct FileOnlyFallbackPreparation<'root> {
 pub enum FirstSliceSourceCoverageReason {
     /// The source format or language has no configured structural analyzer.
     UnsupportedLanguage,
+    /// The retained byte encoding has no structural analyzer.
+    UnsupportedEncoding,
     /// Structural analysis exceeded a bounded repository resource.
     ResourceBounded,
 }
@@ -7425,6 +7433,7 @@ impl FirstSliceService {
                 });
                 unsupported_sources.push(UnsupportedSourceInput {
                     claim: claim.clone(),
+                    encoding: input.encoding.clone(),
                     language: detected_source_language(input)
                         .unwrap_or("unknown")
                         .to_owned(),
@@ -7598,7 +7607,7 @@ impl FirstSliceService {
         let mut document = NormalizedIrDocument::empty(repository, generation);
         let mut disposition_append_state = DocumentAppendState::from_document(&document)?;
         for input in &unsupported_sources {
-            let disposition = unsupported_language_document(repository, generation, input)?;
+            let disposition = unsupported_source_document(repository, generation, input)?;
             append_normalized_document(
                 &mut document,
                 disposition,
@@ -12660,17 +12669,24 @@ impl FirstSliceService {
                 })
                 .reduce(lower_coverage_status)
                 .ok_or(FirstSliceError::CatalogCorrupt)?;
-            let reason = document
-                .diagnostics
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic.code == "unsupported-language"
-                        && diagnostic
-                            .source
-                            .as_ref()
-                            .is_some_and(|source| source.span().file() == file.id)
-                })
-                .then_some(FirstSliceSourceCoverageReason::UnsupportedLanguage);
+            let reason = document.diagnostics.iter().find_map(|diagnostic| {
+                if !diagnostic
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file.id)
+                {
+                    return None;
+                }
+                match diagnostic.code.as_str() {
+                    "unsupported-language" => {
+                        Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+                    }
+                    "unsupported-encoding" => {
+                        Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+                    }
+                    _ => None,
+                }
+            });
             (status, reason)
         };
         Ok(FirstSliceSourceCoverage {
@@ -12833,6 +12849,7 @@ impl FirstSliceService {
                         .as_ref()
                         .map(|source| source.span().file());
                     let reason = match diagnostic.code.as_str() {
+                        "unsupported-encoding" => Some(FirstSliceCoverageGapReason::Unsupported),
                         "unsupported-language" => Some(
                             if file
                                 .and_then(|file| snapshot.find_file(file))
@@ -15266,6 +15283,11 @@ fn supported_source_language<'a>(
     input: &'a ManifestInput,
     analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
 ) -> Option<&'a str> {
+    // Decoder admission preserves raw UTF-16 source. UTF-8 parser offsets
+    // cannot be attached to those bytes without a separate source mapping.
+    if input.encoding != "utf-8" {
+        return None;
+    }
     if input
         .language_signals
         .iter()
@@ -15439,11 +15461,24 @@ fn analysis_tier_for_language(language: &str) -> AnalysisTier {
     }
 }
 
-fn unsupported_language_document(
+fn unsupported_source_document(
     repository: RepositoryId,
     generation: GenerationId,
     input: &UnsupportedSourceInput,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
+    let (code, message, reason) = if input.encoding == "utf-8" {
+        (
+            "unsupported-language",
+            "source language has no configured analyzer",
+            SkippedRegionReason::UnsupportedConstruct,
+        )
+    } else {
+        (
+            "unsupported-encoding",
+            "source encoding has no configured structural analyzer",
+            SkippedRegionReason::UnsupportedEncoding,
+        )
+    };
     let relative = RelativePath::parse(Path::new(&input.claim.path))
         .map_err(|_| FirstSliceError::Repository)?;
     let span = SourceSpan::new(input.claim.file, 0, input.claim.byte_length)
@@ -15469,7 +15504,7 @@ fn unsupported_language_document(
         input_sources: vec![source.clone()],
         evidence_sources: vec![source.clone()],
         derivation_parents: Vec::new(),
-        rule: Some("unsupported-language".to_owned()),
+        rule: Some(code.to_owned()),
     };
     provenance.id =
         derive_provenance_record_id(&provenance).map_err(|_| FirstSliceError::Identity)?;
@@ -15487,7 +15522,7 @@ fn unsupported_language_document(
         content_hash: input.claim.content_hash,
         byte_length: input.claim.byte_length,
         language: input.language.clone(),
-        encoding: "utf-8".to_owned(),
+        encoding: input.encoding.clone(),
         generated: input.generated,
         provenance: provenance_id,
         evidence: evidence(),
@@ -15540,8 +15575,8 @@ fn unsupported_language_document(
             generation,
             source: source.clone(),
             domain,
-            reason: SkippedRegionReason::UnsupportedConstruct,
-            detail: "unsupported-language".to_owned(),
+            reason,
+            detail: code.to_owned(),
             provenance: provenance_id,
             evidence: evidence(),
         };
@@ -15552,8 +15587,8 @@ fn unsupported_language_document(
         id: FactId::from_bytes([0; 20]),
         repository,
         generation,
-        code: "unsupported-language".to_owned(),
-        message: "source language has no configured analyzer".to_owned(),
+        code: code.to_owned(),
+        message: message.to_owned(),
         severity: DiagnosticSeverity::Warning,
         source: Some(source.clone()),
         coverage_effect: CoverageStatus::Unknown,
@@ -15789,7 +15824,7 @@ fn source_file_fallback_record(
         language: detected_source_language(input)
             .unwrap_or("unknown")
             .to_owned(),
-        encoding: "utf-8".to_owned(),
+        encoding: input.encoding.clone(),
         generated: matches!(input.class, InputClass::Generated),
         provenance,
         evidence: FactEvidence {
@@ -41061,6 +41096,201 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "discovery-source-bytes-truncated")
         );
+    }
+
+    #[test]
+    fn utf16_sources_retain_exact_bytes_and_encoding_gaps() {
+        for (label, little_endian) in [("utf-16le", true), ("utf-16be", false)] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join("peer.rs"), "pub fn retained() {}\n").unwrap();
+            let source = "pub fn encoded() {}\r\n// λ𝄞\r\n";
+            let bytes = std::iter::once(0xfeff_u16)
+                .chain(source.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            fs::write(fixture.path().join("encoded.rs"), &bytes).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.discovered_inputs, 2, "{label}");
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let file = snapshot
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == "encoded.rs")
+                .unwrap();
+            assert_eq!(file.encoding, label);
+            assert_eq!(file.byte_length, u64::try_from(bytes.len()).unwrap());
+            assert_eq!(file.content_hash, content_hash(&bytes));
+            let coverage = service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+            );
+            let status = service.repository_status(receipt.repository, None).unwrap();
+            assert_eq!(
+                status
+                    .coverage
+                    .iter()
+                    .map(|row| row.discovered_files)
+                    .sum::<u64>(),
+                2
+            );
+            assert_eq!(
+                status
+                    .coverage
+                    .iter()
+                    .map(|row| row.indexed_files)
+                    .sum::<u64>(),
+                1
+            );
+            let hits = service
+                .code_locate(
+                    receipt.generation,
+                    "encoded.rs".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                hits.data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.file == file.id && hit.symbol.is_none())
+            );
+            let peers = service
+                .code_locate(
+                    receipt.generation,
+                    "retained".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(peers.data.hits.iter().any(|hit| hit.symbol.is_some()));
+            assert!(snapshot.document().skipped_regions.iter().any(|region| {
+                region.source.span().file() == file.id
+                    && region.reason == SkippedRegionReason::UnsupportedEncoding
+            }));
+            assert!(!snapshot.document().entities.iter().any(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file.id)
+            }));
+            let reference = file.evidence.source.clone().unwrap();
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(rootlight_source::SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, bytes);
+            assert_eq!(read.data.chunks[0].reference, reference);
+            assert!(
+                service
+                    .source_read(receipt.generation, vec![reference], &deadline())
+                    .is_err()
+            );
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+        }
+    }
+
+    #[test]
+    fn utf16_encoding_survives_restart_and_incremental_transitions() {
+        let fixture = TempDir::new().unwrap();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let source = "pub fn value() {}\r\n// λ𝄞\r\n";
+        let little = std::iter::once(0xfeff_u16)
+            .chain(source.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let big = std::iter::once(0xfeff_u16)
+            .chain(source.encode_utf16())
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<_>>();
+        let mut previous: Option<(GenerationId, String)> = None;
+        for (encoding, bytes) in [
+            ("utf-16le", little),
+            ("utf-16be", big),
+            ("utf-8", source.as_bytes().to_vec()),
+        ] {
+            let policy = FirstSliceStoragePolicy::resolve_user_config(None, 2).unwrap();
+            let mut service =
+                FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline())
+                    .unwrap();
+            if let Some((generation, old_encoding)) = &previous {
+                let restored = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(restored.generation, *generation);
+                let snapshot = service.loaded_generation_snapshot(*generation).unwrap();
+                assert_eq!(snapshot.document().files[0].encoding, *old_encoding);
+            }
+            fs::write(fixture.path().join("source.rs"), &bytes).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if let Some((generation, _)) = previous {
+                assert_ne!(receipt.generation, generation);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            assert_eq!(snapshot.document().files.len(), 1);
+            let file = &snapshot.document().files[0];
+            assert_eq!(file.encoding, encoding);
+            assert_eq!(file.content_hash, content_hash(&bytes));
+            assert_eq!(snapshot.document().entities.is_empty(), encoding != "utf-8");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().unwrap()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(rootlight_source::SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, bytes);
+            let noop = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(noop.generation, receipt.generation);
+            previous = Some((receipt.generation, encoding.to_owned()));
+        }
     }
 
     #[test]

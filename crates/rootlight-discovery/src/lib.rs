@@ -25,6 +25,7 @@ use rootlight_vfs::{
 };
 use serde::{Deserialize, Serialize};
 
+mod encoding;
 mod incremental;
 mod matlab;
 mod objective_c;
@@ -38,7 +39,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.9";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.10";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -549,6 +550,9 @@ pub struct ManifestInput {
     pub content_hash: ContentHash,
     /// Source byte length.
     pub bytes: u64,
+    /// BOM-verified UTF-16 byte order, or the legacy UTF-8 interpretation.
+    #[serde(default = "legacy_source_encoding")]
+    pub encoding: String,
     /// Input classification.
     pub class: InputClass,
     /// Ordered language signals; no signal implies unknown language.
@@ -1241,11 +1245,16 @@ impl<'a> DiscoveryState<'a> {
                 bytes_examined: self.bytes_examined,
             });
         }
-        if looks_binary(snapshot.content()) {
+        let Some(classification) = encoding::classify(snapshot.content(), self.cancellation)?
+        else {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
-        }
-        let (class, mut language_signals) = classify(&path, snapshot.content());
+        };
+        let classification_content = classification
+            .decoded_prefix
+            .as_ref()
+            .map_or(snapshot.content(), |prefix| prefix.as_bytes());
+        let (class, mut language_signals) = classify(&path, classification_content);
         if let Some(language) = self.config.source_language_for_path(path.as_str()) {
             language_signals.push(LanguageSignal {
                 language: language.to_owned(),
@@ -1268,6 +1277,7 @@ impl<'a> DiscoveryState<'a> {
             path: path.as_str().to_owned(),
             content_hash: snapshot.content_hash(),
             bytes: snapshot.metadata().length,
+            encoding: classification.encoding.to_owned(),
             class,
             language_signals,
             decisive_rule,
@@ -1482,9 +1492,8 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
     (class, signals.into_iter().collect())
 }
 
-fn looks_binary(content: &[u8]) -> bool {
-    let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
-    sample.is_some_and(|sample| sample.contains(&0))
+fn legacy_source_encoding() -> String {
+    "utf-8".to_owned()
 }
 
 fn generated_path(path: &str) -> bool {
@@ -2628,6 +2637,57 @@ max_source_file_bytes = 2097152
                     .any(|signal| signal.language == "vba")
             );
         }
+    }
+
+    #[test]
+    fn utf16_admission_preserves_snapshots_and_bounded_classification_evidence() {
+        let temporary = local_tempdir();
+        let text = "' generated file\r\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\r\n";
+        let bytes = std::iter::once(0xfeff_u16)
+            .chain(text.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        write_fixture(&temporary, "module.bas", &bytes);
+        write_fixture(&temporary, "malformed.bas", &[0xff, 0xfe, 0, 0xd8]);
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"utf16-admission");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.inputs.len(), 1);
+        let input = &result.manifest.inputs[0];
+        assert_eq!(input.path, "module.bas");
+        assert_eq!(input.encoding, "utf-16le");
+        assert_eq!(input.class, InputClass::Generated);
+        assert!(
+            input
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "vba"
+                    && signal.evidence == LanguageEvidence::Content)
+        );
+        assert_eq!(input.content_hash, content_hash(&bytes));
+        assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap());
+        assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+        assert_eq!(result.manifest.exclusions.len(), 1);
+        assert_eq!(
+            result.manifest.exclusions[0].reason,
+            ExclusionReason::Binary
+        );
+        let encoded = serde_json::to_value(input).unwrap();
+        let roundtrip: ManifestInput = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(roundtrip, *input);
+        let mut legacy = encoded;
+        legacy.as_object_mut().unwrap().remove("encoding");
+        let legacy: ManifestInput = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.encoding, "utf-8");
     }
 
     #[test]

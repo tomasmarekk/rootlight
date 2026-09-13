@@ -26,7 +26,9 @@ The JSON output records:
 - Effective configuration identity and the separate raw configuration input hash.
 - Language-scoped indexed counts and every retained file record.
 - Exact generation-bound source retrieval for every retained file, using bounded
-  UTF-8-aligned chunks with no added context, compared to live file bytes and hashes.
+  chunks with no added context, compared to live file bytes and hashes. Valid
+  UTF-8 uses character-aligned chunks; other retained encodings use exact raw-byte
+  reads without transcoding.
 - Per-file occurrence counts by syntax and resolution, plus explicit skipped
   regions from the normalized index.
 
@@ -41,6 +43,14 @@ against a complete repository inventory to account for excluded files. Missing
 declarations or relationships need source-grounded language-specific checks;
 neither zero recorded gaps nor high occurrence counts prove semantic completeness.
 This diagnostic does not qualify an installed package or the MCP transport.
+
+BOM-backed, strictly valid UTF-16LE/BE text is retained with its original encoding,
+hash and byte ranges. A bounded decoded prefix can supply discovery signals, but
+this does not provide UTF-16 lexical search or structural analysis. Such files
+retain explicit unsupported-encoding coverage gaps and must not count as
+structurally indexed language support. Malformed UTF-16 and decoded NUL remain
+excluded; this admission rule does not recognize arbitrary legacy code pages or
+embedded container sources.
 
 The timing observations are not a release benchmark: record build profile,
 hardware, source/configuration hashes and filesystem/cache conditions before

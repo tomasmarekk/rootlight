@@ -15,7 +15,7 @@ use rootlight_cancel::Cancellation;
 use rootlight_ir::{OccurrenceTarget, SourceRef, SourceSpan};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{FirstSliceBudget, FirstSliceService, FirstSliceStoragePolicy};
-use rootlight_source::SourceReadOptions;
+use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     HARD_MAX_SHARED_GENERATION_BUNDLE_BYTES, HARD_MAX_SHARED_GENERATION_HEADER_BYTES,
     SharedGenerationExpectation, SharedGenerationLimits,
@@ -139,10 +139,20 @@ fn inspect(
         {
             return Err("live source identity differs from the indexed file".into());
         }
-        let text = std::str::from_utf8(&live)?;
+        let text = (file.encoding == "utf-8")
+            .then(|| std::str::from_utf8(&live).ok())
+            .flatten();
+        let encoding = if text.is_some() {
+            SourceEncoding::Utf8
+        } else {
+            SourceEncoding::Bytes
+        };
         let mut start = 0_usize;
         loop {
-            let end = chunk_end(text, start);
+            let end = text.map_or_else(
+                || start.saturating_add(16 * 1024).min(live.len()),
+                |text| chunk_end(text, start),
+            );
             let part = SourceRef::new(
                 source.repository(),
                 source.generation(),
@@ -155,7 +165,8 @@ fn inspect(
                 vec![part.clone()],
                 SourceReadOptions::new()
                     .with_context_lines_before(0)
-                    .with_context_lines_after(0),
+                    .with_context_lines_after(0)
+                    .with_encoding(encoding),
                 FirstSliceBudget::default(),
                 &deadline()?,
             )?;
@@ -254,6 +265,47 @@ mod tests {
             assert_eq!(reconstructed, text);
         }
         assert_eq!(chunk_end("", 0), 0);
+    }
+
+    #[test]
+    fn diagnostic_reads_multichunk_utf16_without_transcoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let repository = root.join("repository");
+        fs::create_dir(&repository).unwrap();
+        for (name, little_endian) in [("little.txt", true), ("big.txt", false)] {
+            let source = "λ𝄞\r\n".repeat(5_000);
+            let bytes = std::iter::once(0xfeff_u16)
+                .chain(source.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            fs::write(repository.join(name), bytes).unwrap();
+        }
+        let report = inspect(&repository, &root.join("state"), None).unwrap();
+        let files = report["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|file| file["source_exact"] == true));
+        assert!(
+            files
+                .iter()
+                .all(|file| !file["gaps"].as_array().unwrap().is_empty())
+        );
+        assert_eq!(report["no_op_same_generation"], true);
+        assert_eq!(report["full_semantic_completeness_proven"], false);
+        for file in files {
+            let expected = if file["file"]["path"] == "little.txt" {
+                "utf-16le"
+            } else {
+                "utf-16be"
+            };
+            assert_eq!(file["file"]["encoding"], expected);
+        }
     }
 
     #[test]
