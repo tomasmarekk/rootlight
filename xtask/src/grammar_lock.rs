@@ -17,7 +17,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "18ccbd037106209c522daa0936accb13434f2fa6664315ff32068659ccd6c7ce";
+    "d4f9d36e652088950c5f39c3644540d2735c0fc0fd6afbde1cfce31ad3967177";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -205,6 +205,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 33] = [
     ),
 ];
 
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 1] = [(
+    "tree-sitter-vba",
+    "0.14.1",
+    "third_party/tree-sitter-vba-0.14.1",
+    "8338b17d797a1b3c8dfc17cf0ff4b8017bea93e866e306c284bd52df23bcd42f",
+)];
+
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
     let path = root.join(GRAMMAR_LOCK_PATH);
     let bytes = fs::read(&path).map_err(|source| GrammarLockError::Read {
@@ -221,7 +228,7 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
         source,
     })?;
     validate_manifest(&manifest)?;
-    validate_direct_dependencies(metadata)?;
+    validate_direct_dependencies(metadata, root)?;
     validate_cargo_lock(root, &manifest)?;
     validate_vendored_sources(metadata, root, &manifest)?;
 
@@ -351,7 +358,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 33 {
+    if manifest.grammars.len() != 34 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -409,6 +416,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "toml",
         "yaml",
         "typescript",
+        "vba",
     ]);
     if languages != expected_languages {
         return Err(GrammarLockError::LanguageSet);
@@ -417,6 +425,28 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         if packages.get(name) != Some(&(*version, Some(*checksum))) {
             return Err(GrammarLockError::PackageEvidence {
                 package: (*name).to_owned(),
+            });
+        }
+    }
+    for (name, version, directory, checksum) in EXPECTED_LOCAL_PACKAGES {
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.crate_name == name)
+            .ok_or_else(|| GrammarLockError::PackageEvidence {
+                package: name.to_owned(),
+            })?;
+        if grammar.crate_version != version
+            || grammar.crates_io_checksum.is_some()
+            || grammar.vendored_source_sha256.as_deref() != Some(checksum)
+            || grammar
+                .vendored
+                .as_ref()
+                .map(|vendored| vendored.manifest_path.as_str())
+                != Some(format!("{directory}/Cargo.toml").as_str())
+        {
+            return Err(GrammarLockError::PackageEvidence {
+                package: name.to_owned(),
             });
         }
     }
@@ -576,19 +606,29 @@ fn is_source_relative_path(path: &str) -> bool {
         })
 }
 
-fn validate_direct_dependencies(metadata: &Metadata) -> Result<(), GrammarLockError> {
+fn validate_direct_dependencies(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
     let package = metadata
         .packages
         .iter()
         .find(|package| package.name.as_str() == ADAPTER_PACKAGE)
         .ok_or(GrammarLockError::MissingAdapterPackage)?;
-    validate_tree_sitter_dependencies(&package.dependencies)
+    validate_tree_sitter_dependencies(&package.dependencies, root)
 }
 
-fn validate_tree_sitter_dependencies(dependencies: &[Dependency]) -> Result<(), GrammarLockError> {
+fn validate_tree_sitter_dependencies(
+    dependencies: &[Dependency],
+    root: &Path,
+) -> Result<(), GrammarLockError> {
     let expected: BTreeMap<_, _> = EXPECTED_PACKAGES
         .iter()
-        .map(|(name, version, _)| (*name, *version))
+        .map(|(name, version, _)| (*name, (*version, None)))
+        .chain(
+            EXPECTED_LOCAL_PACKAGES
+                .iter()
+                .map(|(name, version, directory, _)| {
+                    (*name, (*version, Some(root.join(directory))))
+                }),
+        )
         .collect();
     let observed: Vec<_> = dependencies
         .iter()
@@ -608,12 +648,12 @@ fn validate_tree_sitter_dependencies(dependencies: &[Dependency]) -> Result<(), 
     if observed.len() != expected.len() || observed_names != expected_names {
         return Err(GrammarLockError::DependencySet);
     }
-    for (name, version) in expected {
+    for (name, (version, path)) in expected {
         let dependency = observed
             .iter()
             .find(|dependency| dependency.name == name)
             .ok_or(GrammarLockError::DependencySet)?;
-        validate_dependency_profile(dependency, version)?;
+        validate_dependency_profile(dependency, version, path.as_deref())?;
     }
     Ok(())
 }
@@ -628,7 +668,23 @@ fn is_tree_sitter_package(name: &str) -> bool {
 fn validate_dependency_profile(
     dependency: &Dependency,
     version: &str,
+    expected_path: Option<&Path>,
 ) -> Result<(), GrammarLockError> {
+    let source_matches = match expected_path {
+        Some(path) => {
+            dependency.source.is_none()
+                && dependency.path.as_ref().map(|path| path.as_std_path()) == Some(path)
+        }
+        None => {
+            dependency.path.is_none()
+                && dependency
+                    .source
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    == Some(CRATES_IO_SOURCE)
+        }
+    };
     if dependency.req.to_string() != format!("={version}")
         || dependency.kind != cargo_metadata::DependencyKind::Normal
         || dependency.optional
@@ -636,12 +692,7 @@ fn validate_dependency_profile(
         || dependency.rename.is_some()
         || dependency.target.is_some()
         || dependency.registry.is_some()
-        || dependency
-            .source
-            .as_ref()
-            .map(ToString::to_string)
-            .as_deref()
-            != Some(CRATES_IO_SOURCE)
+        || !source_matches
     {
         return Err(GrammarLockError::DependencyProfile {
             package: dependency.name.clone(),
@@ -1016,7 +1067,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 33")]
+    #[error("grammar lock contains {0} grammars instead of 34")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1183,7 +1234,7 @@ mod tests {
         let baseline: GrammarLock =
             toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
         for (index, grammar) in baseline.grammars.iter().enumerate() {
-            if grammar.vendored.is_none() {
+            if grammar.vendored.is_none() || grammar.crates_io_checksum.is_none() {
                 continue;
             }
             let mut manifest: GrammarLock =
@@ -1510,7 +1561,7 @@ mod tests {
         dependencies.push(dependency_fixture("tree-sitter-unreviewed", "1.0.0", &[]));
 
         assert!(matches!(
-            validate_tree_sitter_dependencies(&dependencies),
+            validate_tree_sitter_dependencies(&dependencies, Path::new("/workspace")),
             Err(GrammarLockError::DependencySet)
         ));
     }
@@ -1551,7 +1602,7 @@ mod tests {
 
         for dependency in profiles {
             assert!(matches!(
-                validate_dependency_profile(&dependency, "0.24.2"),
+                validate_dependency_profile(&dependency, "0.24.2", None),
                 Err(GrammarLockError::DependencyProfile { .. })
             ));
         }
@@ -1568,7 +1619,62 @@ mod tests {
                 };
                 dependency_fixture(name, version, features)
             })
+            .chain(
+                EXPECTED_LOCAL_PACKAGES
+                    .iter()
+                    .map(|(name, version, directory, _)| {
+                        let mut dependency =
+                            dependency_fixture_with_source(name, version, &[], None, None);
+                        dependency.path = Some(format!("/workspace/{directory}").into());
+                        dependency
+                    }),
+            )
             .collect()
+    }
+
+    #[test]
+    fn local_dependency_requires_the_reviewed_path_and_exact_profile() {
+        let dependencies = audited_dependency_fixtures();
+        validate_tree_sitter_dependencies(&dependencies, Path::new("/workspace")).unwrap();
+        let baseline = dependencies
+            .iter()
+            .find(|dependency| dependency.name == "tree-sitter-vba")
+            .unwrap();
+        let path = Path::new("/workspace/third_party/tree-sitter-vba-0.14.1");
+        for mutation in [
+            "missing_path",
+            "different_path",
+            "registry",
+            "optional",
+            "features",
+            "version",
+            "renamed",
+            "target",
+            "development",
+            "default_features",
+        ] {
+            let mut dependency = baseline.clone();
+            match mutation {
+                "missing_path" => dependency.path = None,
+                "different_path" => dependency.path = Some("/workspace/unreviewed".into()),
+                "registry" => dependency = dependency_fixture("tree-sitter-vba", "0.14.1", &[]),
+                "optional" => dependency.optional = true,
+                "features" => dependency.features.push("unreviewed".into()),
+                "version" => dependency.req = ">=0.14.1".parse().unwrap(),
+                "renamed" => dependency.rename = Some("replacement".into()),
+                "target" => dependency.target = Some("cfg(windows)".parse().unwrap()),
+                "development" => dependency.kind = cargo_metadata::DependencyKind::Development,
+                "default_features" => dependency.uses_default_features = true,
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    validate_dependency_profile(&dependency, "0.14.1", Some(path)),
+                    Err(GrammarLockError::DependencyProfile { .. })
+                ),
+                "{mutation}"
+            );
+        }
     }
 
     fn dependency_fixture(name: &str, version: &str, features: &[&str]) -> Dependency {

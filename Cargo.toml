@@ -135,6 +135,7 @@ tree-sitter-astro-next = { version = "=0.1.1", default-features = false }
 tree-sitter-objc = { version = "=3.0.2", default-features = false }
 tree-sitter-nix = { version = "=0.3.0", default-features = false }
 tree-sitter-matlab = { version = "=1.3.0", default-features = false }
+tree-sitter-vba = { version = "=0.14.1", path = "third_party/tree-sitter-vba-0.14.1", default-features = false }
 ts-parser-perl = { version = "=2.0.0", default-features = false }
 dekobon-tree-sitter-groovy = { version = "=0.2.0", default-features = false }
 tree-sitter-toml-ng = { version = "=0.7.0", default-features = false }

@@ -2210,6 +2210,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
+ "tree-sitter-vba",
  "tree-sitter-yaml",
  "ts-parser-perl",
  "unicode-casefold",
@@ -3828,6 +3829,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-typescript"
 version = "0.23.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-vba"
+version = "0.14.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

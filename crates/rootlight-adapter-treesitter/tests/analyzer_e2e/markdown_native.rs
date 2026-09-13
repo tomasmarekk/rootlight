@@ -1449,6 +1449,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             matlab_native::MATLAB,
             perl_native::PERL,
             groovy_native::GROOVY,
+            vba_native::VBA,
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()

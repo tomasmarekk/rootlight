@@ -903,7 +903,7 @@ fn preflight_lowering_limits(
                 STABLE_SCOPE_IDENTITY_UNAVAILABLE.len(),
                 limits,
             )?;
-            if supports_signature(kind) {
+            if supports_signature(kind, language_for_fact(request, fact)) {
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
                 account_string(
                     &mut string_bytes,
@@ -1771,7 +1771,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         )?;
                         skipped.insert(region.id, region);
                     }
-                } else if supports_signature(entity.record.kind) {
+                } else if supports_signature(entity.record.kind, &entity.record.language) {
                     let region = skipped_region(
                         self.full_source,
                         entity
@@ -3110,56 +3110,57 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .as_ref()
                     .and_then(|scope| scope.stable_identity)
             };
-            let (signature, signature_evidence, signature_span) = if supports_signature(kind)
-                && let Some(signature) = signature_capture
-            {
-                let text = self.text_for_span(signature.span())?;
-                let maximum = self.request.limits().ir().max_string_bytes;
-                let first_comment = signature_comments.partition_point(|comment| {
-                    comment.start_byte() < signature.span().start_byte()
-                });
-                let comments = &signature_comments[first_comment..];
-                let needs_projection = comments
-                    .first()
-                    .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
-                let projection = if needs_projection {
-                    project_commented_signature(text, signature.span(), comments, cancellation)?
-                } else {
-                    None
-                };
-                let signature_text = projection
-                    .as_ref()
-                    .map_or(text, rootlight_ir::SourceTextProjection::text);
-                let canonical = if needs_projection && projection.is_none() {
-                    None
-                } else if kind == EntityKind::Constructor
-                    && language_for_fact(self.request, fact) == "dart"
-                    && let Some(definition) = definition
+            let (signature, signature_evidence, signature_span) =
+                if supports_signature(kind, language_for_fact(self.request, fact))
+                    && let Some(signature) = signature_capture
                 {
-                    rootlight_adapter_sdk::canonical_dart_constructor_signature(
-                        text,
-                        signature.span(),
-                        definition.span(),
-                        &name,
-                        maximum,
-                    )
+                    let text = self.text_for_span(signature.span())?;
+                    let maximum = self.request.limits().ir().max_string_bytes;
+                    let first_comment = signature_comments.partition_point(|comment| {
+                        comment.start_byte() < signature.span().start_byte()
+                    });
+                    let comments = &signature_comments[first_comment..];
+                    let needs_projection = comments
+                        .first()
+                        .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
+                    let projection = if needs_projection {
+                        project_commented_signature(text, signature.span(), comments, cancellation)?
+                    } else {
+                        None
+                    };
+                    let signature_text = projection
+                        .as_ref()
+                        .map_or(text, rootlight_ir::SourceTextProjection::text);
+                    let canonical = if needs_projection && projection.is_none() {
+                        None
+                    } else if kind == EntityKind::Constructor
+                        && language_for_fact(self.request, fact) == "dart"
+                        && let Some(definition) = definition
+                    {
+                        rootlight_adapter_sdk::canonical_dart_constructor_signature(
+                            text,
+                            signature.span(),
+                            definition.span(),
+                            &name,
+                            maximum,
+                        )
+                    } else {
+                        canonical_symbol_signature(signature_text, maximum)
+                    };
+                    match canonical {
+                        Some(canonical) => (
+                            canonical,
+                            Some(match projection {
+                                Some(projection) => SignatureEvidence::Projected(projection),
+                                None => SignatureEvidence::Contiguous(text.to_owned()),
+                            }),
+                            Some(signature.span()),
+                        ),
+                        None => (String::new(), None, None),
+                    }
                 } else {
-                    canonical_symbol_signature(signature_text, maximum)
+                    (String::new(), None, None)
                 };
-                match canonical {
-                    Some(canonical) => (
-                        canonical,
-                        Some(match projection {
-                            Some(projection) => SignatureEvidence::Projected(projection),
-                            None => SignatureEvidence::Contiguous(text.to_owned()),
-                        }),
-                        Some(signature.span()),
-                    ),
-                    None => (String::new(), None, None),
-                }
-            } else {
-                (String::new(), None, None)
-            };
             let language = language_for_fact(self.request, fact).to_owned();
             let qualified_prefix = parent_scope
                 .as_ref()
@@ -4883,6 +4884,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "dart"
                 | "powershell"
                 | "astro"
+                | "vba"
         )
     {
         return language;
@@ -4993,6 +4995,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "matlab.file.module"
                 | "perl.file.module"
                 | "groovy.file.module"
+                | "vba.file.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
@@ -5026,6 +5029,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "powershell"
                 | "markdown"
                 | "groovy"
+                | "vba"
                 | "astro"
                 | "objective-c"
         )
@@ -5081,21 +5085,24 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
         .then_some(selected)
 }
 
-const fn supports_signature(kind: EntityKind) -> bool {
-    matches!(
-        kind,
-        EntityKind::Function
-            | EntityKind::Method
-            | EntityKind::Constructor
-            | EntityKind::Class
-            | EntityKind::Struct
-            | EntityKind::Enum
-            | EntityKind::Trait
-            | EntityKind::Interface
-            | EntityKind::Event
-            | EntityKind::ErrorDeclaration
-            | EntityKind::Modifier
-    )
+fn supports_signature(kind: EntityKind, language: &str) -> bool {
+    // VBA accessors share a property name but have distinct Get/Let/Set headers.
+    // The same rule governs identity, evidence emission and admission accounting.
+    (kind == EntityKind::Property && language == "vba")
+        || matches!(
+            kind,
+            EntityKind::Function
+                | EntityKind::Method
+                | EntityKind::Constructor
+                | EntityKind::Class
+                | EntityKind::Struct
+                | EntityKind::Enum
+                | EntityKind::Trait
+                | EntityKind::Interface
+                | EntityKind::Event
+                | EntityKind::ErrorDeclaration
+                | EntityKind::Modifier
+        )
 }
 
 fn comment_text(text: &str) -> Option<&str> {

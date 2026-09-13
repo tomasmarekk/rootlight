@@ -79,6 +79,8 @@ pub enum GrammarFamily {
     Perl,
     /// Groovy written declarations; runtime metaprogramming and dispatch remain separate.
     Groovy,
+    /// Visual Basic for Applications source syntax, without Office runtime evaluation.
+    Vba,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -113,7 +115,10 @@ impl GrammarDescriptor {
         self.grammar_version
     }
 
-    /// Returns the exact crates.io source-package SHA-256 from the lockfile.
+    /// Returns the exact source identity enforced by the grammar lock.
+    ///
+    /// Published grammars retain their crates.io archive checksum. An unpublished
+    /// local binding uses the canonical vendored file-manifest SHA-256 instead.
     #[must_use]
     pub const fn grammar_source_sha256(&self) -> &'static str {
         self.grammar_source_sha256
@@ -158,7 +163,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(33);
+        let mut descriptors = Vec::with_capacity(34);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -193,6 +198,7 @@ impl GrammarRegistry {
             GrammarFamily::Matlab,
             GrammarFamily::Perl,
             GrammarFamily::Groovy,
+            GrammarFamily::Vba,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -322,6 +328,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Matlab => tree_sitter_matlab::LANGUAGE.into(),
         GrammarFamily::Perl => ts_parser_perl::LANGUAGE.into(),
         GrammarFamily::Groovy => dekobon_tree_sitter_groovy::LANGUAGE.into(),
+        GrammarFamily::Vba => tree_sitter_vba::LANGUAGE.into(),
     }
 }
 
@@ -344,6 +351,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             scanner_sha256: Some(
                 "508dab84d07d4f6de074b2b50b3dbfd17eb3f9b905d255245843b60d53adb5f1",
             ),
+        },
+        GrammarFamily::Vba => GrammarIdentity {
+            language_id: "vba",
+            grammar_version: "0.14.1",
+            source_package_sha256: "8338b17d797a1b3c8dfc17cf0ff4b8017bea93e866e306c284bd52df23bcd42f",
+            parser_sha256: "128dbbadf386ddb224a885415416684c8a1db91ff60fb950a069d4d976dc5a79",
+            scanner_sha256: None,
         },
         GrammarFamily::Perl => GrammarIdentity {
             language_id: "perl",
@@ -669,7 +683,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 33);
+        assert_eq!(registry.descriptors().len(), 34);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -704,6 +718,7 @@ mod tests {
             GrammarFamily::Matlab,
             GrammarFamily::Perl,
             GrammarFamily::Groovy,
+            GrammarFamily::Vba,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -783,6 +798,7 @@ mod tests {
             (GrammarFamily::ObjectiveC, "objective-c", "tree-sitter-objc"),
             (GrammarFamily::Nix, "nix", "tree-sitter-nix"),
             (GrammarFamily::Matlab, "matlab", "tree-sitter-matlab"),
+            (GrammarFamily::Vba, "vba", "tree-sitter-vba"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -802,13 +818,20 @@ mod tests {
             if let Some(checksum) = source_package_checksum {
                 assert_eq!(descriptor.grammar_source_sha256(), checksum);
             } else {
-                // Local overrides retain the upstream archive identity, while
-                // xtask verifies every vendored byte against the grammar lock.
+                // Both registry-derived overrides and unpublished bindings
+                // require xtask to verify every checked-in source byte.
                 assert!(quoted_field(grammar, "manifest_path").starts_with("third_party/"));
             }
             assert_eq!(quoted_field(grammar, "crate_version"), version);
             assert_eq!(
-                quoted_field(grammar, "crates_io_checksum"),
+                quoted_field(
+                    grammar,
+                    if family == GrammarFamily::Vba {
+                        "vendored_source_sha256"
+                    } else {
+                        "crates_io_checksum"
+                    }
+                ),
                 descriptor.grammar_source_sha256()
             );
             assert_eq!(

@@ -61,7 +61,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "scala.enum_value.declaration" => {
             Some(EntityKind::Constant)
         }
-        SyntaxFactKind::Declaration if label == "solidity.event.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "solidity.event.declaration" | "vba.event.declaration"
+            ) =>
+        {
             Some(EntityKind::Event)
         }
         SyntaxFactKind::Declaration if label == "solidity.error.declaration" => {
@@ -141,6 +146,10 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                     | "powershell.dynamic_property.declaration"
                     | "toml.property.declaration"
                     | "yaml.property.declaration"
+                    | "vba.get_property.declaration"
+                    | "vba.let_property.declaration"
+                    | "vba.set_property.declaration"
+                    | "vba.conditional_property.declaration"
             ) =>
         {
             Some(EntityKind::Property)
@@ -184,6 +193,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label.contains("function") => Some(EntityKind::Function),
         SyntaxFactKind::Declaration if label.contains("class") => Some(EntityKind::Class),
         SyntaxFactKind::Declaration if label.contains("struct") => Some(EntityKind::Struct),
+        SyntaxFactKind::Declaration if label == "vba.enum_constant.declaration" => {
+            Some(EntityKind::Constant)
+        }
         SyntaxFactKind::Declaration if label.contains("enum") => Some(EntityKind::Enum),
         SyntaxFactKind::Declaration if label.contains("trait") => Some(EntityKind::Trait),
         SyntaxFactKind::Declaration if label.contains("interface") => Some(EntityKind::Interface),
@@ -377,7 +389,10 @@ pub fn structural_captured_name_for_language<'a>(
 /// Their captures exclude the `&` or `*` indicator. No trimming, escape decoding
 /// or Unicode normalization occurs; malformed or oversized names return `None`.
 /// Groovy qualified identifiers remove inter-component spaces and block comments
-/// without changing component spelling. Other roles use
+/// without changing component spelling. VBA identifiers remove enclosing brackets
+/// or a trailing type character, retaining original case and source token spans.
+/// This spelling projection does not establish case-insensitive binding identity.
+/// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
 #[must_use]
@@ -387,7 +402,30 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "yaml"
+    if language == "vba"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "vba.identifier.definition" | "vba.identifier.reference"
+        )
+    {
+        if text.is_empty() || text.len() > maximum_bytes {
+            return None;
+        }
+        if let Some(name) = text
+            .strip_prefix('[')
+            .and_then(|name| name.strip_suffix(']'))
+        {
+            return (!name.is_empty()
+                && !name
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '[' | ']')))
+            .then_some(Cow::Borrowed(name));
+        }
+        let name = text
+            .strip_suffix(['$', '%', '&', '#', '@', '^', '!'])
+            .unwrap_or(text);
+        structural_captured_name(name, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "yaml"
         && fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),

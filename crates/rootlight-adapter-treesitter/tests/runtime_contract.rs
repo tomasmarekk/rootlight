@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 33] = [
+    let cases: [(&str, &str, &[u8]); 34] = [
+        (
+            "measure.bas",
+            "vba",
+            b"Public Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\n",
+        ),
         (
             "sample.groovy",
             "groovy",

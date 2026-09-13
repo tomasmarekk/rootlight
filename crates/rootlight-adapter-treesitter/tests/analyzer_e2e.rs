@@ -73,6 +73,8 @@ mod scala_native;
 mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
+#[path = "analyzer_e2e/vba_native.rs"]
+mod vba_native;
 #[path = "analyzer_e2e/yaml_native.rs"]
 mod yaml_native;
 const EXPECTED_DOMAINS: [FactDomain; 8] = [
