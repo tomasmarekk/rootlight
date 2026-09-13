@@ -11,6 +11,124 @@ const SECOND: &str = "package sample\nclass Second { static def fold(value) { va
 const CLIENT: &str = "class Client { def inspect(value) { fold(value) } }";
 
 #[test]
+fn fenced_declarations_do_not_compete_with_compilation_units() {
+    for example in [
+        FIRST,
+        "package sample\nclass First { static def fold(value) { value } }\nclass Broken {",
+        "class Illustration { def render(value) { value } }",
+    ] {
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("first.groovy"), FIRST).unwrap();
+        fs::write(
+            fixture.path().join("client.groovy"),
+            format!("import static sample.First.fold\n{CLIENT}"),
+        )
+        .unwrap();
+        let documentation = format!("# Examples\n\n```groovy\n{example}\n```\n");
+        fs::write(fixture.path().join("guide.md"), &documentation).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let native = document
+            .files
+            .iter()
+            .find(|file| file.path == "first.groovy")
+            .unwrap();
+        let host = document
+            .files
+            .iter()
+            .find(|file| file.path == "guide.md")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "fold"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == native.id)
+            })
+            .unwrap();
+        let caller = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "inspect")
+            .unwrap();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| site.role == OccurrenceRole::CallSite && site.enclosing == Some(caller.id))
+            .unwrap();
+        assert_eq!(
+            call.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{example}"
+        );
+        let response = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([target.id]),
+                vec![RelationFamily::CalledBy],
+                Some(rootlight_query::RelationDirection::Inbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            response
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .any(|edge| {
+                    edge.symbol == caller.id && edge.source_refs.contains(&call.source)
+                })
+        );
+        let embedded = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == "groovy"
+                    && entity.kind == rootlight_ir::EntityKind::Class
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == host.id)
+            })
+            .unwrap();
+        let source = embedded.evidence.source.clone().unwrap();
+        assert_eq!(source.generation(), receipt.generation);
+        let span = source.span();
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![source],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            read.data.chunks[0].bytes,
+            documentation.as_bytes()[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()]
+        );
+    }
+}
+
+#[test]
 fn modifier_only_fields_preserve_cross_file_static_import_calls() {
     for modifier in ["public", "protected", "private", "static", "final"] {
         check(

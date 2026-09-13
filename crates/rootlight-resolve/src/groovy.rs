@@ -143,6 +143,9 @@ impl<'a> GroovyIndex<'a> {
             .filter(|entity| entity.language == "groovy")
         {
             cancellation.check()?;
+            if is_documentation_example(entity, files, entities, provenance, cancellation)? {
+                continue;
+            }
             let context = entity
                 .evidence
                 .source
@@ -711,6 +714,62 @@ fn is_type(kind: EntityKind) -> bool {
             | EntityKind::Trait
             | EntityKind::Enum
     )
+}
+
+fn is_documentation_example(
+    entity: &EntityRecord,
+    files: &BTreeMap<FileId, &FileRecord>,
+    entities: &BTreeMap<SymbolId, &EntityRecord>,
+    provenance: &BTreeMap<FactId, &ProvenanceRecord>,
+    cancellation: &Cancellation,
+) -> Result<bool, ResolutionError> {
+    let Some(source) = entity.evidence.source.as_ref() else {
+        return Ok(false);
+    };
+    let Some(file) = files.get(&source.span().file()).copied() else {
+        return Ok(false);
+    };
+    if file.language != "markdown"
+        || !provenance.get(&file.provenance).is_some_and(|record| {
+            record.producer_kind == ProducerKind::Parser && record.language == "markdown"
+        })
+    {
+        return Ok(false);
+    }
+    let mut current = entity;
+    for _ in 0..super::engine::MAX_SCOPE_DEPTH {
+        cancellation.check()?;
+        let Some(current_source) = current.evidence.source.as_ref() else {
+            return Ok(false);
+        };
+        if current.provenance != file.provenance
+            || current_source.span().file() != file.id
+            || current_source.content_hash() != file.content_hash
+            || current_source.span().end_byte() > file.byte_length
+        {
+            return Ok(false);
+        }
+        let Some(ContainerRef::Entity(parent)) = current.container else {
+            return Ok(false);
+        };
+        // Authored fenced examples belong to isolated host modules, not the
+        // repository compilation namespace. Keep their facts for local queries;
+        // malformed examples cannot introduce competing compiled declarations.
+        if current.language == "markdown"
+            && current.kind == EntityKind::Module
+            && current.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+        {
+            return Ok(
+                current_source.span().start_byte() <= source.span().start_byte()
+                    && current_source.span().end_byte() >= source.span().end_byte(),
+            );
+        }
+        let Some(parent) = entities.get(&parent).copied() else {
+            return Ok(false);
+        };
+        current = parent;
+    }
+    Ok(false)
 }
 
 fn declaration_path<'a>(

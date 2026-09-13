@@ -137,6 +137,62 @@ fn assert_unresolved(fixture: &Fixture) {
 }
 
 #[test]
+fn groovy_imports_require_source_owned_documentation_boundaries() {
+    for mutation in ["none", "marker", "producer", "owner", "native-coverage"] {
+        let (mut fixture, target) = fixture();
+        let host = fixture.add_file(60, "examples.md");
+        let root = fixture.add_entity(60, "examples.md", host, EntityKind::Module, None);
+        let boundary = fixture.add_entity(61, "example", host, EntityKind::Module, Some(root));
+        let example = fixture.add_entity(62, "Widget", host, EntityKind::Class, Some(boundary));
+        let mut producer = fixture.document.provenance[0].clone();
+        producer.id = FactId::from_bytes([60; 20]);
+        producer.language = "markdown".to_owned();
+        if mutation == "producer" {
+            producer.producer_kind = ProducerKind::Compiler;
+        }
+        let host_file = fixture.document.files.last_mut().unwrap();
+        host_file.language = "markdown".to_owned();
+        host_file.provenance = producer.id;
+        for entity in fixture.document.entities.iter_mut().filter(|entity| {
+            entity
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| source.span().file() == host)
+        }) {
+            entity.provenance = producer.id;
+            entity.language = if entity.id == example {
+                "groovy"
+            } else {
+                "markdown"
+            }
+            .to_owned();
+            if entity.id == boundary && mutation != "marker" {
+                entity.flags.push(EntityFlag::Synthetic);
+            }
+            if entity.id == example && mutation == "owner" {
+                entity.container = Some(ContainerRef::Entity(root));
+            }
+        }
+        fixture.document.provenance.push(producer);
+        if mutation == "native-coverage" {
+            fixture.document.coverage_records.pop();
+        }
+        fixture.validate();
+        if mutation == "none" {
+            let batch = ResolutionEngine::default()
+                .resolve(&fixture.document, &Cancellation::new())
+                .unwrap();
+            assert!(
+                matches!(batch.decisions[0].outcome, ResolutionOutcome::Resolved { symbol, .. } if symbol == target)
+            );
+        } else {
+            assert_unresolved(&fixture);
+        }
+    }
+}
+
+#[test]
 fn groovy_import_proofs_preserve_owners_and_coverage_across_application_paths() {
     let (fixture, target) = fixture();
     let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(1, 1).unwrap());
