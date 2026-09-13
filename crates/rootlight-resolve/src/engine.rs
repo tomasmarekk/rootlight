@@ -199,10 +199,17 @@ impl ResolutionEngine {
         if let Some(decision) = index.perl.resolve(occurrence) {
             return Ok(decision);
         }
-        if let Some(entry) = index.groovy.inherited_entry(occurrence) {
+        if let Some(entry) = index
+            .groovy
+            .inherited_entry(occurrence)
+            .or_else(|| index.groovy.static_import_entry(occurrence))
+        {
             work.consume_many(entry.selection.work)?;
         }
-        if let Some(decision) = index.groovy.resolve(occurrence) {
+        if let Some(decision) = index
+            .groovy
+            .resolve(occurrence, self.limits.candidate_limit())?
+        {
             return Ok(decision);
         }
         let file_language = index
@@ -591,7 +598,10 @@ impl<'a> CandidateIndex<'a> {
         occurrence: &OccurrenceRecord,
     ) -> Result<Option<usize>, ResolutionError> {
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            && let Some(entry) = self.groovy.inherited_entry(occurrence)
+            && let Some(entry) = self
+                .groovy
+                .inherited_entry(occurrence)
+                .or_else(|| self.groovy.static_import_entry(occurrence))
         {
             return entry
                 .selection

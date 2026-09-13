@@ -249,6 +249,8 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// Native static import or call context selects one member or namespace declaration.
+    GroovyStaticImport,
     /// Native fully qualified Groovy parent type with source-owned lexical context.
     GroovyQualifiedHeader,
     /// Source-owned Groovy hierarchy and lexical type selection across files.
@@ -267,6 +269,8 @@ pub enum ResolutionRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionSignal {
+    /// Native static-import evidence identifies a namespace or one authored static method.
+    NativeStaticImport,
     /// A native qualified header selects an exact package/type declaration path.
     NativeQualifiedHeader,
     /// Native parent headers and lexical owner context identify the selected type.

@@ -26,6 +26,11 @@
 (for_in_statement variable: (identifier) @declaration @definition)
 
 [(method_declaration) (constructor_declaration)] @signature
+(method_declaration) @expression
+(field_declaration) @expression
+(method_declaration parameters: (formal_parameters) @expression)
+(method_declaration parameters: (formal_parameters (formal_parameter) @expression))
+(method_declaration parameters: (formal_parameters (formal_parameter (annotation) @expression)))
 [(method_declaration) (constructor_declaration)] @scope
 [(class_declaration) (interface_declaration) (annotation_type_declaration)
  (trait_declaration) (record_declaration) (enum_declaration)
@@ -35,7 +40,8 @@
 [(local_variable_declaration) (multi_assignment_declaration)] @scope
 (for_in_statement value: (_) @expression)
 [(closure) (gstring_closure)] @scope @declaration @signature
-(import_declaration) @import @scope
+(import_declaration) @import
+(import_declaration) @scope
 (import_declaration name: (qualified_name) @reference)
 (import_declaration alias: (identifier) @declaration @definition)
 [(superclass) (super_interfaces) (extends_interfaces)] @expression
@@ -44,6 +50,10 @@
 (annotation name: (qualified_name) @reference)
 (qualified_type) @reference
 (method_invocation) @call
+(method_invocation) @scope
+(method_invocation function: (identifier) @call_name)
+(method_invocation arguments: (argument_list (_) @expression))
+(method_invocation closure: (closure) @expression)
 [(identifier) (type_identifier)] @reference
 [(line_comment) (block_comment)] @comment
 ((block_comment) @documentation (#match? @documentation "^/\\*\\*"))

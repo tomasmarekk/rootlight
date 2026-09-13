@@ -26,7 +26,8 @@ use crate::{
 impl ResolutionEngine {
     /// Applies semantic decisions to a normalized IR document.
     ///
-    /// Exact decisions emit their role-specific relation. Ambiguous calls emit
+    /// Exact decisions emit their role-specific relation; proven implicit
+    /// getter reads also emit a call. Ambiguous calls emit
     /// only [`RelationPredicate::DispatchCandidate`]; other ambiguous sites
     /// retain their candidates exclusively in [`OccurrenceTarget::Candidates`].
     ///
@@ -93,6 +94,7 @@ impl ResolutionEngine {
                 new_provenance.push(provenance);
             }
 
+            let semantics = relation_semantics(&document.occurrences[index], decision, &lookup);
             let occurrence = &mut document.occurrences[index];
             let old_id = occurrence.id;
             apply_target(occurrence, decision);
@@ -106,6 +108,7 @@ impl ResolutionEngine {
             append_relation_specs(
                 occurrence,
                 decision,
+                semantics,
                 &mut document.relations,
                 &mut output_budget,
                 cancellation,
@@ -264,6 +267,7 @@ impl ResolutionEngine {
                 new_provenance.push(provenance);
             }
 
+            let semantics = relation_semantics(occurrence, &decision, &lookup);
             let old_id = occurrence.id;
             apply_target(occurrence, &decision);
             occurrence.provenance = provenance_id;
@@ -273,6 +277,7 @@ impl ResolutionEngine {
             append_relation_specs(
                 occurrence,
                 &decision,
+                semantics,
                 &mut document.relations,
                 &mut output_budget,
                 cancellation,
@@ -506,7 +511,13 @@ fn reconcile_groovy_import_gaps(
     let mut producers = BTreeSet::new();
     for provenance in &document.provenance {
         cancellation.check()?;
-        if provenance.rule.as_deref() == Some("groovy-type-import-v1.indexed_snapshot") {
+        if matches!(
+            provenance.rule.as_deref(),
+            Some(
+                "groovy-type-import-v1.indexed_snapshot"
+                    | "groovy-static-import-v1.indexed_snapshot"
+            )
+        ) {
             producers.insert(provenance.id);
         }
     }
@@ -523,32 +534,50 @@ fn reconcile_groovy_import_gaps(
     let mut sources = BTreeMap::new();
     for occurrence in &document.occurrences {
         cancellation.check()?;
-        if occurrence.syntax_kind == "groovy.type_import.reference"
-            && occurrence.role == OccurrenceRole::ImportUse
+        if matches!(
+            occurrence.syntax_kind.as_str(),
+            "groovy.type_import.reference"
+                | "groovy.static_import.reference"
+                | "groovy.static_star_import.reference"
+        ) && occurrence.role == OccurrenceRole::ImportUse
             && producers.contains(&occurrence.provenance)
-            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
         {
+            let detail = match &occurrence.target {
+                OccurrenceTarget::Resolved { .. } => "groovy-import-build-context-unverified",
+                OccurrenceTarget::Candidates { total_count, .. }
+                    if occurrence.syntax_kind == "groovy.static_import.reference"
+                        && *total_count > 1 =>
+                {
+                    "groovy-import-candidates-build-context-unverified"
+                }
+                _ => continue,
+            };
             sources
                 .entry((occurrence.file, occurrence.source.span().start_byte()))
                 .and_modify(|prior| *prior = None)
-                .or_insert(Some((&occurrence.source, occurrence.provenance)));
+                .or_insert(Some((&occurrence.source, occurrence.provenance, detail)));
         }
     }
     let mut remap = BTreeMap::new();
     for gap in &mut document.skipped_regions {
         cancellation.check()?;
         let span = gap.source.span();
-        if gap.domain != rootlight_ir::FactDomain::Relations
-            || gap.detail != "unresolved-import-target"
-            || files.get(&span.file()) != Some(&gap.provenance)
-        {
+        let native_gap = gap.detail == "unresolved-import-target"
+            && files.get(&span.file()) == Some(&gap.provenance);
+        let derived_gap = matches!(
+            gap.detail.as_str(),
+            "groovy-import-build-context-unverified"
+                | "groovy-import-candidates-build-context-unverified"
+        ) && producers.contains(&gap.provenance);
+        if gap.domain != rootlight_ir::FactDomain::Relations || !(native_gap || derived_gap) {
             continue;
         }
         // Import gaps cover the statement, while target proofs cover only its name.
         // At most two lookups detect ambiguity without scanning overlapping ranges.
         let mut enclosed =
             sources.range((span.file(), span.start_byte())..=(span.file(), span.end_byte()));
-        let Some((source, provenance)) = enclosed.next().and_then(|(_, entry)| *entry) else {
+        let Some((source, provenance, detail)) = enclosed.next().and_then(|(_, entry)| *entry)
+        else {
             continue;
         };
         if enclosed.next().is_some()
@@ -558,12 +587,14 @@ fn reconcile_groovy_import_gaps(
             continue;
         }
         let old = gap.id;
-        gap.detail = "groovy-import-build-context-unverified".to_owned();
+        gap.detail = detail.to_owned();
         gap.reason = rootlight_ir::SkippedRegionReason::MissingBuildContext;
         gap.provenance = provenance;
         gap.id =
             rootlight_ir::derive_skipped_region_id(gap).map_err(ResolutionError::FactIdentity)?;
-        remap.insert(old, gap.id);
+        if old != gap.id {
+            remap.insert(old, gap.id);
+        }
     }
     ensure_relation_remap_is_safe(document, &remap)
 }
@@ -741,9 +772,20 @@ fn build_provenance(
     producer: &ProducerIdentity,
     context: ResolverFactContext,
 ) -> Result<ProvenanceRecord, ResolutionError> {
+    // Candidate imports are selected again from immutable native evidence. Using
+    // a prior resolver context here would nest its digest on every repeated pass.
+    let parent_id = if decision.explanation.rule == ResolutionRule::GroovyStaticImport {
+        lookup
+            .files
+            .get(&occurrence.file)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?
+            .provenance
+    } else {
+        occurrence.provenance
+    };
     let parent = lookup
         .provenance
-        .get(&occurrence.provenance)
+        .get(&parent_id)
         .copied()
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let mut sources = vec![occurrence.source.clone()];
@@ -788,11 +830,12 @@ fn build_provenance(
     }
     if matches!(
         decision.explanation.rule,
-        ResolutionRule::GroovyInheritedType
+        ResolutionRule::GroovyInheritedType | ResolutionRule::GroovyStaticImport
     ) {
         let entry = lookup
             .groovy
             .inherited_entry(occurrence)
+            .or_else(|| lookup.groovy.static_import_entry(occurrence))
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
         sources.extend(entry.selection.sources.iter().cloned());
         derivation_parents.extend(entry.selection.facts.iter().copied());
@@ -860,6 +903,7 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",
         ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",
         ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
         ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
@@ -913,9 +957,47 @@ fn apply_target(occurrence: &mut OccurrenceRecord, decision: &ResolutionDecision
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationSemantics {
+    RoleOnly,
+    ImplicitAccessor,
+}
+
+fn relation_semantics(
+    occurrence: &OccurrenceRecord,
+    decision: &ResolutionDecision,
+    lookup: &CandidateIndex<'_>,
+) -> RelationSemantics {
+    let ResolutionOutcome::Resolved { symbol, .. } = decision.outcome else {
+        return RelationSemantics::RoleOnly;
+    };
+    // Selection belongs to the original occurrence identity, before application
+    // remaps it. A method name or a common-IR target alone cannot prove a call.
+    if occurrence.id == decision.occurrence
+        && occurrence.role == OccurrenceRole::Reference
+        && occurrence.syntax_kind == "groovy.identifier.reference"
+        && decision.explanation.rule == ResolutionRule::GroovyStaticImport
+        && lookup
+            .groovy
+            .static_import_entry(occurrence)
+            .is_some_and(|entry| {
+                entry.envelope.namespace == rootlight_ir::GROOVY_VALUE_LOOKUP_NAMESPACE
+                    && entry.envelope.evidence.source.as_ref() == Some(&occurrence.source)
+                    && entry.selection.target.is_some_and(|target| {
+                        target.id == symbol && target.kind == rootlight_ir::EntityKind::Method
+                    })
+            })
+    {
+        RelationSemantics::ImplicitAccessor
+    } else {
+        RelationSemantics::RoleOnly
+    }
+}
+
 fn append_relation_specs(
     occurrence: &OccurrenceRecord,
     decision: &ResolutionDecision,
+    semantics: RelationSemantics,
     relations: &mut Vec<RelationRecord>,
     budget: &mut OutputRecordBudget,
     cancellation: &Cancellation,
@@ -934,6 +1016,16 @@ fn append_relation_specs(
                     *symbol,
                     predicate,
                     *confidence,
+                    decision.explanation.rule,
+                ))?;
+            }
+            if semantics == RelationSemantics::ImplicitAccessor {
+                append(pending_relation(
+                    occurrence,
+                    *symbol,
+                    RelationPredicate::Calls,
+                    *confidence,
+                    decision.explanation.rule,
                 ))?;
             }
         }
@@ -952,6 +1044,7 @@ fn append_relation_specs(
                     *symbol,
                     RelationPredicate::DispatchCandidate,
                     confidence,
+                    decision.explanation.rule,
                 ))?;
             }
         }
@@ -965,12 +1058,13 @@ fn pending_relation(
     target: SymbolId,
     predicate: RelationPredicate,
     confidence: Confidence,
+    rule: ResolutionRule,
 ) -> PendingRelation {
     PendingRelation {
         repository: occurrence.repository,
         generation: occurrence.generation,
         occurrence: occurrence.id,
-        subject: relation_subject(occurrence, predicate),
+        subject: relation_subject(occurrence, predicate, rule),
         target,
         predicate,
         confidence,
@@ -982,16 +1076,23 @@ fn pending_relation(
 fn relation_subject(
     occurrence: &OccurrenceRecord,
     predicate: RelationPredicate,
+    rule: ResolutionRule,
 ) -> RelationEndpoint {
-    if matches!(
-        predicate,
-        RelationPredicate::Extends
-            | RelationPredicate::Implements
-            | RelationPredicate::Satisfies
-            | RelationPredicate::Embeds
-            | RelationPredicate::MixesIn
-            | RelationPredicate::Overrides
-    ) && let Some(enclosing) = occurrence.enclosing
+    // Static-import selection proves the native enclosing scope as well as the
+    // target. Other call rules retain their occurrence-based endpoint contract.
+    let proven_call_owner =
+        rule == ResolutionRule::GroovyStaticImport && predicate == RelationPredicate::Calls;
+    if (proven_call_owner
+        || matches!(
+            predicate,
+            RelationPredicate::Extends
+                | RelationPredicate::Implements
+                | RelationPredicate::Satisfies
+                | RelationPredicate::Embeds
+                | RelationPredicate::MixesIn
+                | RelationPredicate::Overrides
+        ))
+        && let Some(enclosing) = occurrence.enclosing
     {
         RelationEndpoint::Entity(enclosing)
     } else {
@@ -1301,6 +1402,7 @@ mod tests {
         let relation_error = append_relation_specs(
             &occurrence,
             &decision,
+            super::RelationSemantics::RoleOnly,
             &mut relations,
             &mut relation_budget,
             &cancellation,
@@ -1328,6 +1430,7 @@ mod tests {
         let total_error = append_relation_specs(
             &occurrence,
             &decision,
+            super::RelationSemantics::RoleOnly,
             &mut relations,
             &mut total_budget,
             &cancellation,
@@ -1341,5 +1444,57 @@ mod tests {
                 limit: 1,
             })
         ));
+
+        let mut read = occurrence;
+        read.role = OccurrenceRole::Reference;
+        let mut getter = decision;
+        getter.outcome = ResolutionOutcome::Resolved {
+            symbol: SymbolId::from_bytes([6; 20]),
+            confidence: read.confidence,
+        };
+        getter.explanation.rule = ResolutionRule::GroovyStaticImport;
+        for (max_relations, max_total_records) in [(1, 10), (10, 1)] {
+            relations.clear();
+            let mut budget = OutputRecordBudget {
+                relations: 0,
+                provenance: 0,
+                total_records: 0,
+                max_relations,
+                max_provenance: 0,
+                max_total_records,
+            };
+            let error = append_relation_specs(
+                &read,
+                &getter,
+                super::RelationSemantics::ImplicitAccessor,
+                &mut relations,
+                &mut budget,
+                &cancellation,
+            )
+            .expect_err("implicit call must reserve its own output record");
+            assert_eq!(relations.len(), 1);
+            assert_eq!(
+                relations[0].predicate,
+                rootlight_ir::RelationPredicate::RefersTo
+            );
+            if max_relations == 1 {
+                assert!(matches!(
+                    error,
+                    ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
+                        collection: "relations",
+                        observed: 2,
+                        limit: 1,
+                    })
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    ResolutionError::InvalidDocument(IrDocumentValidationError::TotalRecordLimit {
+                        observed: 2,
+                        limit: 1
+                    })
+                ));
+            }
+        }
     }
 }

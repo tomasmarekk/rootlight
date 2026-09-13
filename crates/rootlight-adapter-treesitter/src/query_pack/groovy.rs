@@ -105,6 +105,38 @@ fn member_kind(
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if role == StructuralRole::Expression {
+        if let Some((_, label)) = argument(node) {
+            return Some(label);
+        }
+        match node.kind() {
+            "formal_parameters" => return Some("groovy.callable_parameters"),
+            "formal_parameter" => {
+                let default = node.child_by_field_name("default").is_some();
+                let array = node
+                    .child_by_field_name("type")
+                    .is_some_and(|ty| matches!(ty.kind(), "array_type" | "varargs_type"));
+                return Some(match (default, array) {
+                    (false, false) => "groovy.callable_parameter_required",
+                    (true, false) => "groovy.callable_parameter_default",
+                    (false, true) => "groovy.callable_parameter_required_array",
+                    (true, true) => "groovy.callable_parameter_default_array",
+                });
+            }
+            "annotation" => return Some("groovy.callable_annotation"),
+            _ => {}
+        }
+    }
+    if role == StructuralRole::CallName {
+        // A native identifier function field excludes receiver and computed calls.
+        // This identifies written lookup syntax, not the selected runtime target.
+        return (node.kind() == "identifier"
+            && node.parent().is_some_and(|parent| {
+                parent.kind() == "method_invocation"
+                    && parent.child_by_field_name("function") == Some(node)
+            }))
+        .then_some("groovy.implicit_call_name");
+    }
     if node.kind() == "identifier"
         && node.parent().is_some_and(|parent| {
             parent.kind() == "import_declaration"
@@ -167,6 +199,13 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "quoted_identifier" => "groovy.quoted_identifier",
         "import_declaration" => "groovy.import",
         "superclass" | "super_interfaces" | "extends_interfaces" => "groovy.inheritance",
+        "method_invocation"
+            if node
+                .child_by_field_name("function")
+                .is_some_and(|function| function.kind() == "identifier") =>
+        {
+            "groovy.implicit_call"
+        }
         "method_invocation" => "groovy.call",
         "block" => "groovy.block",
         "class_body" | "enum_body" => "groovy.type_body",
@@ -185,6 +224,164 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "string_literal" => "groovy.string",
         _ => return None,
     })
+}
+
+/// Shares closure-postfix ownership across all captures in one native scan.
+#[derive(Default)]
+pub(super) struct Calls<'tree> {
+    owners: HashMap<usize, Node<'tree>>,
+}
+
+impl<'tree> Calls<'tree> {
+    /// Keeps one invocation for closure suffixes but preserves explicit result calls.
+    ///
+    /// # Errors
+    /// Returns cancellation or allocation failure during native ownership traversal.
+    pub(super) fn retain(
+        &mut self,
+        node: Node<'tree>,
+        role: StructuralRole,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        cancellation.check()?;
+        if role == StructuralRole::Expression
+            && matches!(
+                node.kind(),
+                "line_comment" | "block_comment" | "groovydoc_comment"
+            )
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "argument_list")
+        {
+            return Ok(false);
+        }
+        if node.kind() == "method_invocation"
+            && matches!(role, StructuralRole::Call | StructuralRole::Scope)
+        {
+            return Ok(self.owner(node, cancellation)? == node);
+        }
+        Ok(true)
+    }
+
+    /// Retains argument prefixes and terminal dispatch syntax for the complete call.
+    ///
+    /// # Errors
+    /// Returns cancellation or inconsistent native call/allocation errors.
+    pub(super) fn adjust(
+        &mut self,
+        node: Node<'tree>,
+        candidate: &mut super::QueryCandidate,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        cancellation.check()?;
+        if candidate.role == StructuralRole::Expression
+            && let Some((call, _)) = argument(node)
+        {
+            // A prefix is ownership evidence, not the argument's exact source range.
+            // Its start prevents an argument-sized nested call/closure from stealing
+            // the parent in the parser-independent hierarchy.
+            candidate.start = self.owner(call, cancellation)?.start_byte();
+        }
+        if node.kind() == "method_invocation"
+            && matches!(candidate.role, StructuralRole::Call | StructuralRole::Scope)
+        {
+            let mut call = node;
+            let function = loop {
+                cancellation.check()?;
+                let function = call
+                    .child_by_field_name("function")
+                    .ok_or_else(|| super::query_failure("query-groovy-call-function"))?;
+                if call.child_by_field_name("arguments").is_some() {
+                    break function;
+                }
+                let mut inner = function;
+                while inner.kind() == "parenthesized_expression" {
+                    cancellation.check()?;
+                    let mut expression = None;
+                    let mut cursor = inner.walk();
+                    for child in inner.named_children(&mut cursor) {
+                        cancellation.check()?;
+                        if !child.is_extra() && expression.replace(child).is_some() {
+                            return Err(super::query_failure("query-groovy-call-function"));
+                        }
+                    }
+                    inner = expression
+                        .ok_or_else(|| super::query_failure("query-groovy-call-function"))?;
+                }
+                if inner.kind() != "method_invocation" {
+                    break function;
+                }
+                call = inner;
+            };
+            candidate.syntax = if function.kind() == "identifier" {
+                "groovy.implicit_call"
+            } else {
+                "groovy.call"
+            };
+        }
+        Ok(())
+    }
+
+    fn owner(
+        &mut self,
+        mut call: Node<'tree>,
+        cancellation: &Cancellation,
+    ) -> Result<Node<'tree>, AdapterError> {
+        let mut path = Vec::new();
+        let owner = loop {
+            cancellation.check()?;
+            if let Some(owner) = self.owners.get(&call.id()) {
+                break *owner;
+            }
+            path.try_reserve(1)
+                .map_err(|_| super::query_failure("query-groovy-call-allocation"))?;
+            path.push(call);
+            let mut receiver = call;
+            while let Some(parent) = receiver.parent()
+                && parent.kind() == "parenthesized_expression"
+            {
+                cancellation.check()?;
+                receiver = parent;
+            }
+            let Some(outer) = receiver.parent().filter(|outer| {
+                outer.kind() == "method_invocation"
+                    && outer.child_by_field_name("function") == Some(receiver)
+                    && outer.child_by_field_name("arguments").is_none()
+            }) else {
+                break call;
+            };
+            // Groovy appends trailing closures to the preceding call, including
+            // grouped calls. Parenthesized argument lists instead call its result.
+            call = outer;
+        };
+        self.owners
+            .try_reserve(path.len())
+            .map_err(|_| super::query_failure("query-groovy-call-allocation"))?;
+        for call in path {
+            cancellation.check()?;
+            self.owners.insert(call.id(), owner);
+        }
+        Ok(owner)
+    }
+}
+
+fn argument(node: Node<'_>) -> Option<(Node<'_>, &'static str)> {
+    let parent = node.parent()?;
+    if parent.kind() == "method_invocation" && node.kind() == "closure" {
+        return Some((parent, "groovy.argument_closure_prefix"));
+    }
+    if parent.kind() != "argument_list" {
+        return None;
+    }
+    let call = parent.parent().filter(|call| {
+        call.kind() == "method_invocation" && call.child_by_field_name("arguments") == Some(parent)
+    })?;
+    let label = match node.kind() {
+        "named_argument" => "groovy.argument_named_prefix",
+        "spread_arguments" => "groovy.argument_spread_prefix",
+        _ => "groovy.argument_positional_prefix",
+    };
+    Some((call, label))
 }
 
 /// Distinguishes variable expressions from literal labels and member spelling.
@@ -215,6 +412,52 @@ pub(super) fn nonlexical_identifier(node: Node<'_>) -> bool {
     parent.child_by_field_name(field) == Some(node)
 }
 
+/// Distinguishes variable reads from writes, excluding native declaration names.
+///
+/// # Errors
+/// Returns cancellation while traversing parenthesized or destructuring targets.
+pub(super) fn value_context(
+    mut node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'static str>, AdapterError> {
+    if node.parent().is_some_and(|parent| {
+        parent.child_by_field_name("name") == Some(node)
+            || (parent.kind() == "for_in_statement"
+                && parent.child_by_field_name("variable") == Some(node))
+    }) {
+        return Ok(None);
+    }
+    let mut structured_target = false;
+    while let Some(parent) = node.parent() {
+        cancellation.check()?;
+        match parent.kind() {
+            "parenthesized_expression" | "list_literal" => {
+                structured_target = true;
+                node = parent;
+            }
+            "assignment_expression" if parent.child_by_field_name("left") == Some(node) => {
+                return Ok(Some(if structured_target {
+                    "groovy.value_destructuring"
+                } else if parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| op.kind() == "=")
+                {
+                    "groovy.value_assignment"
+                } else {
+                    "groovy.value_compound_assignment"
+                }));
+            }
+            "update_expression" | "unary_update_expression"
+                if parent.child_by_field_name("operand") == Some(node) =>
+            {
+                return Ok(Some("groovy.value_update"));
+            }
+            _ => break,
+        }
+    }
+    Ok(Some("groovy.value_read"))
+}
+
 /// Preserves import namespaces, interpolation names and native binding boundaries.
 ///
 /// # Errors
@@ -226,6 +469,12 @@ pub(super) fn adjust_candidate(
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
+    if candidate.role == StructuralRole::Expression && node.kind() == "method_declaration" {
+        candidate.syntax = callable_header(node, cancellation)?;
+    }
+    if candidate.role == StructuralRole::Expression && node.kind() == "field_declaration" {
+        candidate.syntax = member_header(node, cancellation)?;
+    }
     if candidate.role == StructuralRole::Expression
         && matches!(
             node.kind(),
@@ -404,6 +653,120 @@ fn type_visibility(
         "groovy.type_visibility_unknown"
     } else {
         visibility.unwrap_or("groovy.type_public")
+    })
+}
+
+fn member_header(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    let interface = node
+        .parent()
+        .and_then(|body| body.parent())
+        .is_some_and(|owner| {
+            matches!(
+                owner.kind(),
+                "interface_declaration" | "annotation_type_declaration"
+            )
+        });
+    let mut visibility = None;
+    let mut is_static = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        match child.kind() {
+            "variable_declarator" => break,
+            "annotation" => return Ok("groovy.member_unknown"),
+            "static" => {
+                if is_static {
+                    return Ok("groovy.member_unknown");
+                }
+                is_static = true;
+            }
+            "public" | "protected" | "private" if visibility.replace(child.kind()).is_some() => {
+                return Ok("groovy.member_unknown");
+            }
+            _ => {}
+        }
+    }
+    // Implicit property access is public; the generated private backing field
+    // has no separate authored declaration and must not replace that visibility.
+    Ok(
+        match (is_static || interface, visibility.unwrap_or("public")) {
+            (true, "public") => "groovy.member_static_public",
+            (true, "protected") => "groovy.member_static_protected",
+            (true, "private") => "groovy.member_static_private",
+            (false, "public") => "groovy.member_instance_public",
+            (false, "protected") => "groovy.member_instance_protected",
+            (false, "private") => "groovy.member_instance_private",
+            _ => "groovy.member_unknown",
+        },
+    )
+}
+
+/// Classifies the native return field without inferring types from method bodies.
+///
+/// # Errors
+/// Returns cancellation or an out-of-bounds native return span.
+pub(super) fn callable_return(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    cancellation.check()?;
+    let Some(ty) = node.child_by_field_name("return_type") else {
+        return Ok("groovy.callable_return_other");
+    };
+    let text = source
+        .get(ty.byte_range())
+        .ok_or_else(|| super::query_failure("query-groovy-callable-return"))?;
+    Ok(if ty.has_error() || text.contains(&b'\\') {
+        "groovy.callable_return_unknown"
+    } else if ty.kind() == "type_identifier" && text == b"boolean" {
+        "groovy.callable_return_boolean"
+    } else {
+        "groovy.callable_return_other"
+    })
+}
+
+fn callable_header(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    let name = node
+        .child_by_field_name("name")
+        .ok_or_else(|| super::query_failure("query-groovy-callable-name"))?;
+    let mut visibility = None;
+    let mut is_static = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.start_byte() >= name.start_byte() {
+            break;
+        }
+        match child.kind() {
+            "annotation" => return Ok("groovy.callable_unknown"),
+            "static" => {
+                if is_static {
+                    return Ok("groovy.callable_unknown");
+                }
+                is_static = true;
+            }
+            "public" | "protected" | "private" if visibility.replace(child.kind()).is_some() => {
+                return Ok("groovy.callable_unknown");
+            }
+            _ => {}
+        }
+    }
+    // The source records eligibility only; no annotation transform is executed.
+    Ok(match (is_static, visibility.unwrap_or("public")) {
+        (true, "public") => "groovy.callable_static_public",
+        (true, "protected") => "groovy.callable_static_protected",
+        (true, "private") => "groovy.callable_static_private",
+        (false, "public") => "groovy.callable_instance_public",
+        (false, "protected") => "groovy.callable_instance_protected",
+        (false, "private") => "groovy.callable_instance_private",
+        _ => "groovy.callable_unknown",
     })
 }
 

@@ -29,8 +29,21 @@ use crate::{
     GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
 };
 use crate::{
+    GROOVY_CALL_LOOKUP_NAMESPACE, GROOVY_STATIC_IMPORT_NAMESPACE,
+    decode_groovy_call_lookup_envelope, decode_groovy_static_import_envelope,
+    new_groovy_call_lookup_envelope, new_groovy_static_import_envelope,
+};
+use crate::{
+    GROOVY_CALLABLE_NAMESPACE, decode_groovy_callable_envelope, new_groovy_callable_envelope,
+};
+use crate::{GROOVY_MEMBER_NAMESPACE, decode_groovy_member_envelope, new_groovy_member_envelope};
+use crate::{
     GROOVY_TYPE_LOOKUP_NAMESPACE, decode_groovy_type_lookup_envelope,
     new_groovy_type_lookup_envelope,
+};
+use crate::{
+    GROOVY_VALUE_LOOKUP_NAMESPACE, decode_groovy_value_lookup_envelope,
+    new_groovy_value_lookup_envelope,
 };
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 
@@ -695,6 +708,11 @@ fn require_supported_extensions_with_checkpoint(
                 | PERL_BINDING_NAMESPACE
                 | GROOVY_BINDING_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
+                | GROOVY_CALLABLE_NAMESPACE
+                | GROOVY_MEMBER_NAMESPACE
+                | GROOVY_CALL_LOOKUP_NAMESPACE
+                | GROOVY_STATIC_IMPORT_NAMESPACE
+                | GROOVY_VALUE_LOOKUP_NAMESPACE
         ) {
             return Err(NormalizedRebindError::UnsupportedExtension);
         }
@@ -1235,6 +1253,36 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        GROOVY_VALUE_LOOKUP_NAMESPACE => {
+            let evidence = decode_groovy_value_lookup_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_value_lookup_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        GROOVY_CALL_LOOKUP_NAMESPACE => {
+            let evidence = decode_groovy_call_lookup_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_call_lookup_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        GROOVY_STATIC_IMPORT_NAMESPACE => {
+            let evidence = decode_groovy_static_import_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_static_import_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        GROOVY_CALLABLE_NAMESPACE => {
+            let evidence = decode_groovy_callable_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_callable_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        GROOVY_MEMBER_NAMESPACE => {
+            let evidence = decode_groovy_member_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_member_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         GROOVY_TYPE_LOOKUP_NAMESPACE => {
             let evidence = decode_groovy_type_lookup_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -1724,6 +1772,227 @@ mod tests {
                 .digest()
         );
         validate_ir_document(&rebound, &limits, &support).unwrap();
+    }
+
+    #[test]
+    fn groovy_call_context_rebinds_without_changing_chunk_identity() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let span = crate::SourceSpan::new(file.id, 0, file.byte_length).unwrap();
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            span,
+            file.content_hash,
+            None,
+        );
+        let lookup = crate::GroovyCallLookup {
+            name: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            name_hash: rootlight_ids::content_hash(b"f"),
+            spelling: "f".into(),
+            arguments: crate::GroovyCallArguments::default(),
+            enclosing_type: Some(span),
+            enclosing_callable: Some(span),
+            lexical_binding: false,
+            static_context: true,
+        };
+        let import = crate::GroovyStaticImport {
+            name: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            alias: Some(crate::SourceSpan::new(file.id, 1, 2).unwrap()),
+            owner: rootlight_ids::content_hash(b"sample.Tools"),
+            member: Some(rootlight_ids::content_hash(b"f")),
+            binding: Some(lookup.name_hash),
+            member_spelling: Some("f".into()),
+            binding_spelling: Some("f".into()),
+        };
+        let envelopes = [
+            new_groovy_value_lookup_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                SourceRef::new(
+                    document.repository,
+                    document.generation,
+                    lookup.name,
+                    file.content_hash,
+                    None,
+                ),
+                crate::GroovyValueLookup {
+                    spelling: "f".into(),
+                    name_hash: lookup.name_hash,
+                    enclosing_type: Some(span),
+                    enclosing_callable: Some(span),
+                    lexical_binding: false,
+                    static_context: true,
+                    read_only: false,
+                    write_kind: Some(crate::GroovyValueWrite::Assignment),
+                },
+            )
+            .unwrap(),
+            new_groovy_call_lookup_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source.clone(),
+                lookup.clone(),
+            )
+            .unwrap(),
+            new_groovy_static_import_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source,
+                import.clone(),
+            )
+            .unwrap(),
+        ];
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        for original in envelopes {
+            document.extensions = vec![original.clone()];
+            let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+            let generation = GenerationId::from_bytes([87; 20]);
+            let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+            let envelope = &rebound.extensions[0];
+            if envelope.namespace == GROOVY_CALL_LOOKUP_NAMESPACE {
+                assert_eq!(
+                    decode_groovy_call_lookup_envelope(envelope).unwrap(),
+                    lookup
+                );
+            } else if envelope.namespace == GROOVY_VALUE_LOOKUP_NAMESPACE {
+                let value = decode_groovy_value_lookup_envelope(envelope).unwrap();
+                assert_eq!(value.spelling, "f");
+                assert!(!value.read_only);
+                assert_eq!(value.write_kind, Some(crate::GroovyValueWrite::Assignment));
+            } else {
+                assert_eq!(
+                    decode_groovy_static_import_envelope(envelope).unwrap(),
+                    import
+                );
+            }
+            assert_eq!(envelope.generation, generation);
+            assert_eq!(
+                envelope.evidence.source.as_ref().unwrap().generation(),
+                generation
+            );
+            assert_ne!(envelope.id, original.id);
+            assert_eq!(
+                chunk.digest(),
+                CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                    .unwrap()
+                    .digest()
+            );
+            validate_ir_document(&rebound, &limits, &support).unwrap();
+            document.extensions[0].payload.push(' ');
+            assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
+        }
+    }
+
+    #[test]
+    fn groovy_members_rebind_without_changing_owner_or_chunk_identity() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let member = crate::GroovyMember {
+            owner: crate::SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+            declaration: crate::SourceSpan::new(file.id, 0, 3).unwrap(),
+            name: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            storage: crate::GroovyMemberStorage::Static,
+            visibility: crate::EntityVisibility::Public,
+        };
+        document.extensions.push(
+            new_groovy_member_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                SourceRef::new(
+                    document.repository,
+                    document.generation,
+                    crate::SourceSpan::new(file.id, 0, 3).unwrap(),
+                    file.content_hash,
+                    None,
+                ),
+                member,
+            )
+            .unwrap(),
+        );
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let generation = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+        let envelope = &rebound.extensions[0];
+        assert_eq!(decode_groovy_member_envelope(envelope).unwrap(), member);
+        assert_eq!(envelope.generation, generation);
+        assert_eq!(
+            envelope.evidence.source.as_ref().unwrap().generation(),
+            generation
+        );
+        assert_ne!(envelope.id, document.extensions[0].id);
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        document.extensions[0].payload.push(' ');
+        assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
+    }
+
+    #[test]
+    fn groovy_callable_rebinds_without_changing_chunk_identity() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let shape = crate::GroovyCallable {
+            name: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            parameters: crate::SourceSpan::new(file.id, 1, 3).unwrap(),
+            parameter_count: 0,
+            required_parameter_count: 0,
+            variadic: false,
+            dispatch: crate::GroovyCallableDispatch::Static,
+            visibility: crate::GroovyCallableVisibility::Public,
+            return_type: crate::GroovyCallableReturnType::PrimitiveBoolean,
+        };
+        document.extensions.push(
+            new_groovy_callable_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                SourceRef::new(
+                    document.repository,
+                    document.generation,
+                    crate::SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+                    file.content_hash,
+                    None,
+                ),
+                shape,
+            )
+            .unwrap(),
+        );
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let generation = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+        let envelope = &rebound.extensions[0];
+        assert_eq!(decode_groovy_callable_envelope(envelope).unwrap(), shape);
+        assert_eq!(envelope.generation, generation);
+        assert_eq!(
+            envelope.evidence.source.as_ref().unwrap().generation(),
+            generation
+        );
+        assert_ne!(envelope.id, document.extensions[0].id);
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        validate_ir_document(&rebound, &limits, &support).unwrap();
+        document.extensions[0].payload.push(' ');
+        assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
     }
 
     #[test]

@@ -7,6 +7,9 @@
 
 mod config;
 mod groovy_bindings;
+mod groovy_callables;
+mod groovy_calls;
+mod groovy_members;
 mod incremental;
 mod lowering;
 mod lua_bindings;

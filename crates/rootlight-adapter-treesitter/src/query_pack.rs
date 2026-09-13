@@ -221,8 +221,24 @@ pub(crate) struct QueryCandidate {
 
 impl QueryCandidate {
     pub(crate) fn retention_rank(self) -> (u8, usize, usize, StructuralRole, &'static str, usize) {
+        // Argument shape is useful only with complete call context. Under bounded
+        // extraction, retain actual reads before these supplementary prefixes.
+        let rank = if self.role == StructuralRole::Expression
+            && matches!(
+                self.syntax,
+                "groovy.argument_positional_prefix"
+                    | "groovy.argument_named_prefix"
+                    | "groovy.argument_spread_prefix"
+                    | "groovy.argument_closure_prefix"
+                    | "groovy.value_read"
+                    | "groovy.value_write"
+            ) {
+            9
+        } else {
+            self.role.retention_rank()
+        };
         (
-            self.role.retention_rank(),
+            rank,
             self.start,
             self.end,
             self.role,
@@ -589,6 +605,7 @@ impl QueryPack {
         let mut limit = None;
         let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
         let mut groovy_members = groovy::MemberKinds::default();
+        let mut groovy_calls = groovy::Calls::default();
 
         'query: while let Some(query_match) = matches.next() {
             if match_count >= limits.matches {
@@ -718,6 +735,11 @@ impl QueryPack {
                     };
                     capture.node = name;
                 }
+                if input.family == GrammarFamily::Groovy
+                    && !groovy_calls.retain(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
                 let mut candidate = candidate_for_capture(
                     input.family,
                     capture,
@@ -729,6 +751,7 @@ impl QueryPack {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
                 }
                 if input.family == GrammarFamily::Groovy {
+                    groovy_calls.adjust(capture.node, &mut candidate, input.cancellation)?;
                     groovy::adjust_candidate(
                         capture.node,
                         &mut candidate,
@@ -773,6 +796,31 @@ impl QueryPack {
                     } else if role == StructuralRole::Scope {
                         candidate.syntax = "scala.unbraced_package_unavailable";
                     }
+                }
+                if input.family == GrammarFamily::Groovy
+                    && role == StructuralRole::Reference
+                    && capture.node.kind() == "identifier"
+                    && candidate.syntax == "groovy.identifier"
+                    && let Some(syntax) = groovy::value_context(capture.node, input.cancellation)?
+                {
+                    retain(QueryCandidate {
+                        role: StructuralRole::Expression,
+                        syntax,
+                        ..candidate
+                    })?;
+                }
+                if input.family == GrammarFamily::Groovy
+                    && role == StructuralRole::Expression
+                    && capture.node.kind() == "method_declaration"
+                {
+                    retain(QueryCandidate {
+                        syntax: groovy::callable_return(
+                            capture.node,
+                            input.source,
+                            input.cancellation,
+                        )?,
+                        ..candidate
+                    })?;
                 }
                 retain(candidate)?;
             }
@@ -1487,6 +1535,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Dart
             | GrammarFamily::PowerShell
             | GrammarFamily::Nix
+            | GrammarFamily::Groovy
     )
 }
 

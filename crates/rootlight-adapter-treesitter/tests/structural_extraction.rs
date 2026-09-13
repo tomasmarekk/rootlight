@@ -169,6 +169,144 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
 }
 
 #[test]
+fn groovy_call_arguments_preserve_native_owner_and_grouping() {
+    let source = "def inspect(values) {\nempty()\nouter(inner(1), 2)\nnamed(first: inner(3), second: 4, 5)\nspread(*values, 6)\nclosure(7) { item -> inner(item) }\nclosureOnly { 8 }\nmultiple { 9 } { 10 }\nmap([first: 11, second: 12])\ntrivia(/* ignored */ 13 /* ignored */, /* ignored */ 14)\nreceiver.fold(15)\n(factory())(16)\n}\n";
+    let fixture = Fixture::new("arguments.groovy", source.as_bytes());
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "groovy",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        output.diagnostics().is_empty(),
+        "{:?}",
+        output.diagnostics()
+    );
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert_parent_contract(output.facts());
+
+    let facts: BTreeMap<_, _> = output
+        .facts()
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect();
+    let text = |fact: &SyntaxFact| {
+        &source[usize::try_from(fact.span().start_byte()).unwrap()
+            ..usize::try_from(fact.span().end_byte()).unwrap()]
+    };
+    let mut arguments: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for fact in output.facts() {
+        let label = fact.syntax_kind().as_str();
+        if !label.starts_with("groovy.argument_") {
+            continue;
+        }
+        let mut parent = fact.parent();
+        let owner = loop {
+            let candidate = facts[&parent.expect("argument has a call owner")];
+            if matches!(
+                candidate.syntax_kind().as_str(),
+                "groovy.implicit_call.scope" | "groovy.call.scope"
+            ) {
+                break candidate;
+            }
+            parent = candidate.parent();
+        };
+        assert_eq!(fact.span().start_byte(), owner.span().start_byte());
+        arguments
+            .entry(text(owner))
+            .or_default()
+            .push((label, text(fact)));
+    }
+    let positional = "groovy.argument_positional_prefix.expression";
+    let named = "groovy.argument_named_prefix.expression";
+    let spread = "groovy.argument_spread_prefix.expression";
+    let closure = "groovy.argument_closure_prefix.expression";
+    let expected = BTreeMap::from([
+        (
+            "outer(inner(1), 2)",
+            vec![
+                (positional, "outer(inner(1)"),
+                (positional, "outer(inner(1), 2"),
+            ],
+        ),
+        ("inner(1)", vec![(positional, "inner(1")]),
+        (
+            "named(first: inner(3), second: 4, 5)",
+            vec![
+                (named, "named(first: inner(3)"),
+                (named, "named(first: inner(3), second: 4"),
+                (positional, "named(first: inner(3), second: 4, 5"),
+            ],
+        ),
+        ("inner(3)", vec![(positional, "inner(3")]),
+        (
+            "spread(*values, 6)",
+            vec![
+                (spread, "spread(*values"),
+                (positional, "spread(*values, 6"),
+            ],
+        ),
+        (
+            "closure(7) { item -> inner(item) }",
+            vec![
+                (positional, "closure(7"),
+                (closure, "closure(7) { item -> inner(item) }"),
+            ],
+        ),
+        ("inner(item)", vec![(positional, "inner(item")]),
+        ("closureOnly { 8 }", vec![(closure, "closureOnly { 8 }")]),
+        (
+            "multiple { 9 } { 10 }",
+            vec![
+                (closure, "multiple { 9 }"),
+                (closure, "multiple { 9 } { 10 }"),
+            ],
+        ),
+        (
+            "map([first: 11, second: 12])",
+            vec![(positional, "map([first: 11, second: 12]")],
+        ),
+        (
+            "trivia(/* ignored */ 13 /* ignored */, /* ignored */ 14)",
+            vec![
+                (positional, "trivia(/* ignored */ 13"),
+                (
+                    positional,
+                    "trivia(/* ignored */ 13 /* ignored */, /* ignored */ 14",
+                ),
+            ],
+        ),
+        ("receiver.fold(15)", vec![(positional, "receiver.fold(15")]),
+        ("(factory())(16)", vec![(positional, "(factory())(16")]),
+    ]);
+    for values in arguments.values_mut() {
+        values.sort_unstable_by_key(|(_, text)| text.len());
+    }
+    assert_eq!(arguments, expected);
+    let empty = output.facts().iter().find(|fact| {
+        fact.syntax_kind().as_str() == "groovy.implicit_call.scope" && text(fact) == "empty()"
+    });
+    assert!(
+        empty.is_some(),
+        "zero-argument calls retain their own scope"
+    );
+}
+
+#[test]
 fn ruby_method_signatures_preserve_headers_without_bodies() {
     let source = "class Café\r\n def ready\r\n  true\r\n end\r\n def self.build\r\n  new\r\n end\r\n def empty()\r\n  nil\r\n end\r\n def accept value, fallback = 1\r\n  value\r\n end\r\n def version = 1\r\n def self.label = 'ready'\r\n def combine(value) = value\r\n def -@\r\n  self\r\n end\r\nend\r\n";
     let fixture = Fixture::new("methods.rb", source.as_bytes());
@@ -1251,6 +1389,36 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
             .get(&fact.parent().expect("name/signature has a parent"))
             .expect("name/signature parent resolves");
         if fact.kind() == SyntaxFactKind::Signature {
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "groovy.value_read.expression" | "groovy.value_write.expression"
+            ) {
+                assert!(
+                    facts
+                        .iter()
+                        .any(|reference| reference.syntax_kind().as_str()
+                            == "groovy.identifier.reference"
+                            && reference.span() == fact.span()
+                            && reference.parent() == fact.parent()),
+                    "value context must share the exact source and lexical parent of its reference"
+                );
+                continue;
+            }
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "groovy.argument_positional_prefix.expression"
+                    | "groovy.argument_named_prefix.expression"
+                    | "groovy.argument_spread_prefix.expression"
+                    | "groovy.argument_closure_prefix.expression"
+            ) {
+                assert_eq!(parent.kind(), SyntaxFactKind::Scope);
+                assert!(matches!(
+                    parent.syntax_kind().as_str(),
+                    "groovy.implicit_call.scope" | "groovy.call.scope"
+                ));
+                assert_eq!(parent.span().start_byte(), fact.span().start_byte());
+                continue;
+            }
             if matches!(
                 fact.syntax_kind().as_str().split_once('.'),
                 Some(("javascript" | "typescript", label)) if label.starts_with("import_")

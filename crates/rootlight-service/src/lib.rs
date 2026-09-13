@@ -211,8 +211,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/110";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/18";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/119";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/29";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -20368,6 +20368,7 @@ fn elapsed_micros(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     mod astro_discovery;
+    mod groovy_static_import;
 
     use std::{
         collections::BTreeSet,
@@ -27965,7 +27966,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/106",
+            b"rootlight.first-slice.treesitter-structural/118",
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -27976,7 +27977,7 @@ mod tests {
             parser.as_bytes(),
             DISCOVERY_MANIFEST_VERSION.as_bytes(),
             RESOLVER_PROVIDER_VERSION.as_bytes(),
-            b"rootlight.first-slice.resolve/12",
+            b"rootlight.first-slice.resolve/28",
             SEARCH_REVISION_SEED,
             INCREMENTAL_SCHEMA_VERSION.as_bytes(),
             DERIVED_PLAN_REVISION_SEED,
@@ -29585,6 +29586,253 @@ mod tests {
             assert!(receipt.logical_snapshot.is_some());
             assert_eq!(clean.receipt().logical_snapshot, receipt.logical_snapshot);
         }
+    }
+
+    #[test]
+    fn groovy_callable_metadata_tracks_headers_and_generation_reuse() {
+        use rootlight_ir::{
+            GROOVY_CALLABLE_NAMESPACE, GroovyCallableDispatch, decode_groovy_callable_envelope,
+        };
+        let fixture = TempDir::new().unwrap();
+        fs::write(
+            fixture.path().join("stable.groovy"),
+            "class Stable { static def anchor() {} }",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(3).unwrap();
+        let mut prior_generation = None;
+        let mut prior_anchor = None;
+        for (method, dispatch, count, required) in [
+            (
+                "static def fold(value = 1) { value }",
+                GroovyCallableDispatch::Static,
+                1,
+                0,
+            ),
+            (
+                "def fold(value) { value }",
+                GroovyCallableDispatch::Instance,
+                1,
+                1,
+            ),
+            (
+                "static def fold(value, extra = 1) { value }",
+                GroovyCallableDispatch::Static,
+                2,
+                1,
+            ),
+            (
+                "static def fold(value, extra = 1) { value + 1 }",
+                GroovyCallableDispatch::Static,
+                2,
+                1,
+            ),
+        ] {
+            fs::write(
+                fixture.path().join("tools.groovy"),
+                format!("class Tools {{ {method} }}\n"),
+            )
+            .unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 2);
+            if let Some(prior) = prior_generation {
+                assert_ne!(receipt.generation, prior);
+                let work = service.incremental_evidence(receipt.generation).unwrap();
+                assert_eq!(work.parsed_files(), 1);
+                assert!(work.reused_parser_artifacts() >= 1);
+            }
+            prior_generation = Some(receipt.generation);
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert!(
+                document.diagnostics.is_empty(),
+                "{:?}",
+                document.diagnostics
+            );
+            let shapes: Vec<_> = document
+                .extensions
+                .iter()
+                .filter(|envelope| envelope.namespace == GROOVY_CALLABLE_NAMESPACE)
+                .collect();
+            assert_eq!(shapes.len(), 2);
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "fold")
+                .unwrap();
+            let envelope = shapes
+                .iter()
+                .find(|envelope| envelope.evidence.source == entity.evidence.source)
+                .unwrap();
+            let shape = decode_groovy_callable_envelope(envelope).unwrap();
+            assert_eq!(shape.dispatch, dispatch);
+            assert_eq!(shape.parameter_count, count);
+            assert_eq!(shape.required_parameter_count, required);
+            let explained = service
+                .symbol_explain(receipt.generation, entity.id, &deadline())
+                .unwrap();
+            assert_eq!(
+                explained.data.entity.visibility,
+                rootlight_ir::EntityVisibility::Public
+            );
+            let anchor = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "anchor")
+                .unwrap();
+            let anchor_envelope = shapes
+                .iter()
+                .find(|envelope| envelope.evidence.source == anchor.evidence.source)
+                .unwrap();
+            let anchor_shape = decode_groovy_callable_envelope(anchor_envelope).unwrap();
+            assert_eq!(
+                anchor_envelope
+                    .evidence
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .generation(),
+                receipt.generation
+            );
+            if let Some(prior) = prior_anchor {
+                assert_eq!(anchor_shape, prior);
+            }
+            prior_anchor = Some(anchor_shape);
+            let reference = envelope.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, method.as_bytes());
+            drop(snapshot);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+                    .generation,
+                receipt.generation
+            );
+            let clean = service
+                .index_repository_with_options(
+                    fixture.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(clean.logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+
+    #[test]
+    fn groovy_static_import_direct_calls_link_authored_targets_and_exact_sources() {
+        assert_groovy_static_import_call("import static sample.Tools.fold", "fold(value)");
+    }
+
+    #[test]
+    fn groovy_static_import_aliased_calls_link_authored_targets_and_exact_sources() {
+        assert_groovy_static_import_call(
+            "import static sample.Tools.fold as selected",
+            "selected(value)",
+        );
+    }
+
+    #[test]
+    fn groovy_static_import_commented_calls_link_authored_targets_and_exact_sources() {
+        assert_groovy_static_import_call(
+            "import static sample /* trivia */ . Tools.fold as selected",
+            "selected /* gap */ (value)",
+        );
+    }
+
+    #[test]
+    fn groovy_static_import_star_calls_link_authored_targets_and_exact_sources() {
+        assert_groovy_static_import_call("import static sample.Tools.*", "fold(value)");
+    }
+
+    fn assert_groovy_static_import_call(import: &str, invocation: &str) {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        let fixture = TempDir::new().unwrap();
+        let source =
+            format!("{import}\nclass Client {{ def inspect(value) {{ {invocation} }} }}\n");
+        fs::write(fixture.path().join("client.groovy"), &source).unwrap();
+        fs::write(
+            fixture.path().join("tools.groovy"),
+            "package sample\nclass Tools { static def fold(value) { value } }\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "fold")
+            .unwrap();
+        let caller = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "inspect")
+            .unwrap();
+        let calls: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::CallSite && site.enclosing == Some(caller.id)
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "{import}");
+        assert_eq!(
+            calls[0].target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{import}"
+        );
+        assert!(
+            document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Calls
+                    && relation.subject == RelationEndpoint::Entity(caller.id)
+                    && relation.object == RelationEndpoint::Entity(target.id)
+            }),
+            "{import}"
+        );
+        let reference = calls[0].source.clone();
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, invocation.as_bytes());
     }
 
     #[test]

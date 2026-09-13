@@ -1301,8 +1301,55 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let groovy_callables = if groovy_bindings.is_some() {
+            crate::groovy_callables::collect(self.parse_output.facts(), &facts_by_id, cancellation)?
+        } else {
+            BTreeMap::new()
+        };
+        let groovy_members = if let Some(bindings) = &groovy_bindings {
+            crate::groovy_members::collect(
+                self.parse_output.facts(),
+                &facts_by_id,
+                bindings,
+                cancellation,
+            )?
+        } else {
+            BTreeMap::new()
+        };
+        let groovy_calls = if let Some(bindings) = &groovy_bindings {
+            crate::groovy_calls::collect(
+                self.parse_output.facts(),
+                &facts_by_id,
+                bindings,
+                self.request.source().bytes(),
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?
+        } else {
+            crate::groovy_calls::Plan::default()
+        };
+
         if let Some(bindings) = &groovy_bindings {
-            for (owner, visibility) in bindings.type_visibilities() {
+            let callable_visibilities = groovy_callables.iter().map(|(owner, callable)| {
+                use rootlight_ir::GroovyCallableVisibility;
+                let visibility = match callable.visibility {
+                    GroovyCallableVisibility::Public => rootlight_ir::EntityVisibility::Public,
+                    GroovyCallableVisibility::Protected => {
+                        rootlight_ir::EntityVisibility::Restricted
+                    }
+                    GroovyCallableVisibility::Private => rootlight_ir::EntityVisibility::Private,
+                    GroovyCallableVisibility::Unknown => rootlight_ir::EntityVisibility::Unknown,
+                };
+                (*owner, visibility)
+            });
+            let member_visibilities = groovy_members
+                .iter()
+                .map(|(owner, (_, member))| (*owner, member.visibility));
+            for (owner, visibility) in bindings
+                .type_visibilities()
+                .chain(callable_visibilities)
+                .chain(member_visibilities)
+            {
                 cancellation.check()?;
                 if let Some(entity) = materialized.get_mut(&owner) {
                     entity.record.visibility = visibility;
@@ -1593,6 +1640,87 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     &entity_source,
                 )?;
                 relations.insert(relation.id, relation);
+                if let Some((statement, member)) = groovy_members.get(&fact.local_id()) {
+                    let envelope = rootlight_ir::new_groovy_member_envelope(
+                        self.full_source.repository(),
+                        self.full_source.generation(),
+                        provenance_id,
+                        source_for_span(self.full_source, *statement),
+                        *member,
+                    )
+                    .map_err(|_| provider_failure("groovy-member-evidence"))?;
+                    if !insert_optional_extension(
+                        envelope,
+                        &mut extensions,
+                        &mut extension_bytes,
+                        self.request.limits().ir(),
+                    )? {
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "groovy-member-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                } else if groovy_bindings.is_some()
+                    && matches!(
+                        fact.syntax_kind().as_str(),
+                        "groovy.field.declaration" | "groovy.property.declaration"
+                    )
+                {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Extensions,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        "groovy-member-evidence-unavailable",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
+                if let Some(callable) = groovy_callables.get(&fact.local_id()) {
+                    let envelope = rootlight_ir::new_groovy_callable_envelope(
+                        self.full_source.repository(),
+                        self.full_source.generation(),
+                        provenance_id,
+                        entity_source.clone(),
+                        *callable,
+                    )
+                    .map_err(|_| provider_failure("groovy-callable-evidence"))?;
+                    if !insert_optional_extension(
+                        envelope,
+                        &mut extensions,
+                        &mut extension_bytes,
+                        self.request.limits().ir(),
+                    )? {
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "groovy-callable-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                }
+                if groovy_bindings.is_some()
+                    && fact.syntax_kind().as_str() == "groovy.function.declaration"
+                    && !groovy_callables.contains_key(&fact.local_id())
+                {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Extensions,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        "groovy-callable-evidence-unavailable",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
                 if let Some(signature) = entity.signature_evidence.as_ref() {
                     let signature_span = entity
                         .signature_span
@@ -1657,6 +1785,94 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
 
             if let Some(role) = occurrence_role(fact) {
+                let call_context = if fact.syntax_kind().as_str() == "groovy.implicit_call.call" {
+                    groovy_calls.calls.get(&fact.span()).cloned().map(|lookup| {
+                        rootlight_ir::new_groovy_call_lookup_envelope(
+                            self.full_source.repository(),
+                            self.full_source.generation(),
+                            provenance_id,
+                            source.clone(),
+                            lookup,
+                        )
+                    })
+                } else if fact.syntax_kind().as_str() == "groovy.identifier.reference" {
+                    groovy_calls
+                        .values
+                        .get(&fact.span())
+                        .cloned()
+                        .map(|lookup| {
+                            rootlight_ir::new_groovy_value_lookup_envelope(
+                                self.full_source.repository(),
+                                self.full_source.generation(),
+                                provenance_id,
+                                source.clone(),
+                                lookup,
+                            )
+                        })
+                } else if fact.kind() == SyntaxFactKind::Import {
+                    groovy_calls
+                        .imports
+                        .get(&fact.span())
+                        .cloned()
+                        .flatten()
+                        .map(|import| {
+                            rootlight_ir::new_groovy_static_import_envelope(
+                                self.full_source.repository(),
+                                self.full_source.generation(),
+                                provenance_id,
+                                source.clone(),
+                                import,
+                            )
+                        })
+                } else {
+                    None
+                };
+                if let Some(envelope) = call_context {
+                    let retained = match envelope {
+                        Ok(envelope) => insert_optional_extension(
+                            envelope,
+                            &mut extensions,
+                            &mut extension_bytes,
+                            self.request.limits().ir(),
+                        )?,
+                        Err(_) => false,
+                    };
+                    if !retained {
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            if fact.syntax_kind().as_str() == "groovy.identifier.reference" {
+                                "groovy-value-lookup-evidence-resource-limit"
+                            } else {
+                                "groovy-call-lookup-evidence-resource-limit"
+                            },
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                } else if groovy_bindings.is_some()
+                    && (matches!(
+                        fact.syntax_kind().as_str(),
+                        "groovy.implicit_call.call" | "groovy.identifier.reference"
+                    ) || (fact.kind() == SyntaxFactKind::Import
+                        && groovy_calls.imports.contains_key(&fact.span())))
+                {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Extensions,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        if fact.syntax_kind().as_str() == "groovy.identifier.reference" {
+                            "groovy-value-lookup-evidence-unavailable"
+                        } else {
+                            "groovy-call-lookup-evidence-unavailable"
+                        },
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
                 let role = if entity_plan.perl.calls.contains(&fact.local_id()) {
                     OccurrenceRole::CallSite
                 } else {

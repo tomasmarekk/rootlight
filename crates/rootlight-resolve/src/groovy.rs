@@ -2,6 +2,7 @@
 //! Links identify declarations in the admitted snapshot, not classpath selection
 //! or dynamic dispatch; incomplete inventories and duplicate names veto promotion.
 
+mod calls;
 mod hierarchy;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +49,7 @@ pub(crate) struct Proof<'a, 'index> {
 
 #[derive(Default)]
 pub(crate) struct GroovyIndex<'a> {
+    static_imports: BTreeMap<FactId, hierarchy::Entry<'a>>,
     inherited: BTreeMap<FactId, hierarchy::Entry<'a>>,
     qualified_headers: BTreeMap<FactId, Option<QualifiedHeader<'a>>>,
     contexts: BTreeMap<FileId, Context<'a>>,
@@ -246,6 +248,14 @@ impl<'a> GroovyIndex<'a> {
         }
         index.collect_qualified_headers(entities, extensions, occurrences, cancellation)?;
         index.inherited = hierarchy::build(
+            &index,
+            entities,
+            coverage,
+            extensions,
+            occurrences,
+            cancellation,
+        )?;
+        index.static_imports = calls::build(
             &index,
             entities,
             coverage,
@@ -470,16 +480,28 @@ impl<'a> GroovyIndex<'a> {
         })
     }
 
-    pub(crate) fn resolve(&self, occurrence: &OccurrenceRecord) -> Option<ResolutionDecision> {
+    pub(crate) fn resolve(
+        &self,
+        occurrence: &OccurrenceRecord,
+        candidate_limit: usize,
+    ) -> Result<Option<ResolutionDecision>, ResolutionError> {
         let inherited = self.inherited.get(&occurrence.id);
-        let (symbol, rule, signal) = if let Some(entry) = inherited {
+        let (symbol, rule, signal) = if let Some(entry) = self.static_imports.get(&occurrence.id) {
+            (
+                entry.selection.target.map(|target| target.id),
+                ResolutionRule::GroovyStaticImport,
+                ResolutionSignal::NativeStaticImport,
+            )
+        } else if let Some(entry) = inherited {
             (
                 entry.selection.target.map(|target| target.id),
                 ResolutionRule::GroovyInheritedType,
                 ResolutionSignal::NativeInheritance,
             )
         } else {
-            let proof = self.proof(occurrence)?;
+            let Some(proof) = self.proof(occurrence) else {
+                return Ok(None);
+            };
             (
                 Some(proof.target.id),
                 if proof.qualified_header.is_some() {
@@ -498,7 +520,7 @@ impl<'a> GroovyIndex<'a> {
             rootlight_ir::Confidence::new(900).expect("fixed structural confidence is valid");
         // An unproven hierarchy is a language-owned negative decision, not
         // permission to recover a same-spelling candidate through generic scoring.
-        let outcome = symbol.map_or(
+        let mut outcome = symbol.map_or(
             ResolutionOutcome::Unresolved {
                 reason: UnresolvedReason::MissingDependency,
                 confidence: rootlight_ir::Confidence::new(0)
@@ -506,14 +528,39 @@ impl<'a> GroovyIndex<'a> {
             },
             |symbol| ResolutionOutcome::Resolved { symbol, confidence },
         );
-        Some(ResolutionDecision {
+        let mut symbols: Vec<_> = symbol.into_iter().collect();
+        if let Some(candidates) = self
+            .static_imports
+            .get(&occurrence.id)
+            .and_then(|entry| entry.selection.candidates.as_ref())
+        {
+            symbols = candidates
+                .symbols
+                .iter()
+                .copied()
+                .take(candidate_limit)
+                .collect();
+            let retained =
+                u64::try_from(symbols.len()).map_err(|_| ResolutionError::CountOverflow)?;
+            outcome = ResolutionOutcome::Candidates {
+                symbols: symbols.clone(),
+                total_count: candidates.total_count,
+                completeness: if retained == candidates.total_count {
+                    CoverageStatus::Complete
+                } else {
+                    CoverageStatus::Bounded
+                },
+                confidence,
+            };
+        }
+        Ok(Some(ResolutionDecision {
             occurrence: occurrence.id,
             outcome,
             explanation: ResolutionExplanation {
                 rule,
                 provider_name: RESOLVER_PROVIDER_NAME,
                 provider_version: RESOLVER_PROVIDER_VERSION,
-                candidates: symbol
+                candidates: symbols
                     .into_iter()
                     .map(|symbol| CandidateExplanation {
                         symbol,
@@ -531,7 +578,7 @@ impl<'a> GroovyIndex<'a> {
                     CompletenessAssumption::IndexedPackageSnapshot,
                 ],
             },
-        })
+        }))
     }
 
     pub(crate) fn inherited_entry(
@@ -539,6 +586,13 @@ impl<'a> GroovyIndex<'a> {
         occurrence: &OccurrenceRecord,
     ) -> Option<&hierarchy::Entry<'a>> {
         self.inherited.get(&occurrence.id)
+    }
+
+    pub(crate) fn static_import_entry(
+        &self,
+        occurrence: &OccurrenceRecord,
+    ) -> Option<&hierarchy::Entry<'a>> {
+        self.static_imports.get(&occurrence.id)
     }
 
     fn has_source_owned_provenance(&self, site: &OccurrenceRecord) -> bool {
@@ -553,14 +607,38 @@ fn source_owned_derived_site(
     context: &Context<'_>,
     record: &ProvenanceRecord,
 ) -> bool {
-    let OccurrenceTarget::Resolved { symbol } = site.target else {
-        return false;
+    let targets_proven = match &site.target {
+        OccurrenceTarget::Resolved { symbol } => record
+            .derivation_parents
+            .contains(&FactRef::Entity(*symbol)),
+        OccurrenceTarget::Candidates { symbols, .. } => {
+            site.role == OccurrenceRole::ImportUse
+                && site.syntax_kind == "groovy.static_import.reference"
+                && record.rule.as_deref() == Some("groovy-static-import-v1.indexed_snapshot")
+                && !symbols.is_empty()
+                && symbols.iter().all(|symbol| {
+                    record
+                        .derivation_parents
+                        .contains(&FactRef::Entity(*symbol))
+                })
+        }
+        _ => false,
     };
     // Bounded passes replace native occurrence provenance. A later pass may
     // reuse that source inventory only when the persisted resolver identity,
     // exact source and complete file/entity coverage still agree. Parent targets
     // are independently selected again before they enter the hierarchy.
     let rule_matches = match (site.role, record.rule.as_deref()) {
+        (OccurrenceRole::Reference, Some("groovy-static-import-v1.indexed_snapshot")) => {
+            site.syntax_kind == "groovy.identifier.reference"
+        }
+        (OccurrenceRole::CallSite, Some("groovy-static-import-v1.indexed_snapshot")) => {
+            site.syntax_kind == "groovy.implicit_call.call"
+        }
+        (OccurrenceRole::ImportUse, Some("groovy-static-import-v1.indexed_snapshot")) => matches!(
+            site.syntax_kind.as_str(),
+            "groovy.static_import.reference" | "groovy.static_star_import.reference"
+        ),
         (
             OccurrenceRole::InheritanceUse | OccurrenceRole::ImplementationUse,
             Some("groovy-qualified-header-v1.indexed_snapshot"),
@@ -596,7 +674,7 @@ fn source_owned_derived_site(
         && site.evidence.source.as_ref() == Some(&site.source)
         && record.input_sources == record.evidence_sources
         && record.evidence_sources.contains(&site.source)
-        && record.derivation_parents.contains(&FactRef::Entity(symbol))
+        && targets_proven
         && context.coverage.iter().all(|coverage| {
             record
                 .derivation_parents

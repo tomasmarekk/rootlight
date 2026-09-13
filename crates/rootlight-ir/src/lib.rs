@@ -15,6 +15,9 @@
 #![forbid(unsafe_code)]
 
 mod groovy_binding;
+mod groovy_call_lookup;
+mod groovy_callable;
+mod groovy_member;
 mod groovy_type_lookup;
 mod identity;
 mod lexical;
@@ -27,6 +30,23 @@ mod validation;
 pub use groovy_binding::{
     GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,
     decode_groovy_binding_envelope, new_groovy_binding_envelope,
+};
+pub use groovy_call_lookup::{
+    GROOVY_CALL_LOOKUP_NAMESPACE, GROOVY_STATIC_IMPORT_NAMESPACE, GROOVY_VALUE_LOOKUP_NAMESPACE,
+    GroovyCallArguments, GroovyCallLookup, GroovyCallLookupError, GroovyStaticImport,
+    GroovyValueLookup, GroovyValueWrite, decode_groovy_call_lookup_envelope,
+    decode_groovy_static_import_envelope, decode_groovy_value_lookup_envelope,
+    new_groovy_call_lookup_envelope, new_groovy_static_import_envelope,
+    new_groovy_value_lookup_envelope,
+};
+pub use groovy_callable::{
+    GROOVY_CALLABLE_NAMESPACE, GroovyCallable, GroovyCallableDispatch, GroovyCallableError,
+    GroovyCallableReturnType, GroovyCallableVisibility, decode_groovy_callable_envelope,
+    new_groovy_callable_envelope,
+};
+pub use groovy_member::{
+    GROOVY_MEMBER_NAMESPACE, GroovyMember, GroovyMemberError, GroovyMemberStorage,
+    decode_groovy_member_envelope, new_groovy_member_envelope,
 };
 pub use groovy_type_lookup::{
     GROOVY_TYPE_LOOKUP_NAMESPACE, GroovyTypeLookup, GroovyTypeLookupError,

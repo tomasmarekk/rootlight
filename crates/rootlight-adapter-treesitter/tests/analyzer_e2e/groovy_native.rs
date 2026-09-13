@@ -27,6 +27,659 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn groovy_write_context_distinguishes_assignment_compound_update_and_tuple_targets() {
+    use rootlight_ir::GroovyValueWrite as Write;
+    for (expression, expected) in [
+        ("chosen = 4", Some(Write::Assignment)),
+        ("chosen /* operator trivia */ = 4", Some(Write::Assignment)),
+        ("chosen += 4", Some(Write::CompoundAssignment)),
+        ("chosen ?= 4", Some(Write::CompoundAssignment)),
+        ("chosen++", Some(Write::Update)),
+        ("++chosen", Some(Write::Update)),
+        ("(chosen) = 4", Some(Write::Destructuring)),
+        ("chosen", None),
+    ] {
+        let source = format!("class Client {{ def inspect() {{ {expression} }} }}");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{expression}: {:?}",
+            document.diagnostics
+        );
+        let values: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|e| e.namespace == rootlight_ir::GROOVY_VALUE_LOOKUP_NAMESPACE)
+            .map(|e| rootlight_ir::decode_groovy_value_lookup_envelope(e).unwrap())
+            .filter(|v| v.spelling == "chosen")
+            .collect();
+        assert_eq!(values.len(), 1, "{expression}");
+        assert_eq!(values[0].write_kind, expected, "{expression}");
+        assert_eq!(values[0].read_only, expected.is_none(), "{expression}");
+    }
+}
+
+#[test]
+fn groovy_value_context_keeps_reads_writes_and_lexical_shadowing_distinct() {
+    let source = "class Client { static def inspect(chosen) { chosen; (other) = chosen; other++; ++other; consume(other); [other]; obj.other = chosen } }";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let values: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|e| e.namespace == rootlight_ir::GROOVY_VALUE_LOOKUP_NAMESPACE)
+        .map(|e| {
+            (
+                e,
+                rootlight_ir::decode_groovy_value_lookup_envelope(e).unwrap(),
+            )
+        })
+        .collect();
+    let mut other = Vec::new();
+    for (envelope, value) in &values {
+        let span = envelope.evidence.source.as_ref().unwrap().span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            value.spelling
+        );
+        assert!(value.enclosing_type.is_some());
+        assert!(value.enclosing_callable.is_some());
+        assert!(value.static_context);
+        if value.spelling == "chosen" {
+            assert!(value.lexical_binding);
+        }
+        if value.spelling == "other" {
+            other.push((span.start_byte(), value.read_only));
+        }
+    }
+    other.sort_unstable();
+    assert_eq!(
+        other.iter().map(|(_, read)| *read).collect::<Vec<_>>(),
+        [false, false, false, true, true]
+    );
+}
+
+#[test]
+fn groovy_member_headers_preserve_storage_visibility_and_nearest_owner() {
+    use rootlight_ir::{EntityVisibility as Visibility, GroovyMemberStorage as Storage};
+    let source = "class Tools {\npublic static int left = 1, right = 2\nstatic String title = 'private static'\nprivate int hidden\n@Deprecated static int changed = 1\nint ordinary\ndef callback = { int local = 1; local }\nstatic class Inner { static int nested = 1 }\n}\ninterface Limits { int maximum = 1 }\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let members: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|envelope| envelope.namespace == rootlight_ir::GROOVY_MEMBER_NAMESPACE)
+        .map(|envelope| {
+            (
+                envelope,
+                rootlight_ir::decode_groovy_member_envelope(envelope).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(members.len(), 9, "{:?}", document.skipped_regions);
+    for (name, storage, visibility, owner_name) in [
+        ("left", Storage::Static, Visibility::Public, "Tools"),
+        ("right", Storage::Static, Visibility::Public, "Tools"),
+        ("title", Storage::Static, Visibility::Public, "Tools"),
+        ("hidden", Storage::Instance, Visibility::Private, "Tools"),
+        ("changed", Storage::Unknown, Visibility::Unknown, "Tools"),
+        ("ordinary", Storage::Instance, Visibility::Public, "Tools"),
+        ("callback", Storage::Instance, Visibility::Public, "Tools"),
+        ("nested", Storage::Static, Visibility::Public, "Inner"),
+        ("maximum", Storage::Static, Visibility::Public, "Limits"),
+    ] {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let (envelope, member) = members
+            .iter()
+            .find(|(_, member)| {
+                member.declaration == entity.evidence.source.as_ref().unwrap().span()
+            })
+            .unwrap();
+        assert_eq!(
+            (member.storage, member.visibility),
+            (storage, visibility),
+            "{name}"
+        );
+        assert_eq!(entity.visibility, visibility);
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == owner_name)
+            .unwrap();
+        assert_eq!(member.owner, owner.evidence.source.as_ref().unwrap().span());
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(owner.id))
+        );
+        assert_eq!(
+            &source.as_bytes()[usize::try_from(member.name.start_byte()).unwrap()
+                ..usize::try_from(member.name.end_byte()).unwrap()],
+            name.as_bytes()
+        );
+        let span = envelope.evidence.source.as_ref().unwrap().span();
+        assert!(span.start_byte() <= member.declaration.start_byte());
+        assert!(span.end_byte() >= member.declaration.end_byte());
+    }
+    let statement = |name: &str| {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        members
+            .iter()
+            .find(|(_, member)| {
+                member.declaration == entity.evidence.source.as_ref().unwrap().span()
+            })
+            .unwrap()
+            .0
+            .evidence
+            .source
+            .as_ref()
+            .unwrap()
+            .span()
+    };
+    assert_eq!(statement("left"), statement("right"));
+}
+
+#[test]
+fn groovy_member_metadata_limits_keep_entities_and_exact_gaps() {
+    let source = "class Tools { public static int count = 1 }";
+    let reference = output(source);
+    let base = limits();
+    let mut ir = base.ir().clone();
+    ir.max_extensions = reference.document().entities.len() + 1;
+    let budget = AnalysisLimits::new(
+        base.max_source_bytes(),
+        base.max_syntax_nodes(),
+        base.max_syntax_depth(),
+        base.max_embedded_ranges(),
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(GROOVY, source.as_bytes());
+    let result = analyze(
+        &analyzer(&provider, GROOVY),
+        &request(&fixture.snapshot, &fixture.source, GROOVY, &budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+    assert!(
+        !result
+            .document()
+            .extensions
+            .iter()
+            .any(|envelope| envelope.namespace == rootlight_ir::GROOVY_MEMBER_NAMESPACE)
+    );
+    let gap = result
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "groovy-member-evidence-resource-limit")
+        .unwrap();
+    let entity = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "count")
+        .unwrap();
+    assert_eq!(gap.domain, FactDomain::Extensions);
+    assert_eq!(gap.evidence.source, entity.evidence.source);
+    assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Public);
+}
+
+#[test]
+fn groovy_oversized_call_context_keeps_occurrences_and_reports_the_metadata_gap() {
+    let name = "f".repeat(5000);
+    let source = format!(
+        "import static sample.Tools.fold as {name}\nclass Client {{ def inspect() {{ {name}() }} }}\n"
+    );
+    let result = output(&source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].syntactic_text_hash,
+        rootlight_ids::content_hash(name.as_bytes())
+    );
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .any(|site| site.syntax_kind == "groovy.static_import.reference")
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source == calls[0].source
+                && gap.detail == "groovy-call-lookup-evidence-resource-limit")
+    );
+    assert!(!document.extensions.iter().any(|envelope| matches!(
+        envelope.namespace.as_str(),
+        "rootlight.groovy_call_lookup" | "rootlight.groovy_static_import"
+    )));
+}
+
+#[test]
+fn groovy_callable_returns_distinguish_primitives_wrappers_arrays_and_dynamic_types() {
+    use rootlight_ir::GroovyCallableReturnType::{Other, PrimitiveBoolean};
+    for (written, expected) in [
+        ("boolean", PrimitiveBoolean),
+        ("Boolean", Other),
+        ("java.lang.Boolean", Other),
+        ("boolean[]", Other),
+        ("def", Other),
+        ("int", Other),
+        ("boolean /* trivia */", PrimitiveBoolean),
+    ] {
+        let source = format!("class Tools {{ static {written} isReady() {{ true }} }}");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{written}: {:?}",
+            document.diagnostics
+        );
+        let method = document
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "isReady")
+            .unwrap();
+        let envelope = document
+            .extensions
+            .iter()
+            .find(|e| {
+                e.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE
+                    && e.evidence.source == method.evidence.source
+            })
+            .unwrap();
+        let shape = rootlight_ir::decode_groovy_callable_envelope(envelope).unwrap();
+        assert_eq!(shape.return_type, expected, "{written}");
+    }
+}
+
+#[test]
+fn groovy_callable_shapes_retain_native_parameters_and_modifiers() {
+    let source = "class Tools {\nstatic def fold(value) { value }\ndef local(first, second = 1) {}\npublic static def empty() {}\nprotected static def packed(Object... values) {}\nprivate static def array(Object[] values) {}\n@Deprecated static def changed(value) {}\nstatic def requiredAfter(first = 1, second) {}\nstatic def nested(value = { int a, int b -> a + b }) {}\n}\ndef script(value) {}\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let shapes: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|envelope| envelope.namespace == "rootlight.groovy_callable")
+        .collect();
+    assert_eq!(shapes.len(), 9);
+    for (name, total, required, variadic, dispatch, visibility) in [
+        ("fold", 1, 1, false, "static", "public"),
+        ("local", 2, 1, false, "instance", "public"),
+        ("empty", 0, 0, false, "static", "public"),
+        ("packed", 1, 1, true, "static", "protected"),
+        ("array", 1, 1, true, "static", "private"),
+        ("changed", 1, 1, false, "unknown", "unknown"),
+        ("requiredAfter", 2, 1, false, "static", "public"),
+        ("nested", 1, 0, false, "static", "public"),
+        ("script", 1, 1, false, "instance", "public"),
+    ] {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let envelope = shapes
+            .iter()
+            .find(|envelope| envelope.evidence.source == entity.evidence.source)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&envelope.payload).unwrap();
+        let shape = rootlight_ir::decode_groovy_callable_envelope(envelope).unwrap();
+        let start = usize::try_from(shape.name.start_byte()).unwrap();
+        let end = usize::try_from(shape.name.end_byte()).unwrap();
+        assert_eq!(&source[start..end], name);
+        let start = usize::try_from(shape.parameters.start_byte()).unwrap();
+        let end = usize::try_from(shape.parameters.end_byte()).unwrap();
+        assert!(source[start..end].starts_with('('));
+        assert!(source[start..end].ends_with(')'));
+        assert_eq!(payload["parameter_count"], total, "{name}");
+        assert_eq!(payload["required_parameter_count"], required, "{name}");
+        assert_eq!(payload["variadic"], variadic, "{name}");
+        assert_eq!(payload["dispatch"], dispatch, "{name}");
+        assert_eq!(payload["visibility"], visibility, "{name}");
+        let expected_visibility = match visibility {
+            "public" => rootlight_ir::EntityVisibility::Public,
+            "protected" => rootlight_ir::EntityVisibility::Restricted,
+            "private" => rootlight_ir::EntityVisibility::Private,
+            "unknown" => rootlight_ir::EntityVisibility::Unknown,
+            _ => unreachable!("the fixture has a closed access matrix"),
+        };
+        assert_eq!(entity.visibility, expected_visibility, "{name}");
+    }
+}
+
+#[test]
+fn groovy_callable_shapes_keep_annotation_and_nested_ownership_boundaries() {
+    let source = "class Tools { static def outer(first = new Object() { def inner(a, b) {} }, second) {}\nstatic def commented(/* static private */ value) {}\nstatic def annotated(@Deprecated value) {} }";
+    let result = output(source);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    for (name, count, required, dispatch) in [
+        ("outer", 2, 1, rootlight_ir::GroovyCallableDispatch::Static),
+        (
+            "inner",
+            2,
+            2,
+            rootlight_ir::GroovyCallableDispatch::Instance,
+        ),
+        (
+            "commented",
+            1,
+            1,
+            rootlight_ir::GroovyCallableDispatch::Static,
+        ),
+        (
+            "annotated",
+            1,
+            1,
+            rootlight_ir::GroovyCallableDispatch::Unknown,
+        ),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let envelope = result
+            .document()
+            .extensions
+            .iter()
+            .find(|envelope| {
+                envelope.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE
+                    && envelope.evidence.source == entity.evidence.source
+            })
+            .unwrap();
+        let shape = rootlight_ir::decode_groovy_callable_envelope(envelope).unwrap();
+        assert_eq!(shape.parameter_count, count, "{name}");
+        assert_eq!(shape.required_parameter_count, required, "{name}");
+        assert_eq!(shape.dispatch, dispatch, "{name}");
+    }
+}
+
+#[test]
+fn groovy_callable_evidence_does_not_survive_incomplete_parsing() {
+    let result = output("class Tools { static def fold(value) {");
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(
+        !result
+            .document()
+            .extensions
+            .iter()
+            .any(|envelope| envelope.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE)
+    );
+}
+
+#[test]
+fn groovy_callable_evidence_limits_leave_exact_extension_gaps() {
+    let source = "class Tools { static def fold(value) { value } }";
+    let reference = output(source);
+    let base = limits();
+    let mut ir = base.ir().clone();
+    ir.max_extensions = reference.document().entities.len() + 1;
+    let budget = AnalysisLimits::new(
+        base.max_source_bytes(),
+        base.max_syntax_nodes(),
+        base.max_syntax_depth(),
+        base.max_embedded_ranges(),
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(GROOVY, source.as_bytes());
+    let result = analyze(
+        &analyzer(&provider, GROOVY),
+        &request(&fixture.snapshot, &fixture.source, GROOVY, &budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+    assert!(
+        !result
+            .document()
+            .extensions
+            .iter()
+            .any(|envelope| envelope.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE)
+    );
+    let gap = result
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "groovy-callable-evidence-resource-limit")
+        .unwrap();
+    assert_eq!(gap.domain, FactDomain::Extensions);
+    let entity = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "fold")
+        .unwrap();
+    assert_eq!(gap.evidence.source, entity.evidence.source);
+}
+
+#[test]
+fn groovy_implicit_calls_retain_native_names_without_receiver_inference() {
+    let source = "def inspect(value) { fold(value); selected /* gap */ (value); Δelta(value); receiver.fold(value); this.fold(value); factory()(value); fold(selected(value)) }\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let implicit: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "groovy.implicit_call.call")
+        .collect();
+    assert_eq!(implicit.len(), 6);
+    for (invocation, name) in [
+        ("fold(value)", "fold"),
+        ("selected /* gap */ (value)", "selected"),
+        ("Δelta(value)", "Δelta"),
+        ("factory()", "factory"),
+        ("fold(selected(value))", "fold"),
+        ("selected(value)", "selected"),
+    ] {
+        let start = u64::try_from(source.find(invocation).unwrap()).unwrap();
+        let site = implicit
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(invocation.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(site.role, OccurrenceRole::CallSite);
+        assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+    let other: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "groovy.call.call")
+        .collect();
+    assert_eq!(other.len(), 3);
+    for site in other {
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
+fn groovy_trailing_closures_share_one_exact_call_site() {
+    for invocation in [
+        "fold(value) { item -> item }",
+        "fold { 1 } { 2 }",
+        "fold(value) { 1 } { 2 }",
+        "(( /* gap */ fold(value))) { 1 }",
+    ] {
+        let source = format!("def inspect(value) {{ {invocation} }}\n");
+        let result = output(&source);
+        let document = result.document();
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::CallSite)
+            .collect();
+        assert_eq!(sites.len(), 1, "{invocation}: {sites:?}");
+        let site = sites[0];
+        assert_eq!(
+            site.syntax_kind, "groovy.implicit_call.call",
+            "{invocation}"
+        );
+        assert_eq!(site.syntactic_text_hash, content_hash(b"fold"));
+        let start = u64::try_from(source.find(invocation).unwrap()).unwrap();
+        assert_eq!(site.source.span().start_byte(), start);
+        assert_eq!(
+            site.source.span().end_byte(),
+            start + u64::try_from(invocation.len()).unwrap()
+        );
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
+fn groovy_call_lookup_retains_shared_imports_and_lexical_context() {
+    let source = "import static sample.Tools.fold as selected\nimport static sample.More.*\nclass Client {\ndef inspect(value) { selected(value, key: 1, other: 2) { 3 }; def selected = { it }; selected(value) }\nstatic def preview(value) { selected(*value) }\n}\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let imports: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|e| e.namespace == rootlight_ir::GROOVY_STATIC_IMPORT_NAMESPACE)
+        .collect();
+    assert_eq!(imports.len(), 2);
+    for envelope in imports {
+        let import = rootlight_ir::decode_groovy_static_import_envelope(envelope).unwrap();
+        assert_eq!(
+            envelope.evidence.source.as_ref().unwrap().generation(),
+            document.generation
+        );
+        if import.owner == content_hash(b"sample.Tools") {
+            assert_eq!(import.member, Some(content_hash(b"fold")));
+            assert_eq!(import.binding, Some(content_hash(b"selected")));
+            let alias = import.alias.unwrap();
+            assert_eq!(
+                &source[usize::try_from(alias.start_byte()).unwrap()
+                    ..usize::try_from(alias.end_byte()).unwrap()],
+                "selected"
+            );
+        } else {
+            assert_eq!(import.owner, content_hash(b"sample.More"));
+            assert_eq!(
+                (import.alias, import.member, import.binding),
+                (None, None, None)
+            );
+        }
+    }
+    let calls: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|e| e.namespace == rootlight_ir::GROOVY_CALL_LOOKUP_NAMESPACE)
+        .collect();
+    assert_eq!(calls.len(), 3);
+    for (invocation, arguments, lexical_binding, static_context) in [
+        (
+            "selected(value, key: 1, other: 2) { 3 }",
+            [1, 2, 0, 1],
+            false,
+            false,
+        ),
+        ("selected(value)", [1, 0, 0, 0], true, false),
+        ("selected(*value)", [0, 0, 1, 0], false, true),
+    ] {
+        let start = u64::try_from(source.find(invocation).unwrap()).unwrap();
+        let envelope = calls
+            .iter()
+            .find(|e| e.evidence.source.as_ref().unwrap().span().start_byte() == start)
+            .unwrap();
+        let lookup = rootlight_ir::decode_groovy_call_lookup_envelope(envelope).unwrap();
+        let shape = lookup.arguments;
+        assert_eq!(
+            [
+                shape.positional,
+                shape.named,
+                shape.spread,
+                shape.trailing_closures
+            ],
+            arguments
+        );
+        assert_eq!(lookup.lexical_binding, lexical_binding);
+        assert_eq!(lookup.static_context, static_context);
+        assert_eq!(lookup.name_hash, content_hash(b"selected"));
+        assert!(lookup.enclosing_type.is_some());
+        assert!(lookup.enclosing_callable.is_some());
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source == *envelope.evidence.source.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(site.role, OccurrenceRole::CallSite);
+        assert_eq!(site.syntactic_text_hash, lookup.name_hash);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
 fn groovy_inherited_lookup_retains_exact_unresolved_owner_context() {
     for written in ["Item", "Outer.Inner"] {
         let source = format!(
@@ -1224,6 +1877,13 @@ fn groovy_bounded_capture_plans_do_not_guess_lexical_bindings() {
         &ExtensionSupport::default(),
     );
     assert_eq!(result.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(
+        !result
+            .document()
+            .extensions
+            .iter()
+            .any(|envelope| envelope.namespace == rootlight_ir::GROOVY_CALLABLE_NAMESPACE)
+    );
     let reads: Vec<_> = result
         .document()
         .occurrences

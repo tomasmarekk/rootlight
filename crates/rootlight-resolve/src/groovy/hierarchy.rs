@@ -24,10 +24,16 @@ pub(crate) struct Entry<'a> {
 #[derive(Default)]
 pub(crate) struct Selection<'a> {
     pub(crate) target: Option<&'a EntityRecord>,
+    pub(crate) candidates: Option<CandidateSet>,
     pub(crate) sources: BTreeSet<SourceRef>,
     pub(crate) facts: BTreeSet<FactRef>,
     pub(crate) work: usize,
     uncertain: bool,
+}
+
+pub(crate) struct CandidateSet {
+    pub(crate) symbols: Vec<SymbolId>,
+    pub(crate) total_count: u64,
 }
 
 struct Parent<'a> {

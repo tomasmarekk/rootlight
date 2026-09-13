@@ -1012,6 +1012,82 @@ impl<'a> GroovyBindings<'a> {
         if fact.syntax_kind().as_str() != "groovy.identifier.reference" {
             return Ok(None);
         }
+        Ok(self.value_binding(fact, name, cancellation)?.flatten())
+    }
+
+    /// Returns the nearest authored type boundary rather than a containing outer type.
+    ///
+    /// # Errors
+    /// Returns cancellation or inconsistent native capture ancestry.
+    pub(super) fn enclosing_type(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_ir::SourceSpan>, AdapterError> {
+        Ok(self
+            .type_context(fact.parent(), cancellation)?
+            .map(|id| self.fact(id))
+            .transpose()?
+            .filter(|fact| is_type_declaration(fact))
+            .map(SyntaxFact::span))
+    }
+
+    /// Retains lexical lookup boundaries independently of candidate selection.
+    ///
+    /// # Errors
+    /// Returns cancellation or inconsistent native ancestry/source ownership.
+    pub(super) fn call_lookup(
+        &self,
+        call: &SyntaxFact,
+        name: &SyntaxFact,
+        text: &str,
+        arguments: rootlight_ir::GroovyCallArguments,
+        cancellation: &Cancellation,
+    ) -> Result<rootlight_ir::GroovyCallLookup, AdapterError> {
+        let enclosing_type = self.enclosing_type(call, cancellation)?;
+        let mut enclosing_callable = None;
+        let mut static_context = false;
+        let mut parent = call.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { break };
+            let owner = self.fact(id)?;
+            if is_type_declaration(owner) || Some(owner.span()) == enclosing_type {
+                break;
+            }
+            match owner.syntax_kind().as_str() {
+                "groovy.function.declaration" | "groovy.constructor.declaration" => {
+                    if enclosing_callable.is_none() {
+                        enclosing_callable = Some(owner.span());
+                    }
+                }
+                "groovy.static_function.scope" | "groovy.static_context.scope" => {
+                    static_context = true;
+                    break;
+                }
+                "groovy.function.scope" | "groovy.constructor.scope" => break,
+                _ => {}
+            }
+            parent = owner.parent();
+        }
+        Ok(rootlight_ir::GroovyCallLookup {
+            name: name.span(),
+            name_hash: content_hash(text.as_bytes()),
+            spelling: text.to_owned(),
+            arguments,
+            enclosing_type,
+            enclosing_callable,
+            lexical_binding: self.value_binding(call, text, cancellation)?.is_some(),
+            static_context,
+        })
+    }
+
+    fn value_binding(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Option<SymbolId>>, AdapterError> {
         let mut scope = self.nearest_scope(fact.parent(), cancellation)?;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
@@ -1021,9 +1097,12 @@ impl<'a> GroovyBindings<'a> {
             if let Some(binding) = self.bindings.get(&(current, name))
                 && fact.span().start_byte() >= binding.visible_from
             {
-                return Ok(binding.symbol);
+                return Ok(Some(binding.symbol));
             }
             let owner = self.fact(current)?;
+            if name == "it" && owner.syntax_kind().as_str() == "groovy.implicit_closure.scope" {
+                return Ok(Some(None));
+            }
             if matches!(
                 owner.syntax_kind().as_str(),
                 "groovy.function.scope"
@@ -1031,9 +1110,7 @@ impl<'a> GroovyBindings<'a> {
                     | "groovy.constructor.scope"
                     | "groovy.type_body.scope"
                     | "groovy.file.scope"
-            ) || (name == "it"
-                && owner.syntax_kind().as_str() == "groovy.implicit_closure.scope")
-            {
+            ) {
                 return Ok(None);
             }
             scope = self.nearest_scope(owner.parent(), cancellation)?;
