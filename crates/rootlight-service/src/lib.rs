@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/128";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/129";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -15266,6 +15266,21 @@ fn supported_source_language<'a>(
     input: &'a ManifestInput,
     analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
 ) -> Option<&'a str> {
+    if input
+        .language_signals
+        .iter()
+        .any(|signal| signal.evidence == LanguageEvidence::Configuration)
+    {
+        if Path::new(&input.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mlx"))
+        {
+            return None;
+        }
+        let language = detected_source_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if is_ambiguous_basic_source(&input.path) {
         let language = basic_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -15350,6 +15365,14 @@ fn c_header_content_language(input: &ManifestInput) -> Option<&str> {
 }
 
 fn detected_source_language(input: &ManifestInput) -> Option<&str> {
+    let mut configured = input
+        .language_signals
+        .iter()
+        .filter(|signal| signal.evidence == LanguageEvidence::Configuration);
+    if let Some(language) = configured.next() {
+        return (!configured.any(|other| other.language != language.language))
+            .then_some(language.language.as_str());
+    }
     if is_ambiguous_basic_source(&input.path) {
         return basic_content_language(input);
     }
@@ -27490,6 +27513,91 @@ mod tests {
                 read.data.chunks[0].bytes,
                 fs::read(fixture.path().join(&file.path)).unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn configured_source_languages_reindex_unchanged_sources_after_restart() {
+        let fixture = TempDir::new().unwrap();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let source = "Attribute VB_Name = \"Metrics\"\nFunction Measure() As Long\nMeasure = 1\nEnd Function\n";
+        fs::write(fixture.path().join("module.bas"), source).unwrap();
+        let mut previous_generation = None;
+        for language in ["vba", "unsupported-language", "vba"] {
+            let contents = format!(
+                "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='{language}'\n"
+            );
+            let policy = FirstSliceStoragePolicy::resolve_user_config(Some(&contents), 2).unwrap();
+            let expected_hash = policy.config.hash();
+            let mut service =
+                FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline())
+                    .unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            if let Some(previous) = previous_generation {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous_generation = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .generation_metadata(receipt.generation)
+                    .unwrap()
+                    .configuration_hash(),
+                expected_hash
+            );
+            let no_op = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(no_op.generation, receipt.generation);
+            let status = service.repository_status(receipt.repository, None).unwrap();
+            assert_eq!(
+                status
+                    .coverage
+                    .iter()
+                    .map(|entry| entry.indexed_files)
+                    .sum::<u64>(),
+                u64::from(language == "vba")
+            );
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            assert_eq!(document.files.len(), 1);
+            let source_ref = document.files[0].evidence.source.clone().unwrap();
+            assert_eq!(source_ref.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![source_ref], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            let module = document.entities.iter().find(|entity| {
+                entity.kind == EntityKind::Module && entity.canonical_name == "Metrics"
+            });
+            assert_eq!(module.is_some(), language == "vba");
+            let hits = service
+                .code_locate(
+                    receipt.generation,
+                    "Metrics".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            if let Some(module) = module {
+                assert!(
+                    hits.data
+                        .hits
+                        .iter()
+                        .any(|hit| hit.symbol == Some(module.id))
+                );
+            } else {
+                assert!(document.entities.is_empty());
+                assert!(hits.data.hits.iter().all(|hit| hit.symbol.is_none()));
+            }
         }
     }
 

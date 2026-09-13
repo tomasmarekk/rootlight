@@ -5,6 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+mod source_languages;
+
+use source_languages::SourceLanguages;
+
 use std::collections::BTreeMap;
 
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, SafeLabel};
@@ -354,7 +358,7 @@ impl Default for StorageConfig {
     }
 }
 
-/// Metadata retained for an optional namespaced extension.
+/// Metadata retained for a namespaced extension without exposing its payload.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionSnapshot {
     namespace: String,
@@ -420,6 +424,7 @@ pub struct ConfigSnapshot {
     storage: StorageConfig,
     maximum_repositories: u32,
     extensions: BTreeMap<String, ExtensionSnapshot>,
+    source_languages: SourceLanguages,
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
     canonical: Vec<u8>,
@@ -487,10 +492,20 @@ impl ConfigSnapshot {
         self.maximum_repositories
     }
 
-    /// Returns preserved optional extension metadata without exposing payloads.
+    /// Returns preserved extension metadata without exposing payloads.
     #[must_use]
     pub const fn extensions(&self) -> &BTreeMap<String, ExtensionSnapshot> {
         &self.extensions
+    }
+
+    /// Returns an explicit language assignment for a normalized repository-relative path.
+    ///
+    /// Exact case-sensitive paths take precedence over case-insensitive final
+    /// extensions. An assignment is configuration evidence, not detected syntax
+    /// or a guarantee that an analyzer exists. Invalid relative paths never match.
+    #[must_use]
+    pub fn source_language_for_path(&self, path: &str) -> Option<&str> {
+        self.source_languages.language_for_path(path)
     }
 
     /// Returns the source that supplied each effective configuration value.
@@ -538,6 +553,7 @@ struct EffectiveConfig {
     storage: StorageConfig,
     maximum_repositories: u32,
     extensions: BTreeMap<String, ExtensionSnapshot>,
+    source_languages: SourceLanguages,
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
     newest_contract: Option<ConfigContract>,
@@ -573,6 +589,7 @@ impl EffectiveConfig {
             storage: StorageConfig::default(),
             maximum_repositories: DEFAULT_MAXIMUM_REPOSITORIES,
             extensions: BTreeMap::new(),
+            source_languages: SourceLanguages::default(),
             provenance,
             hard_denial_provenance: BTreeMap::new(),
             newest_contract: None,
@@ -665,17 +682,26 @@ impl EffectiveConfig {
         }
         for (namespace, extension) in wire.extensions {
             validate_namespace(&namespace)?;
-            if extension.critical {
+            let source_languages = namespace == "source-languages";
+            if extension.critical && !source_languages {
                 return Err(ConfigError::UnknownCriticalExtension { namespace });
             }
             extension.version.require_supported()?;
             let canonical = canonical_extension(&extension.data)?;
+            if source_languages {
+                // Older readers must reject these assignments rather than silently
+                // index the same source with a different language interpretation.
+                if !extension.critical || extension.version != CONFIG_VERSION_1_0 {
+                    return Err(ConfigError::InvalidSourceLanguages);
+                }
+                self.source_languages = SourceLanguages::decode(&canonical)?;
+            }
             let bytes =
                 u64::try_from(canonical.len()).map_err(|_| ConfigError::ExtensionTooLarge)?;
             let snapshot = ExtensionSnapshot {
                 namespace: namespace.clone(),
                 version: extension.version,
-                critical: false,
+                critical: extension.critical,
                 bytes,
                 digest: content_hash(&canonical),
             };
@@ -900,6 +926,7 @@ impl EffectiveConfig {
             storage: self.storage,
             maximum_repositories: self.maximum_repositories,
             extensions: self.extensions,
+            source_languages: self.source_languages,
             provenance: self.provenance,
             hard_denial_provenance: self.hard_denial_provenance,
             canonical,
@@ -1790,6 +1817,9 @@ pub enum ConfigError {
     /// Extension namespace violated its safe allow-list.
     #[error("invalid configuration extension namespace")]
     InvalidExtensionNamespace,
+    /// Explicit source-language rules have an invalid contract, path or language label.
+    #[error("invalid source-language configuration")]
+    InvalidSourceLanguages,
     /// Extension data exceeded its bounded canonical representation.
     #[error("configuration extension exceeds its byte limit")]
     ExtensionTooLarge,

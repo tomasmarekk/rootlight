@@ -38,7 +38,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.8";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.9";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -523,6 +523,8 @@ pub enum LanguageEvidence {
     Content,
     /// Exact conventional source filename, independent of its directory.
     Filename,
+    /// Explicit source-language assignment in the immutable configuration.
+    Configuration,
 }
 
 /// One language signal without a semantic-tier claim.
@@ -1243,7 +1245,14 @@ impl<'a> DiscoveryState<'a> {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         }
-        let (class, language_signals) = classify(&path, snapshot.content());
+        let (class, mut language_signals) = classify(&path, snapshot.content());
+        if let Some(language) = self.config.source_language_for_path(path.as_str()) {
+            language_signals.push(LanguageSignal {
+                language: language.to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+            language_signals.sort();
+        }
         let file = snapshot.file();
         let descriptor = FileDescriptor::new(
             file,
@@ -2619,6 +2628,67 @@ max_source_file_bytes = 2097152
                     .any(|signal| signal.language == "vba")
             );
         }
+    }
+
+    #[test]
+    fn configured_source_languages_preserve_detection_and_binary_exclusions() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "module.bas", b"Sub Visit()\nEnd Sub\n");
+        write_fixture(&temporary, "other.rs", b"fn visit() {}\n");
+        write_fixture(&temporary, "binary.bas", b"\0binary");
+        let contents = "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n[extensions.source-languages.data.paths]\n'other.rs'='unsupported-language'\n";
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents,
+        }])
+        .unwrap();
+        let root = fixture_root(&temporary, b"configured-languages");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 2);
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "binary.bas" && entry.reason == ExclusionReason::Binary)
+        );
+        let basic = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "module.bas")
+            .unwrap();
+        assert_eq!(
+            basic.language_signals,
+            vec![LanguageSignal {
+                language: "vba".to_owned(),
+                evidence: LanguageEvidence::Configuration
+            }]
+        );
+        let rust = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "other.rs")
+            .unwrap();
+        assert!(
+            rust.language_signals
+                .iter()
+                .any(|signal| signal.language == "rust"
+                    && signal.evidence == LanguageEvidence::Extension)
+        );
+        assert!(
+            rust.language_signals
+                .iter()
+                .any(|signal| signal.language == "unsupported-language"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        assert_eq!(manifest.configuration_hash, config.hash());
     }
 
     #[test]
