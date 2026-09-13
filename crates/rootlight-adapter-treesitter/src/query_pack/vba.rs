@@ -7,6 +7,58 @@ use tree_sitter::Node;
 
 use super::StructuralRole;
 
+pub(super) fn class_header<'tree>(
+    root: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let mut cursor = root.walk();
+    let mut header = None;
+    for child in root.named_children(&mut cursor) {
+        cancellation.check()?;
+        match child.kind() {
+            "newline" | "comment" => {}
+            "frm_version_statement" if header.is_none() => {
+                let Some(text) = source.get(child.byte_range()) else {
+                    return Ok(None);
+                };
+                let suffix = source
+                    .get(child.end_byte()..)
+                    .and_then(|tail| tail.split(|byte| matches!(byte, b'\r' | b'\n')).next())
+                    .unwrap_or_default()
+                    .trim_ascii();
+                // The grammar permits any version and optional identifier here;
+                // only the exported class preamble proves a class, not VB_Name.
+                let mut words = text
+                    .split(u8::is_ascii_whitespace)
+                    .filter(|word| !word.is_empty());
+                if child.has_error()
+                    || !(suffix.is_empty() || suffix.starts_with(b"'"))
+                    || !words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case(b"VERSION"))
+                    || words.next() != Some(b"1.0".as_slice())
+                    || !words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case(b"CLASS"))
+                    || words.next().is_some()
+                {
+                    return Ok(None);
+                }
+                header = Some(child);
+            }
+            "frm_version_statement" => return Ok(None),
+            "attribute_statement"
+            | "frm_begin_block"
+            | "frm_begin_property_block"
+            | "frm_property_statement"
+                if header.is_some() => {}
+            _ => break,
+        }
+    }
+    Ok(header)
+}
+
 pub(super) fn module_name_node<'tree>(
     root: Node<'tree>,
     source: &[u8],
@@ -102,6 +154,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         return Some(syntax);
     }
     Some(match node.kind() {
+        "frm_version_statement" if role == StructuralRole::Signature => "vba.class",
         "source_file" => "vba.file",
         "preprocessor_if" | "type_preprocessor_if" => "vba.preprocessor",
         "identifier" | "bang_identifier" => "vba.identifier",
@@ -195,6 +248,47 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_identity_requires_an_exact_leading_export_preamble() {
+        for (source, expected) in [
+            ("VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\n", true),
+            (
+                "' export\r\n\r\nversion\t1.0\tclass\r\nOption Explicit\r\n",
+                true,
+            ),
+            ("VERSION 1.0 CLASS ' export\nOption Explicit\n", true),
+            ("VERSION 1.0\nAttribute VB_Name = \"Counter\"\n", false),
+            ("VERSION 1.0 Form\n", false),
+            ("VERSION 2.0 CLASS\n", false),
+            ("VERSION 1.0 CLASS Extra\n", false),
+            ("VERSION 1.0 CLASS\nVERSION 1.0 CLASS\n", false),
+            (
+                "Attribute VB_Name = \"Counter\"\nVERSION 1.0 CLASS\n",
+                false,
+            ),
+            ("Sub Run()\nVERSION 1.0 CLASS\nEnd Sub\n", false),
+            (
+                "Private label As String\nlabel = \"VERSION 1.0 CLASS\"\n",
+                false,
+            ),
+            ("' VERSION 1.0 CLASS\nOption Explicit\n", false),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_vba::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            assert_eq!(
+                class_header(tree.root_node(), source.as_bytes(), &Cancellation::new())
+                    .unwrap()
+                    .is_some(),
+                expected,
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
 
     #[test]
     fn exported_header_selects_the_last_module_name() {

@@ -3,6 +3,7 @@
 (source_file) @root @module @scope
 (source_file) @definition
 (source_file) @reference
+(source_file) @signature
 (preprocessor_if) @scope
 (type_preprocessor_if) @scope
 (sub_declaration name: (_) @definition) @declaration @scope @signature

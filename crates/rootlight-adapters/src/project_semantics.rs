@@ -19,6 +19,7 @@ use rootlight_adapter_sdk::{
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
     canonical_ecmascript_identifier, derive_structural_occurrence_identity, execute_parse,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
+    structural_type_member_kind,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -2383,8 +2384,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     else {
                         break 'draft None;
                     };
-                    if kind == EntityKind::Function && is_type_member {
-                        kind = EntityKind::Method;
+                    if is_type_member {
+                        kind = structural_type_member_kind(declaration, kind);
                     }
                     let scope_identity = if is_ecmascript && kind == EntityKind::Variable {
                         // Mirror single-file lowering: declaration identities count

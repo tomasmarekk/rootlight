@@ -2,6 +2,7 @@
 //! Source-bound identities are distinct from later project and runtime resolution.
 
 use super::*;
+use rootlight_ir::ContainerRef;
 
 pub(super) const VBA: LanguageCase = LanguageCase {
     name: "vba",
@@ -27,10 +28,98 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_class_exports_preserve_typed_members_and_body_independent_identity() {
+    let source = "VERSION 1.0 CLASS\nBEGIN\n  MultiUse = -1\nEND\nAttribute VB_Name = \"Counter\"\nOption Explicit\nPrivate total As Long\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPublic Event Changed(ByVal value As Long)\nPublic Property Get Current() As Long\nCurrent = total\nEnd Property\nPublic Sub Refresh()\nDim localValue As Long\nlocalValue = 1\ntotal = localValue\nEnd Sub\nPublic Sub Run()\nRefresh\nEnd Sub\n";
+    let first = output(source);
+    let second = output(&source.replace("localValue = 1", "localValue = 2 + 3"));
+    for result in [&first, &second] {
+        let document = result.document();
+        let class = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Counter")
+            .unwrap();
+        assert_eq!(class.kind, EntityKind::Class);
+        for (name, kind) in [
+            ("total", EntityKind::Field),
+            ("ReadClock", EntityKind::Function),
+            ("Changed", EntityKind::Event),
+            ("Current", EntityKind::Property),
+            ("Refresh", EntityKind::Method),
+            ("Run", EntityKind::Method),
+        ] {
+            let member = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(member.kind, kind, "{name}");
+            assert_eq!(
+                member.container,
+                Some(ContainerRef::Entity(class.id)),
+                "{name}"
+            );
+            let original = first
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(member.id, original.id, "{name}");
+        }
+        assert_eq!(
+            class.id,
+            first
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Counter")
+                .unwrap()
+                .id
+        );
+        let refresh = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Refresh")
+            .unwrap();
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "localValue")
+            .unwrap();
+        assert_eq!(local.kind, EntityKind::Variable);
+        assert_eq!(local.container, Some(ContainerRef::Entity(refresh.id)));
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::CallSite
+                    && site.target == OccurrenceTarget::Resolved { symbol: refresh.id })
+        );
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.module_name.definition")
+            .unwrap();
+        assert_eq!(
+            definition.target,
+            OccurrenceTarget::Resolved { symbol: class.id }
+        );
+        assert_eq!(
+            definition.source.span().start_byte(),
+            u64::try_from(source.find("\"Counter\"").unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
 fn vba_exported_module_names_preserve_authored_identity_and_source() {
-    for prefix in [
-        "",
-        "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1\r\nEND\r\n",
+    for (prefix, kind) in [
+        ("", EntityKind::Module),
+        (
+            "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1\r\nEND\r\n",
+            EntityKind::Class,
+        ),
     ] {
         let source = format!(
             "{prefix}Attribute VB_Name = \"Metrics\"\r\nOption Explicit\r\nSub Run()\r\nEnd Sub\r\n"
@@ -40,7 +129,7 @@ fn vba_exported_module_names_preserve_authored_identity_and_source() {
         let module = document
             .entities
             .iter()
-            .find(|entity| entity.kind == EntityKind::Module)
+            .find(|entity| entity.kind == kind)
             .unwrap();
         assert_eq!(module.canonical_name, "Metrics");
         let definition = document

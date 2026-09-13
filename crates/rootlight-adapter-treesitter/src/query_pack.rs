@@ -658,6 +658,17 @@ impl QueryPack {
                 }
                 if input.family == GrammarFamily::Vba
                     && capture.node.kind() == "source_file"
+                    && role == StructuralRole::Signature
+                {
+                    let Some(header) =
+                        vba::class_header(capture.node, input.source, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    capture.node = header;
+                }
+                if input.family == GrammarFamily::Vba
+                    && capture.node.kind() == "source_file"
                     && matches!(role, StructuralRole::Definition | StructuralRole::Reference)
                 {
                     let Some(name) =
@@ -1090,7 +1101,12 @@ fn candidate_for_capture(
             groovy::syntax(capture.node, role).ok_or_else(|| query_failure("query-groovy-kind"))?
         }
         _ if family == GrammarFamily::Vba => {
-            if role == StructuralRole::Reference
+            if role == StructuralRole::Module
+                && capture.node.kind() == "source_file"
+                && vba::class_header(capture.node, source, cancellation)?.is_some()
+            {
+                "vba.class"
+            } else if role == StructuralRole::Reference
                 && matches!(capture.node.kind(), "identifier" | "bang_identifier")
             {
                 vba::reference_syntax(capture.node, cancellation)?

@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/131";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/132";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -27632,6 +27632,146 @@ mod tests {
             } else {
                 assert!(document.entities.is_empty());
                 assert!(hits.data.hits.iter().all(|hit| hit.symbol.is_none()));
+            }
+        }
+    }
+
+    #[test]
+    fn vba_class_members_survive_restart_and_module_kind_transitions() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("counter.bas");
+        let body = "Attribute VB_Name = \"Counter\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPrivate total As Long\nSub Refresh()\ntotal = 1\nEnd Sub\n";
+        let class_source = format!("VERSION 1.0 CLASS\n{body}");
+        let mut previous_class = None;
+        let mut previous_generation = None;
+        for (source, kind) in [
+            (class_source.clone(), EntityKind::Class),
+            (
+                class_source.replace("total = 1", "total = 2 + 3"),
+                EntityKind::Class,
+            ),
+            (body.to_owned(), EntityKind::Module),
+        ] {
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            if let Some(generation) = previous_generation {
+                assert_ne!(receipt.generation, generation);
+            }
+            previous_generation = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            let owner = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Counter")
+                .unwrap();
+            assert_eq!(owner.kind, kind);
+            if let Some(identity) = previous_class {
+                if kind == EntityKind::Class {
+                    assert_eq!(owner.id, identity);
+                } else {
+                    assert_ne!(owner.id, identity);
+                }
+            }
+            if kind == EntityKind::Class {
+                previous_class = Some(owner.id);
+            }
+            for (name, member_kind) in [
+                ("Counter", kind),
+                ("ReadClock", EntityKind::Function),
+                (
+                    "total",
+                    if kind == EntityKind::Class {
+                        EntityKind::Field
+                    } else {
+                        EntityKind::Variable
+                    },
+                ),
+                (
+                    "Refresh",
+                    if kind == EntityKind::Class {
+                        EntityKind::Method
+                    } else {
+                        EntityKind::Function
+                    },
+                ),
+            ] {
+                let entity = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == name)
+                    .unwrap();
+                assert_eq!(entity.kind, member_kind, "{name}");
+                if name != "Counter" {
+                    assert_eq!(
+                        entity.container,
+                        Some(rootlight_ir::ContainerRef::Entity(owner.id))
+                    );
+                }
+                let hits = service
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(
+                    hits.data
+                        .hits
+                        .iter()
+                        .any(|hit| hit.symbol == Some(entity.id)),
+                    "{name}"
+                );
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                    })
+                    .unwrap();
+                assert_eq!(site.source.generation(), receipt.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                let expected = if name == "Counter" {
+                    "\"Counter\""
+                } else {
+                    name
+                };
+                assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
             }
         }
     }

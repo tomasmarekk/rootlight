@@ -8,13 +8,14 @@ use crate::{SyntaxFact, SyntaxFactKind};
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
 ///
-/// Contextual lowering may refine a function to a method when its parent is a
-/// type or a Rust `impl`. Whole-project analysis uses the same base classifier
-/// before applying that identical contextual refinement.
+/// File and project lowering share this base classifier and refine direct
+/// type members with [`structural_type_member_kind`]. Rust `impl` ownership
+/// additionally requires the caller's language-specific scope evidence.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
+        SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
         SyntaxFactKind::Module => Some(EntityKind::Module),
         SyntaxFactKind::Declaration
             if matches!(
@@ -222,6 +223,23 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label.contains("parameter") => Some(EntityKind::Parameter),
         SyntaxFactKind::Declaration if label.contains("variable") => Some(EntityKind::Variable),
         _ => None,
+    }
+}
+
+/// Refines a structural kind when the caller has proven a direct type owner.
+///
+/// Both file and project lowering use this rule. External VBA declarations
+/// describe imported procedures, not methods implemented by an instance.
+#[must_use]
+pub fn structural_type_member_kind(fact: &SyntaxFact, kind: EntityKind) -> EntityKind {
+    match (kind, fact.syntax_kind().as_str()) {
+        (
+            EntityKind::Function,
+            "vba.external_function.declaration" | "vba.external_sub_function.declaration",
+        ) => kind,
+        (EntityKind::Function, _) => EntityKind::Method,
+        (EntityKind::Variable, "vba.variable.declaration") => EntityKind::Field,
+        _ => kind,
     }
 }
 
@@ -562,6 +580,87 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vba_class_and_type_member_kinds_use_reviewed_fact_labels() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (label, fact_kind, base, member) in [
+            (
+                "vba.class.module",
+                SyntaxFactKind::Module,
+                EntityKind::Class,
+                EntityKind::Class,
+            ),
+            (
+                "vba.file.module",
+                SyntaxFactKind::Module,
+                EntityKind::Module,
+                EntityKind::Module,
+            ),
+            (
+                "vba.variable.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Variable,
+                EntityKind::Field,
+            ),
+            (
+                "vba.function.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Function,
+                EntityKind::Method,
+            ),
+            (
+                "vba.sub_function.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Function,
+                EntityKind::Method,
+            ),
+            (
+                "vba.external_function.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Function,
+                EntityKind::Function,
+            ),
+            (
+                "vba.external_sub_function.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Function,
+                EntityKind::Function,
+            ),
+            (
+                "vba.get_property.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Property,
+                EntityKind::Property,
+            ),
+            (
+                "vba.constant.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Constant,
+                EntityKind::Constant,
+            ),
+            (
+                "javascript.variable.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Variable,
+                EntityKind::Variable,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                fact_kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(base), "{label}");
+            assert_eq!(structural_type_member_kind(&fact, base), member, "{label}");
+        }
+    }
 
     #[test]
     fn vba_module_names_preserve_case_and_enforce_latin_identifier_bounds() {

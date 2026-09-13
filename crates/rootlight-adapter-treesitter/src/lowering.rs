@@ -24,7 +24,7 @@ use rootlight_adapter_sdk::{
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
     derive_structural_occurrence_identity as source_occurrence_identity, execute_analysis,
     execute_parse, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order,
+    structural_syntax_fact_order, structural_type_member_kind,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -1278,12 +1278,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         let vba_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
-            && self
-                .parse_output
-                .facts()
-                .iter()
-                .any(|fact| fact.syntax_kind().as_str() == "vba.file.module")
-        {
+            && self.parse_output.facts().iter().any(|fact| {
+                matches!(
+                    fact.syntax_kind().as_str(),
+                    "vba.file.module" | "vba.class.module"
+                )
+            }) {
             let symbols = materialized
                 .values()
                 .filter_map(|entity| entity.definition_local_id.map(|id| (id, entity.record.id)))
@@ -2922,8 +2922,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             {
                 kind = EntityKind::Method;
             }
-            if kind == EntityKind::Function
-                && fact.syntax_kind().as_str() != "groovy.anonymous_function.declaration"
+            if fact.syntax_kind().as_str() != "groovy.anonymous_function.declaration"
                 && parent_entity
                     .and_then(|parent| drafts.get(&parent))
                     .is_some_and(|parent| {
@@ -2938,7 +2937,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         )
                     })
             {
-                kind = EntityKind::Method;
+                kind = structural_type_member_kind(fact, kind);
             }
             let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
             let definition = select_unique_capture(&capture.definitions);
@@ -5040,6 +5039,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "perl.file.module"
                 | "groovy.file.module"
                 | "vba.file.module"
+                | "vba.class.module"
                 | "solidity.file.module"
                 | "scala.file.module"
                 | "dart.file.module"
