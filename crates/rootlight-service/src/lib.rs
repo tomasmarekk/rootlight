@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/127";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/128";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
@@ -27490,6 +27490,78 @@ mod tests {
                 read.data.chunks[0].bytes,
                 fs::read(fixture.path().join(&file.path)).unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn vba_exported_module_identity_is_locatable_and_generation_bound() {
+        let source = "Attribute VB_Name = \"Metrics\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nFunction Measure() As Long\nMeasure = 1\nEnd Function\n";
+        let fixture = TempDir::new().unwrap();
+        let path = fixture.path().join("module.bas");
+        fs::write(&path, source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let mut previous = None;
+        for contents in [
+            source.to_owned(),
+            source.replace("Measure = 1", "Measure = 2"),
+        ] {
+            fs::write(&path, contents).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            let module = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Module && entity.canonical_name == "Metrics"
+                })
+                .unwrap();
+            if let Some(identity) = previous {
+                assert_eq!(module.id, identity);
+            }
+            previous = Some(module.id);
+            let hits = service
+                .code_locate(
+                    receipt.generation,
+                    "Metrics".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                hits.data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.symbol == Some(module.id))
+            );
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: module.id }
+                })
+                .unwrap();
+            assert_eq!(site.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, b"\"Metrics\"");
         }
     }
 

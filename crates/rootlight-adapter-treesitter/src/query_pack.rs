@@ -656,6 +656,26 @@ impl QueryPack {
                 if input.family == GrammarFamily::Vba && !vba::retain_capture(capture.node, role) {
                     continue;
                 }
+                if input.family == GrammarFamily::Vba
+                    && capture.node.kind() == "source_file"
+                    && matches!(role, StructuralRole::Definition | StructuralRole::Reference)
+                {
+                    let Some(name) =
+                        vba::module_name_node(capture.node, input.source, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    let proven = input
+                        .source
+                        .get(name.byte_range())
+                        .and_then(|text| std::str::from_utf8(text).ok())
+                        .and_then(rootlight_adapter_sdk::vba_module_name)
+                        .is_some();
+                    if proven != (role == StructuralRole::Definition) {
+                        continue;
+                    }
+                    capture.node = name;
+                }
                 if input.family == GrammarFamily::Nix {
                     if !nix::retain_capture(capture.node, role) {
                         continue;

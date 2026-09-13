@@ -7,6 +7,39 @@ use tree_sitter::Node;
 
 use super::StructuralRole;
 
+pub(super) fn module_name_node<'tree>(
+    root: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let mut cursor = root.walk();
+    let mut name = None;
+    for child in root.named_children(&mut cursor) {
+        cancellation.check()?;
+        match child.kind() {
+            "attribute_statement" => {
+                if child.child_by_field_name("name").is_some_and(|attribute| {
+                    source
+                        .get(attribute.byte_range())
+                        .is_some_and(|text| text.eq_ignore_ascii_case(b"VB_Name"))
+                }) {
+                    // MS-VBAL 4.2 gives the last header attribute precedence.
+                    // Even an invalid last value must hide an earlier valid name.
+                    name = child.child_by_field_name("value");
+                }
+            }
+            "newline"
+            | "comment"
+            | "frm_version_statement"
+            | "frm_begin_block"
+            | "frm_begin_property_block"
+            | "frm_property_statement" => {}
+            _ => break,
+        }
+    }
+    Ok(name)
+}
+
 fn declaration_syntax(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "sub_declaration" => "vba.sub_function",
@@ -57,6 +90,14 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if matches!(role, StructuralRole::Definition | StructuralRole::Reference)
+        && node.parent().is_some_and(|parent| {
+            parent.kind() == "attribute_statement"
+                && parent.child_by_field_name("value") == Some(node)
+        })
+    {
+        return Some("vba.module_name");
+    }
     if let Some(syntax) = declaration_syntax(node.kind()) {
         return Some(syntax);
     }
@@ -149,4 +190,46 @@ pub(super) fn header_end(
         }
     }
     Ok(node.end_byte())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_header_selects_the_last_module_name() {
+        let source =
+            b"Attribute VB_Name = \"Old\"\nAttribute VB_Name = \"Current\"\nOption Explicit\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_vba::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let name = module_name_node(tree.root_node(), source, &Cancellation::new()).unwrap();
+        assert_eq!(
+            name.and_then(|node| source.get(node.byte_range())),
+            Some(b"\"Current\"".as_slice()),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(
+            rootlight_adapter_sdk::vba_module_name("\"Current\""),
+            Some("Current")
+        );
+        let family = super::super::GrammarFamily::Vba;
+        let pack = super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+            .unwrap();
+        let extraction = pack
+            .extract(family, &tree, source, 1024, 1024, &Cancellation::new())
+            .unwrap();
+        assert!(
+            extraction
+                .candidates
+                .iter()
+                .any(|candidate| candidate.role == StructuralRole::Definition
+                    && candidate.syntax == "vba.module_name"),
+            "{:?}",
+            extraction.candidates
+        );
+    }
 }

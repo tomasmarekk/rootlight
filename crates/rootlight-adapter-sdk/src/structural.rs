@@ -402,7 +402,12 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "vba"
+    if language == "vba" && fact.syntax_kind().as_str() == "vba.module_name.definition" {
+        (text.len() <= maximum_bytes)
+            .then(|| vba_module_name(text))
+            .flatten()
+            .map(Cow::Borrowed)
+    } else if language == "vba"
         && matches!(
             fact.syntax_kind().as_str(),
             "vba.identifier.definition"
@@ -453,6 +458,24 @@ pub fn structural_captured_name_for_fact<'a>(
     } else {
         structural_captured_name_for_language(language, text, maximum_bytes)
     }
+}
+
+/// Returns the unchanged Latin name from a quoted VBA module-header value.
+///
+/// MS-VBAL section 4.2 limits module names to 31 characters. This projection
+/// accepts ASCII letters followed by ASCII letters, digits or underscores;
+/// other code-page-dependent names remain unproven, not normalized or replaced.
+/// Invalid, unquoted or unsupported values return `None`. Callers preserve the
+/// original quoted source span and account for unavailable identities separately.
+#[must_use]
+pub fn vba_module_name(text: &str) -> Option<&str> {
+    let name = text.strip_prefix('"')?.strip_suffix('"')?;
+    (name.len() <= 31
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then_some(name)
 }
 
 /// Returns readable display text for a canonical structural identity.
@@ -539,6 +562,29 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vba_module_names_preserve_case_and_enforce_latin_identifier_bounds() {
+        for name in ["A", "Metrics_2", "abcdefghijklmnopqrstuvwxyzABCDE"] {
+            let quoted = format!("\"{name}\"");
+            assert_eq!(vba_module_name(&quoted), Some(name));
+        }
+        for text in [
+            "",
+            "Metrics",
+            "\"\"",
+            "\"_Name\"",
+            "\"9Name\"",
+            "\"Name$\"",
+            "\"A.B\"",
+            "\"A B\"",
+            "\"A\"\"B\"",
+            "\"Δelta\"",
+            "\"abcdefghijklmnopqrstuvwxyzABCDEF\"",
+        ] {
+            assert_eq!(vba_module_name(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn nix_display_names_decode_static_paths_without_changing_authored_identity() {

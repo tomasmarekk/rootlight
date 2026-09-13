@@ -27,6 +27,111 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_exported_module_names_preserve_authored_identity_and_source() {
+    for prefix in [
+        "",
+        "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1\r\nEND\r\n",
+    ] {
+        let source = format!(
+            "{prefix}Attribute VB_Name = \"Metrics\"\r\nOption Explicit\r\nSub Run()\r\nEnd Sub\r\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module)
+            .unwrap();
+        assert_eq!(module.canonical_name, "Metrics");
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.module_name.definition")
+            .unwrap();
+        assert_eq!(
+            definition.target,
+            OccurrenceTarget::Resolved { symbol: module.id }
+        );
+        let start = source.find("\"Metrics\"").unwrap();
+        assert_eq!(
+            definition.source.span().start_byte(),
+            u64::try_from(start).unwrap()
+        );
+        assert_eq!(
+            definition.source.span().end_byte(),
+            u64::try_from(start + "\"Metrics\"".len()).unwrap()
+        );
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "Run")
+        );
+    }
+}
+
+#[test]
+fn vba_exported_module_header_uses_last_attribute_not_body_attributes() {
+    let source = "Attribute VB_Name = \"OldName\"\nAttribute vb_name = \"CurrentName\"\nSub Run()\nAttribute Run.VB_Name = \"NotModule\"\nEnd Sub\nAttribute VB_Name = \"AfterBody\"\n";
+    let result = output(source);
+    let document = result.document();
+    let module = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module)
+        .unwrap();
+    assert_eq!(module.canonical_name, "CurrentName");
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "vba.module_name.definition")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn vba_unproven_module_names_keep_file_identity_and_scoped_gaps() {
+    for name in [
+        "\"Invalid.Name\"",
+        "\"Name With Space\"",
+        "\"9Name\"",
+        "\"Δelta\"",
+        "\"abcdefghijklmnopqrstuvwxyzABCDEF\"",
+        "42",
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Earlier\"\nAttribute VB_Name = {name}\nSub Run()\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module)
+            .unwrap();
+        assert_eq!(module.canonical_name, VBA.path, "{name}");
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .all(|site| site.syntax_kind != "vba.module_name.definition")
+        );
+        let start = u64::try_from(source.find(&format!("= {name}")).unwrap() + 2).unwrap();
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-module-name-unavailable"
+                    && gap.source.span().start_byte() == start),
+            "{name}: {:?}",
+            document.skipped_regions
+        );
+    }
+}
+
+#[test]
 fn vba_direct_procedure_calls_bind_written_names_across_invocation_forms() {
     let source = "Sub Visit(ByVal value As Long)\nEnd Sub\nFunction Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nSub Clear()\nEnd Sub\nSub Run()\nCall VISIT(1)\nvisit 2\nDim result As Long\nresult = MEASURE(3)\nClear\nCall CLEAR\nEnd Sub\n";
     let result = output(source);

@@ -1,6 +1,8 @@
 ; VBA written declarations retain exact names, headers and owning source scopes.
 ; Parenthesized applications are not proven calls without binding evidence.
 (source_file) @root @module @scope
+(source_file) @definition
+(source_file) @reference
 (preprocessor_if) @scope
 (type_preprocessor_if) @scope
 (sub_declaration name: (_) @definition) @declaration @scope @signature
