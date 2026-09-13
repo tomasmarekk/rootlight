@@ -29,6 +29,7 @@ mod incremental;
 mod matlab;
 mod objective_c;
 mod shebang;
+mod vba;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
@@ -37,7 +38,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.7";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.8";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1455,7 +1456,10 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
             evidence: LanguageEvidence::Shebang,
         });
     }
-    let content_hint = if extension == Some("objective-c") {
+    let content_hint = if is_ambiguous_basic_source(&normalized) {
+        let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
+        vba::has_content_hint(sample).then_some("vba")
+    } else if extension == Some("objective-c") {
         content_language_with_scripts(content, true)
     } else {
         content_language(content)
@@ -1795,6 +1799,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "vba",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "yaml",
         suffixes: &[".yaml", ".yml"],
         aliases: &["yml"],
@@ -1829,6 +1841,20 @@ pub fn extension_language(path: &str) -> Option<&'static str> {
 pub fn filename_language(path: &str) -> Option<&'static str> {
     let name = path.rsplit(['/', '\\']).next()?;
     name.eq_ignore_ascii_case("Jenkinsfile").then_some("groovy")
+}
+
+/// Reports a BASIC-family suffix that needs dialect evidence before parser admission.
+///
+/// These case-insensitive suffixes are shared by VBA, other BASIC dialects and
+/// other source formats. They never establish a language by themselves.
+#[must_use]
+pub fn is_ambiguous_basic_source(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        ["bas", "cls", "frm"]
+            .iter()
+            .any(|suffix| extension.eq_ignore_ascii_case(suffix))
+    })
 }
 
 /// Resolves one installed canonical language label or accepted alias.
@@ -2562,6 +2588,35 @@ max_source_file_bytes = 2097152
                 content_language(source.as_bytes()),
                 Some("matlab"),
                 "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn vba_dialect_evidence_is_bounded_and_requires_a_shared_source_suffix() {
+        let source = b"Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\n";
+        for name in ["module.bas", "class.CLS", "form.frm"] {
+            assert_eq!(extension_language(name), None);
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            let (_, signals) = classify(&path, source);
+            assert_eq!(
+                signals,
+                vec![LanguageSignal {
+                    language: "vba".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            );
+            let mut outside_sample = vec![b' '; MAX_CLASSIFICATION_BYTES];
+            outside_sample.extend_from_slice(source);
+            assert!(classify(&path, &outside_sample).1.is_empty());
+        }
+        for name in ["notes.txt", "archive.vba", "module.bas.bak", "example.rs"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert!(
+                !classify(&path, source)
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "vba")
             );
         }
     }

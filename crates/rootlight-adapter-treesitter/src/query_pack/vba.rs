@@ -60,6 +60,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
     }
     Some(match node.kind() {
         "source_file" => "vba.file",
+        "preprocessor_if" | "type_preprocessor_if" => "vba.preprocessor",
         "identifier" | "bang_identifier" => "vba.identifier",
         "qualified_member_expression" | "implicit_member_expression" => "vba.member",
         "call_expression" if role == StructuralRole::Reference => "vba.application",
@@ -67,6 +68,57 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "string_literal" => "vba.string",
         _ => return None,
     })
+}
+
+pub(super) fn reference_syntax(
+    mut child: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    while let Some(parent) = child.parent() {
+        cancellation.check()?;
+        let kind = parent.kind();
+        if matches!(
+            kind,
+            "type_expression"
+                | "dotted_type_expression"
+                | "implements_statement"
+                | "new_expression"
+                | "addressof_expression"
+                | "preprocessor_const"
+                | "goto_statement"
+                | "gosub_statement"
+                | "on_error_statement"
+                | "resume_statement"
+        ) || (kind == "named_argument" && parent.child_by_field_name("name") == Some(child))
+            || (kind == "on_goto_statement"
+                && parent.child_by_field_name("selector") != Some(child))
+            || (matches!(
+                kind,
+                "preprocessor_if"
+                    | "preprocessor_elseif"
+                    | "type_preprocessor_if"
+                    | "type_preprocessor_elseif"
+            ) && parent.child_by_field_name("condition") == Some(child))
+            || (kind == "raise_event_statement"
+                && parent.child_by_field_name("event") == Some(child))
+        {
+            return Ok("vba.nonvalue_identifier");
+        }
+        if kind == "parameter" {
+            return Ok("vba.default_constant_identifier");
+        }
+        if kind.starts_with("conditional_")
+            && declaration_syntax(kind).is_some()
+            && !matches!(child.kind(), "block" | "conditional_branch_body")
+        {
+            return Ok("vba.nonvalue_identifier");
+        }
+        if declaration_syntax(kind).is_some() || kind == "source_file" {
+            break;
+        }
+        child = parent;
+    }
+    Ok("vba.identifier")
 }
 
 pub(super) fn header_end(

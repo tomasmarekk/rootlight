@@ -1070,7 +1070,13 @@ fn candidate_for_capture(
             groovy::syntax(capture.node, role).ok_or_else(|| query_failure("query-groovy-kind"))?
         }
         _ if family == GrammarFamily::Vba => {
-            vba::syntax(capture.node, role).ok_or_else(|| query_failure("query-vba-kind"))?
+            if role == StructuralRole::Reference
+                && matches!(capture.node.kind(), "identifier" | "bang_identifier")
+            {
+                vba::reference_syntax(capture.node, cancellation)?
+            } else {
+                vba::syntax(capture.node, role).ok_or_else(|| query_failure("query-vba-kind"))?
+            }
         }
         _ if family == GrammarFamily::Perl => {
             perl::syntax(capture.node, role, source, cancellation)?

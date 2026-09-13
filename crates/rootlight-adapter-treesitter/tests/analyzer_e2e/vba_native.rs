@@ -304,3 +304,213 @@ fn vba_external_procedures_retain_names_without_executing_libraries() {
             .all(|site| site.role != OccurrenceRole::CallSite)
     );
 }
+
+fn reference_at<'a>(
+    document: &'a rootlight_ir::NormalizedIrDocument,
+    source: &str,
+    marker: &str,
+) -> &'a rootlight_ir::OccurrenceRecord {
+    let start = u64::try_from(source.find(marker).expect("reference marker exists")).unwrap();
+    document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.identifier.reference"
+                && site.source.span().start_byte() == start
+        })
+        .expect("written reference exists")
+}
+
+#[test]
+fn vba_parameter_shadows_module_binding_independently_of_written_case() {
+    let source = "Private Value As Long\nPublic Sub Update(ByVal value As Long)\nVALUE = value + 1\nEnd Sub\nPublic Sub Other()\nvalue = 2\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "value")
+        .unwrap();
+    let module_value = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "Value")
+        .unwrap();
+    for marker in ["VALUE =", "value +"] {
+        assert_eq!(
+            reference_at(document, source, marker).target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+    }
+    assert_eq!(
+        reference_at(document, source, "value = 2").target,
+        OccurrenceTarget::Resolved {
+            symbol: module_value.id
+        }
+    );
+}
+
+#[test]
+fn vba_procedure_locals_cover_uses_before_their_declaration() {
+    let source =
+        "Private Count As Long\nPublic Sub Update()\nCOUNT = 1\nDim [count] As Long\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let local = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "count")
+        .unwrap();
+    assert_eq!(
+        reference_at(document, source, "COUNT =").target,
+        OccurrenceTarget::Resolved { symbol: local.id }
+    );
+}
+
+#[test]
+fn vba_duplicate_local_names_do_not_expose_an_outer_exact_spelling() {
+    let source = "Private Count As Long\nPublic Sub Update()\nDim count As Long\nDim COUNT As Long\nCount = 1\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_at(result.document(), source, "Count =").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vba-binding-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_unproven_applications_and_members_keep_scoped_relation_gaps() {
+    let source = "Public Sub Update(ByVal source As Object)\nDim result As Long\nresult = source.Value(1)\nEnd Sub\n";
+    let result = output(source);
+    for detail in [
+        "vba-member-target-unavailable",
+        "vba-call-or-index-target-unavailable",
+    ] {
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == detail),
+            "missing {detail}"
+        );
+    }
+}
+
+#[test]
+fn vba_conditional_local_declarations_block_outer_fallthrough() {
+    let source = "Private Count As Long\nPublic Sub Update()\n#If Wide Then\nDim count As Long\n#End If\nCount = 1\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_at(result.document(), source, "Count =").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vba-binding-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
+    let source = "Public Type Model\nValue As Long\nEnd Type\nPublic Sub Update(ByVal Model As Long, ByVal Finish As Long, ByVal size As Long)\nDim item As Model\nGoTo Finish\nFinish:\nCall Visit(size:=size)\nEnd Sub\n";
+    let result = output(source);
+    for marker in ["Model\nGoTo", "Finish\nFinish:", "size:="] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert_eq!(site.syntax_kind, "vba.nonvalue_identifier.reference");
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+    let parameter = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "size")
+        .unwrap();
+    assert_eq!(
+        reference_at(result.document(), source, "size)").target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+}
+
+#[test]
+fn vba_accessor_parameters_remain_separate_environments() {
+    let source = "Private stored As Long\nPublic Property Let Value(ByVal item As Long)\nstored = ITEM\nEnd Property\nPublic Property Let Other(ByVal item As Long)\nstored = item\nEnd Property\n";
+    let result = output(source);
+    let document = result.document();
+    let first = reference_at(document, source, "ITEM\n");
+    let second = reference_at(document, source, "item\n");
+    assert!(matches!(first.target, OccurrenceTarget::Resolved { .. }));
+    assert!(matches!(second.target, OccurrenceTarget::Resolved { .. }));
+    assert_ne!(first.target, second.target);
+}
+
+#[test]
+fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
+    let source = "Private Const Fallback As Long = 3\nPublic Sub Update(Optional ByVal Fallback As Long = [FALLBACK])\nFALLBACK = 2\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let constant = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Constant)
+        .unwrap();
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter)
+        .unwrap();
+    let default = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+        .unwrap();
+    assert_eq!(
+        default.target,
+        OccurrenceTarget::Resolved {
+            symbol: constant.id
+        }
+    );
+    assert_eq!(
+        reference_at(document, source, "FALLBACK = 2").target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+}
+
+#[test]
+fn vba_conditional_header_conditions_do_not_bind_runtime_variables() {
+    let source = "Private Wide As Boolean\n#If Wide Then\nPublic Sub Update(ByVal value As Long)\n#Else\nPublic Sub Update(ByVal value As Integer)\n#End If\nvalue = 1\nEnd Sub\n";
+    let result = output(source);
+    let start = u64::try_from(source.find("Wide Then").unwrap()).unwrap();
+    let condition = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == start)
+        .unwrap();
+    assert_eq!(condition.syntax_kind, "vba.nonvalue_identifier.reference");
+    assert!(matches!(
+        condition.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}

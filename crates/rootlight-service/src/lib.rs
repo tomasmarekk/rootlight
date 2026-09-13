@@ -65,7 +65,8 @@ use rootlight_discovery::{
     InputClass, LanguageEvidence, MAX_DISCOVERY_ENTRIES, ManifestInput, ManifestReconcileInputs,
     canonical_language, correlate_incremental_manifest, discover_incremental_with_progress,
     discover_manifest_and_reconcile_with_progress, discover_manifest_streaming,
-    discover_with_snapshots_at_limit, extension_language, filename_language, language_capabilities,
+    discover_with_snapshots_at_limit, extension_language, filename_language,
+    is_ambiguous_basic_source, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -211,8 +212,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/125";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/31";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/126";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/4";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/3";
@@ -15265,6 +15266,10 @@ fn supported_source_language<'a>(
     input: &'a ManifestInput,
     analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
 ) -> Option<&'a str> {
+    if is_ambiguous_basic_source(&input.path) {
+        let language = basic_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     // Live scripts are containers, not MATLAB text. A native .m grammar does
     // not provide the container reader required to analyze their embedded source.
     if Path::new(&input.path)
@@ -15345,6 +15350,9 @@ fn c_header_content_language(input: &ManifestInput) -> Option<&str> {
 }
 
 fn detected_source_language(input: &ManifestInput) -> Option<&str> {
+    if is_ambiguous_basic_source(&input.path) {
+        return basic_content_language(input);
+    }
     if let Some(language) = source_language_from_path(&input.path) {
         return Some(language);
     }
@@ -15390,6 +15398,14 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
     }
     filename_language(path)
         .or_else(|| extension_language(path).filter(|language| *language != "objective-c"))
+}
+
+fn basic_content_language(input: &ManifestInput) -> Option<&str> {
+    // Shared suffixes do not authorize unrelated content or shebang routing.
+    input.language_signals.iter().find_map(|signal| {
+        (signal.evidence == LanguageEvidence::Content && signal.language == "vba")
+            .then_some(signal.language.as_str())
+    })
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -27300,10 +27316,16 @@ mod tests {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
             fixture.path(),
-            &[(
-                "measure.m",
-                "function result = measure(value)\nresult = value;\nend\n",
-            )],
+            &[
+                (
+                    "measure.m",
+                    "function result = measure(value)\nresult = value;\nend\n",
+                ),
+                (
+                    "clock.bas",
+                    "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\n",
+                ),
+            ],
         );
         let mut service = FirstSliceService::new(2).expect("service initializes");
         let receipt = service
@@ -27320,6 +27342,16 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
+        assert_eq!(receipt.indexed_files, 2);
+        assert_eq!(source_language_from_path("clock.bas"), None);
+        let vba = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "clock.bas")
+            .expect("VBA source is retained");
+        assert_eq!(vba.language, "vba");
+        mapped.insert(vba.language.as_str());
         let registered = registry
             .descriptors()
             .iter()
@@ -27327,6 +27359,138 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(mapped, registered);
+    }
+
+    #[test]
+    fn vba_dialect_route_publishes_local_relationships_and_exact_sources() {
+        let source = "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Update(ByVal value As Long)\nVALUE = value\nEnd Sub\n";
+        for suffix in ["bas", "CLS", "frm"] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(fixture.path().join(format!("module.{suffix}")), source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1, "{suffix}");
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let symbols: BTreeMap<_, _> = generation
+                .document()
+                .entities
+                .iter()
+                .map(|entity| (entity.canonical_name.as_str(), entity.id))
+                .collect();
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([symbols["Update"]]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let mut spans = Vec::new();
+            for edge in relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+            {
+                assert_eq!(edge.symbol, symbols["value"]);
+                for reference in &edge.source_refs {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let start = usize::try_from(reference.span().start_byte()).unwrap();
+                    spans.push(start);
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks.len(), 1);
+                    assert_eq!(
+                        read.data.chunks[0].bytes,
+                        &source.as_bytes()[start..start + 5]
+                    );
+                }
+            }
+            spans.sort_unstable();
+            assert_eq!(
+                spans,
+                [
+                    source.find("VALUE =").unwrap(),
+                    source.find("= value").unwrap() + 2
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_basic_sources_do_not_enter_an_unproven_parser() {
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("module.bas", "Sub Update()\nEnd Sub\n"),
+                ("class.cls", "Public Class Example\nEnd Class\n"),
+                (
+                    "form.frm",
+                    "' Declare PtrSafe Function ReadClock Lib \"clock\" ()\n",
+                ),
+                (
+                    "notes.txt",
+                    "Declare PtrSafe Function ReadClock Lib \"clock\" ()\n",
+                ),
+            ],
+        );
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 4);
+        let status = service.repository_status(receipt.repository, None).unwrap();
+        assert_eq!(
+            status
+                .coverage
+                .iter()
+                .map(|entry| entry.discovered_files)
+                .sum::<u64>(),
+            4
+        );
+        assert!(status.coverage.iter().all(|entry| entry.indexed_files == 0));
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        assert_eq!(generation.document().files.len(), 4);
+        assert!(generation.document().entities.is_empty());
+        for file in &generation.document().files {
+            let coverage = service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+            );
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                fs::read(fixture.path().join(&file.path)).unwrap()
+            );
+        }
     }
 
     #[test]

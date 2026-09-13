@@ -405,7 +405,9 @@ pub fn structural_captured_name_for_fact<'a>(
     if language == "vba"
         && matches!(
             fact.syntax_kind().as_str(),
-            "vba.identifier.definition" | "vba.identifier.reference"
+            "vba.identifier.definition"
+                | "vba.identifier.reference"
+                | "vba.default_constant_identifier.reference"
         )
     {
         if text.is_empty() || text.len() > maximum_bytes {

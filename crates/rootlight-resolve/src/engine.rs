@@ -849,6 +849,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("matlab.") {
         return false;
     }
+    // VBA names bind case-insensitively inside language-owned environments.
+    // Exact-spelling scores cannot recover a rejected local or dynamic target.
+    if occurrence.syntax_kind.starts_with("vba.") {
+        return false;
+    }
     // Perl sigils, package context and runtime imports require language-owned
     // binding evidence; identical spelling alone does not establish a target.
     if occurrence.syntax_kind.starts_with("perl.") {

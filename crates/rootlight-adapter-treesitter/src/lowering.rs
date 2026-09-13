@@ -1276,6 +1276,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let vba_bindings = if self.parse_output.report().coverage().status()
+            == CoverageStatus::Complete
+            && self
+                .parse_output
+                .facts()
+                .iter()
+                .any(|fact| fact.syntax_kind().as_str() == "vba.file.module")
+        {
+            let symbols = materialized
+                .values()
+                .filter_map(|entity| entity.definition_local_id.map(|id| (id, entity.record.id)))
+                .collect();
+            Some(crate::vba_bindings::VbaBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let groovy_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
@@ -1940,6 +1963,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provenance_id,
                     )?;
                     skipped.insert(region.id, region);
+                }
+                if let Some(bindings) = &vba_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &lua_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
@@ -5120,6 +5152,13 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "vba.identifier.reference" => Some("vba-binding-target-unavailable"),
+        "vba.default_constant_identifier.reference" => {
+            Some("vba-default-constant-target-unavailable")
+        }
+        "vba.member.reference" => Some("vba-member-target-unavailable"),
+        "vba.application.reference" => Some("vba-call-or-index-target-unavailable"),
+        "vba.nonvalue_identifier.reference" => Some("vba-nonvalue-target-unavailable"),
         "perl.variable_name.reference"
         | "perl.array_container.reference"
         | "perl.hash_container.reference"
