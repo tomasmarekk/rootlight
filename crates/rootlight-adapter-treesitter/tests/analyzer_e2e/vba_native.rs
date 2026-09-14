@@ -28,6 +28,48 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_self_property_access_selects_get_let_and_set_sources() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate stored As Variant\nPublic Property Get Item() As Variant\nItem = stored\nEnd Property\nPublic Property Let Item(ByVal value As Variant)\nstored = value\nEnd Property\nPublic Property Set Item(ByVal value As Object)\nSet stored = value\nEnd Property\nPublic Sub Run(ByVal value As Object)\nDim Item As Variant\nItem = Me.iTeM\nLet Me.[Item] = 4\nSet Me.ITEM = value\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (declaration, access, spelling) in [
+        ("Get Item", "Me.iTeM", "iTeM"),
+        ("Let Item", "Me.[Item]", "[Item]"),
+        ("Set Item", "Me.ITEM", "ITEM"),
+    ] {
+        let definition_start = u64::try_from(source.find(declaration).unwrap() + 4).unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == definition_start
+            })
+            .unwrap();
+        let start = u64::try_from(source.find(access).unwrap() + 3).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(spelling.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(site.target, definition.target, "{access}");
+        assert_eq!(site.role, OccurrenceRole::CallSite, "{access}");
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("accessor must be source-bound")
+        };
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(site.id)
+                && edge.object == RelationEndpoint::Entity(symbol)
+        }));
+    }
+}
+
+#[test]
 fn vba_self_call_forms_resolve_only_the_declared_callee() {
     for invocation in [
         "Me.Visit 1",
@@ -60,6 +102,138 @@ fn vba_self_call_forms_resolve_only_the_declared_callee() {
         assert_eq!(
             site.source.span().end_byte() - start,
             if invocation.contains('[') { 7 } else { 5 }
+        );
+    }
+}
+
+#[test]
+fn vba_self_properties_preserve_read_and_indexed_assignment_contexts() {
+    let declarations = "Public Property Get Item(ByVal index As Long) As Variant\nItem = index\nEnd Property\nPublic Property Let Item(ByVal index As Long, ByVal value As Variant)\nEnd Property\nPublic Property Set Item(ByVal index As Long, ByVal value As Object)\nEnd Property\n";
+    for (statement, accessor) in [
+        ("value = Me.Item(0)", "Get Item"),
+        ("Let Me.Item(0) = value", "Let Item"),
+        ("Me.Item(0) = value", "Let Item"),
+        ("Set Me.Item(0) = value", "Set Item"),
+        ("If Me.Item(0) Then\nEnd If", "Get Item"),
+        ("value = 1 + Me.Item(0)", "Get Item"),
+        ("value = (Me.Item(0))", "Get Item"),
+        ("Visit Me.Item(0)", "Get Item"),
+        ("Set value = Me.Item(0)", "Get Item"),
+        ("Me.Item(0).Name = value", "Get Item"),
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\n{declarations}Sub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let definition_start = u64::try_from(source.find(accessor).unwrap() + 4).unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == definition_start
+            })
+            .unwrap();
+        let start = u64::try_from(source.rfind("Me.Item").unwrap() + 3).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 4
+            })
+            .unwrap();
+        assert_eq!(site.target, definition.target, "{statement}");
+        assert_eq!(site.role, OccurrenceRole::CallSite, "{statement}");
+    }
+}
+
+#[test]
+fn vba_self_value_calls_and_indexed_fields_keep_distinct_roles() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate items(2) As Variant\nFunction Measure(ByVal index As Long) As Long\nMeasure = index\nEnd Function\nSub Run(ByVal value As Variant)\nvalue = Me.Measure(1)\nLet Me.items(0) = value\nSet Me.items(1) = value\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (marker, role) in [
+        ("Measure(1)", OccurrenceRole::CallSite),
+        ("items(0)", OccurrenceRole::Reference),
+        ("items(1)", OccurrenceRole::Reference),
+    ] {
+        let start = u64::try_from(source.rfind(marker).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            "{marker}"
+        );
+        assert_eq!(site.role, role, "{marker}");
+        if role == OccurrenceRole::Reference {
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source.span().start_byte() == start
+                        && gap.detail == "vba-call-or-index-target-unavailable")
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_self_properties_do_not_guess_missing_or_ambiguous_accessors() {
+    let get = "Public Property Get Item() As Variant\nItem = 1\nEnd Property\n";
+    let set = "Public Property Set Item(ByVal value As Object)\nEnd Property\n";
+    for (class, declarations, statement) in [
+        (false, get.to_owned(), "value = Me.Item"),
+        (true, get.to_owned(), "Me.Item = 2"),
+        (true, get.to_owned(), "Set Me.Item = value"),
+        (true, set.to_owned(), "value = Me.Item"),
+        (true, get.repeat(2), "value = Me.Item"),
+        (
+            true,
+            format!("{get}Private Item As Variant\n"),
+            "value = Me.Item",
+        ),
+        (
+            true,
+            format!("Private Item As Variant\n{get}"),
+            "value = Me.Item",
+        ),
+        (
+            true,
+            format!("#If Enabled Then\n{get}#End If\n"),
+            "value = Me.Item",
+        ),
+        (true, get.to_owned(), "ReDim Me.Item(3)"),
+        (true, get.to_owned(), "value = Me.Item$"),
+        (true, get.to_owned(), "Call Me.Item()"),
+    ] {
+        let prefix = if class { "VERSION 1.0 CLASS\n" } else { "" };
+        let source = format!(
+            "{prefix}Attribute VB_Name = \"Holder\"\n{declarations}Sub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Me.Item").unwrap() + 3).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span().start_byte() == start
+                    && gap.domain == FactDomain::Relations),
+            "{source}"
         );
     }
 }
@@ -98,11 +272,6 @@ fn vba_self_members_keep_unproven_owners_and_targets_explicit() {
             "VERSION 1.0 CLASS\n",
             "Private Declare PtrSafe Function total Lib \"clock\" () As LongPtr\n",
             "Me.total()",
-        ),
-        (
-            "VERSION 1.0 CLASS\n",
-            "Public Property Get total() As Long\ntotal = 1\nEnd Property\n",
-            "Me.total",
         ),
     ] {
         let source = format!(

@@ -248,7 +248,16 @@ pub(super) fn reference_syntax(
         }
         child = parent;
     }
-    Ok(if member.is_some() && invoked {
+    Ok(if let Some(access) = member.and_then(property_access) {
+        match (access, invoked) {
+            (PropertyAccess::Get, false) => "vba.self_get_member",
+            (PropertyAccess::Let, false) => "vba.self_let_member",
+            (PropertyAccess::Set, false) => "vba.self_set_member",
+            (PropertyAccess::Get, true) => "vba.self_invoked_get_member",
+            (PropertyAccess::Let, true) => "vba.self_invoked_let_member",
+            (PropertyAccess::Set, true) => "vba.self_invoked_set_member",
+        }
+    } else if member.is_some() && invoked {
         "vba.self_invoked_member"
     } else if member.is_some() {
         "vba.self_member"
@@ -257,6 +266,57 @@ pub(super) fn reference_syntax(
     } else {
         "vba.identifier"
     })
+}
+
+enum PropertyAccess {
+    Get,
+    Let,
+    Set,
+}
+
+fn property_access(mut expression: Node<'_>) -> Option<PropertyAccess> {
+    let mut parent = expression.parent()?;
+    if parent.kind() == "call_expression"
+        && parent.child_by_field_name("function") == Some(expression)
+    {
+        expression = parent;
+        parent = expression.parent()?;
+    }
+    if matches!(
+        parent.kind(),
+        "assignment_statement" | "let_statement" | "set_statement"
+    ) {
+        return if parent.child_by_field_name("left") == Some(expression) {
+            Some(if parent.kind() == "set_statement" {
+                PropertyAccess::Set
+            } else {
+                PropertyAccess::Let
+            })
+        } else if parent.child_by_field_name("right") == Some(expression) {
+            Some(PropertyAccess::Get)
+        } else {
+            None
+        };
+    }
+    // These positions evaluate the member's value. Unknown statement targets
+    // must not default to Get (for example a loop control or ReDim operand).
+    if matches!(
+        parent.kind(),
+        "binary_expression"
+            | "comparison_expression"
+            | "unary_expression"
+            | "parenthesized_expression"
+            | "logical_value_expression"
+            | "argument_list"
+            | "unparenthesized_argument_list"
+    ) || parent.child_by_field_name("condition") == Some(expression)
+        || (parent.kind() == "qualified_member_expression"
+            && parent.child_by_field_name("receiver") == Some(expression))
+    {
+        Some(PropertyAccess::Get)
+    } else {
+        None
+    }
 }
 
 pub(super) fn header_end(

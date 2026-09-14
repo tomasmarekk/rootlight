@@ -434,6 +434,12 @@ pub fn structural_captured_name_for_fact<'a>(
                 | "vba.invoked_identifier.reference"
                 | "vba.self_member.reference"
                 | "vba.self_invoked_member.reference"
+                | "vba.self_get_member.reference"
+                | "vba.self_let_member.reference"
+                | "vba.self_set_member.reference"
+                | "vba.self_invoked_get_member.reference"
+                | "vba.self_invoked_let_member.reference"
+                | "vba.self_invoked_set_member.reference"
         )
     {
         if text.is_empty() || text.len() > maximum_bytes {

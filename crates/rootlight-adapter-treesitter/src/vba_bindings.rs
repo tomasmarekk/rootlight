@@ -16,6 +16,32 @@ enum Binding {
     Procedure(SymbolId),
     ExternalProcedure(SymbolId),
     FunctionResult(SymbolId),
+    Property(PropertyAccessors),
+}
+
+#[derive(Clone, Copy, Default)]
+struct PropertyAccessors {
+    get: Option<SymbolId>,
+    let_value: Option<SymbolId>,
+    set: Option<SymbolId>,
+}
+
+impl PropertyAccessors {
+    fn merge(self, other: Self) -> Option<Self> {
+        // Accessors share a name, but repeated accessors or mixed declaration
+        // kinds are ambiguous regardless of capture order.
+        if (self.get.is_some() && other.get.is_some())
+            || (self.let_value.is_some() && other.let_value.is_some())
+            || (self.set.is_some() && other.set.is_some())
+        {
+            return None;
+        }
+        Some(Self {
+            get: self.get.or(other.get),
+            let_value: self.let_value.or(other.let_value),
+            set: self.set.or(other.set),
+        })
+    }
 }
 
 pub(super) struct ResolvedBinding {
@@ -92,6 +118,24 @@ impl<'a> VbaBindings<'a> {
                         | "vba.external_function.declaration" => {
                             Some(Binding::ExternalProcedure(symbol))
                         }
+                        "vba.get_property.declaration" => {
+                            Some(Binding::Property(PropertyAccessors {
+                                get: Some(symbol),
+                                ..PropertyAccessors::default()
+                            }))
+                        }
+                        "vba.let_property.declaration" => {
+                            Some(Binding::Property(PropertyAccessors {
+                                let_value: Some(symbol),
+                                ..PropertyAccessors::default()
+                            }))
+                        }
+                        "vba.set_property.declaration" => {
+                            Some(Binding::Property(PropertyAccessors {
+                                set: Some(symbol),
+                                ..PropertyAccessors::default()
+                            }))
+                        }
                         _ => None,
                     }
                 })
@@ -103,7 +147,8 @@ impl<'a> VbaBindings<'a> {
             }
             if owns_scope(declaration) {
                 // A function name denotes its result in value context, but the
-                // procedure in invocation context. Get dispatch remains unproven.
+                // procedure in invocation context. Unqualified Get result/dispatch
+                // still needs its own context, not the explicit Me lookup rules.
                 if matches!(
                     declaration.syntax_kind().as_str(),
                     "vba.function.declaration" | "vba.get_property.declaration"
@@ -140,11 +185,20 @@ impl<'a> VbaBindings<'a> {
             fact.syntax_kind().as_str() == "vba.default_constant_identifier.reference";
         let self_member = matches!(
             fact.syntax_kind().as_str(),
-            "vba.self_member.reference" | "vba.self_invoked_member.reference"
+            "vba.self_member.reference"
+                | "vba.self_invoked_member.reference"
+                | "vba.self_get_member.reference"
+                | "vba.self_let_member.reference"
+                | "vba.self_set_member.reference"
+                | "vba.self_invoked_get_member.reference"
+                | "vba.self_invoked_let_member.reference"
+                | "vba.self_invoked_set_member.reference"
         );
         let invoked = matches!(
             fact.syntax_kind().as_str(),
-            "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
+            "vba.invoked_identifier.reference"
+                | "vba.self_invoked_member.reference"
+                | "vba.self_invoked_get_member.reference"
         );
         if fact.syntax_kind().as_str() != "vba.identifier.reference"
             && !default_constant
@@ -232,6 +286,21 @@ impl<'a> VbaBindings<'a> {
                             is_call: true,
                         })
                     }
+                    Some(Binding::Property(accessors)) if self_member => {
+                        let symbol = match fact.syntax_kind().as_str() {
+                            "vba.self_get_member.reference"
+                            | "vba.self_invoked_get_member.reference" => accessors.get,
+                            "vba.self_let_member.reference"
+                            | "vba.self_invoked_let_member.reference" => accessors.let_value,
+                            "vba.self_set_member.reference"
+                            | "vba.self_invoked_set_member.reference" => accessors.set,
+                            _ => None,
+                        };
+                        symbol.map(|symbol| ResolvedBinding {
+                            symbol,
+                            is_call: true,
+                        })
+                    }
                     _ => None,
                 });
             }
@@ -254,7 +323,14 @@ impl<'a> VbaBindings<'a> {
             .entry(owner)
             .or_default()
             .entry(name.to_ascii_lowercase())
-            .and_modify(|existing| *existing = None)
+            .and_modify(|existing| {
+                *existing = match (*existing, symbol) {
+                    (Some(Binding::Property(left)), Some(Binding::Property(right))) => {
+                        left.merge(right).map(Binding::Property)
+                    }
+                    _ => None,
+                };
+            })
             .or_insert(symbol);
     }
 
@@ -482,6 +558,99 @@ mod tests {
                     .map(|binding| binding.symbol),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn property_capture_order_and_missing_identities_preserve_barriers() {
+        let getter = SymbolId::from_bytes([8; 20]);
+        let setter = SymbolId::from_bytes([9; 20]);
+        let cancellation = Cancellation::new();
+        let mut facts = vec![
+            fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, 14),
+            fact(2, None, SyntaxFactKind::Module, "vba.class.module", 0, 14),
+            fact(
+                3,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.get_property.scope",
+                0,
+                4,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Declaration,
+                "vba.get_property.declaration",
+                0,
+                4,
+            ),
+            fact(
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                0,
+                4,
+            ),
+            fact(
+                6,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.let_property.scope",
+                5,
+                9,
+            ),
+            fact(
+                7,
+                Some(6),
+                SyntaxFactKind::Declaration,
+                "vba.let_property.declaration",
+                5,
+                9,
+            ),
+            fact(
+                8,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                5,
+                9,
+            ),
+            fact(
+                9,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.sub_function.scope",
+                10,
+                14,
+            ),
+            fact(
+                10,
+                Some(9),
+                SyntaxFactKind::Occurrence,
+                "vba.self_get_member.reference",
+                10,
+                14,
+            ),
+        ];
+        for _ in 0..2 {
+            for present in [false, true] {
+                let mut symbols = HashMap::from([(5, getter)]);
+                if present {
+                    symbols.insert(8, setter);
+                }
+                let plan = VbaBindings::new(&facts, b"Item Item ITEM", &symbols, 64, &cancellation)
+                    .unwrap();
+                let reference = facts.iter().find(|fact| fact.local_id() == 10).unwrap();
+                assert_eq!(
+                    plan.resolve(reference, "ITEM", &cancellation)
+                        .unwrap()
+                        .map(|binding| binding.symbol),
+                    present.then_some(getter)
+                );
+            }
+            facts.reverse();
         }
     }
 
