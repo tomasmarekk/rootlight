@@ -252,8 +252,12 @@ fn fence_language(
             .descriptors()
             .iter()
             .find(|descriptor| {
-                descriptor.language().as_str() != "markdown"
-                    && descriptor.language().as_str().as_bytes() == text
+                // Shared BASIC captures retain their native VBA labels. The
+                // host cannot yet preserve the distinct family provenance.
+                !matches!(
+                    descriptor.language().as_str(),
+                    "markdown" | "visual-basic-classic"
+                ) && descriptor.language().as_str().as_bytes() == text
             })
             .map(|descriptor| descriptor.language().clone()));
     }

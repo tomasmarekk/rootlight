@@ -420,12 +420,14 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "vba" && fact.syntax_kind().as_str() == "vba.module_name.definition" {
+    if matches!(language, "vba" | "visual-basic-classic")
+        && fact.syntax_kind().as_str() == "vba.module_name.definition"
+    {
         (text.len() <= maximum_bytes)
             .then(|| vba_module_name(text))
             .flatten()
             .map(Cow::Borrowed)
-    } else if language == "vba"
+    } else if matches!(language, "vba" | "visual-basic-classic")
         && matches!(
             fact.syntax_kind().as_str(),
             "vba.identifier.definition"

@@ -1198,6 +1198,32 @@ fn markdown_lua_binding_artifacts_rebind_exact_relations() {
 }
 
 #[test]
+fn markdown_classic_basic_remains_source_bound_without_inventing_a_dialect() {
+    let source =
+        "~~~visual-basic-classic\nAttribute VB_Name = \"Meter\"\nSub Run()\nEnd Sub\n~~~\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| { matches!(entity.language.as_str(), "vba" | "visual-basic-classic") })
+    );
+    let gap = document
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "markdown-embedded-analysis-unavailable")
+        .unwrap();
+    let start = usize::try_from(gap.source.span().start_byte()).unwrap();
+    let end = usize::try_from(gap.source.span().end_byte()).unwrap();
+    assert!(source[start..end].contains("Attribute VB_Name = \"Meter\""));
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
 fn markdown_code_labels_require_declared_languages_without_content_inference() {
     for (label, supported) in [
         ("rust", true),
@@ -1456,7 +1482,9 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         .unwrap()
         .descriptors()
         .iter()
-        .filter(|descriptor| descriptor.language().as_str() != "markdown")
+        // Classic BASIC has a separate explicit opaque-fence contract: the
+        // shared capture namespace cannot establish the example's dialect.
+        .filter(|descriptor| !matches!(descriptor.language().as_str(), "markdown" | "visual-basic-classic"))
         .map(|descriptor| descriptor.language().as_str().to_owned())
         .collect();
     assert_eq!(

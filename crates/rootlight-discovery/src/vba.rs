@@ -1,8 +1,16 @@
-//! Conservative VBA dialect evidence for shared BASIC source suffixes.
-//! Only a statement-leading VBA7 external declaration is currently discriminating;
-//! common BASIC syntax, comment text and string contents are not dialect proof.
+//! Source evidence for shared classic BASIC exports and the narrower VBA dialect.
+//! Exported module headers establish only the family; a VBA7 external declaration
+//! supplies dialect evidence. Comments and string contents establish neither.
 
 pub(super) fn has_content_hint(source: &[u8]) -> bool {
+    has_statement(source, external_declaration)
+}
+
+pub(super) fn has_classic_content_hint(source: &[u8]) -> bool {
+    has_statement(source, exported_module_header)
+}
+
+fn has_statement(source: &[u8], matches: fn(&[u8]) -> bool) -> bool {
     let mut source = source.strip_prefix(b"\xef\xbb\xbf").unwrap_or(source);
     while !source.is_empty() {
         let start = source;
@@ -21,11 +29,44 @@ pub(super) fn has_content_hint(source: &[u8]) -> bool {
                 break;
             }
         }
-        if external_declaration(&start[..start.len() - source.len()]) {
+        if matches(&start[..start.len() - source.len()]) {
             return true;
         }
     }
     false
+}
+
+fn exported_module_header(mut source: &[u8]) -> bool {
+    if !next_word(&mut source).is_some_and(|word| word.eq_ignore_ascii_case(b"attribute")) {
+        return false;
+    }
+    source = source.trim_ascii_start();
+    let Some(name) = source.get(..7) else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case(b"vb_name") {
+        return false;
+    }
+    let Some(literal) = source[7..].trim_ascii_start().strip_prefix(b"=") else {
+        return false;
+    };
+    let Some(literal) = literal.trim_ascii_start().strip_prefix(b"\"") else {
+        return false;
+    };
+    let Some(end) = literal.iter().position(|byte| *byte == b'"') else {
+        return false;
+    };
+    let Ok(identifier) = std::str::from_utf8(&literal[..end]) else {
+        return false;
+    };
+    let mut characters = identifier.chars();
+    if !characters.next().is_some_and(char::is_alphabetic)
+        || !characters.all(|character| character.is_alphanumeric() || character == '_')
+    {
+        return false;
+    }
+    let tail = literal[end + 1..].trim_ascii();
+    tail.is_empty() || tail.starts_with(b"'")
 }
 
 fn continued_line(line: &[u8]) -> bool {
@@ -130,7 +171,40 @@ fn external_declaration(mut source: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::has_content_hint;
+    use super::{has_classic_content_hint, has_content_hint};
+
+    #[test]
+    fn exported_headers_establish_only_the_classic_family() {
+        for source in [
+            "Attribute VB_Name = \"Meter\"\n",
+            "\u{feff}  attribute\tVB_NAME=\"Métrique\"\r\n",
+            "VERSION 1.0 CLASS\rAttribute VB_Name = \"Holder\" ' exported\r",
+            "' ignored _\nAttribute VB_Name = \"Meter\"",
+        ] {
+            assert!(has_classic_content_hint(source.as_bytes()), "{source}");
+            assert!(!has_content_hint(source.as_bytes()), "{source}");
+        }
+    }
+
+    #[test]
+    fn incomplete_and_noncode_headers_do_not_establish_the_family() {
+        for source in [
+            "' Attribute VB_Name = \"Meter\"",
+            "Rem Attribute VB_Name = \"Meter\"",
+            "text = \"Attribute VB_Name = \"\"Meter\"\"\"",
+            "text = _\nAttribute VB_Name = \"Meter\"",
+            "Attribute VB_NameSuffix = \"Meter\"",
+            "Attribute VB_Name = \"Meter",
+            "Attribute VB_Name = \"Meter\n\"",
+            "Attribute VB_Name = \"\"",
+            "Attribute VB_Name = \"1Meter\"",
+            "Attribute VB_Name = \"Meter\" & value",
+            "Attribute VB_Name = \"Meter\"\"suffix\"",
+            "Attribute VB_Name = unquoted",
+        ] {
+            assert!(!has_classic_content_hint(source.as_bytes()), "{source}");
+        }
+    }
 
     #[test]
     fn external_declarations_supply_case_insensitive_dialect_evidence() {

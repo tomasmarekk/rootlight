@@ -39,7 +39,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.11";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.12";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1477,7 +1477,11 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
     }
     let content_hint = if is_ambiguous_basic_source(&normalized) {
         let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
-        vba::has_content_hint(sample).then_some("vba")
+        if vba::has_content_hint(sample) {
+            Some("vba")
+        } else {
+            vba::has_classic_content_hint(sample).then_some("visual-basic-classic")
+        }
     } else if extension == Some("objective-c") {
         content_language_with_scripts(content, true)
     } else {
@@ -1818,6 +1822,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "vba",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "visual-basic-classic",
         suffixes: &[],
         aliases: &[],
         detectors: &["content"],
@@ -2636,6 +2648,40 @@ max_source_file_bytes = 2097152
                     .iter()
                     .any(|signal| signal.language == "vba")
             );
+        }
+    }
+
+    #[test]
+    fn classic_export_evidence_is_bounded_and_dialect_evidence_takes_precedence() {
+        let header = b"Attribute VB_Name = \"Meter\"\n";
+        for name in ["module.bas", "class.CLS", "form.frm"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            let expected = vec![LanguageSignal {
+                language: "visual-basic-classic".to_owned(),
+                evidence: LanguageEvidence::Content,
+            }];
+            assert_eq!(extension_language(name), None);
+            assert_eq!(classify(&path, header).1, expected);
+            let mut bounded = vec![b' '; MAX_CLASSIFICATION_BYTES - header.len()];
+            bounded.extend_from_slice(header);
+            assert_eq!(classify(&path, &bounded).1, expected);
+            bounded.splice(0..0, [b' '; 2]);
+            assert!(classify(&path, &bounded).1.is_empty());
+            let mut dialect = header.to_vec();
+            dialect.extend_from_slice(b"Declare PtrSafe Sub Pause Lib \"clock\" ()\n");
+            assert_eq!(
+                classify(&path, &dialect).1,
+                vec![LanguageSignal {
+                    language: "vba".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            );
+        }
+        for name in ["notes.txt", "module.bas.bak", "example.rs"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert!(!classify(&path, header).1.iter().any(|signal| {
+                matches!(signal.language.as_str(), "vba" | "visual-basic-classic")
+            }));
         }
     }
 

@@ -89,7 +89,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 34] = [
+    let cases: [(&str, &str, &[u8]); 35] = [
         (
             "measure.bas",
             "vba",
@@ -104,6 +104,11 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
             "sample.pm",
             "perl",
             b"package Sample; sub sample ($value) { return $value; }\n",
+        ),
+        (
+            "sample.bas",
+            "visual-basic-classic",
+            b"Attribute VB_Name = \"Sample\"\nSub Run()\nEnd Sub\n",
         ),
         (
             "measure.m",

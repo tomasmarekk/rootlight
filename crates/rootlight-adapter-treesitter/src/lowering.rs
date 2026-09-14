@@ -833,6 +833,15 @@ fn preflight_lowering_limits(
         request.included_ranges(),
     )?;
     let mut string_bytes = 0_usize;
+    for _ in classic_dialect_spans(request) {
+        cancellation.check()?;
+        skipped_candidates = checked_add(skipped_candidates, 1)?;
+        account_string(
+            &mut string_bytes,
+            "visual-basic-dialect-unproven".len(),
+            limits,
+        )?;
+    }
 
     for value in [
         request.source().path().as_str(),
@@ -1226,6 +1235,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut extension_bytes = 0_usize;
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
+        for span in classic_dialect_spans(self.request) {
+            cancellation.check()?;
+            let region = skipped_region(
+                self.full_source,
+                span,
+                FactDomain::Relations,
+                SkippedRegionReason::UnsupportedConstruct,
+                "visual-basic-dialect-unproven",
+                provenance_id,
+            )?;
+            skipped.insert(region.id, region);
+        }
         for &(span, detail) in &entity_plan.yaml_warnings {
             cancellation.check()?;
             let region = skipped_region(
@@ -1288,8 +1309,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 .values()
                 .filter_map(|entity| entity.definition_local_id.map(|id| (id, entity.record.id)))
                 .chain(materialized.iter().filter_map(|(local_id, entity)| {
-                    (entity.record.kind == EntityKind::Class && entity.record.language == "vba")
-                        .then_some((*local_id, entity.record.id))
+                    (entity.record.kind == EntityKind::Class
+                        && matches!(
+                            entity.record.language.as_str(),
+                            "vba" | "visual-basic-classic"
+                        ))
+                    .then_some((*local_id, entity.record.id))
                 }))
                 .collect();
             Some(crate::vba_bindings::VbaBindings::new(
@@ -4900,6 +4925,23 @@ fn validate_fact_graph(
     Ok(())
 }
 
+fn classic_dialect_spans<'a>(
+    request: &'a AnalysisRequest<'_>,
+) -> impl Iterator<Item = SourceSpan> + 'a {
+    std::iter::once(request.source().source_ref().span())
+        .filter(|_| {
+            request.language().as_str() == "visual-basic-classic"
+                && request.included_ranges().is_empty()
+        })
+        .chain(
+            request
+                .included_ranges()
+                .iter()
+                .filter(|range| range.language().as_str() == "visual-basic-classic")
+                .map(rootlight_adapter_sdk::IncludedRange::span),
+        )
+}
+
 fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact) -> &'a str {
     if request.language().as_str() == "markdown"
         && fact.syntax_kind().as_str().starts_with("objective_c.")
@@ -5088,6 +5130,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "markdown"
                 | "groovy"
                 | "vba"
+                | "visual-basic-classic"
                 | "astro"
                 | "objective-c"
         )
@@ -5144,9 +5187,9 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
 }
 
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
-    // VBA accessors share a property name but have distinct Get/Let/Set headers.
+    // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
-    (kind == EntityKind::Property && language == "vba")
+    (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || matches!(
             kind,
             EntityKind::Function

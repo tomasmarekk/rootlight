@@ -81,6 +81,14 @@ pub enum GrammarFamily {
     Groovy,
     /// Visual Basic for Applications source syntax, without Office runtime evaluation.
     Vba,
+    /// Shared classic Visual Basic syntax without a proven VBA or VB6 dialect.
+    VisualBasicClassic,
+}
+
+impl GrammarFamily {
+    pub(crate) const fn is_classic_basic(self) -> bool {
+        matches!(self, Self::Vba | Self::VisualBasicClassic)
+    }
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -149,7 +157,7 @@ impl GrammarDescriptor {
     }
 }
 
-/// Closed registry of audited first-party grammars.
+/// Closed registry of audited linked grammars and their analysis identities.
 #[derive(Debug, Clone)]
 pub struct GrammarRegistry {
     descriptors: Vec<GrammarDescriptor>,
@@ -163,7 +171,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(34);
+        let mut descriptors = Vec::with_capacity(35);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -199,6 +207,7 @@ impl GrammarRegistry {
             GrammarFamily::Perl,
             GrammarFamily::Groovy,
             GrammarFamily::Vba,
+            GrammarFamily::VisualBasicClassic,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -328,7 +337,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Matlab => tree_sitter_matlab::LANGUAGE.into(),
         GrammarFamily::Perl => ts_parser_perl::LANGUAGE.into(),
         GrammarFamily::Groovy => dekobon_tree_sitter_groovy::LANGUAGE.into(),
-        GrammarFamily::Vba => tree_sitter_vba::LANGUAGE.into(),
+        GrammarFamily::Vba | GrammarFamily::VisualBasicClassic => tree_sitter_vba::LANGUAGE.into(),
     }
 }
 
@@ -343,6 +352,10 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::VisualBasicClassic => GrammarIdentity {
+            language_id: "visual-basic-classic",
+            ..identity_for(GrammarFamily::Vba)
+        },
         GrammarFamily::Groovy => GrammarIdentity {
             language_id: "groovy",
             grammar_version: "0.2.0",
@@ -683,7 +696,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 34);
+        assert_eq!(registry.descriptors().len(), 35);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -719,6 +732,7 @@ mod tests {
             GrammarFamily::Perl,
             GrammarFamily::Groovy,
             GrammarFamily::Vba,
+            GrammarFamily::VisualBasicClassic,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -733,6 +747,21 @@ mod tests {
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             );
         }
+    }
+
+    #[test]
+    fn classic_basic_reuses_the_exact_audited_vba_grammar() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let classic = registry.get(GrammarFamily::VisualBasicClassic).unwrap();
+        let vba = registry.get(GrammarFamily::Vba).unwrap();
+        assert_eq!(classic.language().as_str(), "visual-basic-classic");
+        assert_eq!(vba.language().as_str(), "vba");
+        assert_eq!(classic.grammar_version(), vba.grammar_version());
+        assert_eq!(classic.grammar_source_sha256(), vba.grammar_source_sha256());
+        assert_eq!(classic.parser_sha256(), vba.parser_sha256());
+        assert_eq!(classic.scanner_sha256(), vba.scanner_sha256());
+        assert_eq!(classic.abi_version(), vba.abi_version());
+        assert_eq!(classic.encoding(), vba.encoding());
     }
 
     #[test]

@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/138";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/139";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -5991,6 +5991,8 @@ impl FirstSliceService {
                 )
             } else if descriptor.family() == GrammarFamily::Sql {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::VisualBasicClassic {
+                format!("tree-sitter-vba-{}", descriptor.grammar_version())
             } else {
                 format!(
                     "tree-sitter-{}-{}",
@@ -15448,8 +15450,9 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
 fn basic_content_language(input: &ManifestInput) -> Option<&str> {
     // Shared suffixes do not authorize unrelated content or shebang routing.
     input.language_signals.iter().find_map(|signal| {
-        (signal.evidence == LanguageEvidence::Content && signal.language == "vba")
-            .then_some(signal.language.as_str())
+        (signal.evidence == LanguageEvidence::Content
+            && matches!(signal.language.as_str(), "vba" | "visual-basic-classic"))
+        .then_some(signal.language.as_str())
     })
 }
 
@@ -27383,6 +27386,10 @@ mod tests {
                     "clock.bas",
                     "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\n",
                 ),
+                (
+                    "meter.cls",
+                    "Attribute VB_Name = \"Meter\"\nSub Run()\nEnd Sub\n",
+                ),
             ],
         );
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -27400,7 +27407,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 2);
+        assert_eq!(receipt.indexed_files, 3);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -27410,6 +27417,14 @@ mod tests {
             .expect("VBA source is retained");
         assert_eq!(vba.language, "vba");
         mapped.insert(vba.language.as_str());
+        let classic = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "meter.cls")
+            .unwrap();
+        assert_eq!(classic.language, "visual-basic-classic");
+        mapped.insert(classic.language.as_str());
         let registered = registry
             .descriptors()
             .iter()
@@ -27487,6 +27502,131 @@ mod tests {
                 [
                     source.find("VALUE =").unwrap(),
                     source.find("= value").unwrap() + 2
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn classic_basic_dialect_transitions_preserve_sources_and_local_relationships() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("module.bas");
+        let header = "Attribute VB_Name = \"Meter\"\n";
+        let body = "Sub Update(ByVal value As Long)\nvalue = value + 1\nEnd Sub\n";
+        let mut previous = None;
+        for (prefix, language) in [
+            (header.to_owned(), "visual-basic-classic"),
+            (
+                format!("{header}Declare PtrSafe Sub Pause Lib \"clock\" ()\n"),
+                "vba",
+            ),
+            (String::new(), "unknown"),
+            (header.to_owned(), "visual-basic-classic"),
+        ] {
+            let source = format!("{prefix}{body}");
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(generation) = previous {
+                assert_ne!(receipt.generation, generation);
+            }
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.files.len(), 1);
+            let file = &document.files[0];
+            assert_eq!(file.language, language);
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "visual-basic-dialect-unproven"
+                        && gap.source.generation() == receipt.generation
+                        && gap.source.span() == file.evidence.source.as_ref().unwrap().span()
+                }),
+                language == "visual-basic-classic"
+            );
+            let source_ref = file.evidence.source.clone().unwrap();
+            assert_eq!(source_ref.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![source_ref], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            let symbols: BTreeMap<_, _> = document
+                .entities
+                .iter()
+                .map(|entity| (entity.canonical_name.as_str(), entity.id))
+                .collect();
+            if language == "unknown" {
+                assert!(!symbols.contains_key("Update"));
+                continue;
+            }
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .all(|entity| entity.language == language)
+            );
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([symbols["Update"]]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let mut spans = Vec::new();
+            for edge in relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+            {
+                assert_eq!(edge.symbol, symbols["value"]);
+                for reference in &edge.source_refs {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, b"value");
+                    spans.push(usize::try_from(reference.span().start_byte()).unwrap());
+                }
+            }
+            spans.sort_unstable();
+            assert_eq!(
+                spans,
+                [
+                    source.find("value =").unwrap(),
+                    source.find("value +").unwrap()
                 ]
             );
         }

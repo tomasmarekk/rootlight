@@ -28,6 +28,149 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn visual_basic_classic_preserves_structure_and_dialect_uncertainty() {
+    let case = LanguageCase {
+        name: "visual-basic-classic",
+        ..VBA
+    };
+    let source = "Attribute VB_Name = \"Meter\"\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value + 1\nEnd Function\n";
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(case, source.as_bytes());
+    let budget = limits();
+    let result = analyze(
+        &analyzer(&provider, case),
+        &request(&fixture.snapshot, &fixture.source, case, &budget),
+        &ExtensionSupport::default(),
+    );
+    let document = result.document();
+    validate_ir_document(document, budget.ir(), &ExtensionSupport::default()).unwrap();
+    for name in ["Meter", "Measure", "value"] {
+        assert!(
+            document.entities.iter().any(|entity| {
+                entity.canonical_name == name && entity.language == "visual-basic-classic"
+            }),
+            "missing {name}"
+        );
+    }
+    let start = u64::try_from(source.find("value +").unwrap()).unwrap();
+    let value = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "value")
+        .unwrap();
+    assert!(document.occurrences.iter().any(|site| {
+        site.source.span().start_byte() == start
+            && site.target == OccurrenceTarget::Resolved { symbol: value.id }
+    }));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.detail == "visual-basic-dialect-unproven"
+            && gap.source.span().start_byte() == 0
+            && gap.source.span().end_byte() == u64::try_from(source.len()).unwrap()
+    }));
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn visual_basic_classic_preserves_class_accessor_and_instance_identity() {
+    let case = LanguageCase {
+        name: "visual-basic-classic",
+        ..VBA
+    };
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate stored As Variant\nPublic Property Get Item() As Variant\nItem = stored\nEnd Property\nPublic Property Let Item(ByVal value As Variant)\nstored = value\nEnd Property\nSub Run(ByVal target As Variant)\nSet target = Me\nEnd Sub\n";
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(case, source.as_bytes());
+    let budget = limits();
+    let result = analyze(
+        &analyzer(&provider, case),
+        &request(&fixture.snapshot, &fixture.source, case, &budget),
+        &ExtensionSupport::default(),
+    );
+    let document = result.document();
+    validate_ir_document(document, budget.ir(), &ExtensionSupport::default()).unwrap();
+    let class = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Holder")
+        .unwrap();
+    let accessors: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Property && entity.canonical_name == "Item")
+        .collect();
+    assert_eq!(accessors.len(), 2);
+    assert_ne!(accessors[0].id, accessors[1].id);
+    assert!(
+        document
+            .entities
+            .iter()
+            .all(|entity| entity.language == case.name)
+    );
+    let start = u64::try_from(source.find("Me").unwrap()).unwrap();
+    assert!(document.occurrences.iter().any(|site| {
+        site.source.span().start_byte() == start
+            && site.source.span().end_byte() == start + 2
+            && site.target == OccurrenceTarget::Resolved { symbol: class.id }
+    }));
+}
+
+#[test]
+fn visual_basic_classic_partial_analysis_scopes_dialect_uncertainty() {
+    let case = LanguageCase {
+        name: "visual-basic-classic",
+        ..VBA
+    };
+    let body = "Sub Run()\nEnd Sub\n";
+    let source = format!("excluded prefix\n{body}excluded suffix\n");
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(case, source.as_bytes());
+    let budget = limits();
+    let start = u64::try_from(source.find(body).unwrap()).unwrap();
+    let span = SourceSpan::new(
+        fixture.source.span().file(),
+        start,
+        start + u64::try_from(body.len()).unwrap(),
+    )
+    .unwrap();
+    let request = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(case),
+        EncodingId::utf8(),
+        vec![rootlight_adapter_sdk::IncludedRange::new(
+            span,
+            language(case),
+        )],
+        AnalysisTier::TierD,
+        build_context(),
+        &budget,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let result = analyze(
+        &analyzer(&provider, case),
+        &request,
+        &ExtensionSupport::default(),
+    );
+    let document = result.document();
+    validate_ir_document(document, budget.ir(), &ExtensionSupport::default()).unwrap();
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "visual-basic-dialect-unproven")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].source.span(), span);
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| { entity.language == case.name && entity.canonical_name == "Run" })
+    );
+}
+
+#[test]
 fn vba_instance_expressions_reference_the_source_class() {
     for statement in [
         "Set value = mE",
