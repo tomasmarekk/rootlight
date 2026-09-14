@@ -95,7 +95,8 @@ impl ResolutionLimits {
 /// Deterministic resolver work estimate for one normalized document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionWorkEstimate {
-    /// Occurrence and same-name candidate inspections required by resolution.
+    /// Project evidence, occurrence and candidate work required by resolution.
+    /// This is a lower bound when bounded project preparation stops early.
     pub required: usize,
     /// Configured operation-wide ceiling.
     pub limit: usize,
@@ -249,6 +250,10 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// A native receiver's project-owned declared type selects one accessible member.
+    ClassicProjectMember,
+    /// Declarative classic BASIC project membership selects one native class type.
+    ClassicProjectType,
     /// Native static import or call context selects one member or namespace declaration.
     GroovyStaticImport,
     /// Native fully qualified Groovy parent type with source-owned lexical context.
@@ -269,6 +274,8 @@ pub enum ResolutionRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionSignal {
+    /// Exact source membership isolates a native declaration from other projects.
+    NativeProjectMembership,
     /// Native static-import evidence identifies a namespace or one authored static method.
     NativeStaticImport,
     /// A native qualified header selects an exact package/type declaration path.
@@ -487,6 +494,9 @@ pub struct AppliedResolution {
 /// Semantic resolution failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
+    /// Supplied classic BASIC project bytes differ from indexed file identity.
+    #[error("classic project source identity differs from the indexed generation")]
+    ClassicSourceIdentity,
     /// The normalized input failed validation.
     #[error("resolver input document is invalid")]
     InvalidDocument(#[source] IrDocumentValidationError),
@@ -496,10 +506,10 @@ pub enum ResolutionError {
     /// A bounded collection length could not be represented in the IR count domain.
     #[error("resolver result count is not representable")]
     CountOverflow,
-    /// Resolution exhausted its operation-wide occurrence and candidate work.
+    /// Resolution exhausted its operation-wide project, occurrence and candidate work.
     #[error("resolver work exceeds {maximum} units")]
     WorkLimit {
-        /// Maximum occurrence and candidate inspections allowed.
+        /// Maximum project evidence, occurrence and candidate work allowed.
         maximum: usize,
     },
     /// An internal score escaped the documented confidence range.

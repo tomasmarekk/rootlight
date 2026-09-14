@@ -213,7 +213,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/143";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/33";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -7923,10 +7923,28 @@ impl FirstSliceService {
             u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
         let structural_artifacts = structural_entries.finish(cancellation)?;
         let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
-        let document = apply_bounded_resolution(
+        let classic_sources = if document.files.iter().any(|file| {
+            file.path
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
+        }) {
+            retained_sources
+                .iter()
+                .map(|source| {
+                    rootlight_resolve::ClassicProjectSource::new(
+                        source.snapshot.file(),
+                        source.snapshot.content(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let document = apply_bounded_resolution_with_classic_sources(
             document,
             resolution_limits,
             ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
+            &classic_sources,
             cancellation,
         )?;
         let normalized_facts = normalized_record_count(&document)?;
@@ -19622,15 +19640,26 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
     }
 }
 
+#[cfg(test)]
 fn apply_bounded_resolution(
     document: NormalizedIrDocument,
     limits: ResolutionLimits,
     context: ResolverFactContext,
     cancellation: &Cancellation,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
+    apply_bounded_resolution_with_classic_sources(document, limits, context, &[], cancellation)
+}
+
+fn apply_bounded_resolution_with_classic_sources(
+    document: NormalizedIrDocument,
+    limits: ResolutionLimits,
+    context: ResolverFactContext,
+    sources: &[rootlight_resolve::ClassicProjectSource<'_>],
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
     let engine = ResolutionEngine::new(limits);
     let (mut document, estimate) = engine
-        .apply_document_bounded(document, context, cancellation)
+        .apply_document_bounded_with_classic_sources(document, context, sources, cancellation)
         .map_err(|error| map_resolution_error(error, cancellation))?;
     if !estimate.fits() {
         append_resolution_work_bounded_diagnostic(
@@ -19676,7 +19705,7 @@ fn append_resolution_work_bounded_diagnostic(
         generation: document.generation,
         code: "resolution-work-bounded".to_owned(),
         message: format!(
-            "resolution required {required} work units above the configured limit {limit}"
+            "resolution required at least {required} work units above the configured limit {limit}"
         ),
         severity: DiagnosticSeverity::Warning,
         source: None,
@@ -20892,7 +20921,7 @@ mod tests {
         assert!(bounded.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "resolution-work-bounded"
                 && diagnostic.message
-                    == "resolution required 4 work units above the configured limit 3"
+                    == "resolution required at least 4 work units above the configured limit 3"
         }));
     }
 
@@ -32836,6 +32865,625 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn classic_project_type_respects_membership_after_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        for (path, source) in [
+            (
+                "a/project.vbp",
+                "Type=OleDll\nClass=Worker; Worker.cls\nModule=Client; Client.bas\nName=\"PrimaryProject\"\n",
+            ),
+            (
+                "a/Worker.cls",
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPublic Sub Apply()\nEnd Sub\n",
+            ),
+            (
+                "a/Client.bas",
+                "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Worker)\nvalue.Apply\nEnd Sub\n",
+            ),
+            (
+                "b/project.vbp",
+                "Type=OleDll\nClass=Worker; Worker.cls\nName=\"OtherProject\"\n",
+            ),
+            (
+                "b/Worker.cls",
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPrivate Sub Apply()\nEnd Sub\n",
+            ),
+        ] {
+            let file = fixture.path().join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, source).unwrap();
+        }
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(
+            receipt,
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+        );
+        drop(service);
+        let service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "a/Worker.cls")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Class
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == file.id)
+            })
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.direct_type_identifier.reference")
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{:#?}",
+            document.entities
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::UsesType
+                    && relation.object == RelationEndpoint::Entity(target.id)
+                    && relation.evidence.source.as_ref() == Some(&site.source))
+        );
+        let member = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.member.reference")
+            .unwrap();
+        let project_proof = document
+            .provenance
+            .iter()
+            .filter(|record| record.rule.as_deref() == Some("classic-project-membership-v1.leaf"))
+            .collect::<Vec<_>>();
+        assert_eq!(project_proof.len(), 1);
+        assert_eq!(project_proof[0].input_sources.len(), 3);
+        for resolved in [site, member] {
+            let proof = document
+                .provenance
+                .iter()
+                .find(|record| record.id == resolved.provenance)
+                .unwrap();
+            assert!(
+                proof
+                    .derivation_parents
+                    .contains(&rootlight_ir::FactRef::Fact(project_proof[0].id))
+            );
+            assert!(proof.input_sources.len() <= 3);
+        }
+        let method = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "Apply"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == file.id)
+            })
+            .unwrap();
+        assert_eq!(method.visibility, rootlight_ir::EntityVisibility::Public);
+        assert_eq!(method.kind, EntityKind::Method);
+        let value = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "value")
+            .unwrap();
+        assert_eq!(value.kind, EntityKind::Parameter);
+        assert_eq!(site.enclosing, Some(value.id));
+        let receiver = document
+            .occurrences
+            .iter()
+            .find(|candidate| {
+                candidate.syntax_kind == "vba.value_identifier.reference"
+                    && candidate.source.span().start_byte() == member.source.span().start_byte()
+            })
+            .unwrap();
+        assert_eq!(receiver.role, OccurrenceRole::Reference);
+        assert_eq!(
+            receiver.target,
+            rootlight_ir::OccurrenceTarget::Resolved { symbol: value.id }
+        );
+        assert_eq!(
+            member.target,
+            OccurrenceTarget::Resolved { symbol: method.id },
+            "types and members: {:#?}; entities: {:#?}",
+            document
+                .occurrences
+                .iter()
+                .map(|site| (
+                    &site.syntax_kind,
+                    site.enclosing,
+                    site.source.span(),
+                    &site.target
+                ))
+                .collect::<Vec<_>>(),
+            document
+                .entities
+                .iter()
+                .map(|e| (e.id, &e.canonical_name, e.container, &e.evidence.source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn classic_project_bindings_follow_access_and_membership_changes() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Worker)\nvalue.Apply\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        let mut previous = None;
+        for (access, member, expected_type, expected_member) in [
+            ("Public", "Module=Client; Client.bas\n", true, true),
+            ("Private", "Module=Client; Client.bas\n", true, false),
+            ("Friend", "Module=Client; Client.bas\n", true, true),
+            ("Public", "", false, false),
+            ("Public", "Module=Client; Client.bas\n", true, true),
+            ("Public", "Module=WrongName; Client.bas\n", false, false),
+        ] {
+            let class = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\n{access} Sub Apply()\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Worker.cls"), &class).unwrap();
+            let manifest =
+                format!("Type=OleDll\nName=\"Primary\"\nClass=Worker; Worker.cls\n{member}");
+            fs::write(fixture.path().join("project.vbp"), manifest).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            for (syntax, expected) in [
+                ("vba.direct_type_identifier.reference", expected_type),
+                ("vba.member.reference", expected_member),
+            ] {
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == syntax)
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    expected,
+                    "{access} {member} {syntax}"
+                );
+                let detail = if syntax == "vba.member.reference" {
+                    "vba-member-target-unavailable"
+                } else {
+                    "vba-type-target-unavailable"
+                };
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| { gap.detail == detail && gap.source == site.source }),
+                    !expected,
+                    "stale or missing gap: {access} {member} {syntax}"
+                );
+            }
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            let coverage = document
+                .coverage_records
+                .iter()
+                .find(|record| {
+                    record.scope == rootlight_ir::CoverageScope::File(file.id)
+                        && record.domain == rootlight_ir::FactDomain::Relations
+                })
+                .unwrap();
+            let remaining = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| {
+                    gap.source.span().file() == file.id
+                        && gap.domain == rootlight_ir::FactDomain::Relations
+                })
+                .count();
+            assert_eq!(coverage.skipped, u64::try_from(remaining).unwrap());
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            let relations = document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == file.id)
+                })
+                .count();
+            assert_eq!(coverage.indexed, u64::try_from(relations).unwrap());
+            for name in ["Worker", "Apply"] {
+                let located = service
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        8,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let symbol = located.data.hits.iter().find_map(|hit| hit.symbol).unwrap();
+                let explained = service
+                    .symbol_explain(receipt.generation, symbol, &deadline())
+                    .unwrap();
+                assert_eq!(explained.data.entity.canonical_name, name);
+                let source = explained.data.entity.evidence.source.unwrap();
+                assert_eq!(source.generation(), receipt.generation);
+                let read = service
+                    .source_read(receipt.generation, vec![source], &deadline())
+                    .unwrap();
+                assert!(!read.data.chunks[0].bytes.is_empty());
+            }
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, client.as_bytes());
+        }
+    }
+
+    #[test]
+    fn classic_project_work_limits_count_preparation() {
+        for project_count in [1, 32] {
+            let storage = durable_test_tempdir();
+            let fixture = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let manifest = b"Type=OleDll\nName=\"Primary\"\nClass=Worker; Worker.cls\n";
+            let class =
+                b"VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPublic Sub Apply()\nEnd Sub\n";
+            for index in 0..project_count {
+                fs::write(fixture.path().join(format!("project{index}.vbp")), manifest).unwrap();
+            }
+            fs::write(fixture.path().join("Worker.cls"), class).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let inputs: Vec<_> = document
+                .files
+                .iter()
+                .map(|file| {
+                    let bytes: &[u8] = if file.path.ends_with(".vbp") {
+                        manifest
+                    } else {
+                        class
+                    };
+                    rootlight_resolve::ClassicProjectSource::new(file.id, bytes)
+                })
+                .collect();
+            let context = ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED));
+            let limits = ResolutionLimits::with_work_limit(8, 1).unwrap();
+            let (bounded, estimate) = ResolutionEngine::new(limits)
+                .apply_document_bounded_with_classic_sources(
+                    document.clone(),
+                    context,
+                    &inputs,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                !estimate.fits(),
+                "manifest preparation must not bypass the work limit"
+            );
+            assert!(estimate.required > estimate.limit);
+            assert_eq!(&bounded, document);
+            let warned = apply_bounded_resolution_with_classic_sources(
+                document.clone(),
+                limits,
+                context,
+                &inputs,
+                &deadline(),
+            )
+            .unwrap();
+            assert!(
+                warned
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "resolution-work-bounded")
+            );
+            let (complete, estimate) = ResolutionEngine::default()
+                .apply_document_bounded_with_classic_sources(
+                    document.clone(),
+                    context,
+                    &inputs,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(estimate.fits());
+            assert!(estimate.required > 1);
+            assert_eq!(&complete, document);
+            for (limit, fits) in [(estimate.required, true), (estimate.required - 1, false)] {
+                let limits = ResolutionLimits::with_work_limit(8, limit).unwrap();
+                let (output, observed) = ResolutionEngine::new(limits)
+                    .apply_document_bounded_with_classic_sources(
+                        document.clone(),
+                        context,
+                        &inputs,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    observed.fits(),
+                    fits,
+                    "{project_count} projects, limit {limit}"
+                );
+                assert_eq!(&output, document);
+            }
+        }
+    }
+
+    #[test]
+    fn classic_project_rejects_ambiguous_context_and_nonobject_receivers() {
+        for (label, parameter, local, extra, access, overlaps, expected_type, expected_member) in [
+            (
+                "scalar",
+                "value As Worker",
+                "",
+                "",
+                "Public",
+                false,
+                true,
+                true,
+            ),
+            (
+                "array",
+                "value() As Worker",
+                "",
+                "",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+            (
+                "object",
+                "value As Object",
+                "",
+                "",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+            (
+                "variant",
+                "value As Variant",
+                "",
+                "",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+            (
+                "overlap",
+                "value As Worker",
+                "",
+                "",
+                "Public",
+                true,
+                false,
+                false,
+            ),
+            (
+                "missing",
+                "value As Worker",
+                "",
+                "Module=Missing; Missing.bas\n",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+            (
+                "default-access",
+                "value As Worker",
+                "",
+                "",
+                "",
+                false,
+                true,
+                false,
+            ),
+            (
+                "local-type",
+                "value As Worker",
+                "Private Type Worker\nApply As Long\nEnd Type\n",
+                "",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+            (
+                "project-type",
+                "value As Worker",
+                "",
+                "Module=Types; Types.bas\n",
+                "Public",
+                false,
+                false,
+                false,
+            ),
+        ] {
+            let storage = durable_test_tempdir();
+            let fixture = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let manifest = format!(
+                "Type=OleDll\nName=\"Primary\"\nClass=Worker; Worker.cls\nModule=Client; Client.bas\n{extra}"
+            );
+            fs::write(fixture.path().join("project.vbp"), &manifest).unwrap();
+            if overlaps {
+                fs::write(fixture.path().join("other.vbp"), &manifest).unwrap();
+            }
+            fs::write(
+                fixture.path().join("Types.bas"),
+                "Attribute VB_Name = \"Types\"\nPublic Type Worker\nApply As Long\nEnd Type\n",
+            )
+            .unwrap();
+            fs::write(fixture.path().join("Worker.cls"), format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\n{access} Sub Apply()\nEnd Sub\n")).unwrap();
+            fs::write(fixture.path().join("Client.bas"), format!("Attribute VB_Name = \"Client\"\n{local}Public Sub Run({parameter})\nvalue.Apply\nEnd Sub\n")).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let class = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Class)
+                .unwrap();
+            let method = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Method)
+                .unwrap();
+            let type_target = document.occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::TypeUse
+                    && site.target == OccurrenceTarget::Resolved { symbol: class.id }
+            });
+            let member_target = document.occurrences.iter().any(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.target == OccurrenceTarget::Resolved { symbol: method.id }
+            });
+            assert_eq!(type_target, expected_type, "{label}: class target");
+            assert_eq!(member_target, expected_member, "{label}: member target");
+            let engine = rootlight_resolve::ResolutionEngine::default();
+            let context = ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED));
+            let class_file = class.evidence.source.as_ref().unwrap().span().file();
+            let class_bytes = fs::read(fixture.path().join("Worker.cls")).unwrap();
+            let mut tampered = class_bytes.clone();
+            tampered[0] ^= 1;
+            for input in [
+                rootlight_resolve::ClassicProjectSource::new(
+                    class.evidence.source.as_ref().unwrap().span().file(),
+                    b"altered",
+                ),
+                rootlight_resolve::ClassicProjectSource::new(
+                    rootlight_ids::FileId::from_bytes([0; 20]),
+                    b"unknown",
+                ),
+                rootlight_resolve::ClassicProjectSource::new(class_file, &tampered),
+            ] {
+                assert!(
+                    matches!(
+                        engine.apply_document_bounded_with_classic_sources(
+                            document.clone(),
+                            context,
+                            &[input],
+                            &deadline()
+                        ),
+                        Err(rootlight_resolve::ResolutionError::ClassicSourceIdentity)
+                    ),
+                    "{label}"
+                );
+            }
+            let duplicate = rootlight_resolve::ClassicProjectSource::new(class_file, &class_bytes);
+            assert!(
+                matches!(
+                    engine.apply_document_bounded_with_classic_sources(
+                        document.clone(),
+                        context,
+                        &[duplicate, duplicate],
+                        &deadline()
+                    ),
+                    Err(rootlight_resolve::ResolutionError::ClassicSourceIdentity)
+                ),
+                "{label}: duplicate input"
+            );
+            if overlaps {
+                let retained: Vec<_> = document
+                    .files
+                    .iter()
+                    .filter(|file| file.path != "other.vbp")
+                    .map(|file| (file.id, fs::read(fixture.path().join(&file.path)).unwrap()))
+                    .collect();
+                let inputs: Vec<_> = retained
+                    .iter()
+                    .map(|(file, bytes)| rootlight_resolve::ClassicProjectSource::new(*file, bytes))
+                    .collect();
+                let (output, estimate) = engine
+                    .apply_document_bounded_with_classic_sources(
+                        document.clone(),
+                        context,
+                        &inputs,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(estimate.fits());
+                assert_eq!(
+                    &output, document,
+                    "missing manifest bytes cannot erase a competing project"
+                );
+            }
         }
     }
 

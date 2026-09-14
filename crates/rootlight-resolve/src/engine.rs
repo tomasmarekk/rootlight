@@ -196,6 +196,9 @@ impl ResolutionEngine {
         work: &mut ResolutionWorkBudget,
         cancellation: &Cancellation,
     ) -> Result<ResolutionDecision, ResolutionError> {
+        if let Some(decision) = index.classic.resolve(occurrence) {
+            return Ok(decision);
+        }
         if let Some(decision) = index.perl.resolve(occurrence) {
             return Ok(decision);
         }
@@ -482,7 +485,7 @@ impl ResolutionWorkBudget {
         self.consume_many(1)
     }
 
-    fn consume_many(&mut self, amount: usize) -> Result<(), ResolutionError> {
+    pub(crate) fn consume_many(&mut self, amount: usize) -> Result<(), ResolutionError> {
         self.remaining = self
             .remaining
             .checked_sub(amount)
@@ -490,6 +493,14 @@ impl ResolutionWorkBudget {
                 maximum: self.maximum,
             })?;
         Ok(())
+    }
+
+    pub(crate) const fn consumed(&self) -> usize {
+        self.maximum - self.remaining
+    }
+
+    pub(crate) const fn remaining(&self) -> usize {
+        self.remaining
     }
 }
 
@@ -500,6 +511,7 @@ impl Default for ResolutionEngine {
 }
 
 pub(crate) struct CandidateIndex<'a> {
+    pub(crate) classic: crate::classic::ClassicIndex<'a>,
     pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
@@ -570,6 +582,7 @@ impl<'a> CandidateIndex<'a> {
             entries.dedup_by_key(|entry| entry.entity.id);
         }
         Ok(Self {
+            classic: crate::classic::ClassicIndex::default(),
             groovy: crate::groovy::GroovyIndex::build(
                 &files,
                 &entities,
@@ -611,7 +624,9 @@ impl<'a> CandidateIndex<'a> {
                 .ok_or(ResolutionError::CountOverflow);
         }
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            && (self.perl.eligible(occurrence) || self.groovy.proof(occurrence).is_some())
+            && (self.perl.eligible(occurrence)
+                || self.groovy.proof(occurrence).is_some()
+                || self.classic.proof(occurrence).is_some())
         {
             return Ok(Some(1));
         }

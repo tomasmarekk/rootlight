@@ -80,13 +80,12 @@ impl ResolutionEngine {
                 .get(&decision.occurrence)
                 .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
             let provenance = build_provenance(
-                document.repository,
-                document.generation,
                 &lookup,
                 &document.occurrences[index],
                 decision,
                 &producer,
                 context,
+                None,
             )?;
             let provenance_id = provenance.id;
             if known_provenance.insert(provenance_id) {
@@ -148,7 +147,7 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<NormalizedIrDocument, ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, false)
+        self.apply_document_with_work_selection(document, context, cancellation, false, &[])
             .map(|(document, _)| document)
     }
 
@@ -169,7 +168,25 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, true)
+        self.apply_document_with_work_selection(document, context, cancellation, true, &[])
+    }
+
+    /// Resolves native facts with exact retained classic BASIC project sources.
+    ///
+    /// Membership is read only from indexed declarative project files; source
+    /// bytes must match the generation. Missing context never enables name scoring.
+    ///
+    /// # Errors
+    /// Returns [`ResolutionError`] for invalid source identity or the same bounded
+    /// validation, application and cancellation failures as [`Self::apply_document_bounded`].
+    pub fn apply_document_bounded_with_classic_sources(
+        &self,
+        document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        sources: &[crate::ClassicProjectSource<'_>],
+        cancellation: &Cancellation,
+    ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
+        self.apply_document_with_work_selection(document, context, cancellation, true, sources)
     }
 
     fn apply_document_with_work_selection(
@@ -178,6 +195,7 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
         bounded: bool,
+        sources: &[crate::ClassicProjectSource<'_>],
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
         cancellation.check()?;
         let ir_limits = IrLimits::default();
@@ -186,7 +204,7 @@ impl ResolutionEngine {
         self.invalidate_perl_package_targets(&mut document, context, cancellation)?;
         let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
 
-        let lookup = CandidateIndex::build(
+        let mut lookup = CandidateIndex::build(
             &document.files,
             &document.entities,
             &document.provenance,
@@ -195,7 +213,35 @@ impl ResolutionEngine {
             &document.occurrences,
             cancellation,
         )?;
-        let mut required = 0_usize;
+        let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        lookup.classic = match crate::classic::ClassicIndex::build(
+            &lookup,
+            &document.coverage_records,
+            &document.occurrences,
+            sources,
+            cancellation,
+            &mut work,
+        ) {
+            Ok(index) => index,
+            Err(ResolutionError::WorkLimit { maximum }) if bounded => {
+                // Partial membership cannot establish uniqueness. Preserve the
+                // input facts and let the host expose bounded semantic coverage.
+                drop(lookup);
+                let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
+                    .map_err(ResolutionError::InvalidDocument)?;
+                return Ok((
+                    document,
+                    crate::ResolutionWorkEstimate {
+                        required: maximum
+                            .checked_add(1)
+                            .ok_or(ResolutionError::CountOverflow)?,
+                        limit: maximum,
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let mut required = work.consumed();
         let mut sites = Vec::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
@@ -215,7 +261,7 @@ impl ResolutionEngine {
             None
         } else if bounded {
             sites.sort_unstable();
-            let mut remaining = estimate.limit;
+            let mut remaining = work.remaining();
             let mut selected = BTreeSet::new();
             for (site_work, occurrence) in sites {
                 if site_work > remaining {
@@ -230,8 +276,6 @@ impl ResolutionEngine {
                 maximum: estimate.limit,
             });
         };
-        let repository = document.repository;
-        let generation = document.generation;
         let producer = resolver_producer(self.limits, &self.policy)?;
         let mut known_provenance = document
             .provenance
@@ -240,7 +284,7 @@ impl ResolutionEngine {
             .collect::<BTreeSet<_>>();
         let mut new_provenance = Vec::new();
         let mut occurrence_remap = BTreeMap::new();
-        let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        let mut project_roots = BTreeMap::new();
 
         for occurrence in &mut document.occurrences {
             cancellation.check()?;
@@ -258,8 +302,50 @@ impl ResolutionEngine {
             if matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }) {
                 continue;
             }
+            let project_root = if let Some(proof) = lookup.classic.proof(occurrence) {
+                let manifest = proof.context.manifest;
+                if let Some(root) = project_roots.get(&manifest) {
+                    Some(*root)
+                } else {
+                    let file = lookup
+                        .files
+                        .get(&manifest)
+                        .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+                    let parent = lookup
+                        .provenance
+                        .get(&file.provenance)
+                        .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+                    let mut template = (**parent).clone();
+                    template.producer_kind = ProducerKind::Rule;
+                    template.producer = producer.clone();
+                    template.binary_digest = context.binary_digest();
+                    template.frontend_version = Some(RESOLVER_PROVIDER_VERSION.to_owned());
+                    let root = append_shared_provenance(
+                        ProvenanceTree {
+                            sources: &proof.context.sources,
+                            facts: &proof.context.facts,
+                            rule: "classic-project-membership-v1",
+                        },
+                        template,
+                        &ir_limits,
+                        &mut output_budget,
+                        &mut known_provenance,
+                        &mut new_provenance,
+                        cancellation,
+                    )?;
+                    project_roots.insert(manifest, root);
+                    Some(root)
+                }
+            } else {
+                None
+            };
             let provenance = build_provenance(
-                repository, generation, &lookup, occurrence, &decision, &producer, context,
+                &lookup,
+                occurrence,
+                &decision,
+                &producer,
+                context,
+                project_root,
             )?;
             let provenance_id = provenance.id;
             if known_provenance.insert(provenance_id) {
@@ -292,6 +378,7 @@ impl ResolutionEngine {
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
+        reconcile_classic_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
         Ok((document, estimate))
@@ -452,6 +539,151 @@ impl ResolutionEngine {
             .map_err(ResolutionError::InvalidDocument)?;
         Ok(())
     }
+}
+
+fn reconcile_classic_target_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    use rootlight_ir::{CoverageScope, CoverageStatus, FactDomain, SkippedRegionReason};
+
+    let mut producers = BTreeMap::new();
+    for record in &document.provenance {
+        cancellation.check()?;
+        let selection = match record.rule.as_deref() {
+            Some("classic-project-type-v1.indexed_snapshot") => (
+                "vba.direct_type_identifier.reference",
+                "vba-type-target-unavailable",
+            ),
+            Some("classic-project-member-v1.indexed_snapshot") => {
+                ("vba.member.reference", "vba-member-target-unavailable")
+            }
+            _ => continue,
+        };
+        producers.insert(record.id, (selection, record));
+    }
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let files: BTreeMap<_, _> = document.files.iter().map(|file| (file.id, file)).collect();
+    let mut resolved = BTreeMap::new();
+    for site in &document.occurrences {
+        cancellation.check()?;
+        if let Some(((syntax, detail), _)) = producers.get(&site.provenance)
+            && site.syntax_kind == *syntax
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+        {
+            resolved.insert((site.source.clone(), *detail), site.provenance);
+        }
+    }
+    let mut removed = BTreeMap::new();
+    let mut native_counts = BTreeMap::<_, u64>::new();
+    let mut recovered = BTreeMap::<_, (u64, BTreeSet<FactRef>)>::new();
+    for gap in &document.skipped_regions {
+        cancellation.check()?;
+        let Some(file) = files.get(&gap.source.span().file()) else {
+            continue;
+        };
+        if gap.domain != FactDomain::Relations || gap.provenance != file.provenance {
+            continue;
+        }
+        let count = native_counts.entry(file.id).or_default();
+        *count = count.checked_add(1).ok_or(ResolutionError::CountOverflow)?;
+        if gap.reason != SkippedRegionReason::UnsupportedConstruct {
+            continue;
+        }
+        if let Some(proof) = resolved.get(&(gap.source.clone(), gap.detail.as_str())) {
+            removed.insert(gap.id, gap.id);
+            let (count, proofs) = recovered.entry(file.id).or_default();
+            *count = count.checked_add(1).ok_or(ResolutionError::CountOverflow)?;
+            proofs.insert(FactRef::Fact(*proof));
+        }
+    }
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let limits = IrLimits::default();
+    let mut budget = OutputRecordBudget::from_document(document, &limits);
+    let mut known = document.provenance.iter().map(|p| p.id).collect();
+    let mut added = Vec::new();
+    let mut updated_files = BTreeSet::new();
+    for coverage in &mut document.coverage_records {
+        cancellation.check()?;
+        let CoverageScope::File(file_id) = coverage.scope else {
+            continue;
+        };
+        if coverage.domain != FactDomain::Relations {
+            continue;
+        }
+        let Some((count, proofs)) = recovered.get(&file_id) else {
+            continue;
+        };
+        let file = files
+            .get(&file_id)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        if coverage.provenance != file.provenance
+            || coverage.evidence.source != file.evidence.source
+            || coverage.status != CoverageStatus::Bounded
+            || native_counts.get(&file_id) != Some(&coverage.skipped)
+            || !updated_files.insert(file_id)
+        {
+            return Err(ResolutionError::UnsupportedIdentityRemap);
+        }
+        let proof = proofs
+            .iter()
+            .find_map(|proof| match proof {
+                FactRef::Fact(id) => producers.get(id).map(|(_, record)| *record),
+                _ => None,
+            })
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        let mut facts = proofs.clone();
+        facts.insert(FactRef::Fact(file.provenance));
+        let facts: Vec<_> = facts.into_iter().collect();
+        let sources: Vec<_> = file.evidence.source.iter().cloned().collect();
+        let root = append_shared_provenance(
+            ProvenanceTree {
+                sources: &sources,
+                facts: &facts,
+                rule: "classic-project-coverage-v1",
+            },
+            proof.clone(),
+            &limits,
+            &mut budget,
+            &mut known,
+            &mut added,
+            cancellation,
+        )?;
+        let old = coverage.id;
+        // One native target gap represents one absent role-specific relation.
+        // Recover that unit without changing the discovered-unit denominator.
+        coverage.skipped = coverage
+            .skipped
+            .checked_sub(*count)
+            .ok_or(ResolutionError::CountOverflow)?;
+        coverage.indexed = coverage
+            .indexed
+            .checked_add(*count)
+            .ok_or(ResolutionError::CountOverflow)?;
+        if coverage.skipped == 0 {
+            coverage.status = CoverageStatus::Complete;
+        }
+        coverage.provenance = root;
+        coverage.evidence.derivation.push(FactRef::Fact(root));
+        coverage.evidence.derivation.sort_unstable();
+        coverage.evidence.derivation.dedup();
+        coverage.id = rootlight_ir::derive_coverage_record_id(coverage)
+            .map_err(ResolutionError::FactIdentity)?;
+        removed.insert(old, coverage.id);
+    }
+    if updated_files.len() != recovered.len() {
+        return Err(ResolutionError::UnsupportedIdentityRemap);
+    }
+    document.provenance.extend(added);
+    ensure_relation_remap_is_safe(document, &removed)?;
+    document
+        .skipped_regions
+        .retain(|gap| !removed.contains_key(&gap.id));
+    Ok(())
 }
 
 fn reconcile_perl_target_gaps(
@@ -763,14 +995,104 @@ fn resolver_producer(
     .map_err(ResolutionError::InvalidProducer)
 }
 
+struct ProvenanceTree<'a> {
+    sources: &'a [SourceRef],
+    facts: &'a [FactRef],
+    rule: &'static str,
+}
+
+fn append_shared_provenance(
+    evidence: ProvenanceTree<'_>,
+    mut template: ProvenanceRecord,
+    limits: &IrLimits,
+    budget: &mut OutputRecordBudget,
+    known: &mut BTreeSet<FactId>,
+    output: &mut Vec<ProvenanceRecord>,
+    cancellation: &Cancellation,
+) -> Result<FactId, ResolutionError> {
+    let width = limits.max_nested_items_per_record;
+    if width < 2 {
+        return Err(ResolutionError::InvalidDocument(
+            IrDocumentValidationError::CollectionLimit {
+                collection: "provenance.derivation_parents",
+                observed: 2,
+                limit: width,
+            },
+        ));
+    }
+    template.input_sources.clear();
+    template.evidence_sources.clear();
+    template.derivation_parents.clear();
+    template.rule = Some(format!("{}.leaf", evidence.rule));
+    let count = evidence
+        .sources
+        .len()
+        .max(evidence.facts.len())
+        .div_ceil(width);
+    let mut level = Vec::new();
+    for index in 0..count {
+        cancellation.check()?;
+        // The inventory is shared across all uses. Sharding retains the entire
+        // proof without raising IR limits or copying the inventory per reference.
+        let mut record = template.clone();
+        let start = index
+            .checked_mul(width)
+            .ok_or(ResolutionError::CountOverflow)?;
+        record.input_sources = evidence
+            .sources
+            .iter()
+            .skip(start)
+            .take(width)
+            .cloned()
+            .collect();
+        record.evidence_sources = record.input_sources.clone();
+        record.derivation_parents = evidence
+            .facts
+            .iter()
+            .skip(start)
+            .take(width)
+            .copied()
+            .collect();
+        record.id = derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
+        level.push(FactRef::Fact(record.id));
+        if known.insert(record.id) {
+            budget.reserve_provenance()?;
+            output.push(record);
+        }
+    }
+    template.rule = Some(format!("{}.branch", evidence.rule));
+    while level.len() > 1 {
+        cancellation.check()?;
+        level.sort_unstable();
+        level.dedup();
+        let mut next = Vec::new();
+        for chunk in level.chunks(width) {
+            cancellation.check()?;
+            let mut record = template.clone();
+            record.derivation_parents = chunk.to_vec();
+            record.id =
+                derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
+            next.push(FactRef::Fact(record.id));
+            if known.insert(record.id) {
+                budget.reserve_provenance()?;
+                output.push(record);
+            }
+        }
+        level = next;
+    }
+    match level.first() {
+        Some(FactRef::Fact(id)) => Ok(*id),
+        _ => Err(ResolutionError::UnsupportedIdentityRemap),
+    }
+}
+
 fn build_provenance(
-    repository: rootlight_ids::RepositoryId,
-    generation: rootlight_ids::GenerationId,
     lookup: &CandidateIndex<'_>,
     occurrence: &OccurrenceRecord,
     decision: &ResolutionDecision,
     producer: &ProducerIdentity,
     context: ResolverFactContext,
+    project_root: Option<FactId>,
 ) -> Result<ProvenanceRecord, ResolutionError> {
     // Candidate imports are selected again from immutable native evidence. Using
     // a prior resolver context here would nest its digest on every repeated pass.
@@ -792,6 +1114,23 @@ fn build_provenance(
     let mut derivation_parents = Vec::new();
     let mut context_digests = vec![parent.build_context.digest()];
     let mut tier = parent.tier;
+
+    if matches!(
+        decision.explanation.rule,
+        ResolutionRule::ClassicProjectType | ResolutionRule::ClassicProjectMember
+    ) {
+        let proof = lookup
+            .classic
+            .proof(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        derivation_parents.push(FactRef::Fact(
+            project_root.ok_or(ResolutionError::UnsupportedIdentityRemap)?,
+        ));
+        if let Some((owner, source)) = &proof.receiver {
+            derivation_parents.push(FactRef::Entity(owner.id));
+            sources.push(source.clone());
+        }
+    }
 
     for candidate in &decision.explanation.candidates {
         let entity = lookup
@@ -903,6 +1242,8 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
         ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",
         ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",
         ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
@@ -913,8 +1254,8 @@ fn build_provenance(
     };
     let mut record = ProvenanceRecord {
         id: FactId::from_bytes([0; 20]),
-        repository,
-        generation,
+        repository: occurrence.repository,
+        generation: occurrence.generation,
         producer_kind: ProducerKind::Rule,
         producer: producer.clone(),
         binary_digest: context.binary_digest(),
@@ -1268,6 +1609,148 @@ mod tests {
         OutputRecordBudget, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
         ResolutionOutcome, ResolutionRule, append_relation_specs, apply_target,
     };
+
+    #[test]
+    fn shared_provenance_shards_preserve_all_inputs_and_reuse_identity() {
+        use rootlight_ir::{
+            AnalysisTier, BuildContextIdentity, FactRef, IrLimits, NormalizedIrDocument,
+            ProducerIdentity, ProducerKind, ProvenanceRecord,
+        };
+        use std::collections::BTreeSet;
+
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let mut limits = IrLimits::default();
+        limits.max_nested_items_per_record = 2;
+        let sources: Vec<_> = (0..9_u8)
+            .map(|index| {
+                SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(FileId::from_bytes([index; 20]), 0, 1).unwrap(),
+                    content_hash(b"x"),
+                    None,
+                )
+            })
+            .collect();
+        let facts: Vec<_> = sources
+            .iter()
+            .map(|source| FactRef::File(source.span().file()))
+            .collect();
+        let template = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Rule,
+            producer: ProducerIdentity::new("rootlight-resolve", "1", content_hash(b"config"))
+                .unwrap(),
+            binary_digest: content_hash(b"binary"),
+            frontend_version: None,
+            language: "visual-basic-classic".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(b"context")),
+            input_sources: Vec::new(),
+            evidence_sources: Vec::new(),
+            derivation_parents: Vec::new(),
+            rule: None,
+        };
+        let document = NormalizedIrDocument::empty(repository, generation);
+        let mut budget = OutputRecordBudget::from_document(&document, &limits);
+        let mut known = BTreeSet::new();
+        let mut output = Vec::new();
+        let mut roots = Vec::new();
+        for _ in 0..2 {
+            roots.push(
+                super::append_shared_provenance(
+                    super::ProvenanceTree {
+                        sources: &sources,
+                        facts: &facts,
+                        rule: "classic-project-membership-v1",
+                    },
+                    template.clone(),
+                    &limits,
+                    &mut budget,
+                    &mut known,
+                    &mut output,
+                    &Cancellation::new(),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(roots[0], roots[1]);
+        assert_eq!(budget.provenance, output.len());
+        let records: std::collections::BTreeMap<_, _> = output.iter().map(|p| (p.id, p)).collect();
+        let mut pending = vec![roots[0]];
+        let mut visited = BTreeSet::new();
+        let mut recovered_sources = BTreeSet::new();
+        let mut recovered_facts = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            assert!(visited.insert(id));
+            let record = records[&id];
+            assert_eq!(
+                record.id,
+                rootlight_ir::derive_provenance_record_id(record).unwrap()
+            );
+            assert!(record.input_sources.len() <= 2);
+            assert!(record.evidence_sources.len() <= 2);
+            assert!(record.derivation_parents.len() <= 2);
+            recovered_sources.extend(record.input_sources.iter().cloned());
+            for parent in &record.derivation_parents {
+                if let FactRef::Fact(id) = parent {
+                    pending.push(*id);
+                } else {
+                    recovered_facts.insert(*parent);
+                }
+            }
+        }
+        assert_eq!(visited.len(), output.len());
+        assert_eq!(recovered_sources, sources.into_iter().collect());
+        assert_eq!(recovered_facts, facts.into_iter().collect());
+        let mut exhausted_limits = limits.clone();
+        exhausted_limits.max_provenance_records = 0;
+        let mut exhausted = OutputRecordBudget::from_document(&document, &exhausted_limits);
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut cancelled_output = Vec::new();
+        let error = super::append_shared_provenance(
+            super::ProvenanceTree {
+                sources: &[],
+                facts: &[FactRef::File(FileId::from_bytes([1; 20]))],
+                rule: "classic-project-membership-v1",
+            },
+            template.clone(),
+            &limits,
+            &mut budget,
+            &mut BTreeSet::new(),
+            &mut cancelled_output,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ResolutionError::Cancelled(_)));
+        assert!(cancelled_output.is_empty());
+        let error = super::append_shared_provenance(
+            super::ProvenanceTree {
+                sources: &[],
+                facts: &[FactRef::File(FileId::from_bytes([1; 20]))],
+                rule: "classic-project-membership-v1",
+            },
+            template,
+            &limits,
+            &mut exhausted,
+            &mut BTreeSet::new(),
+            &mut Vec::new(),
+            &Cancellation::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
+                collection: "provenance",
+                observed: 1,
+                limit: 0,
+            })
+        ));
+    }
 
     #[test]
     fn candidate_targets_are_canonical_before_identity_derivation() {

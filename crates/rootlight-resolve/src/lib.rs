@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod application;
+mod classic;
 mod engine;
 mod foreign;
 mod groovy;
@@ -13,6 +14,7 @@ mod model;
 mod perl;
 mod quality;
 
+pub use classic::ClassicProjectSource;
 pub use engine::ResolutionEngine;
 pub use foreign::{
     AppliedForeignLinks, ForeignLinkBatch, ForeignLinkDecision, ForeignLinkEngine,
