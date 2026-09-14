@@ -856,6 +856,14 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
+        if request.language().as_str() == "markdown" && is_classic_fence(fact) {
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "visual-basic-dialect-unproven".len(),
+                limits,
+            )?;
+        }
         if let Some((_, detail)) = source_coverage_gap(fact) {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, detail.len(), limits)?;
@@ -1142,6 +1150,7 @@ struct Lowering<'context, 'source> {
     parse_output: &'context ParseOutput,
     source_text: &'context str,
     full_source: &'context SourceRef,
+    classic_fences: Vec<SourceSpan>,
 }
 
 impl<'context, 'source> Lowering<'context, 'source> {
@@ -1158,10 +1167,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
             parse_output,
             source_text,
             full_source: request.source().source_ref(),
+            classic_fences: Vec::new(),
         })
     }
 
-    fn lower(self, cancellation: &Cancellation) -> Result<LoweredOutput, AdapterError> {
+    fn language_for_fact<'a>(&'a self, fact: &'a SyntaxFact) -> &'a str {
+        // The native capture vocabulary describes grammar syntax, not the
+        // declared dialect. Fence intervals retain provenance without rescanning bytes.
+        if !self.classic_fences.is_empty() && fact.syntax_kind().as_str().starts_with("vba.") {
+            let position = self
+                .classic_fences
+                .partition_point(|span| span.start_byte() <= fact.span().start_byte());
+            if let Some(index) = position.checked_sub(1)
+                && let Some(span) = self.classic_fences.get(index)
+                && fact.span().end_byte() <= span.end_byte()
+            {
+                return "visual-basic-classic";
+            }
+        }
+        language_for_fact(self.request, fact)
+    }
+
+    fn lower(mut self, cancellation: &Cancellation) -> Result<LoweredOutput, AdapterError> {
         let mut total_string_bytes = preflight_lowering_limits(
             self.request,
             self.parse_output,
@@ -1175,6 +1202,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             self.full_source,
             cancellation,
         )?;
+        if self.request.language().as_str() == "markdown" {
+            self.classic_fences = classic_fence_spans(self.parse_output.facts(), cancellation)?;
+        }
         let provenance = self.provenance()?;
         let provenance_id = provenance.id;
         let file = self.file(provenance_id)?;
@@ -1235,7 +1265,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut extension_bytes = 0_usize;
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
-        for span in classic_dialect_spans(self.request) {
+        for span in classic_dialect_spans(self.request).chain(self.classic_fences.iter().copied()) {
             cancellation.check()?;
             let region = skipped_region(
                 self.full_source,
@@ -1620,6 +1650,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "html.embedded_parse_error.signature"
                     | "astro.embedded_parse_error.signature"
                     | "markdown.code_error.signature"
+                    | "markdown.classic_code_error.signature"
                     | "markdown.inline_error.signature" => SkippedRegionReason::ParseError,
                     _ => SkippedRegionReason::UnsupportedConstruct,
                 };
@@ -1944,7 +1975,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|terminal| self.text_for_span(terminal.span()))
                     .transpose()?;
                 let resolution_text = structural_resolution_text(
-                    language_for_fact(self.request, fact),
+                    self.language_for_fact(fact),
                     fact,
                     text,
                     terminal_call_name,
@@ -1971,7 +2002,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     // source, but prevent name-only resolution from guessing a target.
                     occurrence.syntax_kind = format!(
                         "{}.unavailable_name.{}",
-                        language_for_fact(self.request, fact),
+                        self.language_for_fact(fact),
                         if role == OccurrenceRole::CallSite {
                             "call"
                         } else {
@@ -1987,7 +2018,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         SkippedRegionReason::UnsupportedConstruct,
                         &format!(
                             "{}-reference-name-unavailable",
-                            language_for_fact(self.request, fact)
+                            self.language_for_fact(fact)
                         ),
                         provenance_id,
                     )?;
@@ -2232,7 +2263,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     )?;
                     skipped.insert(region.id, region);
                 }
-                if language_for_fact(self.request, fact) == "yaml"
+                if self.language_for_fact(fact) == "yaml"
                     && fact.syntax_kind().as_str() == "yaml.alias.reference"
                 {
                     let target = (self.parse_output.report().coverage().status()
@@ -2600,7 +2631,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut signature_comments = Vec::new();
         for (index, fact) in ordered_facts.iter().enumerate() {
             check_periodically(index, cancellation)?;
-            if language_for_fact(self.request, fact) == "powershell"
+            if self.language_for_fact(fact) == "powershell"
                 && fact.kind() == SyntaxFactKind::Comment
             {
                 signature_comments.push(fact.span());
@@ -2748,7 +2779,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .as_ref()
                         .map(|header| header.digest)
                         .or_else(|| {
-                            (language_for_fact(self.request, fact) == "lua"
+                            (self.language_for_fact(fact) == "lua"
                                 && matches!(
                                     fact.syntax_kind().as_str(),
                                     "lua.file.scope"
@@ -2766,7 +2797,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
                 let written_scope_identity = if matches!(
-                    language_for_fact(self.request, fact),
+                    self.language_for_fact(fact),
                     "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
                 ) {
                     // Named MATLAB workspaces survive unrelated sibling insertion;
@@ -2782,7 +2813,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     let identity = written_source_identity(
-                        language_for_fact(self.request, fact),
+                        self.language_for_fact(fact),
                         parent_scope
                             .as_ref()
                             .and_then(|scope| scope.stable_identity),
@@ -2829,12 +2860,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        if language_for_fact(self.request, fact) == "dart" {
+                        if self.language_for_fact(fact) == "dart" {
                             "rootlight.dart-lexical-scope/1"
-                        } else if language_for_fact(self.request, fact) == "scala" {
+                        } else if self.language_for_fact(fact) == "scala" {
                             "rootlight.scala-lexical-scope/1"
                         } else if matches!(
-                            language_for_fact(self.request, fact),
+                            self.language_for_fact(fact),
                             "javascript" | "typescript"
                         ) {
                             "rootlight.ecmascript-lexical-scope/1"
@@ -2885,7 +2916,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings in other languages need a span-local ambiguity
                 // guard without making position part of their durable SymbolId.
                 let collision_guard = if fact.syntax_kind().as_str().starts_with("css.")
-                    || language_for_fact(self.request, fact) == "json"
+                    || self.language_for_fact(fact) == "json"
                 {
                     None
                 } else {
@@ -3001,7 +3032,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(std::borrow::Cow::Owned)
                 } else {
                     rootlight_adapter_sdk::structural_captured_name_for_fact(
-                        language_for_fact(self.request, definition),
+                        self.language_for_fact(definition),
                         definition,
                         text,
                         self.request.limits().ir().max_string_bytes,
@@ -3080,7 +3111,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "json.property",
                     position,
                 ))
-            } else if language_for_fact(self.request, fact) == "sql" && kind != EntityKind::Module {
+            } else if self.language_for_fact(fact) == "sql" && kind != EntityKind::Module {
                 // Source DDL is not a final live catalog. Separate repeated
                 // declarations and object categories without body/offset hashes.
                 let label = fact.syntax_kind().as_str();
@@ -3093,10 +3124,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
-            } else if matches!(
-                language_for_fact(self.request, fact),
-                "javascript" | "typescript"
-            ) && kind == EntityKind::Variable
+            } else if matches!(self.language_for_fact(fact), "javascript" | "typescript")
+                && kind == EntityKind::Variable
             {
                 // Written variables can share a name in disjoint unnamed blocks.
                 // Count only same-name declarations under their named owner so an
@@ -3137,7 +3166,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     position,
                 ))
             } else if matches!(
-                language_for_fact(self.request, fact),
+                self.language_for_fact(fact),
                 "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
             ) && kind != EntityKind::Module
             {
@@ -3150,7 +3179,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                 Some(written_source_identity(
-                    language_for_fact(self.request, fact),
+                    self.language_for_fact(fact),
                     parent_scope
                         .as_ref()
                         .and_then(|scope| scope.stable_identity),
@@ -3193,7 +3222,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .and_then(|scope| scope.stable_identity)
             };
             let (signature, signature_evidence, signature_span) =
-                if supports_signature(kind, language_for_fact(self.request, fact))
+                if supports_signature(kind, self.language_for_fact(fact))
                     && let Some(signature) = signature_capture
                 {
                     let text = self.text_for_span(signature.span())?;
@@ -3216,7 +3245,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let canonical = if needs_projection && projection.is_none() {
                         None
                     } else if kind == EntityKind::Constructor
-                        && language_for_fact(self.request, fact) == "dart"
+                        && self.language_for_fact(fact) == "dart"
                         && let Some(definition) = definition
                     {
                         rootlight_adapter_sdk::canonical_dart_constructor_signature(
@@ -3243,7 +3272,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 } else {
                     (String::new(), None, None)
                 };
-            let language = language_for_fact(self.request, fact).to_owned();
+            let language = self.language_for_fact(fact).to_owned();
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
@@ -4199,10 +4228,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "markdown.code_limit.signature" => {
             Some((FactDomain::Entities, "markdown-code-budget-unavailable"))
         }
-        "markdown.code_error.signature" => {
+        "markdown.code_error.signature" | "markdown.classic_code_error.signature" => {
             Some((FactDomain::Entities, "markdown-code-parse-unavailable"))
         }
-        "markdown.code_parsed.signature" => {
+        "markdown.code_parsed.signature" | "markdown.classic_code_parsed.signature" => {
             Some((FactDomain::Relations, "markdown-code-semantics-unavailable"))
         }
         "html.embedded_text.signature" => {
@@ -4923,6 +4952,41 @@ fn validate_fact_graph(
         }
     }
     Ok(())
+}
+
+fn classic_fence_spans(
+    facts: &[SyntaxFact],
+    cancellation: &Cancellation,
+) -> Result<Vec<SourceSpan>, AdapterError> {
+    let mut spans = Vec::new();
+    for fact in facts {
+        cancellation.check()?;
+        if is_classic_fence(fact) {
+            spans
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            spans.push(fact.span());
+        }
+    }
+    crate::runtime::sort_cancellable_by(&mut spans, cancellation, |left, right| {
+        left.start_byte().cmp(&right.start_byte())
+    })?;
+    for adjacent in spans.windows(2) {
+        cancellation.check()?;
+        if let [left, right] = adjacent
+            && left.end_byte() > right.start_byte()
+        {
+            return Err(provider_failure("markdown-language-fence-overlap"));
+        }
+    }
+    Ok(spans)
+}
+
+fn is_classic_fence(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "markdown.classic_code_parsed.signature" | "markdown.classic_code_error.signature"
+    )
 }
 
 fn classic_dialect_spans<'a>(

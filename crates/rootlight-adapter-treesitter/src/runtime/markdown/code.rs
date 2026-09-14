@@ -48,12 +48,17 @@ impl TreeSitterProvider {
             else {
                 continue;
             };
+            let classic = language.as_str() == "visual-basic-classic";
             let mut cursor = block.walk();
             let body = block
                 .named_children(&mut cursor)
                 .find(|node| node.kind() == "code_fence_content");
             let Some(body) = body else {
-                candidates[index].syntax = "markdown.code_parsed";
+                candidates[index].syntax = if classic {
+                    "markdown.classic_code_parsed"
+                } else {
+                    "markdown.code_parsed"
+                };
                 continue;
             };
             let remaining_nodes = request
@@ -142,7 +147,11 @@ impl TreeSitterProvider {
                     _ => CoverageStatus::Bounded,
                 };
                 candidates[index].syntax = if child.fully_traversed {
-                    "markdown.code_error"
+                    if classic {
+                        "markdown.classic_code_error"
+                    } else {
+                        "markdown.code_error"
+                    }
                 } else {
                     "markdown.code_limit"
                 };
@@ -151,7 +160,11 @@ impl TreeSitterProvider {
                     continue;
                 }
             } else {
-                candidates[index].syntax = "markdown.code_parsed";
+                candidates[index].syntax = if classic {
+                    "markdown.classic_code_parsed"
+                } else {
+                    "markdown.code_parsed"
+                };
             }
             let pack = self
                 .query_packs
@@ -252,12 +265,8 @@ fn fence_language(
             .descriptors()
             .iter()
             .find(|descriptor| {
-                // Shared BASIC captures retain their native VBA labels. The
-                // host cannot yet preserve the distinct family provenance.
-                !matches!(
-                    descriptor.language().as_str(),
-                    "markdown" | "visual-basic-classic"
-                ) && descriptor.language().as_str().as_bytes() == text
+                descriptor.language().as_str() != "markdown"
+                    && descriptor.language().as_str().as_bytes() == text
             })
             .map(|descriptor| descriptor.language().clone()));
     }

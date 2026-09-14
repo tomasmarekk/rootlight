@@ -1203,16 +1203,30 @@ fn markdown_classic_basic_remains_source_bound_without_inventing_a_dialect() {
         "~~~visual-basic-classic\nAttribute VB_Name = \"Meter\"\nSub Run()\nEnd Sub\n~~~\n";
     let result = output(source);
     let document = result.document();
+    for name in ["Meter", "Run"] {
+        assert!(
+            document.entities.iter().any(|entity| {
+                entity.language == "visual-basic-classic" && entity.canonical_name == name
+            }),
+            "missing {name}"
+        );
+    }
     assert!(
         !document
             .entities
             .iter()
-            .any(|entity| { matches!(entity.language.as_str(), "vba" | "visual-basic-classic") })
+            .any(|entity| entity.language == "vba")
+    );
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "markdown-embedded-analysis-unavailable")
     );
     let gap = document
         .skipped_regions
         .iter()
-        .find(|gap| gap.detail == "markdown-embedded-analysis-unavailable")
+        .find(|gap| gap.detail == "visual-basic-dialect-unproven")
         .unwrap();
     let start = usize::try_from(gap.source.span().start_byte()).unwrap();
     let end = usize::try_from(gap.source.span().end_byte()).unwrap();
@@ -1220,6 +1234,267 @@ fn markdown_classic_basic_remains_source_bound_without_inventing_a_dialect() {
     assert_ne!(
         result.report().coverage().status(),
         CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn markdown_classic_and_vba_examples_keep_separate_languages_and_bindings() {
+    let body =
+        "Attribute VB_Name = \"Meter\"\nSub Run(ByVal value As Long)\nvalue = value + 1\nEnd Sub\n";
+    let mut source = "# Examples λ\r\n\r\n".to_owned();
+    let mut spans = Vec::new();
+    for label in ["visual-basic-classic", "vba", "visual-basic-classic"]
+        .into_iter()
+        .cycle()
+        .take(40)
+    {
+        let start = source.len();
+        source.push_str(&format!(
+            "~~~{label}\r\n{}~~~\r\n\r\n",
+            body.replace('\n', "\r\n")
+        ));
+        spans.push((start, source.len(), label));
+    }
+    let result = output(&source);
+    let document = result.document();
+    let mut parameters = BTreeSet::new();
+    for (start, end, label) in spans {
+        let local = |span: SourceSpan| {
+            usize::try_from(span.start_byte()).unwrap() >= start
+                && usize::try_from(span.end_byte()).unwrap() <= end
+        };
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "value"
+                    && local(entity.evidence.source.as_ref().unwrap().span())
+            })
+            .unwrap();
+        assert_eq!(parameter.language, label);
+        parameters.insert(parameter.id);
+        let references: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && local(site.source.span())
+                    && site.syntactic_text_hash == content_hash(b"value")
+            })
+            .collect();
+        assert_eq!(references.len(), 2);
+        for site in references {
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                }
+            );
+            assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+        }
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .filter(|gap| {
+                    gap.detail == "visual-basic-dialect-unproven" && local(gap.source.span())
+                })
+                .count(),
+            usize::from(label == "visual-basic-classic")
+        );
+    }
+    assert_eq!(parameters.len(), 40);
+}
+
+#[test]
+fn markdown_classic_class_replay_preserves_quoted_host_ranges_and_instance_targets() {
+    let body = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nSub Run(ByVal target As Variant)\nSet target = Me\nEnd Sub\n";
+    let source = format!("~~~visual-basic-classic\n{body}~~~\n")
+        .lines()
+        .map(|line| format!("> {line}\r\n"))
+        .collect::<String>();
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let (result, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let document = result.document();
+    let class = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Holder")
+        .unwrap();
+    assert_eq!(class.language, "visual-basic-classic");
+    let start = u64::try_from(source.find("Me").unwrap()).unwrap();
+    let instance = document
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == start)
+        .unwrap();
+    assert_eq!(
+        instance.target,
+        OccurrenceTarget::Resolved { symbol: class.id }
+    );
+    assert_eq!(instance.source.span().end_byte(), start + 2);
+    assert_eq!(
+        instance.source.content_hash(),
+        content_hash(source.as_bytes())
+    );
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let (fresh, _) = analyzer
+        .analyze_and_capture(
+            &next,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(replay.document(), fresh.document());
+    assert_eq!(replay.report(), fresh.report());
+    for gap in replay
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "visual-basic-dialect-unproven")
+    {
+        assert_eq!(gap.source.generation(), changed.source.generation());
+    }
+}
+
+#[test]
+fn markdown_classic_parse_and_range_limits_keep_scoped_gaps() {
+    let source =
+        "~~~visual-basic-classic\nSub Broken(\n~~~\n\n~~~vba\nSub Healthy()\nEnd Sub\n~~~\n";
+    let full = output(source);
+    assert!(
+        full.document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Healthy" && entity.language == "vba")
+    );
+    let gap = full
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "markdown-code-parse-unavailable")
+        .unwrap();
+    assert_eq!(gap.reason, SkippedRegionReason::ParseError);
+    assert!(
+        usize::try_from(gap.source.span().end_byte()).unwrap()
+            < source.find("Sub Healthy").unwrap()
+    );
+    let dialect = full
+        .document()
+        .skipped_regions
+        .iter()
+        .find(|gap| gap.detail == "visual-basic-dialect-unproven")
+        .unwrap();
+    assert_eq!(dialect.source.span(), gap.source.span());
+    let defaults = limits();
+    let budget = AnalysisLimits::new(
+        defaults.max_source_bytes(),
+        defaults.max_syntax_nodes(),
+        defaults.max_syntax_depth(),
+        0,
+        defaults.max_reported_memory_bytes(),
+        defaults.syntax_stream().clone(),
+        defaults.ir_stream().clone(),
+        defaults.ir().clone(),
+    )
+    .unwrap();
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let limited = analyze(
+        &analyzer(&provider, MARKDOWN),
+        &request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert!(
+        !limited
+            .document()
+            .entities
+            .iter()
+            .any(|entity| matches!(entity.language.as_str(), "vba" | "visual-basic-classic"))
+    );
+    assert_eq!(
+        limited
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "markdown-code-budget-unavailable"
+                && gap.reason == SkippedRegionReason::ResourceLimit)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn markdown_classic_identity_partition_retains_language_provenance() {
+    let source = format!(
+        "~~~visual-basic-classic\nAttribute VB_Name = \"Meter\"\nSub Run()\n{}End Sub\n~~~\n",
+        "unknown = another\n".repeat(100)
+    );
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let defaults = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &defaults);
+    let demand = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    let budget = limits_with_syntax_records(demand + 8);
+    let result = analyze(
+        &analyzer(&provider, MARKDOWN),
+        &request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert!(
+        result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "Run"
+                && entity.language == "visual-basic-classic")
+    );
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.language == "vba")
+    );
+    assert!(
+        result
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-extraction-limit")
+    );
+    assert_eq!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "visual-basic-dialect-unproven")
+            .count(),
+        1
     );
 }
 
@@ -1476,15 +1751,17 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             perl_native::PERL,
             groovy_native::GROOVY,
             vba_native::VBA,
+            LanguageCase {
+                name: "visual-basic-classic",
+                ..vba_native::VBA
+            },
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
         .unwrap()
         .descriptors()
         .iter()
-        // Classic BASIC has a separate explicit opaque-fence contract: the
-        // shared capture namespace cannot establish the example's dialect.
-        .filter(|descriptor| !matches!(descriptor.language().as_str(), "markdown" | "visual-basic-classic"))
+        .filter(|descriptor| descriptor.language().as_str() != "markdown")
         .map(|descriptor| descriptor.language().as_str().to_owned())
         .collect();
     assert_eq!(

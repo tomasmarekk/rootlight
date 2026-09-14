@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/139";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/140";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -32836,6 +32836,134 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn markdown_classic_language_and_sources_survive_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous = None;
+        for (label, value) in [
+            ("visual-basic-classic", 1),
+            ("visual-basic-classic", 2),
+            ("vba", 2),
+            ("visual-basic-classic", 2),
+        ] {
+            let source = format!(
+                "# Examples\r\n\r\n~~~{label}\r\nAttribute VB_Name = \"Meter\"\r\nSub Run(ByVal value As Long)\r\nvalue = value + {value}\r\nEnd Sub\r\n~~~\r\n"
+            );
+            fs::write(fixture.path().join("guide.md"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.files[0].language, "markdown");
+            let symbols: BTreeMap<_, _> = document
+                .entities
+                .iter()
+                .filter(|entity| entity.language == label)
+                .map(|entity| (entity.canonical_name.as_str(), entity.id))
+                .collect();
+            let parameter = symbols["value"];
+            if let Some((old_generation, old_label, old_symbol)) = previous {
+                assert_ne!(receipt.generation, old_generation);
+                assert_eq!(parameter == old_symbol, label == old_label);
+            }
+            previous = Some((receipt.generation, label, parameter));
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "Run".to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                located
+                    .data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.symbol == Some(symbols["Run"]))
+            );
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| gap.detail == "visual-basic-dialect-unproven")
+                    .count(),
+                usize::from(label == "visual-basic-classic")
+            );
+            let reference = document.files[0].evidence.source.clone().unwrap();
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            assert_eq!(read.data.chunks[0].language, "markdown");
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([symbols["Run"]]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let mut spans = Vec::new();
+            for edge in relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+            {
+                assert_eq!(edge.symbol, parameter);
+                for reference in &edge.source_refs {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, b"value");
+                    spans.push(usize::try_from(reference.span().start_byte()).unwrap());
+                }
+            }
+            spans.sort_unstable();
+            assert_eq!(
+                spans,
+                [
+                    source.find("value =").unwrap(),
+                    source.find("value +").unwrap()
+                ]
+            );
         }
     }
 
