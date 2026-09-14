@@ -39,7 +39,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.10";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.11";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2637,6 +2637,26 @@ max_source_file_bytes = 2097152
                     .any(|signal| signal.language == "vba")
             );
         }
+    }
+
+    #[test]
+    fn continued_vba_evidence_requires_a_complete_bounded_literal() {
+        let source = b"Declare _\nPtrSafe Function ReadClock Lib _\n\"clock\"";
+        let path = RelativePath::parse(Path::new("module.bas")).unwrap();
+        let mut bounded = vec![b' '; MAX_CLASSIFICATION_BYTES - source.len()];
+        bounded.extend_from_slice(source);
+        assert_eq!(
+            classify(&path, &bounded).1,
+            vec![LanguageSignal {
+                language: "vba".to_owned(),
+                evidence: LanguageEvidence::Content,
+            }]
+        );
+        bounded.insert(0, b' ');
+        assert!(classify(&path, &bounded).1.is_empty());
+        let mut continued = b"value = _\n".to_vec();
+        continued.extend_from_slice(source);
+        assert!(classify(&path, &continued).1.is_empty());
     }
 
     #[test]

@@ -27493,6 +27493,74 @@ mod tests {
     }
 
     #[test]
+    fn vba_continued_dialect_evidence_is_reclassified_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("module.bas");
+        let declaration =
+            "Private Declare _\r\nPtrSafe Function ReadClock _\r\nLib \"clock\" () As LongPtr\r\n";
+        let mut previous = None;
+        for (prefix, admitted) in [("", true), ("value = _\r\n", false), ("", true)] {
+            let source = format!("{prefix}{declaration}Sub Update()\r\nEnd Sub\r\n");
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(generation) = previous {
+                assert_ne!(receipt.generation, generation);
+            }
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.files.len(), 1);
+            let file = &document.files[0];
+            assert_eq!(file.language == "vba", admitted);
+            for name in ["Update", "ReadClock"] {
+                assert_eq!(
+                    document
+                        .entities
+                        .iter()
+                        .any(|entity| entity.canonical_name == name),
+                    admitted
+                );
+            }
+            let status = service.repository_status(receipt.repository, None).unwrap();
+            assert_eq!(
+                status
+                    .coverage
+                    .iter()
+                    .map(|row| row.indexed_files)
+                    .sum::<u64>(),
+                u64::from(admitted)
+            );
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        }
+    }
+
+    #[test]
     fn ambiguous_basic_sources_do_not_enter_an_unproven_parser() {
         let fixture = TempDir::new().unwrap();
         write_language_fixture(
