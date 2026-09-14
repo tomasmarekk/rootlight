@@ -28,6 +28,69 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_member_invocation_context_does_not_prove_a_call() {
+    let source = "Sub Run(ByVal worker As Object, ByVal other As Object)\nCall worker.Apply(1)\nworker.Apply 2\nanswer = worker.Compute(3)\nworker.Item(1) = 4\nSet worker.Item(2) = other\nanswer = worker.Item\nCall worker.[Apply](5)\nworker.Check 1 = 2\nCall worker.Check((1) = 2)\nworker.Check (1) = 2, 3\nworker.Item (1) = 4\nEnd Sub\n";
+    let result = output(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_vba::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    for (text, invoked, ordinal) in [
+        ("worker.Apply", true, 0),
+        ("worker.Apply", true, 1),
+        ("worker.Compute", true, 0),
+        ("worker.Item", false, 0),
+        ("worker.Item", false, 1),
+        ("worker.Item", false, 2),
+        ("worker.[Apply]", true, 0),
+        ("worker.Check", true, 0),
+        ("worker.Check", true, 1),
+        ("worker.Check", true, 2),
+        ("worker.Item", false, 3),
+    ] {
+        let start = source.match_indices(text).nth(ordinal).unwrap().0;
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                usize::try_from(site.source.span().start_byte()).unwrap() == start
+                    && usize::try_from(site.source.span().end_byte()).unwrap() == start + text.len()
+                    && site.syntax_kind != "vba.application.reference"
+            })
+            .unwrap();
+        assert_eq!(
+            site.syntax_kind,
+            if invoked {
+                "vba.invoked_member.reference"
+            } else {
+                "vba.member.reference"
+            },
+            "{text} at {start}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+        }));
+    }
+    assert!(
+        result
+            .document()
+            .relations
+            .iter()
+            .all(|relation| { relation.predicate != rootlight_ir::RelationPredicate::Calls })
+    );
+}
+
+#[test]
 fn vba_explicit_declaration_visibility_survives_lowering() {
     use rootlight_ir::EntityVisibility;
     let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Boundary\"\nPublic exposed As Long, another As Long\nPrivate hidden As Long\nPublic Sub Visible()\nEnd Sub\nPrivate Sub Internal()\nEnd Sub\nFriend Sub ProjectOnly()\nEnd Sub\nPrivate Type Coordinate\nX As Long\nEnd Type\n";
@@ -364,7 +427,7 @@ fn vba_declared_udt_field_references_do_not_invent_calls() {
         .document()
         .occurrences
         .iter()
-        .find(|site| site.syntax_kind == "vba.member.reference")
+        .find(|site| site.syntax_kind == "vba.invoked_member.reference")
         .unwrap();
     assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
     assert_eq!(site.role, OccurrenceRole::Reference);

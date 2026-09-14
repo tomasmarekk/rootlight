@@ -5318,7 +5318,11 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         "vba.default_constant_identifier.reference" => {
             Some("vba-default-constant-target-unavailable")
         }
-        "vba.member.reference" => Some("vba-member-target-unavailable"),
+        // A bare application and its callee can share a span. Keep target and
+        // application gaps distinct so resolving a member never proves its arguments.
+        "vba.member.reference" | "vba.invoked_member.reference" => {
+            Some("vba-member-target-unavailable")
+        }
         "vba.self_member.reference"
         | "vba.self_get_member.reference"
         | "vba.self_let_member.reference"

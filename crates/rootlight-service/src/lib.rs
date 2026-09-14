@@ -212,8 +212,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/143";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/33";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/144";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/34";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -32869,6 +32869,221 @@ mod tests {
     }
 
     #[test]
+    fn classic_project_calls_follow_member_kind_and_access_after_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Worker)\nvalue.Apply\nCall value.Apply(1)\nvalue.Apply 2\nanswer = value.Compute(3)\nvalue.Apply = 1\nvalue.Apply(1) = 2\nanswer = value.Apply\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nClass=Worker; Worker.cls\nModule=Client; Client.bas\n",
+        )
+        .unwrap();
+        let mut previous = None;
+        for (access, fields, accessible) in [
+            ("Public", false, true),
+            ("Public", true, true),
+            ("Private", false, false),
+            ("Friend", false, true),
+        ] {
+            let members = if fields {
+                "Public Apply As Variant\nPublic Compute As Variant\n".to_owned()
+            } else {
+                format!(
+                    "{access} Sub Apply(Optional ByVal count As Long = 0)\nEnd Sub\n{access} Function Compute(ByVal count As Long) As Long\nCompute = count\nEnd Function\n"
+                )
+            };
+            fs::write(
+                fixture.path().join("Worker.cls"),
+                format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\n{members}"),
+            )
+            .unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            let class_file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Worker.cls")
+                .unwrap();
+            let run = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Run")
+                .unwrap();
+            let mut expected_sources = BTreeSet::new();
+            for (text, ordinal, invoked, name) in [
+                ("value.Apply", 0, true, "Apply"),
+                ("value.Apply", 1, true, "Apply"),
+                ("value.Apply", 2, true, "Apply"),
+                ("value.Compute", 0, true, "Compute"),
+                ("value.Apply", 3, false, "Apply"),
+                ("value.Apply", 4, false, "Apply"),
+                ("value.Apply", 5, false, "Apply"),
+            ] {
+                let start =
+                    u64::try_from(client.match_indices(text).nth(ordinal).unwrap().0).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(text.len()).unwrap()
+                            && site.syntax_kind != "vba.application.reference"
+                    })
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == name
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == class_file.id)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.role,
+                    if invoked && accessible && !fields {
+                        OccurrenceRole::CallSite
+                    } else {
+                        OccurrenceRole::Reference
+                    },
+                    "{access} fields={fields} {text} at {start}"
+                );
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    accessible
+                );
+                if accessible {
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                }
+                if invoked && accessible && !fields {
+                    expected_sources.insert(site.source.clone());
+                    assert!(document.relations.iter().any(|edge| {
+                        edge.predicate == RelationPredicate::Calls
+                            && edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.object == RelationEndpoint::Entity(target.id)
+                            && edge.evidence.source.as_ref() == Some(&site.source)
+                    }));
+                }
+            }
+            let calls = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run.id]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(!calls.data.truncated);
+            let sources: BTreeSet<_> = calls
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .flat_map(|item| item.source_refs.iter().cloned())
+                .collect();
+            assert_eq!(sources, expected_sources);
+            assert_eq!(sources.len(), if accessible && !fields { 4 } else { 0 });
+            for source in sources {
+                assert_eq!(source.generation(), receipt.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].reference, source);
+                assert_eq!(
+                    read.data.chunks[0].bytes,
+                    client.as_bytes()[usize::try_from(source.span().start_byte()).unwrap()
+                        ..usize::try_from(source.span().end_byte()).unwrap()]
+                );
+            }
+            let coverage = document
+                .coverage_records
+                .iter()
+                .find(|record| {
+                    record.domain == rootlight_ir::FactDomain::Relations
+                        && record.scope == rootlight_ir::CoverageScope::File(file.id)
+                })
+                .unwrap();
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            assert_eq!(
+                coverage.skipped,
+                u64::try_from(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .filter(|gap| {
+                            gap.domain == rootlight_ir::FactDomain::Relations
+                                && gap.source.span().file() == file.id
+                        })
+                        .count()
+                )
+                .unwrap()
+            );
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span().file() == file.id
+                        && gap.source.span().start_byte()
+                            == u64::try_from(client.find("value.Apply").unwrap()).unwrap()
+                        && gap.source.span().end_byte()
+                            == u64::try_from(
+                                client.find("value.Apply").unwrap() + "value.Apply".len(),
+                            )
+                            .unwrap()
+                }),
+                "same-span application evidence must survive target-gap recovery"
+            );
+        }
+    }
+
+    #[test]
     fn classic_project_type_respects_membership_after_restart() {
         let storage = durable_test_tempdir();
         let fixture = durable_test_tempdir();
@@ -32957,7 +33172,7 @@ mod tests {
         let member = document
             .occurrences
             .iter()
-            .find(|site| site.syntax_kind == "vba.member.reference")
+            .find(|site| site.syntax_kind == "vba.invoked_member.reference")
             .unwrap();
         let project_proof = document
             .provenance
@@ -33082,7 +33297,7 @@ mod tests {
             let document = snapshot.document();
             for (syntax, expected) in [
                 ("vba.direct_type_identifier.reference", expected_type),
-                ("vba.member.reference", expected_member),
+                ("vba.invoked_member.reference", expected_member),
             ] {
                 let site = document
                     .occurrences
@@ -33094,7 +33309,7 @@ mod tests {
                     expected,
                     "{access} {member} {syntax}"
                 );
-                let detail = if syntax == "vba.member.reference" {
+                let detail = if syntax == "vba.invoked_member.reference" {
                     "vba-member-target-unavailable"
                 } else {
                     "vba-type-target-unavailable"
@@ -33411,7 +33626,7 @@ mod tests {
                     && site.target == OccurrenceTarget::Resolved { symbol: class.id }
             });
             let member_target = document.occurrences.iter().any(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind == "vba.invoked_member.reference"
                     && site.target == OccurrenceTarget::Resolved { symbol: method.id }
             });
             assert_eq!(type_target, expected_type, "{label}: class target");

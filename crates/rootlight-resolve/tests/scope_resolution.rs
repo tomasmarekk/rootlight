@@ -602,6 +602,8 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
         ("matlab", "matlab.command.reference"),
         ("vba", "vba.identifier.reference"),
         ("vba", "vba.member.reference"),
+        ("vba", "vba.invoked_member.reference"),
+        ("visual-basic-classic", "vba.invoked_member.reference"),
         ("vba", "vba.application.reference"),
         ("perl", "perl.variable_name.reference"),
         ("perl", "perl.function_name.reference"),

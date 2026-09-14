@@ -355,6 +355,11 @@ impl ResolutionEngine {
 
             let semantics = relation_semantics(occurrence, &decision, &lookup);
             let old_id = occurrence.id;
+            if lookup.classic.is_call(occurrence) {
+                // Only the native invocation position plus a project-owned method
+                // target establishes a call; an invoked field remains a reference.
+                occurrence.role = OccurrenceRole::CallSite;
+            }
             apply_target(occurrence, &decision);
             occurrence.provenance = provenance_id;
             occurrence.id =
@@ -550,14 +555,15 @@ fn reconcile_classic_target_gaps(
     let mut producers = BTreeMap::new();
     for record in &document.provenance {
         cancellation.check()?;
-        let selection = match record.rule.as_deref() {
+        let selection: (&[&str], &str) = match record.rule.as_deref() {
             Some("classic-project-type-v1.indexed_snapshot") => (
-                "vba.direct_type_identifier.reference",
+                &["vba.direct_type_identifier.reference"],
                 "vba-type-target-unavailable",
             ),
-            Some("classic-project-member-v1.indexed_snapshot") => {
-                ("vba.member.reference", "vba-member-target-unavailable")
-            }
+            Some("classic-project-member-v1.indexed_snapshot") => (
+                &["vba.member.reference", "vba.invoked_member.reference"],
+                "vba-member-target-unavailable",
+            ),
             _ => continue,
         };
         producers.insert(record.id, (selection, record));
@@ -570,7 +576,7 @@ fn reconcile_classic_target_gaps(
     for site in &document.occurrences {
         cancellation.check()?;
         if let Some(((syntax, detail), _)) = producers.get(&site.provenance)
-            && site.syntax_kind == *syntax
+            && syntax.contains(&site.syntax_kind.as_str())
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
         {
             resolved.insert((site.source.clone(), *detail), site.provenance);

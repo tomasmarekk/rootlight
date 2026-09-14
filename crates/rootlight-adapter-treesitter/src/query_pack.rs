@@ -1121,6 +1121,10 @@ fn candidate_for_capture(
                 && matches!(capture.node.kind(), "identifier" | "bang_identifier")
             {
                 vba::reference_syntax(capture.node, source, cancellation)?
+            } else if role == StructuralRole::Reference
+                && capture.node.kind() == "qualified_member_expression"
+            {
+                vba::member_syntax(capture.node, source, cancellation)?
             } else {
                 vba::syntax(capture.node, role).ok_or_else(|| query_failure("query-vba-kind"))?
             }

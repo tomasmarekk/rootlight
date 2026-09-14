@@ -513,7 +513,10 @@ impl<'a> VbaBindings<'a> {
         if text.len() > self.maximum_name_bytes {
             return Ok(None);
         }
-        if fact.syntax_kind().as_str() == "vba.member.reference" {
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "vba.member.reference" | "vba.invoked_member.reference"
+        ) {
             return self.field_reference(fact, text, cancellation);
         }
         if matches!(

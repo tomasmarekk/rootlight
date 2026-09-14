@@ -513,8 +513,10 @@ impl<'a> ClassicIndex<'a> {
         for occurrence in occurrences {
             cancellation.check()?;
             work.consume()?;
-            if occurrence.syntax_kind != "vba.member.reference"
-                || occurrence.role != OccurrenceRole::Reference
+            if !matches!(
+                occurrence.syntax_kind.as_str(),
+                "vba.member.reference" | "vba.invoked_member.reference"
+            ) || occurrence.role != OccurrenceRole::Reference
                 || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             {
                 continue;
@@ -581,6 +583,13 @@ impl<'a> ClassicIndex<'a> {
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<&Proof<'a>> {
         self.proofs.get(&occurrence.id)
+    }
+
+    pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {
+        occurrence.syntax_kind == "vba.invoked_member.reference"
+            && self
+                .proof(occurrence)
+                .is_some_and(|proof| proof.target.kind == EntityKind::Method)
     }
 
     pub(crate) fn resolve(&self, occurrence: &OccurrenceRecord) -> Option<ResolutionDecision> {

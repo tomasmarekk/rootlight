@@ -376,6 +376,39 @@ pub(super) fn reference_syntax(
     })
 }
 
+pub(super) fn member_syntax(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    if let Some(statement) = node.parent()
+        && statement.kind() == "call_statement"
+        && statement.child_by_field_name("callee") == Some(node)
+        && let Some(arguments) = statement.child_by_field_name("arguments")
+        && arguments.kind() == "unparenthesized_argument_list"
+        && arguments.named_child_count() == 1
+        && let Some(argument) = arguments.named_child(0)
+        && argument.kind() == "comparison_expression"
+        && argument
+            .child_by_field_name("left")
+            .is_some_and(|left| left.kind() == "parenthesized_expression")
+        && argument
+            .child_by_field_name("operator")
+            .and_then(|operator| source.get(operator.byte_range()))
+            == Some(b"=")
+    {
+        // The grammar keeps either GLR reading of obj.Item(i) = value. A call
+        // with one comparison argument does not rule out indexed assignment.
+        return Ok("vba.member");
+    }
+    // Invocation position alone cannot distinguish a procedure from a field or
+    // default-member dispatch. Keep it as a reference until binding supplies a target.
+    Ok(match reference_syntax(node, source, cancellation)? {
+        "vba.invoked_identifier" | "vba.invoked_get_identifier" => "vba.invoked_member",
+        _ => "vba.member",
+    })
+}
+
 enum PropertyAccess {
     Get,
     Let,
