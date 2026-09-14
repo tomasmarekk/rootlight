@@ -377,22 +377,44 @@ impl<'a> VbaBindings<'a> {
         let Some(receiver_text) = components.next() else {
             return Ok(None);
         };
-        // Me is an instance expression, not an ordinary local name. An
-        // explicitly escaped [Me] remains a distinct identifier expression.
-        if receiver_text.trim().eq_ignore_ascii_case("Me") {
-            return Ok(None);
-        }
+        // Me bypasses procedure locals, while escaped [Me] is an ordinary
+        // identifier. Only the source class's own variable can start this chain.
+        let instance = receiver_text.trim().eq_ignore_ascii_case("Me");
+        let receiver_text = if instance {
+            let Some(component) = components.next() else {
+                return Ok(None);
+            };
+            component
+        } else {
+            receiver_text
+        };
         let Some(receiver) = member_key(receiver_text) else {
             return Ok(None);
         };
         let mut parent = fact.parent();
         let mut receiver_symbol = None;
+        let mut instance_context = false;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
             let Some((owner, _)) = self.scope(parent, cancellation)? else {
                 break;
             };
             let scope = self.fact(owner)?;
+            if instance {
+                if scope.syntax_kind().as_str() != "vba.file.scope" {
+                    instance_context |= is_instance_procedure_scope(scope);
+                    parent = scope.parent();
+                    continue;
+                }
+                if !instance_context
+                    || self.class_symbol.is_none()
+                    || !self
+                        .class_module
+                        .is_some_and(|class| class.span() == scope.span())
+                {
+                    return Ok(None);
+                }
+            }
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
@@ -542,17 +564,7 @@ impl<'a> VbaBindings<'a> {
             let scope = self.fact(owner)?;
             if self_member || instance {
                 if scope.syntax_kind().as_str() != "vba.file.scope" {
-                    instance_context |= matches!(
-                        scope.syntax_kind().as_str(),
-                        "vba.sub_function.scope"
-                            | "vba.function.scope"
-                            | "vba.get_property.scope"
-                            | "vba.let_property.scope"
-                            | "vba.set_property.scope"
-                            | "vba.conditional_sub_function.scope"
-                            | "vba.conditional_function.scope"
-                            | "vba.conditional_property.scope"
-                    );
+                    instance_context |= is_instance_procedure_scope(scope);
                     // The instance keyword and explicit Me member lookup
                     // bypass ordinary procedure-local name lookup.
                     parent = scope.parent();
@@ -746,6 +758,20 @@ impl<'a> VbaBindings<'a> {
     fn fact(&self, id: u64) -> Result<&'a SyntaxFact, AdapterError> {
         self.facts.get(&id).copied().ok_or_else(invalid_capture)
     }
+}
+
+fn is_instance_procedure_scope(scope: &SyntaxFact) -> bool {
+    matches!(
+        scope.syntax_kind().as_str(),
+        "vba.sub_function.scope"
+            | "vba.function.scope"
+            | "vba.get_property.scope"
+            | "vba.let_property.scope"
+            | "vba.set_property.scope"
+            | "vba.conditional_sub_function.scope"
+            | "vba.conditional_function.scope"
+            | "vba.conditional_property.scope"
+    )
 }
 
 fn owns_scope(declaration: &SyntaxFact) -> bool {

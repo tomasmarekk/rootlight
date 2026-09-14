@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/141";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/142";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -32841,6 +32841,15 @@ mod tests {
 
     #[test]
     fn vba_declared_udt_queries_survive_type_mutation_and_restart() {
+        vba_declared_udt_query_scenario(false);
+    }
+
+    #[test]
+    fn vba_instance_udt_queries_survive_type_mutation_and_restart() {
+        vba_declared_udt_query_scenario(true);
+    }
+
+    fn vba_declared_udt_query_scenario(instance: bool) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
@@ -32848,10 +32857,24 @@ mod tests {
         let fixture = durable_test_tempdir();
         let mut previous = None;
         for ty in ["Coordinate", "Variant", "Coordinate"] {
-            let source = format!(
-                "Attribute VB_Name = \"Geometry\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As {ty})\npoint.X = 1\nEnd Sub\n"
-            );
-            fs::write(fixture.path().join("Geometry.bas"), &source).unwrap();
+            let (source, path, expression) = if instance {
+                (
+                    format!(
+                        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Geometry\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nPrivate point As {ty}\nSub Run(ByVal point As Variant)\nMe.point.X = 1\nEnd Sub\n"
+                    ),
+                    "Geometry.cls",
+                    "Me.point.X",
+                )
+            } else {
+                (
+                    format!(
+                        "Attribute VB_Name = \"Geometry\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As {ty})\npoint.X = 1\nEnd Sub\n"
+                    ),
+                    "Geometry.bas",
+                    "point.X",
+                )
+            };
+            fs::write(fixture.path().join(path), &source).unwrap();
             let mut service =
                 FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
             let receipt = service
@@ -32943,7 +32966,7 @@ mod tests {
                             &deadline(),
                         )
                         .unwrap();
-                    assert_eq!(read.data.chunks[0].bytes, b"point.X");
+                    assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
                 }
             }
         }

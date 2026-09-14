@@ -28,6 +28,102 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_instance_udt_fields_follow_class_ownership() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation As Coordinate\nEnd Type\nPrivate position As Box\nSub Run(ByVal position As Variant)\nMe.position.Location.X = 1\nmE.[position].Location.X = 2\nEnd Sub\n";
+    let result = output(source);
+    for expression in [
+        "Me.position.Location",
+        "Me.position.Location.X",
+        "mE.[position].Location.X",
+    ] {
+        let name = expression.rsplit('.').next().unwrap();
+        let target = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == name)
+            .unwrap();
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(expression.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{expression}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(
+            !result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-member-target-unavailable"
+                    && gap.source.span() == site.source.span())
+        );
+    }
+}
+
+#[test]
+fn vba_instance_udt_fields_preserve_unproven_receiver_barriers() {
+    for (header, declaration) in [
+        ("", "Private position As Coordinate\n"),
+        ("VERSION 1.0 CLASS\n", "Private position As Variant\n"),
+        ("VERSION 1.0 CLASS\n", "Private position() As Coordinate\n"),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private position As Coordinate\nPrivate POSITION As Coordinate\n",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "#If FLAG Then\nPrivate position As Coordinate\n#Else\nPrivate position As Variant\n#End If\n",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Property Get position() As Coordinate\nEnd Property\n",
+        ),
+    ] {
+        let source = format!(
+            "{header}Attribute VB_Name = \"Holder\"\nPrivate Type Coordinate\nX As Long\nEnd Type\n{declaration}Sub Run()\nDim position As Coordinate\nMe.position.X = 1\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let expression = "Me.position.X";
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(expression.len()).unwrap()
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-member-target-unavailable"
+                    && gap.source.span() == site.source.span())
+        );
+    }
+}
+
+#[test]
 fn vba_declared_udt_fields_follow_local_types_and_nested_fields() {
     let source = "Private Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation As Coordinate\nEnd Type\nSub Run(ByRef value As Box)\nDim snapshot As Coordinate\nsnapshot.X = value.Location.X\nEnd Sub\n";
     let result = output(source);
