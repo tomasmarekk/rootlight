@@ -200,6 +200,13 @@ pub(super) fn reference_syntax(
         .parent()
         .filter(|parent| self_member_node(*parent, source) == Some(child));
     let expression = member.unwrap_or(child);
+    // Me is an instance expression, not an ordinary name lookup. Quoted or
+    // type-suffixed names and terminal members do not establish this keyword.
+    let instance = member.is_none()
+        && expression.kind() == "identifier"
+        && source
+            .get(expression.byte_range())
+            .is_some_and(|text| text.eq_ignore_ascii_case(b"Me"));
     let invoked = expression.parent().is_some_and(|parent| {
         (parent.kind() == "call_expression"
             && parent.child_by_field_name("function") == Some(expression))
@@ -221,7 +228,8 @@ pub(super) fn reference_syntax(
                 | "gosub_statement"
                 | "on_error_statement"
                 | "resume_statement"
-        ) || (kind == "named_argument" && parent.child_by_field_name("name") == Some(child))
+        ) || (instance && kind == "const_declarator")
+            || (kind == "named_argument" && parent.child_by_field_name("name") == Some(child))
             || (kind == "on_goto_statement"
                 && parent.child_by_field_name("selector") != Some(child))
             || (matches!(
@@ -253,6 +261,13 @@ pub(super) fn reference_syntax(
             break;
         }
         child = parent;
+    }
+    if instance {
+        return Ok(if invoked {
+            "vba.invoked_instance"
+        } else {
+            "vba.instance"
+        });
     }
     Ok(if let Some(access) = member.and_then(property_access) {
         match (access, invoked) {

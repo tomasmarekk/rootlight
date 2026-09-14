@@ -28,6 +28,150 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_instance_expressions_reference_the_source_class() {
+    for statement in [
+        "Set value = mE",
+        "value = mE.Item",
+        "Visit mE",
+        "With mE\n.Item = 1\nEnd With",
+        "If value Is mE Then\nvalue = 1\nEnd If",
+        "value = mE(0)",
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPublic Item As Variant\nSub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let class = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Holder")
+            .unwrap();
+        let start = u64::try_from(source.find("mE").unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 2
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: class.id },
+            "{statement}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(site.id)
+                && edge.object == RelationEndpoint::Entity(class.id)
+        }));
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(site.id)
+        }));
+        if statement.contains("mE(0)") {
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.source.span() == site.source.span()
+                    && gap.detail == "vba-call-or-index-target-unavailable"
+            }));
+        }
+    }
+}
+
+#[test]
+fn vba_instance_expressions_require_class_bodies_and_keyword_spelling() {
+    for (prefix, body, suffix, marker) in [
+        ("", "Sub Run()\nSet value = mE\nEnd Sub\n", "", "mE"),
+        (
+            "VERSION 1.0 FORM\n",
+            "Sub Run()\nSet value = mE\nEnd Sub\n",
+            "",
+            "mE",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Sub Run(Optional value As Variant = mE)\nEnd Sub\n",
+            "",
+            "mE",
+        ),
+        (
+            "VERSION 1.0 CLASS\nSub Run()\n",
+            "Const value = mE\n",
+            "End Sub\n",
+            "mE",
+        ),
+        (
+            "VERSION 1.0 CLASS\nSub Run()\n",
+            "value = New mE\n",
+            "End Sub\n",
+            "mE",
+        ),
+        (
+            "VERSION 1.0 CLASS\nSub Run()\n",
+            "value = AddressOf mE\n",
+            "End Sub\n",
+            "mE",
+        ),
+        (
+            "VERSION 1.0 CLASS\nSub Run()\n",
+            "value = [mE]\n",
+            "End Sub\n",
+            "[mE]",
+        ),
+        (
+            "VERSION 1.0 CLASS\nSub Run()\n",
+            "value = mE$\n",
+            "End Sub\n",
+            "mE$",
+        ),
+    ] {
+        let source = format!("{prefix}{body}{suffix}");
+        let result = output(&source);
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + u64::try_from(marker.len()).unwrap()
+            })
+            .unwrap_or_else(|| panic!("instance-context reference is missing: {source}"));
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result.document().skipped_regions.iter().any(|gap| {
+                gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+            }),
+            "{source}"
+        );
+    }
+    let source = "VERSION 1.0 CLASS\nSet value = mE\n";
+    let result = output(source);
+    let start = u64::try_from(source.find("mE").unwrap()).unwrap();
+    let statement_start = u64::try_from(source.find("Set").unwrap()).unwrap();
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    // Recovery diagnoses the executable statement at Set, not at its value.
+    assert!(result.document().skipped_regions.iter().any(|gap| {
+        gap.domain == FactDomain::Diagnostics
+            && gap.reason == rootlight_ir::SkippedRegionReason::ParseError
+            && gap.source.span().start_byte() == statement_start
+            && gap.source.span().end_byte() == statement_start + 3
+    }));
+    assert!(!result.document().occurrences.iter().any(|site| {
+        site.source.span().start_byte() == start
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+    }));
+}
+
+#[test]
 fn vba_result_references_bind_the_enclosing_function_or_getter() {
     for (header, end, kind) in [
         (
@@ -778,7 +922,9 @@ fn vba_self_members_keep_unproven_owners_and_targets_explicit() {
             .occurrences
             .iter()
             .filter(|site| {
-                site.source.span().start_byte() >= start && site.source.span().end_byte() <= end
+                site.source.span().start_byte() >= start
+                    && site.source.span().end_byte() <= end
+                    && site.syntax_kind.as_str() != "vba.instance.reference"
             })
             .collect();
         assert!(!sites.is_empty(), "{source}");

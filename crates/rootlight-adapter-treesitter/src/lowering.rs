@@ -1287,6 +1287,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let symbols = materialized
                 .values()
                 .filter_map(|entity| entity.definition_local_id.map(|id| (id, entity.record.id)))
+                .chain(materialized.iter().filter_map(|(local_id, entity)| {
+                    (entity.record.kind == EntityKind::Class && entity.record.language == "vba")
+                        .then_some((*local_id, entity.record.id))
+                }))
                 .collect();
             Some(crate::vba_bindings::VbaBindings::new(
                 self.parse_output.facts(),
@@ -2183,6 +2187,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         || (matches!(
                             fact.syntax_kind().as_str(),
                             "vba.invoked_identifier.reference"
+                                | "vba.invoked_instance.reference"
                                 | "vba.invoked_get_identifier.reference"
                                 | "vba.invoked_let_identifier.reference"
                                 | "vba.invoked_set_identifier.reference"
@@ -5173,12 +5178,14 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "vba.instance.reference" => Some("vba-instance-owner-unavailable"),
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
         "vba.identifier.reference"
         | "vba.value_identifier.reference"
         | "vba.let_identifier.reference"
         | "vba.set_identifier.reference" => Some("vba-binding-target-unavailable"),
         "vba.invoked_identifier.reference"
+        | "vba.invoked_instance.reference"
         | "vba.invoked_get_identifier.reference"
         | "vba.invoked_let_identifier.reference"
         | "vba.invoked_set_identifier.reference" => Some("vba-call-or-index-target-unavailable"),

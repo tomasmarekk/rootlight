@@ -60,6 +60,7 @@ pub(super) struct VbaBindings<'a> {
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
     class_module: Option<&'a SyntaxFact>,
+    class_symbol: Option<SymbolId>,
     maximum_name_bytes: usize,
 }
 
@@ -78,6 +79,7 @@ impl<'a> VbaBindings<'a> {
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
             class_module: None,
+            class_symbol: None,
             maximum_name_bytes,
         };
         for fact in facts {
@@ -92,6 +94,9 @@ impl<'a> VbaBindings<'a> {
                 return Err(invalid_capture());
             }
         }
+        result.class_symbol = result
+            .class_module
+            .and_then(|fact| symbols.get(&fact.local_id()).copied());
         let mut required_parameter_scopes = BTreeSet::new();
         for fact in facts {
             cancellation.check()?;
@@ -203,6 +208,13 @@ impl<'a> VbaBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
         cancellation.check()?;
+        let instance = matches!(
+            fact.syntax_kind().as_str(),
+            "vba.instance.reference" | "vba.invoked_instance.reference"
+        );
+        if instance && !text.eq_ignore_ascii_case("Me") {
+            return Ok(None);
+        }
         let default_constant =
             fact.syntax_kind().as_str() == "vba.default_constant_identifier.reference";
         let self_member = matches!(
@@ -240,6 +252,7 @@ impl<'a> VbaBindings<'a> {
             && !default_constant
             && !invoked
             && !self_member
+            && !instance
         {
             return Ok(None);
         }
@@ -263,7 +276,7 @@ impl<'a> VbaBindings<'a> {
                 return Ok(None);
             };
             let scope = self.fact(owner)?;
-            if self_member {
+            if self_member || instance {
                 if scope.syntax_kind().as_str() != "vba.file.scope" {
                     instance_context |= matches!(
                         scope.syntax_kind().as_str(),
@@ -276,7 +289,8 @@ impl<'a> VbaBindings<'a> {
                             | "vba.conditional_function.scope"
                             | "vba.conditional_property.scope"
                     );
-                    // Explicit Me lookup bypasses procedure-local shadowing.
+                    // The instance keyword and explicit Me member lookup
+                    // bypass ordinary procedure-local name lookup.
                     parent = scope.parent();
                     continue;
                 }
@@ -286,6 +300,14 @@ impl<'a> VbaBindings<'a> {
                         .is_some_and(|class| class.span() == scope.span())
                 {
                     return Ok(None);
+                }
+                if instance {
+                    // The source class owns Me's declared type (MS-VBAL
+                    // 5.6.11); this is not a runtime object or call identity.
+                    return Ok(self.class_symbol.map(|symbol| ResolvedBinding {
+                        symbol,
+                        is_call: false,
+                    }));
                 }
             }
             // Parameter defaults are declaration-time constants, outside the
@@ -705,6 +727,72 @@ mod tests {
                     .map(|binding| binding.symbol),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn instance_ownership_requires_class_identity_and_matching_procedure_scope() {
+        let symbol = SymbolId::from_bytes([9; 20]);
+        for (class_end, parent, present, expected) in [
+            (Some(16), 2, true, Some(symbol)),
+            (Some(16), 2, false, None),
+            (Some(15), 2, true, None),
+            (Some(16), 1, true, None),
+            (None, 2, true, None),
+        ] {
+            let mut facts = vec![
+                fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, 16),
+                fact(
+                    2,
+                    Some(1),
+                    SyntaxFactKind::Scope,
+                    "vba.sub_function.scope",
+                    0,
+                    16,
+                ),
+                fact(
+                    4,
+                    Some(parent),
+                    SyntaxFactKind::Occurrence,
+                    "vba.instance.reference",
+                    14,
+                    16,
+                ),
+            ];
+            if let Some(end) = class_end {
+                facts.push(fact(
+                    3,
+                    None,
+                    SyntaxFactKind::Module,
+                    "vba.class.module",
+                    0,
+                    end,
+                ));
+            }
+            for _ in 0..2 {
+                let symbols = if present {
+                    HashMap::from([(3, symbol)])
+                } else {
+                    HashMap::new()
+                };
+                let cancellation = Cancellation::new();
+                let plan =
+                    VbaBindings::new(&facts, b"              Me", &symbols, 64, &cancellation)
+                        .unwrap();
+                let reference = facts.iter().find(|fact| fact.local_id() == 4).unwrap();
+                assert_eq!(
+                    plan.resolve(reference, "Me", &cancellation)
+                        .unwrap()
+                        .map(|binding| (binding.symbol, binding.is_call)),
+                    expected.map(|symbol| (symbol, false))
+                );
+                assert!(
+                    plan.resolve(reference, "[Me]", &cancellation)
+                        .unwrap()
+                        .is_none()
+                );
+                facts.reverse();
+            }
         }
     }
 
