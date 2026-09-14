@@ -342,6 +342,9 @@ impl QueryPack {
         if family == GrammarFamily::Matlab || family.is_classic_basic() {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
         }
+        if family.is_classic_basic() {
+            expected.push("expression");
+        }
         if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
@@ -1107,7 +1110,9 @@ fn candidate_for_capture(
             groovy::syntax(capture.node, role).ok_or_else(|| query_failure("query-groovy-kind"))?
         }
         _ if family.is_classic_basic() => {
-            if role == StructuralRole::Module
+            if role == StructuralRole::Expression {
+                vba::declared_visibility(capture.node, source, cancellation)?
+            } else if role == StructuralRole::Module
                 && capture.node.kind() == "source_file"
                 && vba::class_header(capture.node, source, cancellation)?.is_some()
             {
@@ -1327,7 +1332,9 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
-    if family.is_classic_basic() && role == StructuralRole::Signature {
+    if family.is_classic_basic()
+        && matches!(role, StructuralRole::Signature | StructuralRole::Expression)
+    {
         end = vba::header_end(capture.node, cancellation)?;
         while end > start && source.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
             end -= 1;
@@ -2290,6 +2297,9 @@ mod tests {
             }
             if family == GrammarFamily::Matlab || family.is_classic_basic() {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            }
+            if family.is_classic_basic() {
+                expected.push("expression");
             }
             if family == GrammarFamily::Markdown {
                 expected.retain(|name| {

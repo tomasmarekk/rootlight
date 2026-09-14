@@ -28,6 +28,46 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_explicit_declaration_visibility_survives_lowering() {
+    use rootlight_ir::EntityVisibility;
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Boundary\"\nPublic exposed As Long, another As Long\nPrivate hidden As Long\nPublic Sub Visible()\nEnd Sub\nPrivate Sub Internal()\nEnd Sub\nFriend Sub ProjectOnly()\nEnd Sub\nPrivate Type Coordinate\nX As Long\nEnd Type\n";
+    let result = output(source);
+    for (name, expected) in [
+        ("exposed", EntityVisibility::Public),
+        ("another", EntityVisibility::Public),
+        ("hidden", EntityVisibility::Private),
+        ("Visible", EntityVisibility::Public),
+        ("Internal", EntityVisibility::Private),
+        ("ProjectOnly", EntityVisibility::Restricted),
+        ("Coordinate", EntityVisibility::Private),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.visibility, expected, "{name}");
+    }
+}
+
+#[test]
+fn vba_visibility_does_not_infer_defaults_from_body_text() {
+    use rootlight_ir::EntityVisibility;
+    let source = "Attribute VB_Name = \"Boundary\"\n' Public\nDim stored As Long\nSub Run(ByVal value As Long)\nDim text As String\ntext = \"Private Public Friend\"\nEnd Sub\nFriend Sub InvalidFriend()\nEnd Sub\n";
+    let result = output(source);
+    for name in ["stored", "Run", "value", "text", "InvalidFriend"] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.visibility, EntityVisibility::Unknown, "{name}");
+    }
+}
+
+#[test]
 fn vba_instance_udt_fields_follow_class_ownership() {
     let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation As Coordinate\nEnd Type\nPrivate position As Box\nSub Run(ByVal position As Variant)\nMe.position.Location.X = 1\nmE.[position].Location.X = 2\nEnd Sub\n";
     let result = output(source);
@@ -2067,7 +2107,7 @@ fn vba_body_only_changes_preserve_declared_symbol_identities() {
     let signatures: Vec<_> = parsed
         .facts()
         .iter()
-        .filter(|fact| fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Signature)
+        .filter(|fact| fact.syntax_kind().as_str() == "vba.function.signature")
         .map(|fact| {
             &VBA.source[usize::try_from(fact.span().start_byte()).unwrap()
                 ..usize::try_from(fact.span().end_byte()).unwrap()]
@@ -2076,6 +2116,16 @@ fn vba_body_only_changes_preserve_declared_symbol_identities() {
     assert_eq!(
         signatures,
         ["Public Function Measure(ByVal value As Long) As Long"]
+    );
+    let visibility = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "vba.public.expression")
+        .unwrap();
+    assert_eq!(
+        &VBA.source[usize::try_from(visibility.span().start_byte()).unwrap()
+            ..usize::try_from(visibility.span().end_byte()).unwrap()],
+        signatures[0]
     );
 }
 

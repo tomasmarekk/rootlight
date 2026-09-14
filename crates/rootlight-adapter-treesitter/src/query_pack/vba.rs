@@ -174,6 +174,41 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
     })
 }
 
+pub(super) fn declared_visibility(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    let header = if matches!(node.kind(), "variable_declarator" | "const_declarator") {
+        node.parent().unwrap_or(node)
+    } else {
+        node
+    };
+    // This is the written access modifier, not proof of project membership or
+    // external accessibility. Defaults and enclosing-module restrictions need
+    // their own source evidence before cross-file resolution may consume them.
+    if header.has_error() {
+        return Ok("vba.visibility_unknown");
+    }
+    let mut parent = header.parent();
+    while let Some(ancestor) = parent {
+        cancellation.check()?;
+        if declaration_syntax(ancestor.kind()).is_some() {
+            return Ok("vba.visibility_unknown");
+        }
+        parent = ancestor.parent();
+    }
+    let Some(visibility) = header.child_by_field_name("visibility") else {
+        return Ok("vba.visibility_unknown");
+    };
+    Ok(match source.get(visibility.byte_range()) {
+        Some(text) if text.eq_ignore_ascii_case(b"Public") => "vba.public",
+        Some(text) if text.eq_ignore_ascii_case(b"Private") => "vba.private",
+        Some(text) if text.eq_ignore_ascii_case(b"Friend") => "vba.project_restricted",
+        _ => "vba.visibility_unknown",
+    })
+}
+
 pub(super) fn self_member_node<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     if node.kind() != "qualified_member_expression" || node.has_error() {
         return None;

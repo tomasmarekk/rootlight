@@ -9,6 +9,7 @@ use rootlight_adapter_sdk::{
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
+use rootlight_ir::EntityVisibility;
 
 #[derive(Clone, Copy)]
 enum Binding {
@@ -73,6 +74,7 @@ pub(super) struct VbaBindings<'a> {
     fields: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
     foreign_field_scopes: BTreeSet<u64>,
     value_types: HashMap<SymbolId, u64>,
+    visibilities: BTreeMap<u64, EntityVisibility>,
 }
 
 impl<'a> VbaBindings<'a> {
@@ -97,6 +99,7 @@ impl<'a> VbaBindings<'a> {
             fields: BTreeMap::new(),
             foreign_field_scopes: BTreeSet::new(),
             value_types: HashMap::new(),
+            visibilities: BTreeMap::new(),
         };
         for fact in facts {
             cancellation.check()?;
@@ -215,7 +218,46 @@ impl<'a> VbaBindings<'a> {
             result.insert(owner, name.as_deref(), symbol);
         }
         result.collect_declared_types(facts, source, symbols, cancellation)?;
+        for fact in facts {
+            cancellation.check()?;
+            let mut visibility = match fact.syntax_kind().as_str() {
+                "vba.public.expression" => EntityVisibility::Public,
+                "vba.private.expression" => EntityVisibility::Private,
+                "vba.project_restricted.expression" => EntityVisibility::Restricted,
+                "vba.visibility_unknown.expression" => EntityVisibility::Unknown,
+                _ => continue,
+            };
+            if let Some(declaration) = result.declaration(fact.parent(), cancellation)?
+                && declaration.span().start_byte() == fact.span().start_byte()
+                && declaration.span().end_byte() >= fact.span().end_byte()
+            {
+                if visibility == EntityVisibility::Restricted
+                    && (result.class_module.is_none()
+                        || !matches!(
+                            declaration.syntax_kind().as_str(),
+                            "vba.sub_function.declaration"
+                                | "vba.function.declaration"
+                                | "vba.get_property.declaration"
+                                | "vba.let_property.declaration"
+                                | "vba.set_property.declaration"
+                        ))
+                {
+                    visibility = EntityVisibility::Unknown;
+                }
+                result
+                    .visibilities
+                    .entry(declaration.local_id())
+                    .and_modify(|prior| *prior = EntityVisibility::Unknown)
+                    .or_insert(visibility);
+            }
+        }
         Ok(result)
+    }
+
+    pub(super) fn visibilities(&self) -> impl Iterator<Item = (u64, EntityVisibility)> + '_ {
+        self.visibilities
+            .iter()
+            .map(|(&owner, &visibility)| (owner, visibility))
     }
 
     fn collect_declared_types(

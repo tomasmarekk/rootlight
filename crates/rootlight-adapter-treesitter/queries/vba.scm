@@ -32,3 +32,22 @@
 (call_statement) @reference
 (comment) @comment
 (string_literal) @string
+
+; Access metadata is optional; missing evidence must never imply public visibility.
+[
+  (sub_declaration)
+  (function_declaration)
+  (conditional_sub_declaration)
+  (conditional_function_declaration)
+  (conditional_property_declaration)
+  (property_get_declaration)
+  (property_let_declaration)
+  (property_set_declaration)
+  (declare_sub_statement)
+  (declare_function_statement)
+  (event_declaration)
+  (type_declaration)
+  (enum_declaration)
+  (variable_declarator)
+  (const_declarator)
+] @expression

@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/142";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/143";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -32836,6 +32836,82 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn vba_declared_visibility_queries_survive_mutation_and_restart() {
+        use rootlight_ir::EntityVisibility;
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous = None;
+        for (modifier, expected) in [
+            ("Public", EntityVisibility::Public),
+            ("Private", EntityVisibility::Private),
+            ("Friend", EntityVisibility::Restricted),
+        ] {
+            let source = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Boundary\"\n{modifier} Sub Visit()\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Boundary.cls"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some(previous) = previous {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "Visit".to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let symbol = located.data.hits.iter().find_map(|hit| hit.symbol).unwrap();
+            let explained = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity.visibility, expected);
+            let reference = explained.data.entity.evidence.source.unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert!(
+                std::str::from_utf8(&read.data.chunks[0].bytes)
+                    .unwrap()
+                    .contains("Visit")
+            );
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let file_source = snapshot.document().files[0]
+                .evidence
+                .source
+                .clone()
+                .unwrap();
+            let read = service
+                .source_read(receipt.generation, vec![file_source], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
         }
     }
 
