@@ -430,6 +430,7 @@ pub fn structural_captured_name_for_fact<'a>(
             fact.syntax_kind().as_str(),
             "vba.identifier.definition"
                 | "vba.identifier.reference"
+                | "vba.value_identifier.reference"
                 | "vba.default_constant_identifier.reference"
                 | "vba.invoked_identifier.reference"
                 | "vba.self_member.reference"

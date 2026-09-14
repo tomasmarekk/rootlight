@@ -5171,7 +5171,9 @@ fn comment_text(text: &str) -> Option<&str> {
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
-        "vba.identifier.reference" => Some("vba-binding-target-unavailable"),
+        "vba.identifier.reference" | "vba.value_identifier.reference" => {
+            Some("vba-binding-target-unavailable")
+        }
         "vba.invoked_identifier.reference" => Some("vba-call-or-index-target-unavailable"),
         "vba.default_constant_identifier.reference" => {
             Some("vba-default-constant-target-unavailable")

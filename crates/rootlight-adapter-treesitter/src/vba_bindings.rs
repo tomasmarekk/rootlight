@@ -14,6 +14,10 @@ use rootlight_ids::SymbolId;
 enum Binding {
     Value(SymbolId),
     Procedure(SymbolId),
+    Function {
+        symbol: SymbolId,
+        accepts_empty: bool,
+    },
     ExternalProcedure(SymbolId),
     FunctionResult(SymbolId),
     Property(PropertyAccessors),
@@ -87,6 +91,15 @@ impl<'a> VbaBindings<'a> {
                 return Err(invalid_capture());
             }
         }
+        let mut required_parameter_scopes = BTreeSet::new();
+        for fact in facts {
+            cancellation.check()?;
+            if fact.syntax_kind().as_str() == "vba.parameter.declaration"
+                && let Some((owner, _)) = result.scope(fact.parent(), cancellation)?
+            {
+                required_parameter_scopes.insert(owner);
+            }
+        }
         for fact in facts {
             cancellation.check()?;
             if fact.syntax_kind().as_str() != "vba.identifier.definition" {
@@ -109,11 +122,14 @@ impl<'a> VbaBindings<'a> {
                 symbols.get(&fact.local_id()).copied().and_then(|symbol| {
                     match declaration.syntax_kind().as_str() {
                         "vba.parameter.declaration"
+                        | "vba.omittable_parameter.declaration"
                         | "vba.variable.declaration"
                         | "vba.constant.declaration" => Some(Binding::Value(symbol)),
-                        "vba.sub_function.declaration" | "vba.function.declaration" => {
-                            Some(Binding::Procedure(symbol))
-                        }
+                        "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
+                        "vba.function.declaration" => Some(Binding::Function {
+                            symbol,
+                            accepts_empty: !required_parameter_scopes.contains(&owner),
+                        }),
                         "vba.external_sub_function.declaration"
                         | "vba.external_function.declaration" => {
                             Some(Binding::ExternalProcedure(symbol))
@@ -154,7 +170,9 @@ impl<'a> VbaBindings<'a> {
                     "vba.function.declaration" | "vba.get_property.declaration"
                 ) {
                     let result_binding = match symbol {
-                        Some(Binding::Procedure(symbol)) => Some(Binding::FunctionResult(symbol)),
+                        Some(Binding::Function { symbol, .. }) => {
+                            Some(Binding::FunctionResult(symbol))
+                        }
                         _ => None,
                     };
                     result.insert(owner, name.as_deref(), result_binding);
@@ -200,7 +218,12 @@ impl<'a> VbaBindings<'a> {
                 | "vba.self_invoked_member.reference"
                 | "vba.self_invoked_get_member.reference"
         );
+        let value_use = matches!(
+            fact.syntax_kind().as_str(),
+            "vba.value_identifier.reference" | "vba.self_get_member.reference"
+        );
         if fact.syntax_kind().as_str() != "vba.identifier.reference"
+            && !value_use
             && !default_constant
             && !invoked
             && !self_member
@@ -281,6 +304,22 @@ impl<'a> VbaBindings<'a> {
                         })
                     }
                     Some(Binding::ExternalProcedure(symbol)) if invoked && !self_member => {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: true,
+                        })
+                    }
+                    Some(Binding::Function {
+                        symbol,
+                        accepts_empty,
+                    }) if invoked
+                        || (value_use
+                            && *accepts_empty
+                            && !text.ends_with(['$', '%', '&', '#', '@', '^', '!'])) =>
+                    {
+                        // Only a complete native parameter inventory admits an
+                        // empty argument list. The function's own result binding
+                        // remains distinct from this implicit call.
                         Some(ResolvedBinding {
                             symbol: *symbol,
                             is_call: true,
@@ -393,6 +432,7 @@ fn owns_scope(declaration: &SyntaxFact) -> bool {
     !matches!(
         declaration.syntax_kind().as_str(),
         "vba.parameter.declaration"
+            | "vba.omittable_parameter.declaration"
             | "vba.variable.declaration"
             | "vba.constant.declaration"
             | "vba.field.declaration"
@@ -485,6 +525,79 @@ mod tests {
                 17,
             ),
         ]
+    }
+
+    #[test]
+    fn function_parameter_inventory_is_order_independent_without_parameter_symbols() {
+        let symbol = SymbolId::from_bytes([9; 20]);
+        let cancellation = Cancellation::new();
+        for label in [
+            "vba.parameter.declaration",
+            "vba.omittable_parameter.declaration",
+        ] {
+            let mut facts = vec![
+                fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, 17),
+                fact(
+                    2,
+                    Some(1),
+                    SyntaxFactKind::Scope,
+                    "vba.function.scope",
+                    0,
+                    11,
+                ),
+                fact(
+                    3,
+                    Some(2),
+                    SyntaxFactKind::Declaration,
+                    "vba.function.declaration",
+                    0,
+                    11,
+                ),
+                fact(
+                    4,
+                    Some(3),
+                    SyntaxFactKind::Occurrence,
+                    "vba.identifier.definition",
+                    0,
+                    5,
+                ),
+                fact(5, Some(3), SyntaxFactKind::Declaration, label, 6, 11),
+                fact(
+                    6,
+                    Some(1),
+                    SyntaxFactKind::Scope,
+                    "vba.sub_function.scope",
+                    12,
+                    17,
+                ),
+                fact(
+                    7,
+                    Some(6),
+                    SyntaxFactKind::Occurrence,
+                    "vba.value_identifier.reference",
+                    12,
+                    17,
+                ),
+            ];
+            for _ in 0..2 {
+                let plan = VbaBindings::new(
+                    &facts,
+                    b"Count input COUNT",
+                    &HashMap::from([(4, symbol)]),
+                    64,
+                    &cancellation,
+                )
+                .unwrap();
+                let reference = facts.iter().find(|fact| fact.local_id() == 7).unwrap();
+                assert_eq!(
+                    plan.resolve(reference, "COUNT", &cancellation)
+                        .unwrap()
+                        .map(|binding| (binding.symbol, binding.is_call)),
+                    (label == "vba.omittable_parameter.declaration").then_some((symbol, true))
+                );
+                facts.reverse();
+            }
+        }
     }
 
     #[test]

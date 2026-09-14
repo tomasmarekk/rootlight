@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/134";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/135";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -27632,6 +27632,117 @@ mod tests {
             } else {
                 assert!(document.entities.is_empty());
                 assert!(hits.data.hits.iter().all(|hit| hit.symbol.is_none()));
+            }
+        }
+    }
+
+    #[test]
+    fn vba_function_value_calls_follow_parameter_changes_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("meter.bas");
+        let mut previous_generation = None;
+        for (parameters, expected_calls) in [
+            ("()", 1),
+            ("(ByVal input As Long)", 0),
+            ("(Optional ByVal input As Long = 1)", 1),
+            ("(ParamArray items() As Variant)", 1),
+        ] {
+            let source = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Meter\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nFunction Measure{parameters} As Long\nMeasure = 1\nEnd Function\nSub Run()\nDim value As Long\nvalue = Me.mEaSuRe\nEnd Sub\n"
+            );
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(previous) = previous_generation {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous_generation = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let run = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Method && entity.canonical_name == "Run")
+                .unwrap()
+                .id;
+            let measure = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Method && entity.canonical_name == "Measure"
+                })
+                .unwrap()
+                .id;
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let edges: Vec<_> = relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .collect();
+            assert_eq!(edges.len(), expected_calls, "{parameters}");
+            let start = u64::try_from(source.find("mEaSuRe").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 7
+                })
+                .unwrap();
+            if expected_calls == 0 {
+                assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            } else {
+                assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: measure });
+                assert_eq!(site.role, OccurrenceRole::CallSite);
+                assert_eq!(edges[0].symbol, measure);
+                assert_eq!(edges[0].source_refs.len(), 1);
+                let reference = &edges[0].source_refs[0];
+                assert_eq!(reference.generation(), receipt.generation);
+                assert_eq!(reference.span().start_byte(), start);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, b"mEaSuRe");
             }
         }
     }

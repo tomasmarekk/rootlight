@@ -150,6 +150,12 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
     {
         return Some("vba.module_name");
     }
+    if node.kind() == "parameter"
+        && (node.child_by_field_name("optional_modifier").is_some()
+            || node.child_by_field_name("paramarray_modifier").is_some())
+    {
+        return Some("vba.omittable_parameter");
+    }
     if let Some(syntax) = declaration_syntax(node.kind()) {
         return Some(syntax);
     }
@@ -263,6 +269,8 @@ pub(super) fn reference_syntax(
         "vba.self_member"
     } else if invoked {
         "vba.invoked_identifier"
+    } else if matches!(property_access(expression), Some(PropertyAccess::Get)) {
+        "vba.value_identifier"
     } else {
         "vba.identifier"
     })
