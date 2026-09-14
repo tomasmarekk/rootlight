@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/132";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/133";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -27633,6 +27633,124 @@ mod tests {
                 assert!(document.entities.is_empty());
                 assert!(hits.data.hits.iter().all(|hit| hit.symbol.is_none()));
             }
+        }
+    }
+
+    #[test]
+    fn vba_self_member_relations_preserve_sources_after_restart_and_mutation() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("counter.bas");
+        let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPrivate total As Long\nPrivate Sub Visit(ByVal value As Long)\nEnd Sub\nPublic Sub Run()\nDim total As Long\nDim Visit As Long\nMe.total = 1\nCall Me.VISIT(1)\nEnd Sub\n";
+        let mut previous = None;
+        for source in [
+            source.to_owned(),
+            source.replace("Me.total = 1", "Me.total = 2 + 3"),
+        ] {
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let generation = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = generation.document();
+            let method = |name: &str| {
+                document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Method && entity.canonical_name == name
+                    })
+                    .unwrap()
+                    .id
+            };
+            let run = method("Run");
+            let visit = method("Visit");
+            if let Some((old_generation, old_visit)) = previous {
+                assert_ne!(receipt.generation, old_generation);
+                assert_eq!(visit, old_visit);
+            }
+            previous = Some((receipt.generation, visit));
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let edges: Vec<_> = relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .collect();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].symbol, visit);
+            assert_eq!(edges[0].source_refs.len(), 1);
+            let reference = &edges[0].source_refs[0];
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(
+                reference.span().start_byte(),
+                u64::try_from(source.find("VISIT(1)").unwrap()).unwrap()
+            );
+            let field = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "total")
+                .unwrap();
+            let field_use = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.self_member.reference")
+                .unwrap();
+            assert_eq!(
+                field_use.target,
+                OccurrenceTarget::Resolved { symbol: field.id }
+            );
+            assert_eq!(field_use.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone(), field_use.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 2);
+            let chunks: BTreeSet<_> = read
+                .data
+                .chunks
+                .iter()
+                .map(|chunk| chunk.bytes.as_slice())
+                .collect();
+            assert_eq!(
+                chunks,
+                BTreeSet::from([b"VISIT".as_slice(), b"total".as_slice()])
+            );
         }
     }
 

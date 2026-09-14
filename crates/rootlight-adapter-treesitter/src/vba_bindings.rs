@@ -1,4 +1,4 @@
-//! Source-bound VBA procedure and module variable environments.
+//! Source-bound VBA procedure, module and explicit instance-member environments.
 //! Missing, duplicate or conditional declarations still shadow outer names;
 //! runtime dispatch and foreign-name comparison require separate evidence.
 
@@ -14,6 +14,7 @@ use rootlight_ids::SymbolId;
 enum Binding {
     Value(SymbolId),
     Procedure(SymbolId),
+    ExternalProcedure(SymbolId),
     FunctionResult(SymbolId),
 }
 
@@ -27,6 +28,7 @@ pub(super) struct VbaBindings<'a> {
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
+    class_module: Option<&'a SyntaxFact>,
     maximum_name_bytes: usize,
 }
 
@@ -44,11 +46,18 @@ impl<'a> VbaBindings<'a> {
             bindings: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
+            class_module: None,
             maximum_name_bytes,
         };
         for fact in facts {
             cancellation.check()?;
             if result.facts.insert(fact.local_id(), fact).is_some() {
+                return Err(invalid_capture());
+            }
+            if fact.kind() == SyntaxFactKind::Module
+                && fact.syntax_kind().as_str() == "vba.class.module"
+                && result.class_module.replace(fact).is_some()
+            {
                 return Err(invalid_capture());
             }
         }
@@ -76,10 +85,13 @@ impl<'a> VbaBindings<'a> {
                         "vba.parameter.declaration"
                         | "vba.variable.declaration"
                         | "vba.constant.declaration" => Some(Binding::Value(symbol)),
-                        "vba.sub_function.declaration"
-                        | "vba.function.declaration"
-                        | "vba.external_sub_function.declaration"
-                        | "vba.external_function.declaration" => Some(Binding::Procedure(symbol)),
+                        "vba.sub_function.declaration" | "vba.function.declaration" => {
+                            Some(Binding::Procedure(symbol))
+                        }
+                        "vba.external_sub_function.declaration"
+                        | "vba.external_function.declaration" => {
+                            Some(Binding::ExternalProcedure(symbol))
+                        }
                         _ => None,
                     }
                 })
@@ -126,11 +138,24 @@ impl<'a> VbaBindings<'a> {
         cancellation.check()?;
         let default_constant =
             fact.syntax_kind().as_str() == "vba.default_constant_identifier.reference";
-        let invoked = fact.syntax_kind().as_str() == "vba.invoked_identifier.reference";
+        let self_member = matches!(
+            fact.syntax_kind().as_str(),
+            "vba.self_member.reference" | "vba.self_invoked_member.reference"
+        );
+        let invoked = matches!(
+            fact.syntax_kind().as_str(),
+            "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
+        );
         if fact.syntax_kind().as_str() != "vba.identifier.reference"
             && !default_constant
             && !invoked
+            && !self_member
         {
+            return Ok(None);
+        }
+        // A type character requires comparison with the declared member type;
+        // spelling normalization alone cannot prove that compatibility.
+        if self_member && text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
             return Ok(None);
         }
         let Some(name) =
@@ -141,12 +166,38 @@ impl<'a> VbaBindings<'a> {
         };
         let key = name.to_ascii_lowercase();
         let mut parent = fact.parent();
+        let mut instance_context = false;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
             let Some((owner, _)) = self.scope(parent, cancellation)? else {
                 return Ok(None);
             };
             let scope = self.fact(owner)?;
+            if self_member {
+                if scope.syntax_kind().as_str() != "vba.file.scope" {
+                    instance_context |= matches!(
+                        scope.syntax_kind().as_str(),
+                        "vba.sub_function.scope"
+                            | "vba.function.scope"
+                            | "vba.get_property.scope"
+                            | "vba.let_property.scope"
+                            | "vba.set_property.scope"
+                            | "vba.conditional_sub_function.scope"
+                            | "vba.conditional_function.scope"
+                            | "vba.conditional_property.scope"
+                    );
+                    // Explicit Me lookup bypasses procedure-local shadowing.
+                    parent = scope.parent();
+                    continue;
+                }
+                if !instance_context
+                    || !self
+                        .class_module
+                        .is_some_and(|class| class.span() == scope.span())
+                {
+                    return Ok(None);
+                }
+            }
             // Parameter defaults are declaration-time constants, outside the
             // procedure body's parameter/local-variable environment.
             if default_constant && scope.syntax_kind().as_str() != "vba.file.scope" {
@@ -159,7 +210,8 @@ impl<'a> VbaBindings<'a> {
             if let Some(binding) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
                 return Ok(match binding {
                     Some(Binding::Value(symbol))
-                        if !default_constant || self.constant_symbols.contains(symbol) =>
+                        if (!default_constant || self.constant_symbols.contains(symbol))
+                            && (!self_member || !self.constant_symbols.contains(symbol)) =>
                     {
                         Some(ResolvedBinding {
                             symbol: *symbol,
@@ -169,6 +221,12 @@ impl<'a> VbaBindings<'a> {
                     Some(Binding::Procedure(symbol) | Binding::FunctionResult(symbol))
                         if invoked =>
                     {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: true,
+                        })
+                    }
+                    Some(Binding::ExternalProcedure(symbol)) if invoked && !self_member => {
                         Some(ResolvedBinding {
                             symbol: *symbol,
                             is_call: true,
@@ -377,6 +435,53 @@ mod tests {
                 );
             }
             facts.reverse();
+        }
+    }
+
+    #[test]
+    fn self_members_require_matching_class_scope_and_instance_context() {
+        let outer = SymbolId::from_bytes([9; 20]);
+        let inner = SymbolId::from_bytes([8; 20]);
+        for (class_end, parent, expected) in [
+            (None, 4, None),
+            (Some(17), 4, Some(outer)),
+            (Some(16), 4, None),
+            (Some(17), 1, None),
+        ] {
+            let mut facts = facts();
+            facts[6] = fact(
+                7,
+                Some(parent),
+                SyntaxFactKind::Occurrence,
+                "vba.self_member.reference",
+                12,
+                17,
+            );
+            if let Some(end) = class_end {
+                facts.push(fact(
+                    8,
+                    None,
+                    SyntaxFactKind::Module,
+                    "vba.class.module",
+                    0,
+                    end,
+                ));
+            }
+            let cancellation = Cancellation::new();
+            let plan = VbaBindings::new(
+                &facts,
+                b"Count count COUNT",
+                &HashMap::from([(3, outer), (6, inner)]),
+                64,
+                &cancellation,
+            )
+            .unwrap();
+            assert_eq!(
+                plan.resolve(&facts[6], "COUNT", &cancellation)
+                    .unwrap()
+                    .map(|binding| binding.symbol),
+                expected
+            );
         }
     }
 

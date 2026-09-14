@@ -2180,8 +2180,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 if let Some(detail) = source_reference_gap(fact)
                     && (matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
-                        || (fact.syntax_kind().as_str() == "vba.invoked_identifier.reference"
-                            && occurrence.role != OccurrenceRole::CallSite))
+                        || (matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.invoked_identifier.reference"
+                                | "vba.self_invoked_member.reference"
+                        ) && occurrence.role != OccurrenceRole::CallSite))
                 {
                     let region = skipped_region(
                         self.full_source,
@@ -5171,6 +5174,8 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
             Some("vba-default-constant-target-unavailable")
         }
         "vba.member.reference" => Some("vba-member-target-unavailable"),
+        "vba.self_member.reference" => Some("vba-member-target-unavailable"),
+        "vba.self_invoked_member.reference" => Some("vba-call-or-index-target-unavailable"),
         "vba.application.reference" => Some("vba-call-or-index-target-unavailable"),
         "vba.nonvalue_identifier.reference" => Some("vba-nonvalue-target-unavailable"),
         "perl.variable_name.reference"

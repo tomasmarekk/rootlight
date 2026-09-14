@@ -168,15 +168,37 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
     })
 }
 
+pub(super) fn self_member_node<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    if node.kind() != "qualified_member_expression" || node.has_error() {
+        return None;
+    }
+    let receiver = node.child_by_field_name("receiver")?;
+    let operator = node.child_by_field_name("operator")?;
+    if receiver.kind() != "identifier"
+        || !source
+            .get(receiver.byte_range())?
+            .eq_ignore_ascii_case(b"Me")
+        || source.get(operator.byte_range())? != b"."
+    {
+        return None;
+    }
+    node.child_by_field_name("member")
+}
+
 pub(super) fn reference_syntax(
     mut child: Node<'_>,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<&'static str, AdapterError> {
-    let invoked = child.parent().is_some_and(|parent| {
+    let member = child
+        .parent()
+        .filter(|parent| self_member_node(*parent, source) == Some(child));
+    let expression = member.unwrap_or(child);
+    let invoked = expression.parent().is_some_and(|parent| {
         (parent.kind() == "call_expression"
-            && parent.child_by_field_name("function") == Some(child))
+            && parent.child_by_field_name("function") == Some(expression))
             || (parent.kind() == "call_statement"
-                && parent.child_by_field_name("callee") == Some(child))
+                && parent.child_by_field_name("callee") == Some(expression))
     });
     while let Some(parent) = child.parent() {
         cancellation.check()?;
@@ -209,7 +231,11 @@ pub(super) fn reference_syntax(
             return Ok("vba.nonvalue_identifier");
         }
         if kind == "parameter" {
-            return Ok("vba.default_constant_identifier");
+            return Ok(if member.is_some() {
+                "vba.nonvalue_identifier"
+            } else {
+                "vba.default_constant_identifier"
+            });
         }
         if kind.starts_with("conditional_")
             && declaration_syntax(kind).is_some()
@@ -222,7 +248,11 @@ pub(super) fn reference_syntax(
         }
         child = parent;
     }
-    Ok(if invoked {
+    Ok(if member.is_some() && invoked {
+        "vba.self_invoked_member"
+    } else if member.is_some() {
+        "vba.self_member"
+    } else if invoked {
         "vba.invoked_identifier"
     } else {
         "vba.identifier"

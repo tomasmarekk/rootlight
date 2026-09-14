@@ -657,6 +657,12 @@ impl QueryPack {
                     continue;
                 }
                 if input.family == GrammarFamily::Vba
+                    && role == StructuralRole::Reference
+                    && let Some(member) = vba::self_member_node(capture.node, input.source)
+                {
+                    capture.node = member;
+                }
+                if input.family == GrammarFamily::Vba
                     && capture.node.kind() == "source_file"
                     && role == StructuralRole::Signature
                 {
@@ -1109,7 +1115,7 @@ fn candidate_for_capture(
             } else if role == StructuralRole::Reference
                 && matches!(capture.node.kind(), "identifier" | "bang_identifier")
             {
-                vba::reference_syntax(capture.node, cancellation)?
+                vba::reference_syntax(capture.node, source, cancellation)?
             } else {
                 vba::syntax(capture.node, role).ok_or_else(|| query_failure("query-vba-kind"))?
             }

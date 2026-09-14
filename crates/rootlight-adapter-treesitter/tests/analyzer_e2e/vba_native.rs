@@ -28,6 +28,194 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_self_call_forms_resolve_only_the_declared_callee() {
+    for invocation in [
+        "Me.Visit 1",
+        "Call Me.Visit(1)",
+        "Me.Visit(1)",
+        "Call Me.[Visit](1)",
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate Sub Visit(ByVal value As Long)\nEnd Sub\nPublic Sub Run()\n{invocation}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Visit")
+            .unwrap();
+        let start = u64::try_from(source.rfind("Me.").unwrap() + 3).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{invocation}"
+        );
+        assert_eq!(site.role, OccurrenceRole::CallSite, "{invocation}");
+        assert_eq!(
+            site.source.span().end_byte() - start,
+            if invocation.contains('[') { 7 } else { 5 }
+        );
+    }
+}
+
+#[test]
+fn vba_self_members_keep_unproven_owners_and_targets_explicit() {
+    for (prefix, declarations, access) in [
+        ("", "Private total As Long\n", "Me.total"),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private total As Long\n",
+            "other.total",
+        ),
+        ("VERSION 1.0 CLASS\n", "Private total As Long\n", "Me!total"),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private total As Long\n",
+            "Me.total$",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private total As Long\nPrivate TOTAL As Long\n",
+            "Me.total",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "#If Wide Then\nPrivate total As Long\n#End If\n",
+            "Me.total",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private Const total = 1\n",
+            "Me.total",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private Declare PtrSafe Function total Lib \"clock\" () As LongPtr\n",
+            "Me.total()",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Property Get total() As Long\ntotal = 1\nEnd Property\n",
+            "Me.total",
+        ),
+    ] {
+        let source = format!(
+            "{prefix}Attribute VB_Name = \"Counter\"\n{declarations}Public Sub Run()\nDim value As Variant\nvalue = {access}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind(access).unwrap()).unwrap();
+        let end = start + u64::try_from(access.len()).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() >= start && site.source.span().end_byte() <= end
+            })
+            .collect();
+        assert!(!sites.is_empty(), "{source}");
+        assert!(
+            sites
+                .iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span().start_byte() >= start
+                    && gap.source.span().end_byte() <= end
+                    && matches!(
+                        gap.detail.as_str(),
+                        "vba-member-target-unavailable" | "vba-call-or-index-target-unavailable"
+                    )),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_self_indexed_fields_are_references_not_proven_method_calls() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate items(1) As Long\nPublic Sub Run()\nDim value As Long\nvalue = Me.items(0)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let start = u64::try_from(source.rfind("items(0)").unwrap()).unwrap();
+    let field = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "items")
+        .unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == start)
+        .unwrap();
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+    assert_eq!(site.role, OccurrenceRole::Reference);
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source.span().start_byte() == start
+                && gap.detail == "vba-call-or-index-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_self_members_bypass_locals_and_preserve_exact_name_sources() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate total As Long\nPrivate Sub Refresh()\nEnd Sub\nPublic Sub Run()\nDim total As Long\nDim Refresh As Long\ntotal = 1\nMe.total = total\nCall mE.ReFrEsH()\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let class = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class)
+        .unwrap();
+    for (marker, name, kind, role) in [
+        (
+            "total = total",
+            "total",
+            EntityKind::Field,
+            OccurrenceRole::Reference,
+        ),
+        (
+            "ReFrEsH()",
+            "Refresh",
+            EntityKind::Method,
+            OccurrenceRole::CallSite,
+        ),
+    ] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .unwrap();
+        assert_eq!(target.container, Some(ContainerRef::Entity(class.id)));
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + u64::try_from(name.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.role, role);
+    }
+}
+
+#[test]
 fn vba_class_exports_preserve_typed_members_and_body_independent_identity() {
     let source = "VERSION 1.0 CLASS\nBEGIN\n  MultiUse = -1\nEND\nAttribute VB_Name = \"Counter\"\nOption Explicit\nPrivate total As Long\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPublic Event Changed(ByVal value As Long)\nPublic Property Get Current() As Long\nCurrent = total\nEnd Property\nPublic Sub Refresh()\nDim localValue As Long\nlocalValue = 1\ntotal = localValue\nEnd Sub\nPublic Sub Run()\nRefresh\nEnd Sub\n";
     let first = output(source);
