@@ -267,10 +267,17 @@ pub(super) fn reference_syntax(
         "vba.self_invoked_member"
     } else if member.is_some() {
         "vba.self_member"
+    } else if let Some(access) = property_access(expression) {
+        match (access, invoked) {
+            (PropertyAccess::Get, false) => "vba.value_identifier",
+            (PropertyAccess::Let, false) => "vba.let_identifier",
+            (PropertyAccess::Set, false) => "vba.set_identifier",
+            (PropertyAccess::Get, true) => "vba.invoked_get_identifier",
+            (PropertyAccess::Let, true) => "vba.invoked_let_identifier",
+            (PropertyAccess::Set, true) => "vba.invoked_set_identifier",
+        }
     } else if invoked {
         "vba.invoked_identifier"
-    } else if matches!(property_access(expression), Some(PropertyAccess::Get)) {
-        "vba.value_identifier"
     } else {
         "vba.identifier"
     })

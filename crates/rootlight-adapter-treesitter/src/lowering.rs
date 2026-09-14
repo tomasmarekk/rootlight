@@ -2183,6 +2183,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         || (matches!(
                             fact.syntax_kind().as_str(),
                             "vba.invoked_identifier.reference"
+                                | "vba.invoked_get_identifier.reference"
+                                | "vba.invoked_let_identifier.reference"
+                                | "vba.invoked_set_identifier.reference"
                                 | "vba.self_invoked_member.reference"
                                 | "vba.self_invoked_get_member.reference"
                                 | "vba.self_invoked_let_member.reference"
@@ -5171,10 +5174,14 @@ fn comment_text(text: &str) -> Option<&str> {
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
-        "vba.identifier.reference" | "vba.value_identifier.reference" => {
-            Some("vba-binding-target-unavailable")
-        }
-        "vba.invoked_identifier.reference" => Some("vba-call-or-index-target-unavailable"),
+        "vba.identifier.reference"
+        | "vba.value_identifier.reference"
+        | "vba.let_identifier.reference"
+        | "vba.set_identifier.reference" => Some("vba-binding-target-unavailable"),
+        "vba.invoked_identifier.reference"
+        | "vba.invoked_get_identifier.reference"
+        | "vba.invoked_let_identifier.reference"
+        | "vba.invoked_set_identifier.reference" => Some("vba-call-or-index-target-unavailable"),
         "vba.default_constant_identifier.reference" => {
             Some("vba-default-constant-target-unavailable")
         }

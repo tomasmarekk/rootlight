@@ -163,8 +163,8 @@ impl<'a> VbaBindings<'a> {
             }
             if owns_scope(declaration) {
                 // A function name denotes its result in value context, but the
-                // procedure in invocation context. Unqualified Get result/dispatch
-                // still needs its own context, not the explicit Me lookup rules.
+                // procedure in invocation context. A Get's own result must not
+                // fall through to the module's accessor group as a recursive call.
                 if matches!(
                     declaration.syntax_kind().as_str(),
                     "vba.function.declaration" | "vba.get_property.declaration"
@@ -215,6 +215,7 @@ impl<'a> VbaBindings<'a> {
         let invoked = matches!(
             fact.syntax_kind().as_str(),
             "vba.invoked_identifier.reference"
+                | "vba.invoked_get_identifier.reference"
                 | "vba.self_invoked_member.reference"
                 | "vba.self_invoked_get_member.reference"
         );
@@ -222,7 +223,15 @@ impl<'a> VbaBindings<'a> {
             fact.syntax_kind().as_str(),
             "vba.value_identifier.reference" | "vba.self_get_member.reference"
         );
+        let assignment = matches!(
+            fact.syntax_kind().as_str(),
+            "vba.let_identifier.reference"
+                | "vba.set_identifier.reference"
+                | "vba.invoked_let_identifier.reference"
+                | "vba.invoked_set_identifier.reference"
+        );
         if fact.syntax_kind().as_str() != "vba.identifier.reference"
+            && !assignment
             && !value_use
             && !default_constant
             && !invoked
@@ -325,13 +334,21 @@ impl<'a> VbaBindings<'a> {
                             is_call: true,
                         })
                     }
-                    Some(Binding::Property(accessors)) if self_member => {
+                    Some(Binding::Property(accessors))
+                        if !text.ends_with(['$', '%', '&', '#', '@', '^', '!']) =>
+                    {
                         let symbol = match fact.syntax_kind().as_str() {
                             "vba.self_get_member.reference"
+                            | "vba.value_identifier.reference"
+                            | "vba.invoked_get_identifier.reference"
                             | "vba.self_invoked_get_member.reference" => accessors.get,
                             "vba.self_let_member.reference"
+                            | "vba.let_identifier.reference"
+                            | "vba.invoked_let_identifier.reference"
                             | "vba.self_invoked_let_member.reference" => accessors.let_value,
                             "vba.self_set_member.reference"
+                            | "vba.set_identifier.reference"
+                            | "vba.invoked_set_identifier.reference"
                             | "vba.self_invoked_set_member.reference" => accessors.set,
                             _ => None,
                         };

@@ -28,6 +28,171 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_unqualified_properties_select_source_bound_accessors() {
+    for (parameters, argument) in [("", ""), ("ByVal index As Long", "(0)")] {
+        let setter_parameters = if parameters.is_empty() {
+            "ByVal value As Variant".to_owned()
+        } else {
+            format!("{parameters}, ByVal value As Variant")
+        };
+        for (statement, accessor) in [
+            (format!("value = [iTeM]{argument}"), "Get Item"),
+            (format!("[iTeM]{argument} = value"), "Let Item"),
+            (format!("Let [iTeM]{argument} = value"), "Let Item"),
+            (format!("Set [iTeM]{argument} = value"), "Set Item"),
+            (format!("value = 1 + [iTeM]{argument}"), "Get Item"),
+            (format!("Visit [iTeM]{argument}"), "Get Item"),
+        ] {
+            let source = format!(
+                "Property Get Item({parameters}) As Variant\nItem = 1\nEnd Property\nProperty Let Item({setter_parameters})\nEnd Property\nProperty Set Item({setter_parameters})\nEnd Property\nSub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let definition_start = u64::try_from(source.find(accessor).unwrap() + 4).unwrap();
+            let target = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == definition_start
+                })
+                .unwrap()
+                .target
+                .clone();
+            assert!(matches!(target, OccurrenceTarget::Resolved { .. }));
+            let start = u64::try_from(source.find("[iTeM]").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 6
+                })
+                .unwrap();
+            assert_eq!(site.target, target, "{statement}");
+            assert_eq!(site.role, OccurrenceRole::CallSite, "{statement}");
+            let OccurrenceTarget::Resolved { symbol } = target else {
+                unreachable!()
+            };
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::Calls
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(symbol)
+            }));
+        }
+    }
+}
+
+#[test]
+fn vba_unqualified_properties_respect_local_values_and_index_gaps() {
+    for (parameter, local) in [
+        ("", "Dim Item(2) As Variant\n"),
+        ("ByVal Item As Variant", ""),
+    ] {
+        for statement in [
+            "value = iTeM",
+            "iTeM = value",
+            "Set iTeM = value",
+            "iTeM(0) = value",
+            "value = iTeM(0)",
+        ] {
+            let source = format!(
+                "Property Get Item() As Variant\nItem = 1\nEnd Property\nSub Run({parameter})\n{local}Dim value As Variant\n{statement}\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let value = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Item"
+                        && matches!(entity.kind, EntityKind::Variable | EntityKind::Parameter)
+                })
+                .unwrap();
+            let start = u64::try_from(source.find("iTeM").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 4
+                })
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: value.id },
+                "{statement}"
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            if statement.contains('(') {
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.domain == FactDomain::Relations
+                        && gap.source.span() == site.source.span()
+                        && gap.detail == "vba-call-or-index-target-unavailable"
+                }));
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_unqualified_properties_keep_result_slots_and_unproven_calls_explicit() {
+    let get = "Property Get Item() As Variant\nItem = 1\nEnd Property\n";
+    for (declarations, statement) in [
+        (get.to_owned(), "iTeM = value"),
+        (get.to_owned(), "Set iTeM = value"),
+        (get.to_owned(), "Call iTeM()"),
+        (get.to_owned(), "ReDim iTeM(2)"),
+        (get.to_owned(), "value = iTeM$"),
+        (get.repeat(2), "value = iTeM"),
+        (format!("#If Enabled Then\n{get}#End If\n"), "value = iTeM"),
+        (
+            "Function Item(ByVal index As Long) As Variant\nEnd Function\n".to_owned(),
+            "iTeM(0) = value",
+        ),
+    ] {
+        let source =
+            format!("{declarations}Sub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n");
+        let result = output(&source);
+        let start = u64::try_from(source.find("iTeM").unwrap()).unwrap();
+        let name_length = if statement.contains("iTeM$") { 5 } else { 4 };
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + name_length
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+        }));
+    }
+    for statement in ["iTeM = value", "Set iTeM = value", "value = iTeM"] {
+        let source = format!(
+            "Property Get Item() As Variant\nDim value As Variant\n{statement}\nEnd Property\nProperty Let Item(ByVal value As Variant)\nEnd Property\nProperty Set Item(ByVal value As Variant)\nEnd Property\n"
+        );
+        let result = output(&source);
+        assert!(matches!(
+            reference_at(result.document(), &source, "iTeM").target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .all(|site| site.role != OccurrenceRole::CallSite)
+        );
+    }
+}
+
+#[test]
 fn vba_function_values_without_parentheses_accept_omittable_parameters() {
     for parameters in [
         "",
@@ -822,11 +987,13 @@ fn vba_recursive_function_invocation_is_not_its_result_variable() {
         u64::try_from(source.find("REDUCE(").unwrap()).unwrap()
     );
     for site in document.occurrences.iter().filter(|site| {
-        site.syntax_kind == "vba.identifier.reference"
-            && source.get(
-                usize::try_from(site.source.span().start_byte()).unwrap()
-                    ..usize::try_from(site.source.span().end_byte()).unwrap(),
-            ) == Some("Reduce")
+        matches!(
+            site.syntax_kind.as_str(),
+            "vba.identifier.reference" | "vba.let_identifier.reference"
+        ) && source.get(
+            usize::try_from(site.source.span().start_byte()).unwrap()
+                ..usize::try_from(site.source.span().end_byte()).unwrap(),
+        ) == Some("Reduce")
     }) {
         assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
     }
@@ -1183,7 +1350,10 @@ fn reference_at<'a>(
         .find(|site| {
             matches!(
                 site.syntax_kind.as_str(),
-                "vba.identifier.reference" | "vba.value_identifier.reference"
+                "vba.identifier.reference"
+                    | "vba.value_identifier.reference"
+                    | "vba.let_identifier.reference"
+                    | "vba.set_identifier.reference"
             ) && site.source.span().start_byte() == start
         })
         .expect("written reference exists")

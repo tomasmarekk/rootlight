@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/135";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/136";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -27743,6 +27743,129 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks.len(), 1);
                 assert_eq!(read.data.chunks[0].bytes, b"mEaSuRe");
+            }
+        }
+    }
+
+    #[test]
+    fn vba_unqualified_property_calls_preserve_accessor_sources_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("holder.bas");
+        let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPrivate stored As Variant\nProperty Get Item() As Variant\nItem = stored\nEnd Property\nProperty Let Item(ByVal value As Variant)\nstored = value\nEnd Property\nProperty Set Item(ByVal value As Object)\nSet stored = value\nEnd Property\nSub Run(ByVal value As Variant)\nvalue = iTeM\nLet [Item] = 1\nSet ITEM = value\nEnd Sub\n";
+        let mut previous = None;
+        for source in [
+            source.to_owned(),
+            source.replace("Let [Item] = 1", "Let [Item] = 2 + 3"),
+        ] {
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let run = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Method && entity.canonical_name == "Run")
+                .unwrap()
+                .id;
+            let accessors: BTreeSet<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Property && entity.canonical_name == "Item"
+                })
+                .map(|entity| entity.id)
+                .collect();
+            assert_eq!(accessors.len(), 3);
+            if let Some((old_generation, old_accessors)) = previous {
+                assert_ne!(receipt.generation, old_generation);
+                assert_eq!(accessors, old_accessors);
+            }
+            previous = Some((receipt.generation, accessors.clone()));
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let edges: Vec<_> = relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .collect();
+            assert_eq!(edges.len(), 3);
+            assert_eq!(
+                edges
+                    .iter()
+                    .map(|edge| edge.symbol)
+                    .collect::<BTreeSet<_>>(),
+                accessors
+            );
+            for (declaration, spelling) in [
+                ("Get Item", "iTeM"),
+                ("Let Item", "[Item]"),
+                ("Set Item", "ITEM"),
+            ] {
+                let definition_start =
+                    u64::try_from(source.find(declaration).unwrap() + 4).unwrap();
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.source.span().start_byte() == definition_start
+                    })
+                    .unwrap();
+                let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                    panic!("property definition must resolve")
+                };
+                let edge = edges.iter().find(|edge| edge.symbol == symbol).unwrap();
+                assert_eq!(edge.source_refs.len(), 1);
+                let reference = &edge.source_refs[0];
+                assert_eq!(reference.generation(), receipt.generation);
+                assert_eq!(
+                    reference.span().start_byte(),
+                    u64::try_from(source.rfind(spelling).unwrap()).unwrap()
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![reference.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, spelling.as_bytes());
             }
         }
     }
