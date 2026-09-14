@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/140";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/141";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -32836,6 +32836,116 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn vba_declared_udt_queries_survive_type_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous = None;
+        for ty in ["Coordinate", "Variant", "Coordinate"] {
+            let source = format!(
+                "Attribute VB_Name = \"Geometry\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As {ty})\npoint.X = 1\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Geometry.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(previous) = previous {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let field = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "X")
+                .unwrap();
+            let procedure = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Run")
+                .unwrap();
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "X".to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                located
+                    .data
+                    .hits
+                    .iter()
+                    .any(|hit| hit.symbol == Some(field.id))
+            );
+            let read = service
+                .source_read(
+                    receipt.generation,
+                    vec![document.files[0].evidence.source.clone().unwrap()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([procedure.id]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let edges: Vec<_> = relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .filter(|edge| edge.symbol == field.id)
+                .collect();
+            assert_eq!(edges.len(), usize::from(ty == "Coordinate"));
+            for edge in edges {
+                for reference in &edge.source_refs {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, b"point.X");
+                }
+            }
         }
     }
 

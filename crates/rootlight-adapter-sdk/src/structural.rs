@@ -439,6 +439,8 @@ pub fn structural_captured_name_for_fact<'a>(
                 | "vba.invoked_let_identifier.reference"
                 | "vba.invoked_set_identifier.reference"
                 | "vba.default_constant_identifier.reference"
+                | "vba.direct_type_identifier.reference"
+                | "vba.type_identifier.reference"
                 | "vba.invoked_identifier.reference"
                 | "vba.self_member.reference"
                 | "vba.self_invoked_member.reference"

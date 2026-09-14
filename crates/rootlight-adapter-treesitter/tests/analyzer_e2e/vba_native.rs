@@ -28,6 +28,361 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_declared_udt_fields_follow_local_types_and_nested_fields() {
+    let source = "Private Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation As Coordinate\nEnd Type\nSub Run(ByRef value As Box)\nDim snapshot As Coordinate\nsnapshot.X = value.Location.X\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (expression, field) in [
+        ("snapshot.X", "X"),
+        ("value.Location", "Location"),
+        ("value.Location.X", "X"),
+    ] {
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == field)
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(expression.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{expression}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "vba-member-target-unavailable" && gap.source.span() == site.source.span()
+        }));
+    }
+}
+
+#[test]
+fn vba_declared_type_references_ignore_value_namespace_shadowing() {
+    let source = "Private Type Coordinate\nX As Long\nEnd Type\nSub Run(ByVal Coordinate As Long)\nDim point As Coordinate\npoint.X = Coordinate\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Struct && entity.canonical_name == "Coordinate")
+        .unwrap();
+    let start = u64::try_from(source.find("As Coordinate").unwrap() + 3).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == start)
+        .unwrap();
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert_eq!(site.role, OccurrenceRole::TypeUse);
+    assert!(
+        document
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::UsesType
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+                && relation.evidence.source.as_ref() == Some(&site.source))
+    );
+}
+
+#[test]
+fn vba_declared_udt_members_preserve_ambiguous_dynamic_and_array_barriers() {
+    for (types, globals, parameter, body, unresolved) in [
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As Variant",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As Object",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As External",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point() As Coordinate",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As New Coordinate",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nx As Long\nEnd Type\n",
+            "",
+            "point As Coordinate",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\nPrivate Type Coordinate\nY As Long\nEnd Type\n",
+            "",
+            "point As Coordinate",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\n#If FLAG Then\nX As Long\n#Else\nX As Long\n#End If\nEnd Type\n",
+            "",
+            "point As Coordinate",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "Private point As Coordinate\n",
+            "point As Variant",
+            "point.X = 1",
+            "point.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation() As Coordinate\nEnd Type\n",
+            "",
+            "value As Box",
+            "value.Location.X = 1",
+            "value.Location.X",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As Coordinate",
+            "point.X$ = 1",
+            "point.X$",
+        ),
+        (
+            "Private Type Coordinate\nX As Long\nEnd Type\n",
+            "",
+            "point As Coordinate",
+            "point!X = 1",
+            "point!X",
+        ),
+    ] {
+        let source = format!("{types}{globals}Sub Run(ByRef {parameter})\n{body}\nEnd Sub\n");
+        let result = output(&source);
+        let start = u64::try_from(source.find(unresolved).unwrap()).unwrap();
+        let end = start + u64::try_from(unresolved.len()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-member-target-unavailable"
+                    && gap.source.span() == site.source.span()),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_declared_udt_field_references_do_not_invent_calls() {
+    let source = "Private Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As Coordinate)\nCall point.X(1)\nEnd Sub\n";
+    let result = output(source);
+    let field = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "X")
+        .unwrap();
+    let site = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.member.reference")
+        .unwrap();
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+    assert_eq!(site.role, OccurrenceRole::Reference);
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vba-call-or-index-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_declared_udt_types_and_fields_survive_generation_replay() {
+    let source = "Private Type Coordinate\r\n[X] As Long\r\nEnd Type\r\nSub Run(ByRef point As _\r\n Coordinate)\r\npoint.[X] = 1\r\nEnd Sub\r\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, VBA);
+    let fixture = Fixture::new(VBA, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, VBA, &budget);
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let field = first
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "X")
+        .unwrap();
+    let site = first
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.member.reference")
+        .unwrap();
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, VBA, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let (fresh, _) = analyzer
+        .analyze_and_capture(
+            &next,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(replay.document(), fresh.document());
+    assert_eq!(replay.report(), fresh.report());
+    assert!(
+        replay
+            .document()
+            .occurrences
+            .iter()
+            .all(|site| site.source.generation() == changed.source.generation())
+    );
+}
+
+#[test]
+fn vba_declared_udt_fields_do_not_rebind_instance_keywords() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nPrivate Type Box\nLocation As Coordinate\nEnd Type\nPrivate Location As Variant\nSub Run()\nDim [Me] As Box\nMe.Location.X = 1\n[Me].Location.X = 2\nEnd Sub\n";
+    let result = output(source);
+    let field = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "X")
+        .unwrap();
+    for (expression, resolved) in [("Me.Location.X", false), ("[Me].Location.X", true)] {
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        if resolved {
+            assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+        } else {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{expression}"
+            );
+            assert!(
+                result
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "vba-member-target-unavailable"
+                        && gap.source.span() == site.source.span())
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_declared_udt_fields_remain_unresolved_when_capture_budget_is_clipped() {
+    let source = format!(
+        "Private Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As Coordinate)\npoint.X = 1\n{}End Sub\n",
+        "unknown = another\n".repeat(100)
+    );
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(VBA, source.as_bytes());
+    let defaults = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, VBA, &defaults);
+    let demand = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    let budget = limits_with_syntax_records(demand + 8);
+    let result = analyze(
+        &analyzer(&provider, VBA),
+        &request(&fixture.snapshot, &fixture.source, VBA, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert!(
+        result
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-extraction-limit")
+    );
+    let members: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "vba.member.reference")
+        .collect();
+    assert!(!members.is_empty());
+    assert!(
+        members
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+#[test]
 fn visual_basic_classic_preserves_structure_and_dialect_uncertainty() {
     let case = LanguageCase {
         name: "visual-basic-classic",
@@ -1906,7 +2261,17 @@ fn vba_conditional_local_declarations_block_outer_fallthrough() {
 fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
     let source = "Public Type Model\nValue As Long\nEnd Type\nPublic Sub Update(ByVal Model As Long, ByVal Finish As Long, ByVal size As Long)\nDim item As Model\nGoTo Finish\nFinish:\nCall Visit(size:=size)\nEnd Sub\n";
     let result = output(source);
-    for marker in ["Model\nGoTo", "Finish\nFinish:", "size:="] {
+    let model = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Struct && entity.canonical_name == "Model")
+        .unwrap();
+    for (marker, is_type) in [
+        ("Model\nGoTo", true),
+        ("Finish\nFinish:", false),
+        ("size:=", false),
+    ] {
         let start = u64::try_from(source.find(marker).unwrap()).unwrap();
         let site = result
             .document()
@@ -1914,8 +2279,14 @@ fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
             .iter()
             .find(|site| site.source.span().start_byte() == start)
             .unwrap();
-        assert_eq!(site.syntax_kind, "vba.nonvalue_identifier.reference");
-        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        if is_type {
+            assert_eq!(site.syntax_kind, "vba.direct_type_identifier.reference");
+            assert_eq!(site.role, OccurrenceRole::TypeUse);
+            assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: model.id });
+        } else {
+            assert_eq!(site.syntax_kind, "vba.nonvalue_identifier.reference");
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        }
     }
     let parameter = result
         .document()

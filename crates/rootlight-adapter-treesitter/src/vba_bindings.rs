@@ -1,4 +1,4 @@
-//! Source-bound VBA procedure, module and explicit instance-member environments.
+//! Source-bound VBA procedure, module, declared-type and member environments.
 //! Missing, duplicate or conditional declarations still shadow outer names;
 //! runtime dispatch and foreign-name comparison require separate evidence.
 
@@ -54,6 +54,12 @@ pub(super) struct ResolvedBinding {
     pub(super) is_call: bool,
 }
 
+#[derive(Clone, Copy)]
+struct DeclaredType {
+    symbol: SymbolId,
+    field_scope: Option<u64>,
+}
+
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
@@ -62,6 +68,11 @@ pub(super) struct VbaBindings<'a> {
     class_module: Option<&'a SyntaxFact>,
     class_symbol: Option<SymbolId>,
     maximum_name_bytes: usize,
+    types: BTreeMap<u64, BTreeMap<String, Option<DeclaredType>>>,
+    foreign_type_scopes: BTreeSet<u64>,
+    fields: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    foreign_field_scopes: BTreeSet<u64>,
+    value_types: HashMap<SymbolId, u64>,
 }
 
 impl<'a> VbaBindings<'a> {
@@ -81,6 +92,11 @@ impl<'a> VbaBindings<'a> {
             class_module: None,
             class_symbol: None,
             maximum_name_bytes,
+            types: BTreeMap::new(),
+            foreign_type_scopes: BTreeSet::new(),
+            fields: BTreeMap::new(),
+            foreign_field_scopes: BTreeSet::new(),
+            value_types: HashMap::new(),
         };
         for fact in facts {
             cancellation.check()?;
@@ -198,7 +214,229 @@ impl<'a> VbaBindings<'a> {
             }
             result.insert(owner, name.as_deref(), symbol);
         }
+        result.collect_declared_types(facts, source, symbols, cancellation)?;
         Ok(result)
+    }
+
+    fn collect_declared_types(
+        &mut self,
+        facts: &[SyntaxFact],
+        source: &[u8],
+        symbols: &HashMap<u64, SymbolId>,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        let mut declarations = HashMap::new();
+        for fact in facts {
+            cancellation.check()?;
+            if fact.syntax_kind().as_str() != "vba.identifier.definition" {
+                continue;
+            }
+            let Some(declaration) = self.declaration(fact.parent(), cancellation)? else {
+                continue;
+            };
+            let Some((owner, conditional)) = self.scope(fact.parent(), cancellation)? else {
+                continue;
+            };
+            let symbol = symbols
+                .get(&fact.local_id())
+                .copied()
+                .filter(|_| !conditional);
+            let name = self.source_name(fact, source)?;
+            declarations.insert(declaration.local_id(), symbol.filter(|_| name.is_some()));
+            match declaration.syntax_kind().as_str() {
+                "vba.struct.declaration" | "vba.enum.declaration" => {
+                    let Some((module, outer_conditional)) =
+                        self.scope(self.fact(owner)?.parent(), cancellation)?
+                    else {
+                        continue;
+                    };
+                    if self.fact(module)?.syntax_kind().as_str() != "vba.file.scope" {
+                        continue;
+                    }
+                    let Some(name) = name else {
+                        self.foreign_type_scopes.insert(module);
+                        continue;
+                    };
+                    let ty = symbol
+                        .filter(|_| !outer_conditional)
+                        .map(|symbol| DeclaredType {
+                            symbol,
+                            field_scope: (declaration.syntax_kind().as_str()
+                                == "vba.struct.declaration")
+                                .then_some(owner),
+                        });
+                    self.types
+                        .entry(module)
+                        .or_default()
+                        .entry(name)
+                        .and_modify(|value| *value = None)
+                        .or_insert(ty);
+                }
+                "vba.field.declaration" => {
+                    let Some(name) = name else {
+                        self.foreign_field_scopes.insert(owner);
+                        continue;
+                    };
+                    self.fields
+                        .entry(owner)
+                        .or_default()
+                        .entry(name)
+                        .and_modify(|value| *value = None)
+                        .or_insert(symbol);
+                }
+                _ => {}
+            }
+        }
+        for fact in facts {
+            cancellation.check()?;
+            if fact.syntax_kind().as_str() != "vba.direct_type_identifier.reference" {
+                continue;
+            }
+            let Some(declaration) = self.declaration(fact.parent(), cancellation)? else {
+                continue;
+            };
+            let Some(&Some(symbol)) = declarations.get(&declaration.local_id()) else {
+                continue;
+            };
+            let Some(name) = self.source_name(fact, source)? else {
+                continue;
+            };
+            if let Some(DeclaredType {
+                field_scope: Some(scope),
+                ..
+            }) = self.declared_type(fact, &name, cancellation)?
+            {
+                self.value_types.insert(symbol, scope);
+            }
+        }
+        Ok(())
+    }
+
+    fn source_name(
+        &self,
+        fact: &SyntaxFact,
+        source: &[u8],
+    ) -> Result<Option<String>, AdapterError> {
+        let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
+        let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
+            .map_err(|_| invalid_capture())?;
+        if text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
+            return Ok(None);
+        }
+        Ok(
+            structural_captured_name_for_fact("vba", fact, text, self.maximum_name_bytes)
+                .filter(|name| name.is_ascii())
+                .map(|name| name.to_ascii_lowercase()),
+        )
+    }
+
+    fn declared_type(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<DeclaredType>, AdapterError> {
+        // MS-VBAL type binding searches module-level UDTs and enums before
+        // project types; procedure-local values do not shadow this namespace.
+        let mut parent = fact.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some((owner, _)) = self.scope(parent, cancellation)? else {
+                return Ok(None);
+            };
+            let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() == "vba.file.scope" {
+                if self.foreign_type_scopes.contains(&owner) {
+                    return Ok(None);
+                }
+                return Ok(self
+                    .types
+                    .get(&owner)
+                    .and_then(|names| names.get(name))
+                    .copied()
+                    .flatten());
+            }
+            parent = scope.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn field_reference(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        if self.value_types.is_empty() {
+            return Ok(None);
+        }
+        // Only a written dot-chain through declared UDT fields establishes
+        // these targets; indexing and default-member dispatch are separate.
+        let mut components = text.split('.');
+        let Some(receiver_text) = components.next() else {
+            return Ok(None);
+        };
+        // Me is an instance expression, not an ordinary local name. An
+        // explicitly escaped [Me] remains a distinct identifier expression.
+        if receiver_text.trim().eq_ignore_ascii_case("Me") {
+            return Ok(None);
+        }
+        let Some(receiver) = member_key(receiver_text) else {
+            return Ok(None);
+        };
+        let mut parent = fact.parent();
+        let mut receiver_symbol = None;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some((owner, _)) = self.scope(parent, cancellation)? else {
+                break;
+            };
+            let scope = self.fact(owner)?;
+            if self.foreign_scopes.contains(&owner) {
+                return Ok(None);
+            }
+            if let Some(binding) = self
+                .bindings
+                .get(&owner)
+                .and_then(|names| names.get(&receiver))
+            {
+                if let Some(Binding::Value(symbol)) = binding {
+                    receiver_symbol = Some(*symbol);
+                }
+                break;
+            }
+            if scope.syntax_kind().as_str() == "vba.file.scope" {
+                break;
+            }
+            parent = scope.parent();
+        }
+        let Some(mut symbol) = receiver_symbol else {
+            return Ok(None);
+        };
+        let mut member_count = 0_usize;
+        for component in components {
+            cancellation.check()?;
+            let Some(name) = member_key(component) else {
+                return Ok(None);
+            };
+            let Some(scope) = self.value_types.get(&symbol) else {
+                return Ok(None);
+            };
+            if self.foreign_field_scopes.contains(scope) {
+                return Ok(None);
+            }
+            let Some(Some(field)) = self.fields.get(scope).and_then(|fields| fields.get(&name))
+            else {
+                return Ok(None);
+            };
+            symbol = *field;
+            member_count = member_count.checked_add(1).ok_or_else(invalid_capture)?;
+        }
+        Ok((member_count > 0).then_some(ResolvedBinding {
+            symbol,
+            is_call: false,
+        }))
     }
 
     pub(super) fn resolve(
@@ -208,6 +446,32 @@ impl<'a> VbaBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
         cancellation.check()?;
+        if text.len() > self.maximum_name_bytes {
+            return Ok(None);
+        }
+        if fact.syntax_kind().as_str() == "vba.member.reference" {
+            return self.field_reference(fact, text, cancellation);
+        }
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "vba.type_identifier.reference" | "vba.direct_type_identifier.reference"
+        ) {
+            if text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
+                return Ok(None);
+            }
+            let Some(name) =
+                structural_captured_name_for_fact("vba", fact, text, self.maximum_name_bytes)
+                    .filter(|name| name.is_ascii())
+            else {
+                return Ok(None);
+            };
+            return Ok(self
+                .declared_type(fact, &name.to_ascii_lowercase(), cancellation)?
+                .map(|ty| ResolvedBinding {
+                    symbol: ty.symbol,
+                    is_call: false,
+                }));
+        }
         let instance = matches!(
             fact.syntax_kind().as_str(),
             "vba.instance.reference" | "vba.invoked_instance.reference"
@@ -494,6 +758,23 @@ fn owns_scope(declaration: &SyntaxFact) -> bool {
             | "vba.field.declaration"
             | "vba.enum_constant.declaration"
     )
+}
+
+fn member_key(text: &str) -> Option<String> {
+    let text = text.trim();
+    let name = text
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+        .unwrap_or(text);
+    let mut bytes = name.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    Some(name.to_ascii_lowercase())
 }
 
 fn invalid_capture() -> AdapterError {
@@ -886,6 +1167,112 @@ mod tests {
                 );
             }
             facts.reverse();
+        }
+    }
+
+    #[test]
+    fn declared_type_inventory_preserves_order_and_missing_evidence() {
+        let cancellation = Cancellation::new();
+        let ty = SymbolId::from_bytes([1; 20]);
+        let field = SymbolId::from_bytes([2; 20]);
+        let parameter = SymbolId::from_bytes([3; 20]);
+        let source = b"Coord X point Coord point.X";
+        let original = vec![
+            fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, 27),
+            fact(2, Some(1), SyntaxFactKind::Scope, "vba.struct.scope", 0, 7),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "vba.struct.declaration",
+                0,
+                7,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                0,
+                5,
+            ),
+            fact(
+                5,
+                Some(3),
+                SyntaxFactKind::Declaration,
+                "vba.field.declaration",
+                6,
+                7,
+            ),
+            fact(
+                6,
+                Some(5),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                6,
+                7,
+            ),
+            fact(
+                7,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.sub_function.scope",
+                8,
+                27,
+            ),
+            fact(
+                8,
+                Some(7),
+                SyntaxFactKind::Declaration,
+                "vba.parameter.declaration",
+                8,
+                19,
+            ),
+            fact(
+                9,
+                Some(8),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                8,
+                13,
+            ),
+            fact(
+                10,
+                Some(8),
+                SyntaxFactKind::Occurrence,
+                "vba.direct_type_identifier.reference",
+                14,
+                19,
+            ),
+            fact(
+                11,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                "vba.member.reference",
+                20,
+                27,
+            ),
+        ];
+        for missing in [None, Some(4), Some(6), Some(9), Some(10)] {
+            let mut symbols = HashMap::from([(4, ty), (6, field), (9, parameter)]);
+            let mut facts = original.clone();
+            if let Some(missing) = missing {
+                symbols.remove(&missing);
+                if missing == 10 {
+                    facts.retain(|fact| fact.local_id() != 10);
+                }
+            }
+            for _ in 0..2 {
+                let plan = VbaBindings::new(&facts, source, &symbols, 64, &cancellation).unwrap();
+                let reference = facts.iter().find(|fact| fact.local_id() == 11).unwrap();
+                assert_eq!(
+                    plan.resolve(reference, "point.X", &cancellation)
+                        .unwrap()
+                        .map(|binding| (binding.symbol, binding.is_call)),
+                    missing.is_none().then_some((field, false))
+                );
+                facts.reverse();
+            }
         }
     }
 

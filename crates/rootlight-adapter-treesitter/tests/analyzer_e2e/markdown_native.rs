@@ -1238,6 +1238,46 @@ fn markdown_classic_basic_remains_source_bound_without_inventing_a_dialect() {
 }
 
 #[test]
+fn markdown_udt_fields_stay_bound_to_each_example_type() {
+    let mut source = "# Types\n\n".to_owned();
+    let mut examples = Vec::new();
+    for language in ["vba", "visual-basic-classic"].into_iter().cycle().take(12) {
+        let start = source.len();
+        source.push_str(&format!("~~~{language}\nPrivate Type Coordinate\nX As Long\nEnd Type\nSub Run(ByRef point As Coordinate)\npoint.X = 1\nEnd Sub\n~~~\n\n"));
+        examples.push((start, source.len(), language));
+    }
+    let result = output(&source);
+    let mut identities = BTreeSet::new();
+    for (start, end, language) in examples {
+        let local = |span: SourceSpan| {
+            usize::try_from(span.start_byte()).unwrap() >= start
+                && usize::try_from(span.end_byte()).unwrap() <= end
+        };
+        let field = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Field
+                    && entity.canonical_name == "X"
+                    && local(entity.evidence.source.as_ref().unwrap().span())
+            })
+            .unwrap();
+        assert_eq!(field.language, language);
+        identities.insert(field.id);
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.member.reference" && local(site.source.span()))
+            .unwrap();
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+        assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+    }
+    assert_eq!(identities.len(), 12);
+}
+
+#[test]
 fn markdown_classic_and_vba_examples_keep_separate_languages_and_bindings() {
     let body =
         "Attribute VB_Name = \"Meter\"\nSub Run(ByVal value As Long)\nvalue = value + 1\nEnd Sub\n";

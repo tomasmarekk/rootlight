@@ -1,5 +1,5 @@
 //! VBA authored binding positions and body-independent declaration headers.
-//! Dynamic members and call/index syntax remain source references, not proven edges.
+//! Dynamic dispatch and call/index syntax need evidence beyond declared field targets.
 
 use rootlight_adapter_sdk::AdapterError;
 use rootlight_cancel::Cancellation;
@@ -213,6 +213,49 @@ pub(super) fn reference_syntax(
             || (parent.kind() == "call_statement"
                 && parent.child_by_field_name("callee") == Some(expression))
     });
+    if let Some(ty) = child
+        .parent()
+        .filter(|node| node.kind() == "type_expression")
+    {
+        let direct = if let Some(clause) =
+            ty.parent().filter(|node| node.kind() == "as_type_clause")
+            && let Some(declaration) = clause.parent()
+            && matches!(
+                declaration.kind(),
+                "variable_declarator" | "parameter" | "type_member"
+            )
+            && declaration.child_by_field_name("bounds").is_none()
+        {
+            // The grammar's anonymous regex keywords are invisible to child
+            // traversal. Check only the native clause prefix, preserving New
+            // as a distinct instantiation rule even across continued lines.
+            let prefix = source
+                .get(clause.start_byte()..ty.start_byte())
+                .unwrap_or_default();
+            let mut words = prefix
+                .split(u8::is_ascii_whitespace)
+                .filter(|word| !word.is_empty() && *word != b"_");
+            let mut direct = words
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"As"))
+                && words.next().is_none();
+            let mut cursor = clause.walk();
+            for part in clause.children(&mut cursor) {
+                cancellation.check()?;
+                if part.kind() == "array_bounds" {
+                    direct = false;
+                }
+            }
+            direct
+        } else {
+            false
+        };
+        return Ok(if direct {
+            "vba.direct_type_identifier"
+        } else {
+            "vba.type_identifier"
+        });
+    }
     while let Some(parent) = child.parent() {
         cancellation.check()?;
         let kind = parent.kind();
@@ -368,6 +411,66 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_type_capture_distinguishes_arrays_and_automatic_objects() {
+        for (declaration, direct) in [
+            ("point As Coordinate", true),
+            ("point As _\r\n Coordinate", true),
+            ("point As New Coordinate", false),
+            ("point As _\r\n New Coordinate", false),
+            ("point() As Coordinate", false),
+            ("point As Coordinate()", false),
+        ] {
+            let source = format!("Sub Run(ByRef {declaration})\nEnd Sub\n");
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_vba::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            let family = super::super::GrammarFamily::Vba;
+            let pack =
+                super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+                    .unwrap();
+            let extraction = pack
+                .extract(
+                    family,
+                    &tree,
+                    source.as_bytes(),
+                    1024,
+                    1024,
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            let labels: Vec<_> = extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Reference)
+                .map(|candidate| candidate.syntax)
+                .collect();
+            let clause = tree
+                .root_node()
+                .named_child(0)
+                .unwrap()
+                .child_by_field_name("parameters")
+                .unwrap()
+                .named_child(0)
+                .unwrap()
+                .child_by_field_name("type")
+                .unwrap();
+            let mut cursor = clause.walk();
+            let parts: Vec<_> = clause
+                .children(&mut cursor)
+                .map(|node| (node.kind(), source.get(node.byte_range())))
+                .collect();
+            assert_eq!(
+                labels.contains(&"vba.direct_type_identifier"),
+                direct,
+                "{source}: {} {labels:?} {parts:?}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
 
     #[test]
     fn class_identity_requires_an_exact_leading_export_preamble() {
