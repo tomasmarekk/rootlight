@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/136";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/137";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/32";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -27743,6 +27743,112 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks.len(), 1);
                 assert_eq!(read.data.chunks[0].bytes, b"mEaSuRe");
+            }
+        }
+    }
+
+    #[test]
+    fn vba_result_references_preserve_sources_after_restart_and_mutation() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("holder.bas");
+        let source = "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nFunction Measure() As Variant\n[mEaSuRe] = 1\n[mEaSuRe] = [mEaSuRe] + 1\nEnd Function\nProperty Get Item() As Variant\n[iTeM] = 1\n[iTeM] = [iTeM] + 1\nEnd Property\n";
+        let mut previous = None;
+        for source in [source.to_owned(), source.replace("+ 1", "+ 2 + 3")] {
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let symbols: BTreeMap<_, _> = document
+                .entities
+                .iter()
+                .filter(|entity| matches!(entity.kind, EntityKind::Function | EntityKind::Property))
+                .map(|entity| (entity.canonical_name.as_str(), entity.id))
+                .collect();
+            let identities = BTreeSet::from([symbols["Measure"], symbols["Item"]]);
+            if let Some((old_generation, old_identities)) = previous {
+                assert_ne!(receipt.generation, old_generation);
+                assert_eq!(identities, old_identities);
+            }
+            previous = Some((receipt.generation, identities));
+            for (name, spelling) in [("Measure", "[mEaSuRe]"), ("Item", "[iTeM]")] {
+                let symbol = symbols[name];
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References, RelationFamily::Calls],
+                        Some(RelationDirection::Outbound),
+                        0,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let edges: Vec<_> = relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .collect();
+                assert_eq!(edges.len(), 3);
+                assert!(edges.iter().all(|edge| edge.symbol == symbol));
+                let references: Vec<_> = edges.iter().flat_map(|edge| &edge.source_refs).collect();
+                let expected: BTreeSet<_> = source
+                    .match_indices(spelling)
+                    .map(|(start, _)| u64::try_from(start).unwrap())
+                    .collect();
+                assert_eq!(expected.len(), 3);
+                assert_eq!(references.len(), expected.len());
+                assert_eq!(
+                    references
+                        .iter()
+                        .map(|reference| reference.span().start_byte())
+                        .collect::<BTreeSet<_>>(),
+                    expected
+                );
+                for reference in references {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| site.source.span() == reference.span())
+                        .unwrap();
+                    assert_eq!(site.role, OccurrenceRole::Reference);
+                    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol });
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks.len(), 1);
+                    assert_eq!(read.data.chunks[0].bytes, spelling.as_bytes());
+                }
             }
         }
     }

@@ -20,6 +20,7 @@ enum Binding {
     },
     ExternalProcedure(SymbolId),
     FunctionResult(SymbolId),
+    PropertyResult(SymbolId),
     Property(PropertyAccessors),
 }
 
@@ -162,9 +163,17 @@ impl<'a> VbaBindings<'a> {
                 result.constant_symbols.insert(symbol);
             }
             if owns_scope(declaration) {
-                // A function name denotes its result in value context, but the
-                // procedure in invocation context. A Get's own result must not
-                // fall through to the module's accessor group as a recursive call.
+                let Some((parent, conditional)) =
+                    result.scope(result.fact(owner)?.parent(), cancellation)?
+                else {
+                    continue;
+                };
+                if conditional {
+                    symbol = None;
+                }
+                // MS-VBAL 5.6.2.1 evaluates a bare enclosing Function/Get name
+                // as its return value. Keep that declaration reference local;
+                // falling through would invent a recursive accessor call.
                 if matches!(
                     declaration.syntax_kind().as_str(),
                     "vba.function.declaration" | "vba.get_property.declaration"
@@ -173,19 +182,14 @@ impl<'a> VbaBindings<'a> {
                         Some(Binding::Function { symbol, .. }) => {
                             Some(Binding::FunctionResult(symbol))
                         }
+                        Some(Binding::Property(PropertyAccessors {
+                            get: Some(symbol), ..
+                        })) => Some(Binding::PropertyResult(symbol)),
                         _ => None,
                     };
                     result.insert(owner, name.as_deref(), result_binding);
                 }
-                let Some((parent, conditional)) =
-                    result.scope(result.fact(owner)?.parent(), cancellation)?
-                else {
-                    continue;
-                };
                 owner = parent;
-                if conditional {
-                    symbol = None;
-                }
             }
             result.insert(owner, name.as_deref(), symbol);
         }
@@ -295,6 +299,19 @@ impl<'a> VbaBindings<'a> {
             }
             if let Some(binding) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
                 return Ok(match binding {
+                    Some(Binding::FunctionResult(symbol) | Binding::PropertyResult(symbol))
+                        if matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.value_identifier.reference"
+                                | "vba.let_identifier.reference"
+                                | "vba.set_identifier.reference"
+                        ) && !text.ends_with(['$', '%', '&', '#', '@', '^', '!']) =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: false,
+                        })
+                    }
                     Some(Binding::Value(symbol))
                         if (!default_constant || self.constant_symbols.contains(symbol))
                             && (!self_member || !self.constant_symbols.contains(symbol)) =>

@@ -28,6 +28,141 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_result_references_bind_the_enclosing_function_or_getter() {
+    for (header, end, kind) in [
+        (
+            "Function Measure(ByVal value As Variant) As Variant",
+            "Function",
+            EntityKind::Function,
+        ),
+        (
+            "Property Get Measure(ByVal value As Variant) As Variant",
+            "Property",
+            EntityKind::Property,
+        ),
+    ] {
+        for statement in [
+            "[mEaSuRe] = value",
+            "Let [mEaSuRe] = value",
+            "Set [mEaSuRe] = value",
+            "value = [mEaSuRe]",
+            "value = 1 + [mEaSuRe]",
+            "Visit [mEaSuRe]",
+        ] {
+            let source = format!("{header}\n{statement}\nEnd {end}\n");
+            let result = output(&source);
+            let document = result.document();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == kind && entity.canonical_name == "Measure")
+                .unwrap();
+            let site = reference_at(document, &source, "[mEaSuRe]");
+            assert_eq!(
+                site.source.span().end_byte() - site.source.span().start_byte(),
+                9
+            );
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{source}"
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference, "{source}");
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(target.id)
+            }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::Calls
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+            }));
+        }
+    }
+}
+
+#[test]
+fn vba_result_references_keep_type_scope_and_index_barriers() {
+    for (before, body, after, marker) in [
+        (
+            "Function Measure() As Variant\n",
+            "mEaSuRe$ = 1",
+            "End Function\n",
+            "mEaSuRe$",
+        ),
+        (
+            "Function Measure() As Variant\nDim Measure As Variant\n",
+            "mEaSuRe = 1",
+            "End Function\n",
+            "mEaSuRe",
+        ),
+        (
+            "#If Enabled Then\nFunction Measure() As Variant\n",
+            "mEaSuRe = 1",
+            "End Function\n#End If\n",
+            "mEaSuRe",
+        ),
+        (
+            "Property Get Measure() As Variant\nDim value As Variant\n",
+            "value = mEaSuRe(0)",
+            "End Property\n",
+            "mEaSuRe",
+        ),
+        (
+            "Property Get Measure() As Variant\n",
+            "mEaSuRe(0) = 1",
+            "End Property\n",
+            "mEaSuRe",
+        ),
+        (
+            "Property Get Measure() As Variant\n",
+            "Call mEaSuRe()",
+            "End Property\n",
+            "mEaSuRe",
+        ),
+        (
+            "Property Get Measure() As Variant\nDim Measure As Variant\n",
+            "mEaSuRe = 1",
+            "End Property\n",
+            "mEaSuRe",
+        ),
+        (
+            "Function Measure(Optional value As Variant = mEaSuRe) As Variant\n",
+            "",
+            "End Function\n",
+            "mEaSuRe",
+        ),
+    ] {
+        let source = format!("{before}{body}\n{after}");
+        let result = output(&source);
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + u64::try_from(marker.len()).unwrap()
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert_ne!(site.role, OccurrenceRole::CallSite, "{source}");
+        assert!(
+            result.document().skipped_regions.iter().any(|gap| {
+                gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+            }),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn vba_unqualified_properties_select_source_bound_accessors() {
     for (parameters, argument) in [("", ""), ("ByVal index As Long", "(0)")] {
         let setter_parameters = if parameters.is_empty() {
@@ -178,10 +313,19 @@ fn vba_unqualified_properties_keep_result_slots_and_unproven_calls_explicit() {
             "Property Get Item() As Variant\nDim value As Variant\n{statement}\nEnd Property\nProperty Let Item(ByVal value As Variant)\nEnd Property\nProperty Set Item(ByVal value As Variant)\nEnd Property\n"
         );
         let result = output(&source);
-        assert!(matches!(
-            reference_at(result.document(), &source, "iTeM").target,
-            OccurrenceTarget::Unresolved { .. }
-        ));
+        let document = result.document();
+        let getter = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition && site.source.span().start_byte() == 13
+            })
+            .unwrap();
+        assert!(matches!(getter.target, OccurrenceTarget::Resolved { .. }));
+        assert_eq!(
+            reference_at(document, &source, "iTeM").target,
+            getter.target
+        );
         assert!(
             result
                 .document()
@@ -343,10 +487,18 @@ fn vba_function_values_preserve_result_and_local_shadowing() {
     let result = output(source);
     let document = result.document();
     let result_read = reference_at(document, source, "mEaSuRe +");
-    assert!(matches!(
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "Measure")
+        .unwrap();
+    assert_eq!(
         result_read.target,
-        OccurrenceTarget::Unresolved { .. }
-    ));
+        OccurrenceTarget::Resolved {
+            symbol: function.id
+        }
+    );
+    assert_eq!(result_read.role, OccurrenceRole::Reference);
     let parameter = document
         .entities
         .iter()
@@ -995,7 +1147,8 @@ fn vba_recursive_function_invocation_is_not_its_result_variable() {
                 ..usize::try_from(site.source.span().end_byte()).unwrap(),
         ) == Some("Reduce")
     }) {
-        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol });
+        assert_eq!(site.role, OccurrenceRole::Reference);
     }
 }
 
