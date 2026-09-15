@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compound;
+
 use std::{
     collections::VecDeque,
     sync::Arc,
