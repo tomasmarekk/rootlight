@@ -14,6 +14,15 @@ use rootlight_ir::EntityVisibility;
 #[derive(Clone, Copy)]
 enum Binding {
     Value(SymbolId),
+    EnumMember {
+        symbol: SymbolId,
+        defined_at: u64,
+    },
+    EnumType {
+        symbol: SymbolId,
+        scope: u64,
+        defined_at: u64,
+    },
     Procedure(SymbolId),
     Function {
         symbol: SymbolId,
@@ -117,6 +126,7 @@ impl<'a> VbaBindings<'a> {
             .class_module
             .and_then(|fact| symbols.get(&fact.local_id()).copied());
         let mut required_parameter_scopes = BTreeSet::new();
+        let mut enum_module_bindings = Vec::new();
         for fact in facts {
             cancellation.check()?;
             if fact.syntax_kind().as_str() == "vba.parameter.declaration"
@@ -150,6 +160,15 @@ impl<'a> VbaBindings<'a> {
                         | "vba.omittable_parameter.declaration"
                         | "vba.variable.declaration"
                         | "vba.constant.declaration" => Some(Binding::Value(symbol)),
+                        "vba.enum_constant.declaration" => Some(Binding::EnumMember {
+                            symbol,
+                            defined_at: declaration.span().start_byte(),
+                        }),
+                        "vba.enum.declaration" => Some(Binding::EnumType {
+                            symbol,
+                            scope: owner,
+                            defined_at: declaration.span().start_byte(),
+                        }),
                         "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
                         "vba.function.declaration" => Some(Binding::Function {
                             symbol,
@@ -186,7 +205,13 @@ impl<'a> VbaBindings<'a> {
             {
                 result.constant_symbols.insert(symbol);
             }
-            if owns_scope(declaration) {
+            let enum_member = declaration.syntax_kind().as_str() == "vba.enum_constant.declaration";
+            if enum_member {
+                // Qualified lookup uses the enum's members, while simple names
+                // participate in the enclosing module tier (MS-VBAL 5.6.10).
+                result.insert(owner, name.as_deref(), symbol);
+            }
+            if owns_scope(declaration) || enum_member {
                 let Some((parent, conditional)) =
                     result.scope(result.fact(owner)?.parent(), cancellation)?
                 else {
@@ -215,6 +240,17 @@ impl<'a> VbaBindings<'a> {
                 }
                 owner = parent;
             }
+            if enum_member || declaration.syntax_kind().as_str() == "vba.enum.declaration" {
+                enum_module_bindings.push((declaration.span().start_byte(), owner, name, symbol));
+            } else {
+                result.insert(owner, name.as_deref(), symbol);
+            }
+        }
+        // Enum type/member precedence is defined by source order, not capture
+        // order. Select earlier candidates before duplicate names become barriers.
+        enum_module_bindings.sort_by_key(|entry| entry.0);
+        for (_, owner, name, symbol) in enum_module_bindings {
+            cancellation.check()?;
             result.insert(owner, name.as_deref(), symbol);
         }
         result.collect_declared_types(facts, source, symbols, cancellation)?;
@@ -410,11 +446,8 @@ impl<'a> VbaBindings<'a> {
         text: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
-        if self.value_types.is_empty() {
-            return Ok(None);
-        }
-        // Only a written dot-chain through declared UDT fields establishes
-        // these targets; indexing and default-member dispatch are separate.
+        // A written dot-chain can select enum constants or declared UDT fields.
+        // Indexing and default-member dispatch need separate application evidence.
         let mut components = text.split('.');
         let Some(receiver_text) = components.next() else {
             return Ok(None);
@@ -434,7 +467,7 @@ impl<'a> VbaBindings<'a> {
             return Ok(None);
         };
         let mut parent = fact.parent();
-        let mut receiver_symbol = None;
+        let mut receiver_binding = None;
         let mut instance_context = false;
         for _ in 0..self.facts.len() {
             cancellation.check()?;
@@ -442,6 +475,10 @@ impl<'a> VbaBindings<'a> {
                 break;
             };
             let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() == "vba.enum.scope" {
+                parent = scope.parent();
+                continue;
+            }
             if instance {
                 if scope.syntax_kind().as_str() != "vba.file.scope" {
                     instance_context |= is_instance_procedure_scope(scope);
@@ -465,9 +502,7 @@ impl<'a> VbaBindings<'a> {
                 .get(&owner)
                 .and_then(|names| names.get(&receiver))
             {
-                if let Some(Binding::Value(symbol)) = binding {
-                    receiver_symbol = Some(*symbol);
-                }
+                receiver_binding = *binding;
                 break;
             }
             if scope.syntax_kind().as_str() == "vba.file.scope" {
@@ -475,7 +510,31 @@ impl<'a> VbaBindings<'a> {
             }
             parent = scope.parent();
         }
-        let Some(mut symbol) = receiver_symbol else {
+        if let Some(Binding::EnumType { scope, .. }) = receiver_binding {
+            if instance || self.foreign_scopes.contains(&scope) {
+                return Ok(None);
+            }
+            let Some(name) = components.next().and_then(member_key) else {
+                return Ok(None);
+            };
+            if components.next().is_some() {
+                return Ok(None);
+            }
+            let Some(Some(Binding::EnumMember { symbol, defined_at })) = self
+                .bindings
+                .get(&scope)
+                .and_then(|members| members.get(&name))
+            else {
+                return Ok(None);
+            };
+            return Ok(self
+                .enum_member_precedes_initializer(fact, *defined_at, cancellation)?
+                .then_some(ResolvedBinding {
+                    symbol: *symbol,
+                    is_call: false,
+                }));
+        }
+        let Some(Binding::Value(mut symbol)) = receiver_binding else {
             return Ok(None);
         };
         let mut member_count = 0_usize;
@@ -501,6 +560,22 @@ impl<'a> VbaBindings<'a> {
             symbol,
             is_call: false,
         }))
+    }
+
+    fn enum_member_precedes_initializer(
+        &self,
+        fact: &SyntaxFact,
+        defined_at: u64,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        // Enum initializers may reference earlier members, including those in
+        // earlier enums, but never themselves or later members (MS-VBAL 5.2.3.4).
+        Ok(self
+            .declaration(fact.parent(), cancellation)?
+            .is_none_or(|declaration| {
+                declaration.syntax_kind().as_str() != "vba.enum_constant.declaration"
+                    || defined_at < declaration.span().start_byte()
+            }))
     }
 
     pub(super) fn resolve(
@@ -607,6 +682,10 @@ impl<'a> VbaBindings<'a> {
                 return Ok(None);
             };
             let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() == "vba.enum.scope" {
+                parent = scope.parent();
+                continue;
+            }
             if self_member || instance {
                 if scope.syntax_kind().as_str() != "vba.file.scope" {
                     instance_context |= is_instance_procedure_scope(scope);
@@ -642,6 +721,30 @@ impl<'a> VbaBindings<'a> {
             }
             if let Some(binding) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
                 return Ok(match binding {
+                    Some(Binding::EnumMember { symbol, defined_at })
+                        if !self_member
+                            && !text.ends_with(['$', '%', '&', '#', '@', '^', '!'])
+                            && self.enum_member_precedes_initializer(
+                                fact,
+                                *defined_at,
+                                cancellation,
+                            )? =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: false,
+                        })
+                    }
+                    Some(Binding::EnumType { symbol, .. })
+                        if !self_member
+                            && !default_constant
+                            && !text.ends_with(['$', '%', '&', '#', '@', '^', '!']) =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: false,
+                        })
+                    }
                     Some(Binding::FunctionResult(symbol) | Binding::PropertyResult(symbol))
                         if matches!(
                             fact.syntax_kind().as_str(),
@@ -741,6 +844,18 @@ impl<'a> VbaBindings<'a> {
             .entry(name.to_ascii_lowercase())
             .and_modify(|existing| {
                 *existing = match (*existing, symbol) {
+                    (
+                        Some(left @ Binding::EnumType { defined_at: a, .. }),
+                        Some(right @ Binding::EnumMember { defined_at: b, .. }),
+                    )
+                    | (
+                        Some(left @ Binding::EnumMember { defined_at: a, .. }),
+                        Some(right @ Binding::EnumType { defined_at: b, .. }),
+                    ) => {
+                        // The earlier declaration wins only this specific
+                        // type/member collision; all other duplicates stay ambiguous.
+                        Some(if a < b { left } else { right })
+                    }
                     (Some(Binding::Property(left)), Some(Binding::Property(right))) => {
                         left.merge(right).map(Binding::Property)
                     }
@@ -933,6 +1048,100 @@ mod tests {
                 17,
             ),
         ]
+    }
+
+    #[test]
+    fn enum_inventory_preserves_capture_order_and_missing_identities() {
+        let source = b"Phase Ready Phase.Ready Ready";
+        let original = vec![
+            fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, 29),
+            fact(2, Some(1), SyntaxFactKind::Scope, "vba.enum.scope", 0, 11),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "vba.enum.declaration",
+                0,
+                11,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                0,
+                5,
+            ),
+            fact(
+                5,
+                Some(3),
+                SyntaxFactKind::Declaration,
+                "vba.enum_constant.declaration",
+                6,
+                11,
+            ),
+            fact(
+                6,
+                Some(5),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                6,
+                11,
+            ),
+            fact(
+                7,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.sub_function.scope",
+                12,
+                29,
+            ),
+            fact(
+                8,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                "vba.member.reference",
+                12,
+                23,
+            ),
+            fact(
+                9,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                "vba.value_identifier.reference",
+                24,
+                29,
+            ),
+        ];
+        let ty = SymbolId::from_bytes([1; 20]);
+        let member = SymbolId::from_bytes([2; 20]);
+        for missing in [None, Some(4), Some(6)] {
+            let mut symbols = HashMap::from([(4, ty), (6, member)]);
+            if let Some(id) = missing {
+                symbols.remove(&id);
+            }
+            for rotation in 0..original.len() {
+                let mut facts = original.clone();
+                facts.rotate_left(rotation);
+                for reverse in [false, true] {
+                    if reverse {
+                        facts.reverse();
+                    }
+                    let bindings =
+                        VbaBindings::new(&facts, source, &symbols, 256, &Cancellation::new())
+                            .unwrap();
+                    for (id, text, expected) in [
+                        (8, "Phase.Ready", missing.is_none().then_some(member)),
+                        (9, "Ready", (missing != Some(6)).then_some(member)),
+                    ] {
+                        let site = facts.iter().find(|fact| fact.local_id() == id).unwrap();
+                        let result = bindings.resolve(site, text, &Cancellation::new()).unwrap();
+                        assert_eq!(result.as_ref().map(|binding| binding.symbol), expected);
+                        assert!(result.is_none_or(|binding| !binding.is_call));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

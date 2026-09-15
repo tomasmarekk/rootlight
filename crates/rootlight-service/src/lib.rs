@@ -212,7 +212,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/144";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/145";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/34";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -32865,6 +32865,114 @@ mod tests {
                 assert_eq!(symbols, previous);
             }
             previous = Some(symbols);
+        }
+    }
+
+    #[test]
+    fn vba_enum_queries_follow_source_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut previous = None;
+        for (member, value, resolved) in
+            [("Ready", 1, true), ("Ready", 2, true), ("Other", 2, false)]
+        {
+            let source = format!(
+                "Attribute VB_Name = \"States\"\nPrivate Enum Phase\n{member} = {value}\nEnd Enum\nSub Run()\nanswer = Phase.Ready\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Module.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let start = u64::try_from(source.find("Phase.Ready").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 11
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            assert_eq!(site.source.generation(), receipt.generation);
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(target.kind, rootlight_ir::EntityKind::Constant);
+                assert_eq!(target.canonical_name, "Ready");
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        16,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(!relationships.data.truncated);
+                let references: BTreeSet<_> = relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|item| item.source_refs.iter().cloned())
+                    .collect();
+                assert_eq!(references, BTreeSet::from([site.source.clone()]));
+            }
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].reference, site.source);
+            assert_eq!(read.data.chunks[0].bytes, b"Phase.Ready");
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-member-target-unavailable"),
+                !resolved
+            );
+            for coverage in &document.coverage_records {
+                assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            }
         }
     }
 

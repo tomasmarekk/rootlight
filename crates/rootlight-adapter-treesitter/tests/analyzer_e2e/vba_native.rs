@@ -28,6 +28,254 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn vba_enum_members_bind_in_module_and_qualified_value_contexts() {
+    let source = "Private Enum Phase\nReady = 1\nDone = Ready + 1\nEnd Enum\nSub Run(Optional ByVal selected As Long = Done)\nDim answer As Long\nanswer = Ready\nanswer = Phase.Done\nanswer = [Phase].[Ready]\nanswer = Phase.Done(1)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (text, name, ordinal) in [
+        ("Ready", "Ready", 1),
+        ("Done", "Done", 1),
+        ("Ready", "Ready", 2),
+        ("Phase.Done", "Done", 0),
+        ("[Phase].[Ready]", "Ready", 0),
+        ("Phase.Done", "Done", 1),
+    ] {
+        let start = source.match_indices(text).nth(ordinal).unwrap().0;
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + text.len()).unwrap()
+                    && site.syntax_kind != "vba.application.reference"
+            })
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == rootlight_ir::EntityKind::Constant && entity.canonical_name == name
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{text} at {start}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == rootlight_ir::RelationPredicate::RefersTo
+                && edge.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+                && edge.evidence.source.as_ref() == Some(&site.source)
+        }));
+    }
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|edge| edge.predicate != rootlight_ir::RelationPredicate::Calls)
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vba-call-or-index-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_enum_members_preserve_shadowing_duplicates_and_initializer_order() {
+    for (source, text, ordinal, target_kind, resolved) in [
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nSub Run()\nDim Ready As Long\nanswer = Ready\nEnd Sub\n",
+            "Ready",
+            2,
+            rootlight_ir::EntityKind::Variable,
+            true,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nSub Run(ByVal Phase As Object)\nanswer = Phase.Ready\nEnd Sub\n",
+            "Phase.Ready",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nSub Run()\nanswer = Phase.Ready.Other\nEnd Sub\n",
+            "Phase.Ready.Other",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nready = 2\nEnd Enum\nSub Run()\nanswer = Phase.Ready\nEnd Sub\n",
+            "Phase.Ready",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nEnum Phase\nDone = 2\nEnd Enum\nSub Run()\nanswer = Phase.Ready\nEnd Sub\n",
+            "Phase.Ready",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = Ready + 1\nEnd Enum\n",
+            "Ready",
+            1,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = Done\nDone = 2\nEnd Enum\n",
+            "Done",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = Phase.Done\nDone = 2\nEnd Enum\n",
+            "Phase.Done",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nEnum Result\nDone = Phase.Ready\nEnd Enum\n",
+            "Phase.Ready",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            true,
+        ),
+        (
+            "#If FEATURE Then\nEnum Phase\nReady = 1\nEnd Enum\n#End If\nSub Run()\nanswer = Ready\nEnd Sub\n",
+            "Ready",
+            1,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nPrivate Ready As Long\nSub Run()\nanswer = Ready\nEnd Sub\n",
+            "Ready",
+            2,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum First\nReady = 1\nEnd Enum\nEnum Second\nReady = 2\nEnd Enum\nSub Run()\nanswer = Ready\nEnd Sub\n",
+            "Ready",
+            2,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPrivate Enum Phase\nReady = 1\nEnd Enum\nSub Run()\nanswer = Me.Ready\nEnd Sub\n",
+            "Ready",
+            1,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nSub Run()\nanswer = Ready$\nEnd Sub\n",
+            "Ready$",
+            0,
+            rootlight_ir::EntityKind::Constant,
+            false,
+        ),
+    ] {
+        let result = output(source);
+        let start = source.match_indices(text).nth(ordinal).unwrap().0;
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + text.len()).unwrap()
+                    && site.syntax_kind != "vba.application.reference"
+            })
+            .unwrap_or_else(|| panic!("missing {text} in {source}"));
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            resolved,
+            "{text} in {source}"
+        );
+        if let OccurrenceTarget::Resolved { symbol } = site.target {
+            let target = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(target.kind, target_kind, "{source}");
+        }
+        assert_ne!(site.role, OccurrenceRole::CallSite);
+    }
+}
+
+#[test]
+fn vba_enum_type_member_collisions_use_source_order() {
+    for (declarations, expression, resolved, name) in [
+        (
+            "Enum Phase\nReady = 1\nEnd Enum\nEnum Extra\nPhase = 2\nEnd Enum\nEnum Other\nPhase = 3\nEnd Enum\n",
+            "Phase.Ready",
+            true,
+            "Ready",
+        ),
+        (
+            "Enum Extra\nPhase = 2\nEnd Enum\nEnum Phase\nReady = 1\nEnd Enum\n",
+            "Phase",
+            true,
+            "Phase",
+        ),
+        (
+            "Enum Extra\nPhase = 2\nEnd Enum\nEnum Other\nPhase = 3\nEnd Enum\nEnum Phase\nReady = 1\nEnd Enum\n",
+            "Phase",
+            false,
+            "Phase",
+        ),
+        (
+            "Enum Phase\nPhase = 1\nEnd Enum\n",
+            "Phase.Phase",
+            true,
+            "Phase",
+        ),
+    ] {
+        let source = format!("{declarations}Sub Run()\nanswer = {expression}\nEnd Sub\n");
+        let result = output(&source);
+        let start = source.rfind(expression).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte()
+                        == u64::try_from(start + expression.len()).unwrap()
+                    && site.syntax_kind != "vba.application.reference"
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            resolved,
+            "{source}"
+        );
+        if let OccurrenceTarget::Resolved { symbol } = site.target {
+            let target = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(target.kind, rootlight_ir::EntityKind::Constant);
+            assert_eq!(target.canonical_name, name);
+        }
+    }
+}
+
+#[test]
 fn vba_member_invocation_context_does_not_prove_a_call() {
     let source = "Sub Run(ByVal worker As Object, ByVal other As Object)\nCall worker.Apply(1)\nworker.Apply 2\nanswer = worker.Compute(3)\nworker.Item(1) = 4\nSet worker.Item(2) = other\nanswer = worker.Item\nCall worker.[Apply](5)\nworker.Check 1 = 2\nCall worker.Check((1) = 2)\nworker.Check (1) = 2, 3\nworker.Item (1) = 4\nEnd Sub\n";
     let result = output(source);
