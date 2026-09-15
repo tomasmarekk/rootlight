@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compound;
+pub mod vba_compression;
 
 use std::{
     collections::VecDeque,
