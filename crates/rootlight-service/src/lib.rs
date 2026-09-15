@@ -213,7 +213,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/145";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/34";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/35";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -33188,6 +33188,344 @@ mod tests {
                 }),
                 "same-span application evidence must survive target-gap recovery"
             );
+        }
+    }
+
+    #[test]
+    fn classic_project_value_types_follow_access_and_membership_after_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal state As Phase, ByVal data As Payload)\nanswer = state.Ready\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        let manifest = "Type=OleDll\nName=\"Primary\"\nModule=Types; Types.bas\nModule=Client; Client.bas\nModule=Other; Other.bas\n";
+        let mut previous = None;
+        for (access, duplicate, listed, resolved) in [
+            ("Public", false, true, true),
+            ("Private", false, true, false),
+            ("Public", true, true, false),
+            ("Public", false, false, false),
+            ("Public", false, true, true),
+        ] {
+            let declarations = format!(
+                "{access} Enum Phase\nReady = 1\nEnd Enum\n{access} Type Payload\nCount As Long\nEnd Type\n"
+            );
+            fs::write(
+                fixture.path().join("Types.bas"),
+                format!("Attribute VB_Name = \"Types\"\n{declarations}"),
+            )
+            .unwrap();
+            fs::write(
+                fixture.path().join("Other.bas"),
+                format!(
+                    "Attribute VB_Name = \"Other\"\n{}",
+                    if duplicate { &declarations } else { "" }
+                ),
+            )
+            .unwrap();
+            fs::write(
+                fixture.path().join("project.vbp"),
+                if listed {
+                    manifest.to_owned()
+                } else {
+                    manifest.replace("Module=Types; Types.bas\n", "")
+                },
+            )
+            .unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|f| f.path == "Client.bas")
+                .unwrap();
+            let types = document
+                .files
+                .iter()
+                .find(|f| f.path == "Types.bas")
+                .unwrap();
+            for (name, kind) in [("Phase", EntityKind::Enum), ("Payload", EntityKind::Struct)] {
+                let start = u64::try_from(client.find(name).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.syntax_kind == "vba.direct_type_identifier.reference"
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    resolved,
+                    "{access} duplicate={duplicate} listed={listed} {name}"
+                );
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|e| {
+                        e.kind == kind
+                            && e.canonical_name == name
+                            && e.evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|s| s.span().file() == types.id)
+                    })
+                    .unwrap();
+                if resolved {
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                    let relationships = service
+                        .symbol_relationships(
+                            receipt.generation,
+                            BTreeSet::from([target.id]),
+                            vec![RelationFamily::Types],
+                            Some(RelationDirection::Inbound),
+                            0,
+                            16,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(!relationships.data.truncated);
+                    assert!(
+                        relationships
+                            .data
+                            .groups
+                            .iter()
+                            .flat_map(|g| &g.items)
+                            .any(|item| item.source_refs.contains(&site.source))
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![site.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0)
+                                .with_encoding(SourceEncoding::Bytes),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].reference, site.source);
+                    assert_eq!(read.data.chunks[0].bytes, name.as_bytes());
+                }
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.detail == "vba-type-target-unavailable"
+                            && gap.source == site.source),
+                    !resolved
+                );
+            }
+            let member = document
+                .occurrences
+                .iter()
+                .find(|site| site.file == file.id && site.syntax_kind == "vba.member.reference")
+                .unwrap();
+            assert!(
+                matches!(member.target, OccurrenceTarget::Unresolved { .. }),
+                "an enum-typed value is not an enum namespace receiver"
+            );
+            for record in document
+                .coverage_records
+                .iter()
+                .filter(|r| r.scope == rootlight_ir::CoverageScope::File(file.id))
+            {
+                assert_eq!(record.discovered, record.indexed + record.skipped);
+            }
+        }
+    }
+
+    #[test]
+    fn classic_project_value_type_names_preserve_context_boundaries() {
+        for (declaration, kind) in [
+            ("Enum State\nReady = 1\nEnd Enum\n", EntityKind::Enum),
+            ("Type State\nCount As Long\nEnd Type\n", EntityKind::Struct),
+        ] {
+            for scenario in [
+                "private-sibling",
+                "public-sibling",
+                "module-name",
+                "project-name",
+                "local-type",
+                "foreign-project",
+                "conditional-sibling",
+                "same-module-private",
+                "same-module-public",
+                "unknown-sibling",
+                "class-name",
+            ] {
+                for reverse in [false, true] {
+                    let fixture = durable_test_tempdir();
+                    let local = if scenario == "local-type" {
+                        format!("Private {declaration}")
+                    } else {
+                        String::new()
+                    };
+                    let client = format!(
+                        "Attribute VB_Name = \"Client\"\n{local}Public Sub Run(ByVal value As State)\nEnd Sub\n"
+                    );
+                    let other_name = if matches!(scenario, "module-name" | "class-name") {
+                        "State"
+                    } else {
+                        "Other"
+                    };
+                    let other = match scenario {
+                        "private-sibling" => format!("Private {declaration}"),
+                        "public-sibling" => format!("Public {declaration}"),
+                        "unknown-sibling" => declaration.to_owned(),
+                        "conditional-sibling" => {
+                            format!("#If Available Then\nPublic {declaration}#End If\n")
+                        }
+                        _ => String::new(),
+                    };
+                    let other_kind = if scenario == "class-name" {
+                        "Class"
+                    } else {
+                        "Module"
+                    };
+                    let other_path = if scenario == "class-name" {
+                        "Other.cls"
+                    } else {
+                        "Other.bas"
+                    };
+                    let other_header = if scenario == "class-name" {
+                        "VERSION 1.0 CLASS\n"
+                    } else {
+                        ""
+                    };
+                    let extra = match scenario {
+                        "same-module-private" => format!("Private {declaration}"),
+                        "same-module-public" => format!("Public {declaration}"),
+                        _ => String::new(),
+                    };
+                    let mut entries = [
+                        "Module=Types; Types.bas".to_owned(),
+                        "Module=Client; Client.bas".to_owned(),
+                        format!("{other_kind}={other_name}; {other_path}"),
+                    ];
+                    if reverse {
+                        entries.reverse();
+                    }
+                    let project_name = if scenario == "project-name" {
+                        "State"
+                    } else {
+                        "Primary"
+                    };
+                    for (path, source) in [
+                        (
+                            "project.vbp",
+                            format!(
+                                "Type=OleDll\nName=\"{project_name}\"\n{}\n",
+                                entries.join("\n")
+                            ),
+                        ),
+                        (
+                            "Types.bas",
+                            format!("Attribute VB_Name = \"Types\"\nPublic {declaration}{extra}"),
+                        ),
+                        ("Client.bas", client.clone()),
+                        (
+                            other_path,
+                            format!("{other_header}Attribute VB_Name = \"{other_name}\"\n{other}"),
+                        ),
+                    ] {
+                        fs::write(fixture.path().join(path), source).unwrap();
+                    }
+                    if scenario == "foreign-project" {
+                        fs::create_dir(fixture.path().join("foreign")).unwrap();
+                        fs::write(
+                            fixture.path().join("foreign/project.vbp"),
+                            "Type=OleDll\nName=\"Separate\"\nModule=Types; Types.bas\n",
+                        )
+                        .unwrap();
+                        fs::write(
+                            fixture.path().join("foreign/Types.bas"),
+                            format!("Attribute VB_Name = \"Types\"\nPublic {declaration}"),
+                        )
+                        .unwrap();
+                    }
+                    let mut service = FirstSliceService::new(4).unwrap();
+                    let receipt = service
+                        .index_repository(fixture.path(), &deadline())
+                        .unwrap();
+                    let snapshot = service
+                        .loaded_generation_snapshot(receipt.generation)
+                        .unwrap();
+                    let document = snapshot.document();
+                    let file = document
+                        .files
+                        .iter()
+                        .find(|f| f.path == "Client.bas")
+                        .unwrap();
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.file == file.id
+                                && site.syntax_kind == "vba.direct_type_identifier.reference"
+                                && site.source.span().start_byte()
+                                    == u64::try_from(client.rfind("State").unwrap()).unwrap()
+                        })
+                        .unwrap();
+                    let expected_path = match scenario {
+                        "private-sibling" | "foreign-project" => Some("Types.bas"),
+                        "local-type" => Some("Client.bas"),
+                        _ => None,
+                    };
+                    if let Some(path) = expected_path {
+                        let target_file = document.files.iter().find(|f| f.path == path).unwrap();
+                        let target = document
+                            .entities
+                            .iter()
+                            .find(|e| {
+                                e.kind == kind
+                                    && e.canonical_name == "State"
+                                    && e.evidence
+                                        .source
+                                        .as_ref()
+                                        .is_some_and(|s| s.span().file() == target_file.id)
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            site.target,
+                            OccurrenceTarget::Resolved { symbol: target.id },
+                            "{kind:?} {scenario} reverse={reverse}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                            "{kind:?} {scenario} reverse={reverse}: {:?}",
+                            site.target
+                        );
+                    }
+                }
+            }
         }
     }
 

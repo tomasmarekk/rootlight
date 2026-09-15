@@ -65,6 +65,11 @@ struct Member {
     class: bool,
 }
 
+struct Project {
+    name: String,
+    members: Vec<Member>,
+}
+
 fn is_manifest(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
@@ -118,7 +123,7 @@ fn parse_project(
     bytes: &[u8],
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
-) -> Result<Option<Vec<Member>>, ResolutionError> {
+) -> Result<Option<Project>, ResolutionError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Ok(None);
     }
@@ -128,7 +133,7 @@ fn parse_project(
     let mut members = Vec::new();
     let mut names = BTreeSet::new();
     let mut paths = BTreeSet::new();
-    let mut project_name = false;
+    let mut project_name = None;
     let mut project_type = false;
     for (index, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         cancellation.check()?;
@@ -146,16 +151,14 @@ fn parse_project(
         let key = key.trim();
         let value = value.trim();
         if key.eq_ignore_ascii_case("Name") {
-            if project_name
-                || value
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .and_then(identifier)
-                    .is_none()
-            {
+            let name = value
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .and_then(identifier);
+            if project_name.is_some() || name.is_none() {
                 return Ok(None);
             }
-            project_name = true;
+            project_name = name;
         } else if key.eq_ignore_ascii_case("Type") {
             if project_type
                 || !["Exe", "OleDll", "OleExe", "Control"]
@@ -198,7 +201,9 @@ fn parse_project(
             return Ok(None);
         }
     }
-    Ok((project_name && project_type && !members.is_empty()).then_some(members))
+    Ok(project_name
+        .filter(|_| project_type && !members.is_empty())
+        .map(|name| Project { name, members }))
 }
 
 impl<'a> ClassicIndex<'a> {
@@ -257,7 +262,7 @@ impl<'a> ClassicIndex<'a> {
             }
         }
         let mut declarations: BTreeMap<FileId, Vec<&EntityRecord>> = BTreeMap::new();
-        let mut local_types = BTreeSet::new();
+        let mut local_types = BTreeMap::new();
         for entity in entities.values() {
             cancellation.check()?;
             work.consume()?;
@@ -267,10 +272,13 @@ impl<'a> ClassicIndex<'a> {
                     .or_default()
                     .push(entity);
                 if matches!(entity.kind, EntityKind::Struct | EntityKind::Enum) {
-                    local_types.insert((
-                        source.span().file(),
-                        entity.canonical_name.to_ascii_lowercase(),
-                    ));
+                    local_types
+                        .entry((
+                            source.span().file(),
+                            entity.canonical_name.to_ascii_lowercase(),
+                        ))
+                        .and_modify(|unique| *unique = false)
+                        .or_insert(true);
                 }
             }
         }
@@ -281,12 +289,13 @@ impl<'a> ClassicIndex<'a> {
             let Some(bytes) = sources.get(&manifest.id) else {
                 return Ok(result);
             };
-            let Some(members) = parse_project(&manifest.path, bytes, cancellation, work)? else {
+            let Some(project) = parse_project(&manifest.path, bytes, cancellation, work)? else {
                 return Ok(result);
             };
+            let members = project.members;
             // Project inventories can overlap. Admit their retained evidence
             // before allocation rather than relying on later ambiguity pruning.
-            work.consume_many(3)?;
+            work.consume_many(4)?;
             let mut evidence = ProjectEvidence {
                 manifest: manifest.id,
                 sources: Vec::new(),
@@ -296,7 +305,7 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             };
             evidence.sources.push(source.clone());
-            let mut classes = BTreeMap::new();
+            let mut types = BTreeMap::from([(project.name, None)]);
             work.consume_many(members.len())?;
             let member_files: Vec<_> = members
                 .iter()
@@ -376,17 +385,30 @@ impl<'a> ClassicIndex<'a> {
                     complete = false;
                     break;
                 }
-                if member.class {
-                    classes
-                        .entry(member.name)
-                        .and_modify(|prior| *prior = None)
-                        .or_insert(Some(named[0].id));
-                }
+                // Public UDT/enum names cannot collide with any module or the
+                // project name. Keep barriers sticky across manifest order.
+                types
+                    .entry(member.name)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(member.class.then_some(named[0].id));
                 for entity in records
                     .iter()
                     .filter(|entity| matches!(entity.kind, EntityKind::Struct | EntityKind::Enum))
                 {
-                    classes.insert(entity.canonical_name.to_ascii_lowercase(), None);
+                    if entity.visibility == EntityVisibility::Private {
+                        continue;
+                    }
+                    // A private sibling module does not compete with an export,
+                    // but duplicate types inside the exporting module do.
+                    let name = entity.canonical_name.to_ascii_lowercase();
+                    let target = (entity.visibility == EntityVisibility::Public
+                        && entity.container == Some(ContainerRef::Entity(named[0].id))
+                        && local_types.get(&(file.id, name.clone())) == Some(&true))
+                    .then_some(entity.id);
+                    types
+                        .entry(name)
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(target);
                 }
                 evidence.facts.push(FactRef::File(file.id));
                 if let Some(source) = &file.evidence.source {
@@ -405,7 +427,7 @@ impl<'a> ClassicIndex<'a> {
             evidence.sources.dedup();
             evidence.facts.sort_unstable();
             evidence.facts.dedup();
-            projects.push(complete.then_some((classes, Arc::new(evidence))));
+            projects.push(complete.then_some((types, Arc::new(evidence))));
         }
         for occurrence in occurrences {
             cancellation.check()?;
@@ -442,7 +464,7 @@ impl<'a> ClassicIndex<'a> {
             };
             // Local UDT/enum type declarations have their own lookup tier, even
             // when native analysis could not safely select one of them.
-            if local_types.contains(&(occurrence.file, name.clone())) {
+            if local_types.contains_key(&(occurrence.file, name.clone())) {
                 continue;
             }
             let Some(target) = project
@@ -464,6 +486,8 @@ impl<'a> ClassicIndex<'a> {
                 },
             );
         }
+        // Only class-typed receivers enter instance member lookup. Enum and
+        // UDT type identities do not establish an object dispatch environment.
         let mut value_types = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         let mut members = BTreeMap::new();
@@ -489,6 +513,7 @@ impl<'a> ClassicIndex<'a> {
                     EntityKind::Parameter | EntityKind::Variable | EntityKind::Field
                 )
                 && let Some(proof) = result.proof(occurrence)
+                && proof.target.kind == EntityKind::Class
             {
                 value_types
                     .entry(owner.id)
@@ -636,7 +661,7 @@ mod tests {
         path: &str,
         bytes: &[u8],
         cancellation: &Cancellation,
-    ) -> Result<Option<Vec<Member>>, ResolutionError> {
+    ) -> Result<Option<Project>, ResolutionError> {
         parse_project(
             path,
             bytes,
@@ -649,10 +674,11 @@ mod tests {
     fn project_membership_preserves_relative_source_paths() {
         let cancel = Cancellation::default();
         let project = parse("app/project.vbp", b"Type=OleDll\r\nName=\"Primary\"\r\nClass=Worker; ..\\shared\\Worker.cls\r\nModule=Client; Client.bas\r\n", &cancel).unwrap().unwrap();
-        assert_eq!(project.len(), 2);
-        assert_eq!(project[0].path, "shared/worker.cls");
-        assert!(project[0].class);
-        assert_eq!(project[1].name, "client");
+        assert_eq!(project.name, "primary");
+        assert_eq!(project.members.len(), 2);
+        assert_eq!(project.members[0].path, "shared/worker.cls");
+        assert!(project.members[0].class);
+        assert_eq!(project.members[1].name, "client");
     }
 
     #[test]
