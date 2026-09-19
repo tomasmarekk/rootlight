@@ -13,6 +13,7 @@ pub mod vba_compression;
 pub mod vba_dir;
 pub mod vba_project;
 pub mod vba_source;
+pub mod vba_text;
 
 use std::{
     collections::VecDeque,

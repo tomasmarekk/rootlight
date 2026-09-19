@@ -165,6 +165,7 @@ impl ModuleDescriptor {
 /// One raw MBCS module body and its complete physical and decoding dependencies.
 #[derive(Debug)]
 pub struct ModuleSource {
+    code_page: u16,
     stream_id: u32,
     descriptor: Range<usize>,
     source_offset: usize,
@@ -173,6 +174,22 @@ pub struct ModuleSource {
 }
 
 impl ModuleSource {
+    /// Decodes with the codepage retained from this module's own project metadata.
+    ///
+    /// Returned original offsets address [`Self::bytes`]; compression and CFB
+    /// mappings remain on this module for the next provenance composition step.
+    ///
+    /// # Errors
+    /// Returns a typed decoding/limit/cancellation error, without losing access
+    /// to the raw module bytes when its codepage is unsupported or malformed.
+    pub fn decode_text(
+        &self,
+        limits: crate::vba_text::TextLimits,
+        cancellation: &Cancellation,
+    ) -> Result<crate::vba_text::DecodedText<'_>, crate::vba_text::TextError> {
+        crate::vba_text::DecodedText::decode(self.bytes(), self.code_page, limits, cancellation)
+    }
+
     /// Returns exact expanded MBCS bytes; the project supplies their code page.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
@@ -437,6 +454,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
             .ok_or(SourceError::Offset { ordinal })?;
         let decoded = vba_compression::decompress(compressed, limits.compression, cancellation)?;
         Ok(ModuleSource {
+            code_page: self.code_page,
             stream_id,
             descriptor: binding.descriptor.clone(),
             source_offset,

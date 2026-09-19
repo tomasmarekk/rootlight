@@ -44,12 +44,16 @@ fn scalar(bytes: &mut Vec<u8>, id: u16, value: u32) {
 }
 
 fn directory(modules: &[(&str, u32)]) -> Vec<u8> {
+    directory_with_code_page(modules, 1252)
+}
+
+fn directory_with_code_page(modules: &[(&str, u32)], code_page: u16) -> Vec<u8> {
     let mut bytes = Vec::new();
     scalar(&mut bytes, 1, 1);
     scalar(&mut bytes, 2, 0x409);
     scalar(&mut bytes, 20, 0x409);
     header(&mut bytes, 3, 2);
-    word(&mut bytes, 1252);
+    word(&mut bytes, code_page);
     word(&mut bytes, 4);
     text(&mut bytes, b"Project");
     pair(&mut bytes, 5, "");
@@ -287,6 +291,46 @@ fn stream<'a>(name: &'a str, body: &[u8]) -> Stream<'a> {
 }
 fn parse(bytes: &[u8]) -> CompoundFile<'_> {
     CompoundFile::parse(bytes, CompoundLimits::default(), &Cancellation::new()).unwrap()
+}
+
+#[test]
+fn module_text_uses_its_own_declared_page_and_preserves_raw_source() {
+    use crate::vba_text::{TextError, TextLimits};
+
+    for page in [1252, 65001, 932] {
+        let body = b"' caf\xe9 \x80\r\n";
+        let input = compound(&[
+            Stream {
+                name: "dir",
+                bytes: compress_literals(&directory_with_code_page(&[("Source", 0)], page)),
+                inside: true,
+            },
+            stream("Source", body),
+        ]);
+        let file = parse(&input);
+        let cancel = Cancellation::new();
+        let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+        let module = project
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap();
+        match page {
+            1252 => {
+                let text = module.decode_text(TextLimits::default(), &cancel).unwrap();
+                assert_eq!(text.text(), "' café €\r\n");
+                assert_eq!(text.original_range(8..11), Some(7..8));
+                assert_eq!(text.code_page(), page);
+            }
+            65001 => assert!(matches!(
+                module.decode_text(TextLimits::default(), &cancel),
+                Err(TextError::Invalid { offset: 5, .. })
+            )),
+            _ => assert!(matches!(
+                module.decode_text(TextLimits::default(), &cancel),
+                Err(TextError::Unsupported { code_page: 932 })
+            )),
+        }
+        assert_eq!(module.bytes(), body);
+    }
 }
 
 #[test]
