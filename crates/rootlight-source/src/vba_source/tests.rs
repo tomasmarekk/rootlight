@@ -334,6 +334,67 @@ fn module_text_uses_its_own_declared_page_and_preserves_raw_source() {
 }
 
 #[test]
+fn membership_reads_own_project_and_preserves_lazy_source_access() {
+    use crate::vba_membership::{
+        MembershipError, MembershipIssue, MembershipLimits, ProjectMembership,
+    };
+
+    let properties = b"ID=\"{01234567-89AB-CDEF-0123-456789ABCDEF}\"\r\nModule=SECOND\r\nClass=First\r\nName=\"Project\"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n";
+    let input = fixture(
+        &[("First", 0), ("Second", 0)],
+        vec![
+            stream("First", b"first body"),
+            stream("Second", b"second body"),
+            Stream {
+                name: "PROJECT",
+                bytes: properties.to_vec(),
+                inside: false,
+            },
+        ],
+    );
+    let file = parse(&input);
+    let cancel = Cancellation::new();
+    let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+    let membership =
+        ProjectMembership::read(&project, MembershipLimits::default(), &cancel).unwrap();
+    assert_eq!(
+        membership.directory_records()[0].outcome(),
+        Err(MembershipIssue::KindMismatch)
+    );
+    assert_eq!(
+        membership.directory_records()[1]
+            .outcome()
+            .unwrap()
+            .counterpart(),
+        0
+    );
+    assert_eq!(membership.project_records().len(), 2);
+    assert_eq!(membership.project_stream().bytes(), properties);
+    for part in membership.project_stream().source_parts() {
+        assert_eq!(
+            &input[part.container_range()],
+            &properties[part.stream_range()]
+        );
+    }
+    assert_eq!(
+        project
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap()
+            .bytes(),
+        b"first body"
+    );
+    let mut limits = MembershipLimits::default();
+    limits.project.input_bytes = properties.len() - 1;
+    assert!(ProjectMembership::read(&project, limits, &cancel).is_err());
+    let mut limits = MembershipLimits::default();
+    limits.directory.modules = 1;
+    assert!(matches!(
+        ProjectMembership::read(&project, limits, &cancel),
+        Err(MembershipError::Directory(_))
+    ));
+}
+
+#[test]
 fn lazy_sources_preserve_bytes_and_composed_physical_dependencies() {
     let body = b"Attribute VB_Name = \"Module\"\r\nSub Run()\r\nEnd Sub\r\n";
     let mut encoded = vec![0x81; 71];
