@@ -16,6 +16,8 @@ use crate::{
     vba_dir::{DirectoryError, DirectoryLimits, ProjectDirectory},
 };
 
+pub mod root;
+
 #[cfg(test)]
 mod tests;
 
@@ -64,7 +66,7 @@ pub enum BindingError {
     /// The exact named child is a storage, not a byte stream.
     #[error("vba module target is not a stream")]
     NotStream,
-    /// The module refers to the directory metadata stream itself.
+    /// The module refers to the directory or reserved version/cache stream.
     #[error("vba module target is the metadata stream")]
     Metadata,
     /// Multiple declarations refer to the same physical stream.
@@ -494,7 +496,9 @@ fn bind_name(
     if entry.kind() != CompoundEntryKind::Stream {
         return Err(BindingError::NotStream);
     }
-    if entry.id() == directory_id {
+    // Version-dependent cached code is never an authoritative module source,
+    // even when its bytes happen to parse as a compressed source container.
+    if entry.id() == directory_id || entry.name().eq_ignore_ascii_case("_VBA_PROJECT") {
         return Err(BindingError::Metadata);
     }
     Ok(BoundStream {

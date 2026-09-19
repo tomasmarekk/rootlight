@@ -326,6 +326,236 @@ fn ascii_case_variants(word: &str) -> Vec<String> {
         .collect()
 }
 
+fn rooted_fixture() -> Vec<u8> {
+    fixture(
+        &[("Source", 0)],
+        vec![
+            stream("Source", b"Attribute VB_Name = \"Source\"\r\n"),
+            Stream {
+                name: "PROJECT",
+                bytes: b"Module=Source\r\n".to_vec(),
+                inside: false,
+            },
+            Stream {
+                name: "_VBA_PROJECT",
+                bytes: vec![0xff; 7],
+                inside: true,
+            },
+        ],
+    )
+}
+
+#[test]
+fn explicit_root_keeps_descriptor_evidence_and_ignores_version_values() {
+    let bytes = rooted_fixture();
+    let compound = parse(&bytes);
+    let cancel = Cancellation::new();
+    let rooted =
+        root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).unwrap();
+    for (entry, id) in [
+        (rooted.root(), 0),
+        (rooted.storage(), 1),
+        (rooted.properties(), 4),
+        (rooted.version(), 5),
+    ] {
+        assert_eq!(entry.id(), id);
+        assert_eq!(
+            entry.directory_range(),
+            1024 + usize::try_from(id).unwrap() * 128
+                ..1024 + (usize::try_from(id).unwrap() + 1) * 128
+        );
+    }
+    assert_eq!(rooted.version().byte_length(), 7);
+    assert_eq!(
+        rooted
+            .project()
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap()
+            .bytes(),
+        b"Attribute VB_Name = \"Source\"\r\n"
+    );
+    assert_eq!(
+        rooted
+            .project()
+            .read_project_stream(64, &cancel)
+            .unwrap()
+            .bytes(),
+        b"Module=Source\r\n"
+    );
+    assert!(!format!("{rooted:?}").contains("Module=Source"));
+    for (id, name) in [(1, "vBa"), (4, "pRoJeCt"), (5, "_vBa_pRoJeCt")] {
+        let mut changed = bytes.clone();
+        renamed_entry(&mut changed, id, name);
+        let compound = parse(&changed);
+        assert!(
+            root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).is_ok()
+        );
+    }
+}
+
+#[test]
+fn root_selection_never_falls_back_to_other_subtrees() {
+    let mut bytes = rooted_fixture();
+    // Reparent the existing VBA subtree under an explicitly selected host storage.
+    let host = 6;
+    entry(&mut bytes, host, "Host", 1, 0, 0);
+    put32(&mut bytes, 1024 + 76, u32::try_from(host).unwrap());
+    put32(&mut bytes, 1024 + host * 128 + 76, 1);
+    let compound = parse(&bytes);
+    let cancel = Cancellation::new();
+    assert!(matches!(
+        root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel),
+        Err(root::RootError::Storage)
+    ));
+    let rooted =
+        root::RootedProject::open(&compound, 6, ProjectReadLimits::default(), &cancel).unwrap();
+    assert_eq!(rooted.root().id(), 6);
+    assert_eq!(rooted.storage().parent(), Some(6));
+    assert_eq!(rooted.properties().parent(), Some(6));
+    for id in [3, 99] {
+        assert!(matches!(
+            root::RootedProject::open(&compound, id, ProjectReadLimits::default(), &cancel),
+            Err(root::RootError::Root)
+        ));
+    }
+}
+
+#[test]
+fn root_children_cannot_be_missing_ambiguous_or_wrong_kind() {
+    let cancel = Cancellation::new();
+    for id in [1, 4, 5] {
+        let mut bytes = rooted_fixture();
+        renamed_entry(&mut bytes, id, "Unrelated");
+        let compound = parse(&bytes);
+        assert!(
+            root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).is_err()
+        );
+    }
+    for (name, inside) in [("vBa", false), ("project", false), ("_vba_project", true)] {
+        let bytes = fixture(
+            &[],
+            vec![
+                Stream {
+                    name: "PROJECT",
+                    bytes: Vec::new(),
+                    inside: false,
+                },
+                Stream {
+                    name: "_VBA_PROJECT",
+                    bytes: vec![0; 7],
+                    inside: true,
+                },
+                Stream {
+                    name,
+                    bytes: Vec::new(),
+                    inside,
+                },
+            ],
+        );
+        let compound = parse(&bytes);
+        assert!(
+            root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).is_err()
+        );
+    }
+    for id in [4, 5] {
+        let mut bytes = rooted_fixture();
+        entry(
+            &mut bytes,
+            id,
+            if id == 4 { "PROJECT" } else { "_VBA_PROJECT" },
+            1,
+            0,
+            0,
+        );
+        let compound = parse(&bytes);
+        assert!(
+            root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).is_err()
+        );
+    }
+}
+
+#[test]
+fn version_presence_and_directory_limits_do_not_activate_cached_code() {
+    let cancel = Cancellation::new();
+    for length in [0, 1, 6, 7, 8, 4096] {
+        let bytes = fixture(
+            &[],
+            vec![
+                Stream {
+                    name: "PROJECT",
+                    bytes: Vec::new(),
+                    inside: false,
+                },
+                Stream {
+                    name: "_VBA_PROJECT",
+                    bytes: vec![0xa5; length],
+                    inside: true,
+                },
+            ],
+        );
+        let compound = parse(&bytes);
+        let result = root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel);
+        assert_eq!(result.is_ok(), length >= 7);
+        if length < 7 {
+            assert!(matches!(result, Err(root::RootError::Version)));
+        }
+    }
+    let bytes = rooted_fixture();
+    let compound = parse(&bytes);
+    let mut limits = ProjectReadLimits::default();
+    limits.directory.input_bytes = 1;
+    assert!(matches!(
+        root::RootedProject::open(&compound, 0, limits, &cancel),
+        Err(root::RootError::Source(_))
+    ));
+    cancel.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel),
+        Err(root::RootError::Cancelled(_))
+    ));
+}
+
+#[test]
+fn version_cache_cannot_be_claimed_as_module_source() {
+    let bytes = fixture(
+        &[("_VBA_PROJECT", 0), ("Source", 0)],
+        vec![
+            stream("_VBA_PROJECT", b"cached bytes are not module code"),
+            stream("Source", b"independent readable body"),
+            Stream {
+                name: "PROJECT",
+                bytes: Vec::new(),
+                inside: false,
+            },
+        ],
+    );
+    let compound = parse(&bytes);
+    let cancel = Cancellation::new();
+    let rooted =
+        root::RootedProject::open(&compound, 0, ProjectReadLimits::default(), &cancel).unwrap();
+    assert_eq!(
+        rooted.project().modules()[0].stream_id(),
+        Err(BindingError::Metadata)
+    );
+    assert!(matches!(
+        rooted
+            .project()
+            .read_module(0, ModuleReadLimits::default(), &cancel),
+        Err(SourceError::Binding {
+            source: BindingError::Metadata,
+            ..
+        })
+    ));
+    assert_eq!(
+        rooted
+            .project()
+            .read_module(1, ModuleReadLimits::default(), &cancel)
+            .unwrap()
+            .bytes(),
+        b"independent readable body"
+    );
+}
+
 #[test]
 fn reserved_storage_and_stream_names_ignore_ascii_case() {
     let cancel = Cancellation::new();
