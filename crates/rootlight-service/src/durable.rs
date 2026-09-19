@@ -85,7 +85,8 @@ const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const JSON_GZIP_RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 3;
 const LEGACY_INCREMENTAL_STATE_VERSION: u16 = 1;
-const INCREMENTAL_STATE_VERSION: u16 = 2;
+const COMPACT_INCREMENTAL_STATE_VERSION: u16 = 2;
+const INCREMENTAL_STATE_VERSION: u16 = 3;
 const LEGACY_SOURCE_FILE_CATALOG_VERSION: u16 = 1;
 const SOURCE_FILE_CATALOG_VERSION: u16 = 2;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
@@ -939,6 +940,10 @@ struct DurableIncrementalState {
     baseline_context_inputs: Vec<DurableInputFingerprint>,
     analysis_files: DurableAnalysisFileSelection,
     analysis_context_inputs: Vec<DurableInputFingerprint>,
+    // Derived snapshots have no filesystem metadata and must not enter the
+    // discovery baseline or authorize metadata-only content-hash reuse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    derived_inputs: Vec<DurableInputFingerprint>,
     evidence: FirstSliceIncrementalEvidence,
 }
 
@@ -1476,8 +1481,37 @@ impl DurableIncrementalState {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         drop(baseline_file_ids);
+        let mut analysis_inputs = Vec::new();
+        let mut derived_inputs = Vec::new();
+        for input in state.inputs.iter() {
+            check_cancellation(cancellation)?;
+            let derived = match input.key() {
+                InputKey::FileContent(file) | InputKey::FilePath(file) => baseline_files
+                    .binary_search_by_key(&file, |candidate| candidate.file)
+                    .is_err(),
+                _ => false,
+            };
+            if derived {
+                derived_inputs
+                    .try_reserve(1)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                derived_inputs.push(DurableInputFingerprint {
+                    key: input.key(),
+                    value: input.value(),
+                });
+            } else {
+                analysis_inputs
+                    .try_reserve(1)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                analysis_inputs.push(input);
+            }
+        }
+        validate_derived_inputs(&derived_inputs, &baseline_files, cancellation)?;
+        let analysis_inputs =
+            InputSnapshot::new(analysis_inputs, PlanningLimits::default(), cancellation)
+                .map_err(|error| map_incremental_error(error, cancellation))?;
         let (analysis_file_ids, analysis_context_inputs) =
-            compact_incremental_inputs(&state.inputs, &baseline_files, cancellation)?;
+            compact_incremental_inputs(&analysis_inputs, &baseline_files, cancellation)?;
         let analysis_files = if file_ids_cover_baseline(&analysis_file_ids, &baseline_files) {
             DurableAnalysisFileSelection::AllBaseline
         } else {
@@ -1490,6 +1524,7 @@ impl DurableIncrementalState {
             baseline_context_inputs,
             analysis_files,
             analysis_context_inputs,
+            derived_inputs,
             evidence: state.evidence.clone(),
         })
     }
@@ -1498,10 +1533,16 @@ impl DurableIncrementalState {
         self,
         cancellation: &Cancellation,
     ) -> Result<PreparedIncrementalState, FirstSliceError> {
-        if self.version != INCREMENTAL_STATE_VERSION {
+        if !matches!(
+            self.version,
+            COMPACT_INCREMENTAL_STATE_VERSION | INCREMENTAL_STATE_VERSION
+        ) || (self.version == COMPACT_INCREMENTAL_STATE_VERSION
+            && !self.derived_inputs.is_empty())
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         validate_durable_baseline_order(&self.baseline_files)?;
+        validate_derived_inputs(&self.derived_inputs, &self.baseline_files, cancellation)?;
         let metadata = restore_metadata_baseline(&self.baseline_files, cancellation)?;
         let baseline_inputs = restore_compact_input_snapshot(
             self.baseline_files.iter().map(|file| file.file),
@@ -1532,6 +1573,27 @@ impl DurableIncrementalState {
                 )?
             }
         };
+        let analysis_inputs = if self.derived_inputs.is_empty() {
+            analysis_inputs
+        } else {
+            let count = analysis_inputs
+                .iter()
+                .count()
+                .checked_add(self.derived_inputs.len())
+                .ok_or(FirstSliceError::Retention)?;
+            let mut combined = Vec::new();
+            combined
+                .try_reserve_exact(count)
+                .map_err(|_| FirstSliceError::Retention)?;
+            combined.extend(analysis_inputs.iter());
+            combined.extend(
+                self.derived_inputs
+                    .into_iter()
+                    .map(|input| InputFingerprint::new(input.key, input.value)),
+            );
+            InputSnapshot::new(combined, PlanningLimits::default(), cancellation)
+                .map_err(|error| map_incremental_error(error, cancellation))?
+        };
         validate_incremental_evidence(&self.evidence)?;
         Ok(PreparedIncrementalState {
             baseline: IncrementalDiscoveryBaseline::from_validated_parts(metadata, baseline_inputs),
@@ -1539,6 +1601,34 @@ impl DurableIncrementalState {
             evidence: self.evidence,
         })
     }
+}
+
+fn validate_derived_inputs(
+    inputs: &[DurableInputFingerprint],
+    baseline: &[DurableBaselineFile],
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    let mut content = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for input in inputs {
+        check_cancellation(cancellation)?;
+        let (file, set) = match input.key {
+            InputKey::FileContent(file) => (file, &mut content),
+            InputKey::FilePath(file) => (file, &mut paths),
+            _ => return Err(FirstSliceError::CatalogCorrupt),
+        };
+        if baseline
+            .binary_search_by_key(&file, |candidate| candidate.file)
+            .is_ok()
+            || !set.insert(file)
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    if content != paths {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
 }
 
 fn compact_incremental_inputs(
@@ -6231,7 +6321,7 @@ fn decode_incremental_state(
                 serde_json::from_slice(bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
             durable.into_prepared(cancellation)
         }
-        INCREMENTAL_STATE_VERSION => {
+        COMPACT_INCREMENTAL_STATE_VERSION | INCREMENTAL_STATE_VERSION => {
             let durable: DurableIncrementalState =
                 serde_json::from_slice(bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
             durable.into_prepared(cancellation)
@@ -7587,6 +7677,66 @@ mod tests {
             assert_eq!(restored.inputs, prepared.inputs);
             assert_eq!(restored.evidence, prepared.evidence);
         }
+    }
+
+    #[test]
+    fn derived_incremental_inputs_stay_outside_physical_baseline() {
+        let cancellation = Cancellation::new();
+        let mut prepared = compact_incremental_fixture(2);
+        let derived = FileId::from_bytes([241; 20]);
+        let mut inputs = prepared.inputs.iter().collect::<Vec<_>>();
+        inputs.extend([
+            InputFingerprint::new(
+                InputKey::FileContent(derived),
+                content_hash(b"derived bytes"),
+            ),
+            InputFingerprint::new(InputKey::FilePath(derived), content_hash(b"derived path")),
+        ]);
+        prepared.inputs =
+            InputSnapshot::new(inputs, PlanningLimits::default(), &cancellation).unwrap();
+        let compact = DurableIncrementalState::from_prepared(&prepared, &cancellation).unwrap();
+        assert_eq!(compact.derived_inputs.len(), 2);
+        assert_eq!(compact.baseline_files.len(), 2);
+        let encoded = serde_json::to_vec(&compact).unwrap();
+        let restored = decode_incremental_state(&encoded, &cancellation).unwrap();
+        assert_eq!(restored.baseline, prepared.baseline);
+        assert_eq!(restored.inputs, prepared.inputs);
+        for defect in [
+            "missing-path",
+            "duplicate",
+            "physical",
+            "context",
+            "old-version",
+        ] {
+            let mut damaged: DurableIncrementalState = serde_json::from_slice(&encoded).unwrap();
+            match defect {
+                "missing-path" => {
+                    damaged.derived_inputs.pop();
+                }
+                "duplicate" => damaged.derived_inputs.push(damaged.derived_inputs[0]),
+                "physical" => {
+                    damaged.derived_inputs[0].key =
+                        InputKey::FileContent(damaged.baseline_files[0].file)
+                }
+                "context" => damaged.derived_inputs[0].key = InputKey::SearchRevision,
+                "old-version" => damaged.version = COMPACT_INCREMENTAL_STATE_VERSION,
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    decode_incremental_state(&serde_json::to_vec(&damaged).unwrap(), &cancellation),
+                    Err(FirstSliceError::CatalogCorrupt)
+                ),
+                "{defect}"
+            );
+        }
+        let original = compact_incremental_fixture(2);
+        let mut old = DurableIncrementalState::from_prepared(&original, &cancellation).unwrap();
+        old.version = COMPACT_INCREMENTAL_STATE_VERSION;
+        let restored =
+            decode_incremental_state(&serde_json::to_vec(&old).unwrap(), &cancellation).unwrap();
+        assert_eq!(restored.baseline, original.baseline);
+        assert_eq!(restored.inputs, original.inputs);
     }
 
     #[test]

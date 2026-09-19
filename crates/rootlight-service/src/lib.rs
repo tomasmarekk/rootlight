@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod catalog;
+mod container_sources;
 mod coverage_languages;
 mod durable;
 #[cfg(test)]
@@ -7292,9 +7293,73 @@ impl FirstSliceService {
             bytes_examined,
             0,
         ));
-        let source_preflight =
+        let mut source_preflight =
             summarize_source_inputs(&manifest.inputs, &self.analyzers, cancellation)?;
-        let file_claims = source_file_identity_claims(&manifest.inputs, repository, cancellation)?;
+        let mut file_claims =
+            source_file_identity_claims(&manifest.inputs, repository, cancellation)?;
+        let file_only_fallback_required = (resource_bounded_inventory_required
+            && !manifest.inputs.is_empty())
+            || manifest.inputs.len() > self.analysis_limits.ir().max_files
+            || source_preflight.source_bytes
+                > u64::try_from(self.source_snapshots.maximum_bytes)
+                    .map_err(|_| FirstSliceError::Limits)?
+            || ensure_generation_memory_preflight(source_preflight.source_bytes).is_err();
+        let mut discovered_snapshots = BTreeMap::new();
+        let mut derived = container_sources::PreparedSources::default();
+        if !file_only_fallback_required {
+            enforce_source_input_bounds(
+                &source_preflight,
+                manifest.inputs.len(),
+                self.analysis_limits.ir().max_files,
+                self.source_snapshots.maximum_bytes,
+            )?;
+            let (retained_manifest, snapshots) = discover_with_snapshots_at_limit(
+                &root,
+                &self.config,
+                &policy,
+                discovery_limits,
+                BTreeMap::new(),
+                u64::try_from(self.source_snapshots.maximum_bytes)
+                    .map_err(|_| FirstSliceError::Limits)?,
+                cancellation,
+            )
+            .map_err(|error| map_discovery_error(error, cancellation))?
+            .into_parts();
+            if retained_manifest != manifest {
+                return Err(FirstSliceError::DiscoveryDrift.into());
+            }
+            discovered_snapshots = snapshots;
+            derived = container_sources::prepare(
+                &manifest.inputs,
+                &mut discovered_snapshots,
+                repository,
+                self.analysis_limits.ir().max_files - manifest.inputs.len(),
+                self.source_snapshots.maximum_bytes
+                    - usize::try_from(source_preflight.source_bytes)
+                        .map_err(|_| FirstSliceError::Limits)?,
+                cancellation,
+            )?;
+            if !derived.inputs.is_empty() {
+                let extra =
+                    summarize_source_inputs(&derived.inputs, &self.analyzers, cancellation)?;
+                source_preflight.source_bytes = source_preflight
+                    .source_bytes
+                    .checked_add(extra.source_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                source_preflight.supported_file_count = source_preflight
+                    .supported_file_count
+                    .checked_add(extra.supported_file_count)
+                    .ok_or(FirstSliceError::Limits)?;
+                file_claims
+                    .try_reserve(derived.inputs.len())
+                    .map_err(|_| FirstSliceError::Limits)?;
+                file_claims.extend(source_file_identity_claims(
+                    &derived.inputs,
+                    repository,
+                    cancellation,
+                )?);
+            }
+        }
         let source_files = file_claims
             .iter()
             .map(|claim| claim.file)
@@ -7346,13 +7411,6 @@ impl FirstSliceService {
             estimated_disk_bytes,
             0,
         )?;
-        let file_only_fallback_required = (resource_bounded_inventory_required
-            && !manifest.inputs.is_empty())
-            || manifest.inputs.len() > self.analysis_limits.ir().max_files
-            || source_preflight.source_bytes
-                > u64::try_from(self.source_snapshots.maximum_bytes)
-                    .map_err(|_| FirstSliceError::Limits)?
-            || ensure_generation_memory_preflight(source_preflight.source_bytes).is_err();
         if file_only_fallback_required && self.durable.is_some() {
             return self.prepare_file_only_fallback(
                 FileOnlyFallbackPreparation {
@@ -7385,25 +7443,11 @@ impl FirstSliceService {
         }
         enforce_source_input_bounds(
             &source_preflight,
-            manifest.inputs.len(),
+            file_claims.len(),
             self.analysis_limits.ir().max_files,
             self.source_snapshots.maximum_bytes,
         )?;
-        let (retained_manifest, mut discovered_snapshots) = discover_with_snapshots_at_limit(
-            &root,
-            &self.config,
-            &policy,
-            discovery_limits,
-            BTreeMap::new(),
-            u64::try_from(self.source_snapshots.maximum_bytes)
-                .map_err(|_| FirstSliceError::Limits)?,
-            cancellation,
-        )
-        .map_err(|error| map_discovery_error(error, cancellation))?
-        .into_parts();
-        if retained_manifest != manifest {
-            return Err(FirstSliceError::DiscoveryDrift.into());
-        }
+        ensure_generation_memory_preflight(source_preflight.source_bytes)?;
         let source_count = source_preflight.supported_file_count;
         let mut sources = Vec::new();
         sources
@@ -7411,14 +7455,19 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Limits)?;
         let mut retained_sources = Vec::new();
         retained_sources
-            .try_reserve_exact(manifest.inputs.len())
+            .try_reserve_exact(file_claims.len())
             .map_err(|_| FirstSliceError::Limits)?;
         let mut unsupported_sources = Vec::new();
         unsupported_sources
-            .try_reserve_exact(manifest.inputs.len().saturating_sub(source_count))
+            .try_reserve_exact(file_claims.len().saturating_sub(source_count))
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
-        for (input, claim) in manifest.inputs.iter().zip(&file_claims) {
+        for (input, claim) in manifest
+            .inputs
+            .iter()
+            .chain(&derived.inputs)
+            .zip(&file_claims)
+        {
             check_cancellation(cancellation)?;
             let snapshot = discovered_snapshots
                 .remove(&input.file)
@@ -7508,7 +7557,7 @@ impl FirstSliceService {
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
                 source_files: &source_files,
-                semantic_inputs: &[],
+                semantic_inputs: &derived.fingerprints,
                 estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
                     .map_err(|_| FirstSliceError::Limits)?,
                 estimated_durable_bytes: admission.estimated_disk_bytes,
@@ -7859,7 +7908,12 @@ impl FirstSliceService {
             // structural candidate that can never become active.
             return Err(error.into());
         }
-        let semantic_inputs = first_slice_semantic_inputs(&document, &source_files, cancellation)?;
+        let mut semantic_inputs =
+            first_slice_semantic_inputs(&document, &source_files, cancellation)?;
+        semantic_inputs
+            .try_reserve(derived.fingerprints.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        semantic_inputs.extend_from_slice(&derived.fingerprints);
         let final_incremental_plan = prepare_incremental_state(
             FirstSliceIncrementalPlanningContext {
                 repository,
@@ -7942,13 +7996,16 @@ impl FirstSliceService {
         } else {
             Vec::new()
         };
-        let document = apply_bounded_resolution_with_classic_sources(
+        let mut document = apply_bounded_resolution_with_classic_sources(
             document,
             resolution_limits,
             ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
             &classic_sources,
             cancellation,
         )?;
+        // Project fallback may discard parser mappings. Container dependencies
+        // are generation facts and must survive every structural fallback.
+        derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
         let normalized_facts = normalized_record_count(&document)?;
         // Count only rebound records that remain exact after project
         // composition and resolution; replaced candidates are rebuilt work.
@@ -15099,6 +15156,7 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
         DERIVED_PLAN_REVISION_SEED,
         LANGUAGE_DISPOSITION_PROVIDER_SEED,
         SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+        container_sources::REVISION,
     ])
 }
 
@@ -15499,7 +15557,7 @@ fn unsupported_source_document(
         (
             "unsupported-encoding",
             if input.encoding == "binary" {
-                "container bytes retained; embedded source expansion is unavailable"
+                "container bytes have no direct structural analyzer; derived source coverage is reported separately"
             } else {
                 "source encoding has no configured structural analyzer"
             },
