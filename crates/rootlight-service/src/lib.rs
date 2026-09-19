@@ -11,6 +11,7 @@ mod coverage_languages;
 mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
+pub mod office_package;
 mod refinement;
 pub mod source_archive;
 #[cfg(test)]

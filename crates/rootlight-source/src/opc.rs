@@ -6,6 +6,7 @@ use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ids::{ContentHash, content_hash};
 use std::{collections::BTreeSet, fmt, ops::Range};
 
+pub mod parts;
 mod xml;
 
 const TYPES_NS: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
