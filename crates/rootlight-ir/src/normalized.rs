@@ -27,6 +27,8 @@ pub const NORMALIZED_IR_VERSION_V1_3: IrVersion = IrVersion::new(1, 3);
 pub const NORMALIZED_IR_VERSION_V1_4: IrVersion = IrVersion::new(1, 4);
 /// The normalized fact-document version admitting document sections and link definitions.
 pub const NORMALIZED_IR_VERSION_V1_5: IrVersion = IrVersion::new(1, 5);
+/// The normalized fact-document version admitting container extraction dependencies.
+pub const NORMALIZED_IR_VERSION_V1_6: IrVersion = IrVersion::new(1, 6);
 /// Maximum components in one lossless file-path locator.
 pub const MAX_FILE_PATH_LOCATOR_COMPONENTS: usize = 256;
 /// Maximum aggregate hexadecimal bytes in one lossless file-path locator.
@@ -46,6 +48,8 @@ pub enum NormalizedIrVersion {
     V1_4,
     /// Common facts including authored document sections and named link definitions.
     V1_5,
+    /// Common facts including immutable whole-file container extraction dependencies.
+    V1_6,
 }
 
 impl NormalizedIrVersion {
@@ -64,6 +68,7 @@ impl NormalizedIrVersion {
             Self::V1_3 => NORMALIZED_IR_VERSION_V1_3,
             Self::V1_4 => NORMALIZED_IR_VERSION_V1_4,
             Self::V1_5 => NORMALIZED_IR_VERSION_V1_5,
+            Self::V1_6 => NORMALIZED_IR_VERSION_V1_6,
         }
     }
 }
@@ -89,8 +94,9 @@ impl<'de> Deserialize<'de> for NormalizedIrVersion {
             NORMALIZED_IR_VERSION_V1_3 => Ok(Self::V1_3),
             NORMALIZED_IR_VERSION_V1_4 => Ok(Self::V1_4),
             NORMALIZED_IR_VERSION_V1_5 => Ok(Self::V1_5),
+            NORMALIZED_IR_VERSION_V1_6 => Ok(Self::V1_6),
             version => Err(de::Error::custom(format_args!(
-                "expected normalized IR version 1.1, 1.2, 1.3, 1.4 or 1.5, got {}.{}",
+                "expected normalized IR version 1.1 through 1.6, got {}.{}",
                 version.major(),
                 version.minor()
             ))),
@@ -109,7 +115,7 @@ impl schemars::JsonSchema for NormalizedIrVersion {
             "type": "object",
             "properties": {
                 "major": { "type": "integer", "const": 1 },
-                "minor": { "type": "integer", "enum": [1, 2, 3, 4, 5] }
+                "minor": { "type": "integer", "enum": [1, 2, 3, 4, 5, 6] }
             },
             "required": ["major", "minor"],
             "additionalProperties": false
@@ -864,7 +870,7 @@ pub struct ProvenanceRecord {
     pub rule: Option<String>,
 }
 
-/// The semantic direction of a generated or expanded source mapping.
+/// The semantic direction of a generated, expanded or extracted source mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -875,6 +881,11 @@ pub enum SourceMappingKind {
     ExpansionToInvocation,
     /// An invocation maps to its original declaration or schema.
     InvocationToOrigin,
+    /// A complete extracted file depends on one complete immutable container.
+    /// This is not byte-offset equivalence or a directly editable filesystem path.
+    /// Both endpoints are whole-file references; extraction ownership is unique
+    /// per derived file and forms an acyclic graph within the generation.
+    ExtractedFromContainer,
 }
 
 /// One source-to-source origin mapping.
@@ -888,9 +899,9 @@ pub struct SourceMappingRecord {
     pub repository: RepositoryId,
     /// Owning immutable generation.
     pub generation: GenerationId,
-    /// Generated or expanded source reference.
+    /// Generated, expanded or extracted source reference.
     pub from: SourceRef,
-    /// Invocation or handwritten origin reference.
+    /// Invocation, handwritten origin or immutable container reference.
     pub to: SourceRef,
     /// Mapping direction.
     pub kind: SourceMappingKind,
@@ -1134,6 +1145,8 @@ pub enum IrDocument {
     NormalizedV1_4(NormalizedIrDocument),
     /// The normalized 1.5 fact document with document sections and link definitions.
     NormalizedV1_5(NormalizedIrDocument),
+    /// The normalized 1.6 fact document with container extraction dependencies.
+    NormalizedV1_6(NormalizedIrDocument),
 }
 
 impl IrDocument {
@@ -1147,6 +1160,7 @@ impl IrDocument {
             Self::NormalizedV1_3(_) => NORMALIZED_IR_VERSION_V1_3,
             Self::NormalizedV1_4(_) => NORMALIZED_IR_VERSION_V1_4,
             Self::NormalizedV1_5(_) => NORMALIZED_IR_VERSION_V1_5,
+            Self::NormalizedV1_6(_) => NORMALIZED_IR_VERSION_V1_6,
         }
     }
 }
@@ -1162,7 +1176,8 @@ impl Serialize for IrDocument {
             | Self::NormalizedV1_2(document)
             | Self::NormalizedV1_3(document)
             | Self::NormalizedV1_4(document)
-            | Self::NormalizedV1_5(document) => {
+            | Self::NormalizedV1_5(document)
+            | Self::NormalizedV1_6(document) => {
                 if document.version.value() != self.version() {
                     return Err(serde::ser::Error::custom(
                         "IR dispatch and document versions differ",
@@ -1670,6 +1685,7 @@ pub fn decode_ir_document_with_checkpoint(
         && version != NORMALIZED_IR_VERSION_V1_3
         && version != NORMALIZED_IR_VERSION_V1_4
         && version != NORMALIZED_IR_VERSION_V1_5
+        && version != NORMALIZED_IR_VERSION_V1_6
     {
         return Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -1707,6 +1723,10 @@ pub fn decode_ir_document_with_checkpoint(
         NORMALIZED_IR_VERSION_V1_5 => {
             decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
                 .map(IrDocument::NormalizedV1_5)
+        }
+        NORMALIZED_IR_VERSION_V1_6 => {
+            decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
+                .map(IrDocument::NormalizedV1_6)
         }
         version => Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -3180,10 +3200,10 @@ mod tests {
         );
 
         let mut value = normalized_value();
-        value["version"]["minor"] = serde_json::json!(6);
+        value["version"]["minor"] = serde_json::json!(7);
         assert_eq!(
             decode(&encode_test_value(&value), &IrLimits::default()),
-            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 6 })
+            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 7 })
         );
     }
 

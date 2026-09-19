@@ -256,7 +256,8 @@ pub(crate) fn decode(
     | IrDocument::NormalizedV1_2(document)
     | IrDocument::NormalizedV1_3(document)
     | IrDocument::NormalizedV1_4(document)
-    | IrDocument::NormalizedV1_5(document)) =
+    | IrDocument::NormalizedV1_5(document)
+    | IrDocument::NormalizedV1_6(document)) =
         decode_ir_document(document_bytes, limits, extensions)
             .map_err(|_| SegmentError::Corrupt)?
     else {

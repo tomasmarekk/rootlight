@@ -996,6 +996,7 @@ fn validate_invariants(
             &facts,
         )?;
     }
+    validate_extraction_dependencies(document, &files)?;
 
     for coverage in &document.coverage_records {
         validate_owner(
@@ -1322,6 +1323,60 @@ fn validate_fact_ref(
     }
 }
 
+fn validate_extraction_dependencies(
+    document: &NormalizedIrDocument,
+    files: &BTreeMap<FileId, &crate::FileRecord>,
+) -> Result<(), IrDocumentValidationError> {
+    let mut parents = BTreeMap::new();
+    for mapping in &document.source_mappings {
+        if mapping.kind != crate::SourceMappingKind::ExtractedFromContainer {
+            continue;
+        }
+        if document.version < crate::NormalizedIrVersion::V1_6 {
+            return Err(IrDocumentValidationError::ExtractionVersion(mapping.id));
+        }
+        for source in [&mapping.from, &mapping.to] {
+            let file = files
+                .get(&source.span().file())
+                .ok_or(IrDocumentValidationError::MissingFile(source.span().file()))?;
+            if source.span().start_byte() != 0 || source.span().end_byte() != file.byte_length {
+                return Err(IrDocumentValidationError::PartialExtractionDependency(
+                    mapping.id,
+                ));
+            }
+        }
+        let file = mapping.from.span().file();
+        if parents.insert(file, mapping.to.span().file()).is_some() {
+            return Err(IrDocumentValidationError::DuplicateExtractionOrigin(file));
+        }
+    }
+    // Iterative coloring visits each retained dependency once, including shared
+    // nested containers. A source-controlled nesting depth never uses the stack.
+    let mut states = BTreeMap::<FileId, u8>::new();
+    for start in parents.keys().copied() {
+        let mut current = start;
+        while let Some(parent) = parents.get(&current) {
+            match states.get(&current) {
+                Some(1) => return Err(IrDocumentValidationError::ExtractionCycle(current)),
+                Some(2) => break,
+                Some(_) | None => {
+                    states.insert(current, 1);
+                    current = *parent;
+                }
+            }
+        }
+        current = start;
+        while states.get(&current) == Some(&1) {
+            states.insert(current, 2);
+            let Some(parent) = parents.get(&current) else {
+                break;
+            };
+            current = *parent;
+        }
+    }
+    Ok(())
+}
+
 fn validate_container_cycles(
     document: &NormalizedIrDocument,
 ) -> Result<(), IrDocumentValidationError> {
@@ -1561,6 +1616,18 @@ pub enum IrDocumentValidationError {
     /// Semantic entity containers form a cycle.
     #[error("entity container cycle includes {0}")]
     ContainerCycle(SymbolId),
+    /// Container extraction is not admitted by the document's selected version.
+    #[error("extraction mapping {0} requires normalized IR version 1.6")]
+    ExtractionVersion(FactId),
+    /// Extraction dependencies must bind complete source and container snapshots.
+    #[error("extraction mapping {0} does not bind two complete files")]
+    PartialExtractionDependency(FactId),
+    /// Distinct extraction records claim ownership of the same derived file.
+    #[error("extracted file {0} has multiple container origins")]
+    DuplicateExtractionOrigin(FileId),
+    /// Container extraction dependencies form a cycle, including self-extraction.
+    #[error("container extraction cycle includes {0}")]
+    ExtractionCycle(FileId),
     /// A fact has neither direct source nor derivation evidence.
     #[error("fact {0:?} has neither source nor derivation evidence")]
     MissingFactEvidence(FactRef),
@@ -1602,6 +1669,8 @@ pub enum IrDocumentValidationError {
 
 #[cfg(test)]
 mod tests {
+    mod extraction;
+
     use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
 
     use super::*;

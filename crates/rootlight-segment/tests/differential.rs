@@ -44,6 +44,13 @@ fn fixture() -> (GenerationMetadata, NormalizedIrDocument) {
 }
 
 fn fixture_with_kind(kind: EntityKind) -> (GenerationMetadata, NormalizedIrDocument) {
+    fixture_with_extraction(kind, false)
+}
+
+fn fixture_with_extraction(
+    kind: EntityKind,
+    extracted: bool,
+) -> (GenerationMetadata, NormalizedIrDocument) {
     const SOURCE: &[u8] = b"pub fn answer() -> u32 { answer() }\n";
     const PATH: &str = "src/lib.rs";
     let repository = derive_repository(b"rootlight-segment-differential").id();
@@ -64,11 +71,21 @@ fn fixture_with_kind(kind: EntityKind) -> (GenerationMetadata, NormalizedIrDocum
         byte_length: u64::try_from(SOURCE.len()).expect("fixture length fits u64"),
     };
     file_claim.file = file_claim.derived_file();
-    let manifest_hash =
-        GenerationManifestRecipe::new(repository, configuration_hash, vec![file_claim.clone()])
-            .expect("fixture manifest is valid")
-            .canonical_hash()
-            .expect("fixture manifest encodes");
+    let mut claims = vec![file_claim.clone()];
+    let container_claim = extracted.then(|| {
+        let mut claim = file_claim.clone();
+        claim.path = "source.container".to_owned();
+        claim.path_identity = claim.path.as_bytes().to_vec();
+        claim.file = claim.derived_file();
+        claim.content_hash = content_hash(b"opaque retained container");
+        claim.byte_length = 512;
+        claim
+    });
+    claims.extend(container_claim.iter().cloned());
+    let manifest_hash = GenerationManifestRecipe::new(repository, configuration_hash, claims)
+        .expect("fixture manifest is valid")
+        .canonical_hash()
+        .expect("fixture manifest encodes");
     let provider_set_hash = content_hash(b"segment-fixture-providers");
     let generation = derive_generation(GenerationIdentity {
         repository,
@@ -305,7 +322,7 @@ fn fixture_with_kind(kind: EntityKind) -> (GenerationMetadata, NormalizedIrDocum
     )
     .expect("symbol claim envelope is valid");
 
-    let document = NormalizedIrDocument {
+    let mut document = NormalizedIrDocument {
         version: rootlight_ir::NormalizedIrVersion::new(),
         repository,
         generation,
@@ -320,6 +337,45 @@ fn fixture_with_kind(kind: EntityKind) -> (GenerationMetadata, NormalizedIrDocum
         diagnostics: Vec::new(),
         extensions: vec![file_claim_envelope, symbol_claim_envelope],
     };
+    if let Some(claim) = container_claim {
+        let origin = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(claim.file, 0, claim.byte_length).unwrap(),
+            claim.content_hash,
+            None,
+        );
+        let mut container = document.files[0].clone();
+        container.id = claim.file;
+        container.path = claim.path.clone();
+        container.path_locator = None;
+        container.content_hash = claim.content_hash;
+        container.byte_length = claim.byte_length;
+        container.encoding = "bytes".to_owned();
+        container.language = "unknown".to_owned();
+        container.evidence.source = Some(origin.clone());
+        let mut mapping = rootlight_ir::SourceMappingRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            from: document.files[0].evidence.source.clone().unwrap(),
+            to: origin.clone(),
+            kind: rootlight_ir::SourceMappingKind::ExtractedFromContainer,
+            provenance: document.provenance[0].id,
+            evidence: FactEvidence {
+                source: Some(origin.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        mapping.id = rootlight_ir::derive_source_mapping_record_id(&mapping).unwrap();
+        document.extensions.push(
+            new_file_identity_claim_envelope(&claim, generation, document.provenance[0].id, origin)
+                .unwrap(),
+        );
+        document.files.push(container);
+        document.source_mappings.push(mapping);
+        document.version = rootlight_ir::NormalizedIrVersion::V1_6;
+    }
     let metadata = GenerationMetadata::new(
         repository,
         generation,
@@ -549,6 +605,10 @@ fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
         ),
         (EntityKind::Event, rootlight_ir::NormalizedIrVersion::V1_4),
         (
+            EntityKind::Function,
+            rootlight_ir::NormalizedIrVersion::V1_6,
+        ),
+        (
             EntityKind::DocumentSection,
             rootlight_ir::NormalizedIrVersion::V1_5,
         ),
@@ -567,7 +627,8 @@ fn segment_and_sqlite_preserve_explicit_normalized_document_version() {
     ] {
         let cancellation = Cancellation::new();
         let context = context(&cancellation);
-        let (metadata, mut document) = fixture_with_kind(kind);
+        let (metadata, mut document) =
+            fixture_with_extraction(kind, version == rootlight_ir::NormalizedIrVersion::V1_6);
         document.version = version;
         let document = rootlight_ir::canonicalize_ir_document(
             document,

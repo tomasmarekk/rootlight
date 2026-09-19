@@ -25,6 +25,7 @@ fn mixed_version_appends_preserve_every_fact_and_required_version() {
         NormalizedIrVersion::V1_3,
         NormalizedIrVersion::V1_4,
         NormalizedIrVersion::V1_5,
+        NormalizedIrVersion::V1_6,
     ] {
         for source_version in [
             NormalizedIrVersion::V1_1,
@@ -32,6 +33,7 @@ fn mixed_version_appends_preserve_every_fact_and_required_version() {
             NormalizedIrVersion::V1_3,
             NormalizedIrVersion::V1_4,
             NormalizedIrVersion::V1_5,
+            NormalizedIrVersion::V1_6,
         ] {
             for path in ["structural", "project", "partition"] {
                 let source = fixture(source_version);

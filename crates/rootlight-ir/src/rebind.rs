@@ -2255,6 +2255,7 @@ mod tests {
             crate::NormalizedIrVersion::V1_3,
             crate::NormalizedIrVersion::V1_4,
             crate::NormalizedIrVersion::V1_5,
+            crate::NormalizedIrVersion::V1_6,
         ] {
             let (mut original, _, _) = fixture_with_identity_extensions();
             original.version = version;
@@ -2281,6 +2282,59 @@ mod tests {
             original.version = crate::NormalizedIrVersion::V1_1;
             assert_ne!(versioned_digest, digest(&original));
         }
+    }
+
+    #[test]
+    fn extraction_rebinds_both_snapshots_without_turning_dependency_into_offsets() {
+        let mut original = fixture_with_lexical_extension();
+        original.extensions.clear();
+        original.version = crate::NormalizedIrVersion::V1_6;
+        let mut container = original.files[0].clone();
+        container.id = FileId::from_bytes([246; 20]);
+        container.path = "source.container".to_owned();
+        container.path_locator = None;
+        container.content_hash = rootlight_ids::content_hash(b"original container");
+        container.byte_length = 4096;
+        let origin = SourceRef::new(
+            original.repository,
+            original.generation,
+            crate::SourceSpan::new(container.id, 0, container.byte_length).unwrap(),
+            container.content_hash,
+            None,
+        );
+        container.evidence.source = Some(origin.clone());
+        original.files.push(container);
+        original.source_mappings = vec![crate::SourceMappingRecord {
+            id: FactId::from_bytes([247; 20]),
+            repository: original.repository,
+            generation: original.generation,
+            from: original.files[0].evidence.source.clone().unwrap(),
+            to: origin.clone(),
+            kind: crate::SourceMappingKind::ExtractedFromContainer,
+            provenance: original.provenance[0].id,
+            evidence: FactEvidence {
+                source: Some(origin),
+                derivation: Vec::new(),
+            },
+        }];
+        let generation = GenerationId::from_bytes([248; 20]);
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let rebound = rebind_document(original.clone(), generation, &limits, &support).unwrap();
+        assert_eq!(rebound.version, original.version);
+        let before = &original.source_mappings[0];
+        let after = &rebound.source_mappings[0];
+        assert_ne!(before.id, after.id);
+        assert_eq!(after.kind, before.kind);
+        for (old, new) in [(&before.from, &after.from), (&before.to, &after.to)] {
+            assert_eq!(new.generation(), generation);
+            assert_eq!(new.span(), old.span());
+            assert_eq!(new.content_hash(), old.content_hash());
+        }
+        assert_eq!(
+            canonical_generation_neutral_digests(&original, &limits, &support, || true).unwrap(),
+            canonical_generation_neutral_digests(&rebound, &limits, &support, || true).unwrap()
+        );
     }
 
     #[test]
