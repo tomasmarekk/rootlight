@@ -12,6 +12,7 @@ mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
 mod refinement;
+pub mod source_archive;
 #[cfg(test)]
 mod version_merge_tests;
 
