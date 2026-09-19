@@ -15496,7 +15496,11 @@ fn unsupported_source_document(
     } else {
         (
             "unsupported-encoding",
-            "source encoding has no configured structural analyzer",
+            if input.encoding == "binary" {
+                "container bytes retained; embedded source expansion is unavailable"
+            } else {
+                "source encoding has no configured structural analyzer"
+            },
             SkippedRegionReason::UnsupportedEncoding,
         )
     };
@@ -20475,6 +20479,7 @@ fn elapsed_micros(started: Instant) -> u64 {
 mod tests {
     mod astro_discovery;
     mod groovy_static_import;
+    mod office_sources;
 
     use std::{
         collections::BTreeSet,

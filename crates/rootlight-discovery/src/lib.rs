@@ -29,6 +29,7 @@ mod encoding;
 mod incremental;
 mod matlab;
 mod objective_c;
+mod office;
 mod shebang;
 mod vba;
 
@@ -39,7 +40,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.12";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.13";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1245,8 +1246,16 @@ impl<'a> DiscoveryState<'a> {
                 bytes_examined: self.bytes_examined,
             });
         }
-        let Some(classification) = encoding::classify(snapshot.content(), self.cancellation)?
-        else {
+        let container_format = office::container_format(path.as_str(), snapshot.content());
+        let classification = if container_format.is_some() {
+            Some(encoding::SourceClassification {
+                encoding: "binary",
+                decoded_prefix: None,
+            })
+        } else {
+            encoding::classify(snapshot.content(), self.cancellation)?
+        };
+        let Some(classification) = classification else {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         };
@@ -1254,7 +1263,21 @@ impl<'a> DiscoveryState<'a> {
             .decoded_prefix
             .as_ref()
             .map_or(snapshot.content(), |prefix| prefix.as_bytes());
-        let (class, mut language_signals) = classify(&path, classification_content);
+        let (class, mut language_signals) = classify(
+            &path,
+            if container_format.is_some() {
+                b""
+            } else {
+                classification_content
+            },
+        );
+        if let Some(format) = container_format {
+            language_signals.clear();
+            language_signals.push(LanguageSignal {
+                language: format.to_owned(),
+                evidence: LanguageEvidence::Content,
+            });
+        }
         if let Some(language) = self.config.source_language_for_path(path.as_str()) {
             language_signals.push(LanguageSignal {
                 language: language.to_owned(),
@@ -2172,6 +2195,155 @@ mod tests {
     fn fixture_root(temporary: &TempDir, identity: &[u8]) -> RepositoryRoot {
         let repository = derive_repository(identity).id();
         RepositoryRoot::open(repository, temporary.path()).expect("fixture root opens")
+    }
+
+    #[test]
+    fn office_container_candidates_retain_bytes_without_claiming_text() {
+        let temporary = local_tempdir();
+        let zip = b"PK\x03\x04\0opaque package payload";
+        let compound = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\0opaque compound payload";
+        for (path, bytes) in [
+            ("book.XLSM", zip.as_slice()),
+            ("legacy.doc", compound.as_slice()),
+            ("unrelated.data", zip.as_slice()),
+            ("image.xlsm", b"\0not a zip".as_slice()),
+        ] {
+            write_fixture(&temporary, path, bytes);
+        }
+        let root = fixture_root(&temporary, b"office-container-admission");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let (manifest, snapshots) = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            4096,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest.inputs.len(), 2);
+        for (path, bytes, format) in [
+            ("book.XLSM", zip.as_slice(), "office-open-xml"),
+            ("legacy.doc", compound.as_slice(), "compound-document"),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, "binary");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap());
+            assert_eq!(input.content_hash, content_hash(bytes));
+            assert_eq!(snapshots[&input.file].content(), bytes);
+            assert_eq!(
+                input.language_signals,
+                vec![LanguageSignal {
+                    language: format.to_owned(),
+                    evidence: LanguageEvidence::Content
+                }]
+            );
+        }
+        assert_eq!(manifest.coverage.included, 2);
+        for path in ["unrelated.data", "image.xlsm"] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|entry| entry.path == path && entry.reason == ExclusionReason::Binary)
+            );
+        }
+        assert_eq!(
+            manifest,
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn office_container_admission_preserves_policy_size_and_aggregate_limits() {
+        let temporary = local_tempdir();
+        let bytes = b"PK\x03\x04\0opaque package";
+        for path in ["first.xlsm", "second.docm"] {
+            write_fixture(&temporary, path, bytes);
+        }
+        let root = fixture_root(&temporary, b"office-container-bounds");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let exact = u64::try_from(2 * bytes.len()).unwrap();
+        let (complete, snapshots) = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            exact,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(complete.inputs.len(), 2);
+        assert!(complete.coverage.complete);
+        assert_eq!(
+            snapshots.values().map(|s| s.content().len()).sum::<usize>(),
+            2 * bytes.len()
+        );
+        let (partial, snapshots) = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            exact - 1,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert!(!partial.coverage.complete);
+        assert_eq!(partial.inputs.len(), 1);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            partial.coverage.truncation.unwrap().resource,
+            DiscoveryTruncationResource::RetainedSourceBytes
+        );
+        let small =
+            DiscoveryLimits::new(100, 16, u64::try_from(bytes.len() - 1).unwrap(), 100).unwrap();
+        let oversized =
+            discover_manifest_streaming(&root, &config(), &policy, small, &Cancellation::new())
+                .unwrap();
+        assert!(oversized.inputs.is_empty());
+        assert_eq!(oversized.exclusions.len(), 2);
+        assert!(
+            oversized
+                .exclusions
+                .iter()
+                .all(|e| e.reason == ExclusionReason::Oversized)
+        );
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "*.xlsm".to_owned(),
+                source: "operation".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let excluded =
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .unwrap();
+        assert_eq!(excluded.inputs.len(), 1);
+        assert!(
+            excluded
+                .exclusions
+                .iter()
+                .any(|e| e.path == "first.xlsm" && e.reason == ExclusionReason::Policy)
+        );
+        let cancel = Cancellation::new();
+        cancel.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &cancel),
+            Err(DiscoveryError::Cancelled(_))
+        ));
     }
 
     #[test]
