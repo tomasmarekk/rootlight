@@ -4,6 +4,79 @@
 use super::*;
 use rootlight_cancel::CancellationReason;
 
+#[test]
+fn source_name_check_preserves_pairing_issues_and_case_scope() {
+    use crate::vba_header::{HeaderLimits, HeaderName};
+
+    for (name, source, expected) in [
+        (b"Source".as_slice(), "SOURCE", None),
+        (
+            b"Source".as_slice(),
+            "Different",
+            Some(MembershipIssue::SourceNameMismatch),
+        ),
+        (b"Caf\xe9".as_slice(), "Café", None),
+        (
+            b"Caf\xe9".as_slice(),
+            "CAFÉ",
+            Some(MembershipIssue::SourceNameMismatch),
+        ),
+    ] {
+        let mut items = b"Class=".to_vec();
+        items.extend(name);
+        items.extend(b"\r\n");
+        let (records, _) = run(
+            1252,
+            &[Module {
+                name,
+                wide: None,
+                object: true,
+            }],
+            &items,
+        );
+        let input = format!("Attribute VB_Name = \"{source}\"\n");
+        let cancel = Cancellation::new();
+        let text =
+            DecodedText::decode(input.as_bytes(), 65001, TextLimits::default(), &cancel).unwrap();
+        let header =
+            HeaderName::parse(&text, ModuleKind::Object, HeaderLimits::default(), &cancel).unwrap();
+        let result = records[0].check_source_name(&header);
+        if let Some(issue) = expected {
+            assert_eq!(result, Err(issue));
+        } else {
+            assert_eq!(result, records[0].outcome());
+            assert_eq!(
+                result.unwrap().needs_non_ascii_case_validation(),
+                !name.is_ascii()
+            );
+        }
+        let wrong = HeaderName::parse(
+            &text,
+            ModuleKind::Procedural,
+            HeaderLimits::default(),
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            records[0].check_source_name(&wrong),
+            Err(MembershipIssue::SourceKindMismatch)
+        );
+        let (missing, _) = run(
+            1252,
+            &[Module {
+                name,
+                wide: None,
+                object: true,
+            }],
+            b"",
+        );
+        assert_eq!(
+            missing[0].check_source_name(&header),
+            Err(MembershipIssue::Missing)
+        );
+    }
+}
+
 struct Module<'a> {
     name: &'a [u8],
     wide: Option<&'a str>,

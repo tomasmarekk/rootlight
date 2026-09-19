@@ -65,6 +65,10 @@ pub enum MembershipIssue {
     CounterpartInvalid,
     /// Procedural/object classification disagrees across the two streams.
     KindMismatch,
+    /// Source-header spelling differs under exact Unicode plus ASCII-case comparison.
+    SourceNameMismatch,
+    /// The source header was interpreted with the wrong procedural/object mode.
+    SourceKindMismatch,
 }
 
 /// One unique compatible pair under exact Unicode plus ASCII-case comparison.
@@ -139,6 +143,39 @@ impl MembershipRecord {
     /// Returns a [`MembershipIssue`] without dropping the record or raw source.
     pub const fn outcome(&self) -> Result<MembershipMatch, MembershipIssue> {
         self.outcome
+    }
+
+    /// Checks an effective source-header name against this paired declaration.
+    ///
+    /// This preserves the pairing's non-ASCII case-validation flag and is not
+    /// proof that an arbitrary supplied body belongs to this container/generation.
+    /// Callers must obtain the header from this record's own bound module stream.
+    ///
+    /// # Errors
+    /// Returns the existing metadata issue, a source-kind mismatch or a spelling
+    /// mismatch. Case comparison has the same restricted scope as metadata pairing.
+    pub fn check_source_name(
+        &self,
+        header: &crate::vba_header::HeaderName<'_>,
+    ) -> Result<MembershipMatch, MembershipIssue> {
+        let matched = self.outcome?;
+        let expected = match matched.kind {
+            ProjectModuleKind::Procedural => ModuleKind::Procedural,
+            ProjectModuleKind::Class
+            | ProjectModuleKind::Document { .. }
+            | ProjectModuleKind::Designer => ModuleKind::Object,
+        };
+        if header.kind() != expected {
+            return Err(MembershipIssue::SourceKindMismatch);
+        }
+        if !self
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(header.name()))
+        {
+            return Err(MembershipIssue::SourceNameMismatch);
+        }
+        Ok(matched)
     }
 }
 

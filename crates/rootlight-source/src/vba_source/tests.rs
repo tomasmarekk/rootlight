@@ -581,6 +581,59 @@ fn membership_reads_own_project_and_preserves_lazy_source_access() {
 }
 
 #[test]
+fn source_header_binds_metadata_without_hiding_conflicting_bodies() {
+    use crate::{
+        vba_header::{HeaderLimits, HeaderName},
+        vba_membership::{MembershipIssue, MembershipLimits, ProjectMembership},
+        vba_text::TextLimits,
+    };
+
+    let properties = b"ID=\"{01234567-89AB-CDEF-0123-456789ABCDEF}\"\r\nModule=Source\r\nName=\"Project\"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n";
+    for name in ["SOURCE", "Unrelated"] {
+        let body = format!("Attribute VB_Name = \"{name}\"\r\nSub Work()\r\nEnd Sub\r\n");
+        let input = fixture(
+            &[("Source", 0)],
+            vec![
+                stream("Source", body.as_bytes()),
+                Stream {
+                    name: "PROJECT",
+                    bytes: properties.to_vec(),
+                    inside: false,
+                },
+            ],
+        );
+        let compound = parse(&input);
+        let cancel = Cancellation::new();
+        let project =
+            VbaProject::open(&compound, 1, ProjectReadLimits::default(), &cancel).unwrap();
+        let membership =
+            ProjectMembership::read(&project, MembershipLimits::default(), &cancel).unwrap();
+        let source = project
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap();
+        let text = source.decode_text(TextLimits::default(), &cancel).unwrap();
+        let header = HeaderName::parse(
+            &text,
+            crate::vba_dir::ModuleKind::Procedural,
+            HeaderLimits::default(),
+            &cancel,
+        )
+        .unwrap();
+        let record = &membership.directory_records()[0];
+        let outcome = record.check_source_name(&header);
+        if name == "SOURCE" {
+            assert_eq!(outcome, record.outcome());
+        } else {
+            assert_eq!(outcome, Err(MembershipIssue::SourceNameMismatch));
+        }
+        assert_eq!(source.bytes(), body.as_bytes());
+        assert_eq!(&source.bytes()[header.original_range()], name.as_bytes());
+        assert_eq!(membership.directory_records().len(), 1);
+        assert_eq!(membership.project_records().len(), 1);
+    }
+}
+
+#[test]
 fn lazy_sources_preserve_bytes_and_composed_physical_dependencies() {
     let body = b"Attribute VB_Name = \"Module\"\r\nSub Run()\r\nEnd Sub\r\n";
     let mut encoded = vec![0x81; 71];
