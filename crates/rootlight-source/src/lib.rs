@@ -10,6 +10,7 @@
 
 pub mod compound;
 pub mod vba_compression;
+pub mod vba_dir;
 
 use std::{
     collections::VecDeque,
