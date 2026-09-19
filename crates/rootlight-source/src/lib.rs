@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compound;
+pub mod opc;
 pub mod vba_compression;
 pub mod vba_dir;
 pub mod vba_header;
