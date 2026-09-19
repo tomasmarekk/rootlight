@@ -16,6 +16,7 @@ pub mod vba_membership;
 pub mod vba_project;
 pub mod vba_source;
 pub mod vba_text;
+pub mod zip;
 
 use std::{
     collections::VecDeque,
