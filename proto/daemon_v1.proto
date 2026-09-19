@@ -869,6 +869,9 @@ message FirstSliceLocateHit {
   bool generated = 9;
   uint32 score = 10;
   optional FirstSliceSourceRef source = 11;
+  // Whole immediate container dependency; the hit path is a derived display path,
+  // not an editable filesystem path or a byte-offset mapping into the container.
+  optional FirstSliceSourceRef extracted_from = 12;
 }
 
 // Returns bounded typed lexical results and generation correlation.
@@ -977,6 +980,8 @@ message FirstSliceSourceChunk {
   // Exact bytes for both UTF-8 and binary source reads.
   bytes exact_content = 14;
   FirstSliceAnalysisTier tier = 15;
+  // Whole immediate container dependency, not byte-offset equivalence.
+  optional FirstSliceSourceRef extracted_from = 16;
 }
 
 // Returns exact verified source chunks.

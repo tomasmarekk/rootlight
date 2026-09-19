@@ -6634,7 +6634,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.5",
+            "contractVersion": "1.6",
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
@@ -7160,7 +7160,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.5",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7303,16 +7303,6 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
-                  "type": "string"
-                }
-              ]
-            },
-            "BindingQueryVersion": {
-              "description": "Exact version of import- and export-aware locate and advanced queries.",
-              "oneOf": [
-                {
-                  "const": "1.5",
-                  "description": "Query contract 1.5.",
                   "type": "string"
                 }
               ]
@@ -7557,7 +7547,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingQueryVersion",
+                  "$ref": "#/$defs/OriginLocateVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7716,7 +7706,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingQueryVersion",
+                  "$ref": "#/$defs/OriginLocateVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8125,6 +8115,17 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "extracted_from": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SourceRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Whole immediate container dependency for a virtual extracted source.\nIts display path is not directly editable; offsets are not container offsets."
+                },
                 "file_id": {
                   "anyOf": [
                     {
@@ -8318,6 +8319,16 @@
             "OperationId": {
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
+            },
+            "OriginLocateVersion": {
+              "description": "Exact version of origin-aware locate responses.",
+              "oneOf": [
+                {
+                  "const": "1.6",
+                  "description": "Locate contract 1.6.",
+                  "type": "string"
+                }
+              ]
             },
             "PlanExplanation": {
               "additionalProperties": false,
@@ -8968,7 +8979,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.5",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -32775,7 +32786,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
             "fallbackSummary": "bounded source ranges from pinned source references as untrusted data",
             "generation": "selects_generation",
@@ -33128,7 +33139,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `source.read`.",
@@ -33222,6 +33233,16 @@
         "name": "source.read",
         "outputSchema": {
           "$defs": {
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -33435,6 +33456,93 @@
               "pattern": "^[a-z0-9_]+$",
               "type": "string"
             },
+            "EntityErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked domain error under one exact source-entity contract revision.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Source-free error and remediation."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Exact error contract version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "EntityReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Generation-bound read result carrying an exact source-entity version marker.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/SourceReadData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor for pageable results."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Exact response contract version."
+                },
+                "truncated": {
+                  "description": "Whether a hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
             "ErrorCode": {
               "description": "Stable public error families shared by all Rootlight boundaries.",
               "oneOf": [
@@ -33549,25 +33657,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -34163,74 +34252,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/SourceReadData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -34337,16 +34358,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceChunk": {
               "additionalProperties": false,
               "description": "One exact verified source chunk.",
@@ -34380,6 +34391,17 @@
                     "integer",
                     "null"
                   ]
+                },
+                "extracted_from": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SourceRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Whole immediate container dependency for a virtual extracted source.\nByte offsets address this chunk's derived source, not the container."
                 },
                 "generated": {
                   "description": "Whether the indexed file is generated.",
@@ -34708,20 +34730,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/EntityReadEnvelope",
+              "description": "Tool-specific successful result."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/EntityErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success or checked domain error sharing one exact contract revision.",
+          "title": "EntityToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },

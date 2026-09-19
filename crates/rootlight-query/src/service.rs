@@ -422,6 +422,7 @@ where
             }
             files.insert(hit.file_id);
             located.push(LocateHit {
+                extracted_from: None,
                 symbol: hit.symbol_id,
                 file: hit.file_id,
                 identifier: hit.identifier,
@@ -437,6 +438,28 @@ where
             });
         }
 
+        let mut origins_truncated = false;
+        if !located.is_empty() {
+            for mapping in &self.generation.document().source_mappings {
+                control.check()?;
+                if !tracker.can_add(QueryResource::Rows, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
+                    // Until the scan finishes, absence of an origin is not
+                    // evidence that a hit is an editable physical source.
+                    located.clear();
+                    origins_truncated = true;
+                    break;
+                }
+                tracker.add_rows(1)?;
+                if mapping.kind == rootlight_ir::SourceMappingKind::ExtractedFromContainer {
+                    for hit in &mut located {
+                        if hit.file == mapping.from.span().file() {
+                            hit.extracted_from = Some(mapping.to.clone());
+                        }
+                    }
+                }
+            }
+        }
         let (coverage, coverage_truncated) = collect_coverage_partial(
             self.generation.document(),
             &symbols,
@@ -445,7 +468,8 @@ where
             &control,
             &mut limiting_resources,
         )?;
-        let next_page_offset = (has_more_matches && !coverage_truncated).then_some(returned_end);
+        let next_page_offset =
+            (has_more_matches && !coverage_truncated && !origins_truncated).then_some(returned_end);
         if next_page_offset.is_some() {
             record_limit(&mut limiting_resources, QueryResource::Results)?;
         }
@@ -2616,6 +2640,7 @@ where
                 _ => return Err(QueryError::InvalidSourceEncoding),
             };
             chunks.push(SourceChunkResult {
+                extracted_from: chunk.extracted_from,
                 reference: chunk.reference,
                 path: chunk.path,
                 start_byte: chunk.start_byte,

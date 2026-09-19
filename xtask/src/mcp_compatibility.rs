@@ -331,7 +331,18 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         resources.insert("retained_durable_bytes".to_owned(), json!(0));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "code.locate", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "code.locate",
+        VerticalTool::CodeLocate.contract_version(),
+        |_| Ok(()),
+    )?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "source.read",
+        VerticalTool::SourceRead.contract_version(),
+        |_| Ok(()),
+    )?;
     upgrade_additive_success_example(&mut tools, "query.advanced", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "symbol.explain", "1.6", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
@@ -1411,7 +1422,7 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
                 {
@@ -1461,6 +1472,11 @@ mod tests {
                 },
                 {
                     "tool": "context.pack",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "source.read",
                     "current_version": "1.1",
                     "projected_version": "1.0",
                 },

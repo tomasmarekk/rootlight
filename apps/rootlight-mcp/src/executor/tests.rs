@@ -1846,6 +1846,7 @@ fn locate_response() -> CodeLocatePortResponse {
         client::CodeLocate {
             context: context(1, 0),
             hits: vec![LocateHit {
+                extracted_from: None,
                 symbol: Some(symbol()),
                 file: file(),
                 identifier: "Publisher".to_owned(),
@@ -3110,6 +3111,7 @@ fn source_read_response(source: client::SourceReference) -> SourceReadPortRespon
         client::SourceRead {
             context: context(1, 8),
             chunks: vec![ClientSourceChunk {
+                extracted_from: None,
                 source,
                 path: "src/lib.rs".to_owned(),
                 start_byte: 4,
@@ -10212,6 +10214,7 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
         client::SourceRead {
             context: context(1, 15),
             chunks: vec![ClientSourceChunk {
+                extracted_from: None,
                 source: requested.clone(),
                 path: "src/lib.rs".to_owned(),
                 start_byte: 0,
@@ -10283,6 +10286,71 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
 }
 
 #[tokio::test]
+async fn extracted_origins_survive_all_source_profiles_and_locate() {
+    let origin = client::SourceReference::new(
+        repository(),
+        generation(),
+        FileId::from_bytes([87; 20]),
+        0..4096,
+        content_hash(),
+        None,
+    )
+    .unwrap();
+    let expected = client_source_ref(&origin).unwrap();
+    for profile in ["compact", "standard", "evidence"] {
+        let mut response = source_read_response(source_reference(4, 12, 2, 2));
+        response.result.chunks[0].extracted_from = Some(origin.clone());
+        let harness = Harness::new(FakeOutcome::SourceRead(Ok(response)));
+        let output: SourceReadOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::SourceRead,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "generation": generation(),
+                    "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
+                    "response_profile": profile
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("source read failed")
+        };
+        assert_eq!(
+            output.data.chunks[0].extracted_from.as_ref(),
+            Some(&expected)
+        );
+        assert_eq!(output.data.chunks[0].content, "xxxxxxxx");
+        let mut response = locate_response();
+        response.result.hits[0].extracted_from = Some(origin.clone());
+        let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+        let output: CodeLocateOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::CodeLocate,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "generation": generation(),
+                    "query": "Publisher",
+                    "response_profile": profile
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("locate failed")
+        };
+        assert_eq!(
+            output.data.matches[0].extracted_from.as_ref(),
+            Some(&expected)
+        );
+    }
+}
+
+#[tokio::test]
 async fn source_read_profiles_preserve_verified_source_and_shape_line_metadata() {
     for (profile, expected_lines, expected_hint) in [
         ("compact", None, None),
@@ -10333,6 +10401,7 @@ async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
         client::SourceRead {
             context: context(1, 2),
             chunks: vec![ClientSourceChunk {
+                extracted_from: None,
                 source: requested,
                 path: "assets/raw.bin".to_owned(),
                 start_byte: 4,

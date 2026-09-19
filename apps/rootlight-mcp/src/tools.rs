@@ -35,11 +35,12 @@ use rootlight_mcp_contract::{
     source_entity::{
         ChangeImpactOutputV1_3, ChangeImpactOutputV1_4, ChangeImpactOutputV1_5,
         CodeLocateOutputV1_1, CodeLocateOutputV1_2, CodeLocateOutputV1_3, CodeLocateOutputV1_4,
-        CodeLocateOutputV1_5, HistoryCompareOutputV1_3, HistoryCompareOutputV1_4,
-        HistoryCompareOutputV1_5, QueryAdvancedOutputV1_1, QueryAdvancedOutputV1_2,
-        QueryAdvancedOutputV1_3, QueryAdvancedOutputV1_4, QueryAdvancedOutputV1_5,
-        SymbolExplainOutputV1_2, SymbolExplainOutputV1_3, SymbolExplainOutputV1_4,
-        SymbolExplainOutputV1_5, SymbolExplainOutputV1_6,
+        CodeLocateOutputV1_5, CodeLocateOutputV1_6, EntityToolResponse, HistoryCompareOutputV1_3,
+        HistoryCompareOutputV1_4, HistoryCompareOutputV1_5, QueryAdvancedOutputV1_1,
+        QueryAdvancedOutputV1_2, QueryAdvancedOutputV1_3, QueryAdvancedOutputV1_4,
+        QueryAdvancedOutputV1_5, SourceReadOutputV1_1, SymbolExplainOutputV1_2,
+        SymbolExplainOutputV1_3, SymbolExplainOutputV1_4, SymbolExplainOutputV1_5,
+        SymbolExplainOutputV1_6,
     },
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
@@ -1982,7 +1983,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
         VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_5::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => CodeLocateOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
@@ -2000,13 +2001,23 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => {
-            let Ok(output) = SourceReadOutput::deserialize(output) else {
+            let Ok(output) = SourceReadOutputV1_1::deserialize(output) else {
                 return false;
             };
             let TypedInput::SourceRead(input) = input else {
                 return false;
             };
-            source_read_output_invariants_are_valid(input, &output)
+            let EntityToolResponse::Success(output) = output else {
+                return true;
+            };
+            source_read_fields_are_valid(
+                input,
+                output.repository.repository_id,
+                output.generation.generation_id,
+                output.trust,
+                output.usage.source_bytes,
+                &output.data,
+            )
         }
     }
 }
@@ -2020,7 +2031,16 @@ fn typed_selected_output_is_valid(
     match selection {
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::SourceRead => {
+                let Ok(output) = SourceReadOutput::deserialize(output) else {
+                    return false;
+                };
+                let TypedInput::SourceRead(input) = input else {
+                    return false;
+                };
+                source_read_output_invariants_are_valid(input, &output)
+            }
+            VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_4::deserialize(output).is_ok(),
@@ -2044,7 +2064,7 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_3::deserialize(output).is_ok(),
@@ -2055,7 +2075,7 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
@@ -2065,7 +2085,7 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::ThirdLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
@@ -2074,7 +2094,7 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::FourthLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => {
                 rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
             }
@@ -2085,6 +2105,7 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
@@ -2100,19 +2121,37 @@ fn source_read_output_invariants_are_valid(
     let ToolResponse::Success(output) = output else {
         return true;
     };
-    if output.trust != TrustClassification::UntrustedRepositoryData
-        || output.usage.source_bytes != u64::from(output.data.total_source_bytes)
+    source_read_fields_are_valid(
+        input,
+        output.repository.repository_id,
+        output.generation.generation_id,
+        output.trust,
+        output.usage.source_bytes,
+        &output.data,
+    )
+}
+
+fn source_read_fields_are_valid(
+    input: &SourceReadInput,
+    repository: rootlight_ids::RepositoryId,
+    generation: rootlight_ids::GenerationId,
+    trust: TrustClassification,
+    source_bytes: u64,
+    data: &rootlight_mcp_contract::vertical::SourceReadData,
+) -> bool {
+    if trust != TrustClassification::UntrustedRepositoryData
+        || source_bytes != u64::from(data.total_source_bytes)
     {
         return false;
     }
 
     if let RepositorySelector::ById(selector) = &input.repository
-        && selector.repository_id != output.repository.repository_id
+        && selector.repository_id != repository
     {
         return false;
     }
-    if let Some(GenerationSelector::Explicit(generation)) = input.generation.as_ref()
-        && *generation != output.generation.generation_id
+    if let Some(GenerationSelector::Explicit(requested)) = input.generation.as_ref()
+        && *requested != generation
     {
         return false;
     }
@@ -2127,14 +2166,14 @@ fn source_read_output_invariants_are_valid(
                 .and_then(|budget| budget.max_source_bytes),
         )
         .min();
-    if requested_source_bytes.is_some_and(|maximum| output.data.total_source_bytes > maximum) {
+    if requested_source_bytes.is_some_and(|maximum| data.total_source_bytes > maximum) {
         return false;
     }
 
-    output.data.chunks.iter().all(|chunk| {
-        chunk.source_ref.repository() == output.repository.repository_id
-            && chunk.source_ref.generation() == output.generation.generation_id
-            && chunk.trust == output.trust
+    data.chunks.iter().all(|chunk| {
+        chunk.source_ref.repository() == repository
+            && chunk.source_ref.generation() == generation
+            && chunk.trust == trust
     })
 }
 
@@ -2286,11 +2325,35 @@ fn requires_entity_contract(
     selection: ContractSelection,
     output: &Value,
 ) -> bool {
+    let origin_path = match tool {
+        VerticalTool::CodeLocate => Some("/data/matches"),
+        VerticalTool::SourceRead => Some("/data/chunks"),
+        _ => None,
+    };
+    if selection != ContractSelection::Current
+        && origin_path.is_some_and(|path| {
+            output
+                .pointer(path)
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("extracted_from")
+                            .is_some_and(|origin| !origin.is_null())
+                    })
+                })
+        })
+    {
+        return true;
+    }
     let is_new_kind = |value: Option<&Value>| match value.and_then(Value::as_str) {
         Some("import" | "export") => match tool {
-            VerticalTool::CodeLocate
-            | VerticalTool::QueryAdvanced
-            | VerticalTool::SymbolExplain => selection != ContractSelection::Current,
+            VerticalTool::CodeLocate => matches!(
+                selection.schema_version(tool),
+                "1.0" | "1.1" | "1.2" | "1.3" | "1.4"
+            ),
+            VerticalTool::QueryAdvanced | VerticalTool::SymbolExplain => {
+                selection != ContractSelection::Current
+            }
             _ => false,
         },
         Some("document_section" | "link_definition") => match tool {
@@ -2397,7 +2460,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
         VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_5::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => CodeLocateOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
@@ -2414,7 +2477,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::HistoryCompare => HistoryCompareOutputV1_5::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::SourceRead => SourceReadOutput::deserialize(output).is_ok(),
+        VerticalTool::SourceRead => SourceReadOutputV1_1::deserialize(output).is_ok(),
     }
 }
 
@@ -2426,7 +2489,8 @@ fn typed_selected_error_output_is_valid(
     match selection {
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
         ContractSelection::Previous => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
+            VerticalTool::SourceRead => SourceReadOutput::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_5::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_4::deserialize(output).is_ok(),
@@ -2450,7 +2514,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::Legacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_4::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_3::deserialize(output).is_ok(),
@@ -2461,7 +2525,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::SecondLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_3::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_2::deserialize(output).is_ok(),
@@ -2471,7 +2535,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::ThirdLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
@@ -2480,7 +2544,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::FourthLegacy => match tool {
-            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
+            VerticalTool::CodeLocate => CodeLocateOutputV1_1::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => {
                 rootlight_mcp_contract::context::QueryAdvancedOutput::deserialize(output).is_ok()
             }
@@ -2491,6 +2555,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::Initial => match tool {
+            VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
@@ -2657,7 +2722,10 @@ fn select_output_version(
                 }
             }
         }
-        VerticalTool::CodeLocate | VerticalTool::QueryAdvanced | VerticalTool::ChangeImpact => {}
+        VerticalTool::CodeLocate
+        | VerticalTool::QueryAdvanced
+        | VerticalTool::ChangeImpact
+        | VerticalTool::SourceRead => {}
         VerticalTool::TestsSelect => {
             let tests = data
                 .get_mut("tests")
@@ -4256,16 +4324,16 @@ mod tests {
             observed,
             [
                 (
-                    231_181,
-                    "fa5ffd714dafefb142a952035080c2a6e43d8db09414cf3204c316382b4c8251".to_owned(),
+                    231_486,
+                    "4090701265652eb396fb9d2abee263c1144de063976d4c33d570142dbbd2a9ed".to_owned(),
                 ),
                 (
-                    500_778,
-                    "6fb9c2121780adec9fd7c27686387e66d5df0ce311196023f8663826389e8778".to_owned(),
+                    501_083,
+                    "1a97f42cba1683bdaa22fc8363bd222968116d0eeeb2270e4eb6323f332d4a08".to_owned(),
                 ),
                 (
-                    704_137,
-                    "ab9ed731fcdc174aff492eb53ebffe79f73fcd6224a98823a96c51a84d0926dd".to_owned(),
+                    704_442,
+                    "e2fc952285ccddb6d7cd650765a8304b49c419f629792fd65e0085ebe2a31bb8".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -5039,6 +5107,131 @@ mod tests {
         }
 
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn extracted_sources_require_origin_aware_contracts_without_silent_loss() {
+        for (tool, items, reference) in [
+            (VerticalTool::CodeLocate, "matches", "source_ref"),
+            (VerticalTool::SourceRead, "chunks", "source_ref"),
+        ] {
+            for extracted in [false, true] {
+                let mut output = retained_output(tool.name());
+                if tool == VerticalTool::CodeLocate {
+                    let read = retained_output("source.read");
+                    let source = &read["data"]["chunks"][0]["source_ref"];
+                    output.get_mut("data").unwrap()["matches"] = json!([{
+                        "symbol_id": null,
+                        "file_id": source["span"]["file"],
+                        "kind": "file",
+                        "display_name": "module.bas",
+                        "signature": null,
+                        "path": "book.xlsm/@vba/module.bas",
+                        "score": 1000,
+                        "why": ["lexical_match"],
+                        "source_ref": source,
+                        "trust": "untrusted_repository_data"
+                    }]);
+                }
+                if extracted {
+                    let item = &mut output.get_mut("data").unwrap()[items][0];
+                    let mut origin = item[reference].clone();
+                    origin.as_object_mut().unwrap().remove("line_hint");
+                    origin["span"]["file"] =
+                        serde_json::to_value(rootlight_ids::FileId::from_bytes([87; 20])).unwrap();
+                    origin["span"]["start_byte"] = json!(0);
+                    origin["span"]["end_byte"] = json!(4096);
+                    item["extracted_from"] = origin;
+                }
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(output.clone()),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .unwrap();
+                let versions: &[&str] = if tool == VerticalTool::CodeLocate {
+                    &["1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"]
+                } else {
+                    &["1.0", "1.1"]
+                };
+                for version in versions {
+                    let result = success(router.handle(
+                        request("tools/call", json!({
+                            "name": tool.name(), "arguments": retained_input(tool.name()),
+                            "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                        })), cancellation(),
+                    ).await);
+                    let rejected = extracted && *version != tool.contract_version();
+                    assert_eq!(
+                        result["isError"], rejected,
+                        "{tool:?} {version} extracted={extracted}"
+                    );
+                    let body = &result["structuredContent"];
+                    assert_eq!(body["schema_version"], *version);
+                    if rejected {
+                        let error: AnyErrorResponse = serde_json::from_value(body.clone()).unwrap();
+                        assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
+                    } else {
+                        let mut expected = output.clone();
+                        expected.insert("schema_version".to_owned(), json!(version));
+                        assert_eq!(body, &Value::Object(expected));
+                    }
+                }
+                if extracted {
+                    let source = &output["data"][items][0][reference];
+                    let mut mutations = vec![
+                        (
+                            "extracted_from/repository",
+                            json!(rootlight_ids::RepositoryId::from_bytes([87; 16])),
+                        ),
+                        (
+                            "extracted_from/generation",
+                            json!(rootlight_ids::GenerationId::from_bytes([87; 20])),
+                        ),
+                        ("extracted_from/span/file", source["span"]["file"].clone()),
+                        ("extracted_from/span/start_byte", json!(1)),
+                    ];
+                    if tool == VerticalTool::CodeLocate {
+                        mutations.extend([
+                            ("source_ref", Value::Null),
+                            (
+                                "file_id",
+                                json!(rootlight_ids::FileId::from_bytes([88; 20])),
+                            ),
+                        ]);
+                    }
+                    for (field, value) in mutations {
+                        let mut invalid = Value::Object(output.clone());
+                        *invalid
+                            .pointer_mut(&format!("/data/{items}/0/{field}"))
+                            .unwrap() = value;
+                        let router = ToolRouter::new(
+                            StaticExecutor {
+                                result: Ok(invalid.as_object().unwrap().clone()),
+                            },
+                            ExposureProfile::Developer,
+                        )
+                        .unwrap();
+                        let response = router.handle(
+                            request("tools/call", json!({
+                                "name": tool.name(), "arguments": retained_input(tool.name())
+                            })), cancellation(),
+                        ).await;
+                        assert!(
+                            matches!(
+                                response,
+                                HandlerResponse::Error {
+                                    code: INTERNAL_ERROR,
+                                    ..
+                                }
+                            ),
+                            "{tool:?} must reject uncorrelated {field}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -6212,7 +6405,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "RESOURCE_EXHAUSTED"
         );
-        serde_json::from_value::<SourceReadOutput>(result["structuredContent"].clone())
+        serde_json::from_value::<SourceReadOutputV1_1>(result["structuredContent"].clone())
             .expect("resource error uses the source.read output contract");
         assert!(serialized_json_fits(&result, MAX_TOOL_RESULT_BYTES));
         let mirror: Value = serde_json::from_str(

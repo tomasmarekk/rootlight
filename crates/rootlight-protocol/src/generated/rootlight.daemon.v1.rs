@@ -1383,6 +1383,11 @@ pub struct FirstSliceLocateHit {
     #[prost(message, optional, tag = "11")]
     #[allow(missing_docs)]
     pub source: ::core::option::Option<FirstSliceSourceRef>,
+    /// Whole immediate container dependency; the hit path is a derived display path,
+    /// not an editable filesystem path or a byte-offset mapping into the container.
+    #[prost(message, optional, tag = "12")]
+    #[allow(missing_docs)]
+    pub extracted_from: ::core::option::Option<FirstSliceSourceRef>,
 }
 /// Returns bounded typed lexical results and generation correlation.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1640,6 +1645,10 @@ pub struct FirstSliceSourceChunk {
     #[prost(enumeration = "FirstSliceAnalysisTier", tag = "15")]
     #[allow(missing_docs)]
     pub tier: i32,
+    /// Whole immediate container dependency, not byte-offset equivalence.
+    #[prost(message, optional, tag = "16")]
+    #[allow(missing_docs)]
+    pub extracted_from: ::core::option::Option<FirstSliceSourceRef>,
 }
 /// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]

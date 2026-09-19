@@ -1502,6 +1502,10 @@ fn code_locate_hard_coverage_limit_suppresses_page_continuation() {
         !snapshot.document().coverage_records.is_empty(),
         "fixture must exercise coverage scanning"
     );
+    assert!(
+        !snapshot.document().source_mappings.is_empty(),
+        "fixture must exercise bounded origin verification"
+    );
     let search = fixture_search(&snapshot);
     let truncated_search = TruncatedSearch(search.clone());
     let service = QueryService::new(&snapshot, &truncated_search).expect("generation inputs agree");
@@ -1522,6 +1526,11 @@ fn code_locate_hard_coverage_limit_suppresses_page_continuation() {
         .execute_code_locate(&plan, &Cancellation::new())
         .expect("hard coverage truncation returns an honest partial result");
 
+    assert!(
+        response.data.hits.is_empty(),
+        "unverified origins must not escape a truncated scan"
+    );
+    assert!(response.usage.rows <= 3);
     assert!(response.data.truncated);
     assert_eq!(
         response.data.execution.state(),

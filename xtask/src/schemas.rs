@@ -109,7 +109,7 @@ const COMPATIBILITY_BASELINES: [&str; 13] = [
     STORAGE_COMPATIBILITY_BASELINES[5],
     STORAGE_COMPATIBILITY_BASELINES[6],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 15] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 16] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -125,6 +125,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 15] = [
     ("1.15", "protobuf/1.15/rootlight.desc"),
     ("1.16", "protobuf/1.16/rootlight.desc"),
     ("1.17", "protobuf/1.17/rootlight.desc"),
+    ("1.18", "protobuf/1.18/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 24] = [
     "Cargo.lock",
@@ -1184,6 +1185,20 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     )?;
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
+    write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.1")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SourceReadOutputV1_1>(
+        &schema_root,
+        "source.read",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.6")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_6>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.6",
+    )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
     write_mcp_tool_schema_version::<RepoStatusInput>(&schema_root, "repo.status", "input", "1.1")?;
@@ -1397,6 +1412,27 @@ fn write_mcp_tool_schema_version<T: JsonSchema>(
         }
     }
     if direction == "output" {
+        // Retained contracts cannot acquire extraction semantics through a
+        // shared Rust result type. Only the new revisions expose the origin.
+        let historical_result = match (tool, version) {
+            ("code.locate", "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5") => Some("LocatedItem"),
+            ("source.read", "1.0") => Some("SourceChunk"),
+            _ => None,
+        };
+        if let Some(result) = historical_result {
+            schema
+                .as_object_mut()
+                .and_then(|object| object.get_mut("$defs"))
+                .and_then(|definitions| definitions.get_mut(result))
+                .and_then(|definition| definition.get_mut("properties"))
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    SchemaError::GeneratedSchemaSemantics(
+                        "retained source result schema is missing its properties".to_owned(),
+                    )
+                })?
+                .remove("extracted_from");
+        }
         schema.insert(
             "type".to_owned(),
             serde_json::Value::String("object".to_owned()),
@@ -1455,6 +1491,8 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             name,
             "mcp-code-locate-input-1.5.schema.json"
                 | "mcp-code-locate-output-1.5.schema.json"
+                | "mcp-code-locate-input-1.6.schema.json"
+                | "mcp-code-locate-output-1.6.schema.json"
                 | "mcp-query-advanced-input-1.5.schema.json"
                 | "mcp-query-advanced-output-1.5.schema.json"
                 | "mcp-symbol-explain-input-1.6.schema.json"
@@ -2991,6 +3029,10 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.1.schema.json"),

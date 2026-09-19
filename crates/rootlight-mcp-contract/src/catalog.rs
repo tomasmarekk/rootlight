@@ -102,7 +102,9 @@ impl McpTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
-            Self::CodeLocate | Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
+            Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
+            Self::SourceRead => crate::source_entity::SOURCE_READ_VERSION,
+            Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
             Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
@@ -446,6 +448,7 @@ mod tests {
                     | McpTool::PlanChange
                     | McpTool::ContextPack
                     | McpTool::CodeLocate
+                    | McpTool::SourceRead
                     | McpTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
@@ -455,9 +458,18 @@ mod tests {
             McpTool::SymbolExplain.contract_version(),
             crate::source_entity::EXPLAIN_VERSION
         );
-        for tool in [McpTool::CodeLocate, McpTool::QueryAdvanced] {
-            assert_eq!(tool.contract_version(), crate::source_entity::QUERY_VERSION);
-        }
+        assert_eq!(
+            McpTool::CodeLocate.contract_version(),
+            crate::source_entity::LOCATE_VERSION
+        );
+        assert_eq!(
+            McpTool::SourceRead.contract_version(),
+            crate::source_entity::SOURCE_READ_VERSION
+        );
+        assert_eq!(
+            McpTool::QueryAdvanced.contract_version(),
+            crate::source_entity::QUERY_VERSION
+        );
     }
 
     #[test]

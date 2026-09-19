@@ -1237,7 +1237,8 @@ fn ensure_daemon_binary() -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     // The process contract evolves with the generated daemon schema. Let Cargo
-    // refresh a stale sibling binary instead of trusting that its path exists.
+    // refresh both first-party siblings: deep fixtures require the project
+    // adapter even when no earlier test or workspace build produced it.
     let output = Command::new(cargo)
         .current_dir(&workspace)
         .args([
@@ -1245,8 +1246,9 @@ fn ensure_daemon_binary() -> PathBuf {
             OsStr::new("--locked"),
             OsStr::new("-p"),
             OsStr::new("rootlight-daemon"),
-            OsStr::new("--bin"),
-            OsStr::new("rootlight-daemon"),
+            OsStr::new("-p"),
+            OsStr::new("rootlight-adapter-host"),
+            OsStr::new("--bins"),
             OsStr::new("--target-dir"),
         ])
         .arg(target_dir)
@@ -1258,6 +1260,14 @@ fn ensure_daemon_binary() -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(daemon.is_file(), "daemon build did not produce {daemon:?}");
+    let adapter = profile_dir.join(format!(
+        "rootlight-adapter-host{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        adapter.is_file(),
+        "project adapter build did not produce {adapter:?}"
+    );
     daemon
 }
 

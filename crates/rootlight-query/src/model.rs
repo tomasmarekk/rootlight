@@ -944,6 +944,10 @@ pub enum RepositoryDataTrust {
 /// One hydrated deterministic lexical result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LocateHit {
+    /// Whole immediate container dependency for a virtual extracted source.
+    /// This is not byte-offset equivalence or an editable filesystem path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceRef>,
     /// Stable semantic entity identity, absent for a file-only source hit.
     pub symbol: Option<SymbolId>,
     /// Stable declaring file identity.
@@ -2377,6 +2381,9 @@ pub enum SourceChunkEncoding {
 /// One verified source chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceChunkResult {
+    /// Whole immediate container dependency; offsets address the derived source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceRef>,
     /// Exact indexed selector.
     pub reference: SourceRef,
     /// Repository-relative display path.

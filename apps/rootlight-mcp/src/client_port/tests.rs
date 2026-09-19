@@ -492,6 +492,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             let chunks = references
                 .into_iter()
                 .map(|source| SourceChunk {
+                    extracted_from: None,
                     source,
                     path: "src/lib.rs".to_owned(),
                     start_byte: 0,
@@ -1686,6 +1687,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     let locate = CodeLocate {
         context: context.clone(),
         hits: vec![LocateHit {
+            extracted_from: None,
             symbol: Some(symbol()),
             file: file(),
             identifier: "DenoWorkspace".to_owned(),
@@ -1720,6 +1722,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     let read = SourceRead {
         context,
         chunks: vec![SourceChunk {
+            extracted_from: None,
             source,
             path: "Lib/venv/__init__.py".to_owned(),
             start_byte: 0,

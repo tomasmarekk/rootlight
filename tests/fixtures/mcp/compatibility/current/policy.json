@@ -33,7 +33,7 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.5",
+        "current_version": "1.6",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
@@ -86,6 +86,11 @@
         "current_version": "1.1",
         "projected_version": "1.0",
         "tool": "context.pack"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "source.read"
       },
       {
         "current_version": "1.5",
@@ -190,7 +195,7 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.5"
+      "version": "1.6"
     },
     {
       "tool": "symbol.explain",
@@ -238,7 +243,7 @@
     },
     {
       "tool": "source.read",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "query.advanced",

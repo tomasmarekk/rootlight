@@ -1180,6 +1180,7 @@ mod tests {
 
         let source_read = serde_json::to_value(SourceReadData {
             chunks: vec![SourceChunk {
+                extracted_from: None,
                 source_ref: source_ref(1),
                 path: "src/lib.rs".to_owned(),
                 start_byte: 1,
@@ -1500,6 +1501,7 @@ mod tests {
         let evidence = source_ref(12);
         let raw = CodeLocateData {
             matches: vec![LocatedItem {
+                extracted_from: None,
                 symbol_id: Some(symbol_id),
                 file_id: Some(file_id),
                 kind: ContractEntityKind::Function,

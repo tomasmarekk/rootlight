@@ -11262,6 +11262,7 @@ fn code_locate(
         .map_err(|_| resource_exhausted())?;
     for hit in response.data.hits {
         hits.push(daemon::FirstSliceLocateHit {
+            extracted_from: hit.extracted_from.as_ref().map(source_ref_to_wire),
             symbol: hit.symbol.map(symbol_to_wire),
             file: Some(file_to_wire(hit.file)),
             identifier: hit.identifier,
@@ -13583,6 +13584,7 @@ fn source_read(
             }
         };
         chunks.push(daemon::FirstSliceSourceChunk {
+            extracted_from: chunk.extracted_from.as_ref().map(source_ref_to_wire),
             source: Some(source_ref_to_wire(&chunk.reference)),
             path: chunk.path,
             start_byte: chunk.start_byte,

@@ -117,7 +117,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn contract_version(self) -> &'static str {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
+            Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
+            Self::SourceRead => crate::source_entity::SOURCE_READ_VERSION,
+            Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
@@ -152,7 +154,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-input-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.5.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.6.schema.json"
             ),
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-input-1.6.schema.json"
@@ -188,7 +190,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-input-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-input-1.1.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.5.schema.json"
@@ -216,7 +218,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-output-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.5.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.6.schema.json"
             ),
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-output-1.6.schema.json"
@@ -252,7 +254,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-output-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-output-1.1.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.5.schema.json"
@@ -267,7 +269,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => Some("1.4"),
+            Self::SourceRead => Some("1.0"),
+            Self::CodeLocate => Some("1.5"),
+            Self::QueryAdvanced => Some("1.4"),
             Self::SymbolExplain => Some("1.5"),
             Self::ChangeImpact | Self::HistoryCompare => Some("1.4"),
             Self::OperationStatus => Some("1.5"),
@@ -288,7 +292,8 @@ impl VerticalTool {
     #[must_use]
     pub const fn legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => Some("1.3"),
+            Self::CodeLocate => Some("1.4"),
+            Self::QueryAdvanced => Some("1.3"),
             Self::SymbolExplain => Some("1.4"),
             Self::ChangeImpact | Self::HistoryCompare => Some("1.3"),
             Self::OperationStatus => Some("1.4"),
@@ -302,7 +307,8 @@ impl VerticalTool {
     #[must_use]
     pub const fn second_legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => Some("1.2"),
+            Self::CodeLocate => Some("1.3"),
+            Self::QueryAdvanced => Some("1.2"),
             Self::SymbolExplain => Some("1.3"),
             Self::ChangeImpact | Self::HistoryCompare => Some("1.2"),
             Self::OperationStatus => Some("1.3"),
@@ -314,7 +320,8 @@ impl VerticalTool {
     #[must_use]
     pub const fn third_legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => Some("1.1"),
+            Self::CodeLocate => Some("1.2"),
+            Self::QueryAdvanced => Some("1.1"),
             Self::SymbolExplain => Some("1.2"),
             Self::ChangeImpact | Self::HistoryCompare => Some("1.1"),
             Self::OperationStatus => Some("1.2"),
@@ -326,7 +333,8 @@ impl VerticalTool {
     #[must_use]
     pub const fn fourth_legacy_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::CodeLocate | Self::QueryAdvanced => Some("1.0"),
+            Self::CodeLocate => Some("1.1"),
+            Self::QueryAdvanced => Some("1.0"),
             Self::SymbolExplain => Some("1.1"),
             Self::ChangeImpact | Self::HistoryCompare => Some("1.0"),
             Self::OperationStatus => Some("1.1"),
@@ -338,7 +346,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn initial_contract_version(self) -> Option<&'static str> {
         match self {
-            Self::RepoIndex | Self::OperationStatus | Self::SymbolExplain => {
+            Self::CodeLocate | Self::RepoIndex | Self::OperationStatus | Self::SymbolExplain => {
                 Some(crate::MCP_SCHEMA_VERSION)
             }
             _ => None,
@@ -349,8 +357,11 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-input-1.0.schema.json"
+            )),
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.4.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.5.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.4.schema.json"
@@ -402,8 +413,11 @@ impl VerticalTool {
     #[must_use]
     pub const fn previous_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-output-1.0.schema.json"
+            )),
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.4.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.5.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.4.schema.json"
@@ -456,7 +470,7 @@ impl VerticalTool {
     pub const fn legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.4.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.3.schema.json"
@@ -488,7 +502,7 @@ impl VerticalTool {
     pub const fn legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.4.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.3.schema.json"
@@ -520,7 +534,7 @@ impl VerticalTool {
     pub const fn second_legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.3.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.2.schema.json"
@@ -546,7 +560,7 @@ impl VerticalTool {
     pub const fn second_legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.3.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.2.schema.json"
@@ -572,7 +586,7 @@ impl VerticalTool {
     pub const fn third_legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.2.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.1.schema.json"
@@ -598,7 +612,7 @@ impl VerticalTool {
     pub const fn third_legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.2.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.1.schema.json"
@@ -624,7 +638,7 @@ impl VerticalTool {
     pub const fn fourth_legacy_input_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.1.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.0.schema.json"
@@ -650,7 +664,7 @@ impl VerticalTool {
     pub const fn fourth_legacy_output_schema_json(self) -> Option<&'static str> {
         match self {
             Self::CodeLocate => Some(include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.1.schema.json"
             )),
             Self::QueryAdvanced => Some(include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.0.schema.json"
@@ -675,6 +689,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn initial_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
+            )),
             Self::SymbolExplain => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
             )),
@@ -692,6 +709,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn initial_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
+            )),
             Self::SymbolExplain => Some(include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
             )),
@@ -1009,6 +1029,9 @@ pub enum McpContractError {
     /// A source chunk does not match its reference, encoding, or range.
     #[error("invalid source chunk")]
     InvalidSourceChunk,
+    /// An extracted source has no correlated whole-container dependency.
+    #[error("invalid extracted source origin")]
+    InvalidExtractedOrigin,
     /// Source chunk bytes do not match the declared aggregate.
     #[error("invalid source byte total")]
     InvalidSourceByteTotal,
@@ -2824,9 +2847,13 @@ pub enum LocateReason {
 }
 
 /// One bounded locate result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocatedItem {
+    /// Whole immediate container dependency for a virtual extracted source.
+    /// Its display path is not directly editable; offsets are not container offsets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceRef>,
     /// Stable symbol identity when the item is a symbol.
     pub symbol_id: Option<SymbolId>,
     /// Stable file identity when available.
@@ -2852,6 +2879,62 @@ pub struct LocatedItem {
     pub source_ref: Option<SourceRef>,
     /// Mandatory repository-data trust marker.
     pub trust: TrustClassification,
+}
+
+impl<'de> Deserialize<'de> for LocatedItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireLocatedItem {
+            extracted_from: Option<SourceRef>,
+            symbol_id: Option<SymbolId>,
+            file_id: Option<FileId>,
+            kind: EntityKind,
+            display_name: String,
+            signature: Option<String>,
+            path: String,
+            score: u16,
+            why: Vec<LocateReason>,
+            source_ref: Option<SourceRef>,
+            trust: TrustClassification,
+        }
+
+        let wire = WireLocatedItem::deserialize(deserializer)?;
+        if wire.extracted_from.as_ref().is_some_and(|origin| {
+            wire.source_ref.as_ref().is_none_or(|source| {
+                !extracted_origin_matches_source(origin, source)
+                    || wire.file_id != Some(source.span().file())
+            })
+        }) {
+            return Err(serde::de::Error::custom(
+                McpContractError::InvalidExtractedOrigin,
+            ));
+        }
+        Ok(Self {
+            extracted_from: wire.extracted_from,
+            symbol_id: wire.symbol_id,
+            file_id: wire.file_id,
+            kind: wire.kind,
+            display_name: wire.display_name,
+            signature: wire.signature,
+            path: wire.path,
+            score: wire.score,
+            why: wire.why,
+            source_ref: wire.source_ref,
+            trust: wire.trust,
+        })
+    }
+}
+
+fn extracted_origin_matches_source(origin: &SourceRef, source: &SourceRef) -> bool {
+    origin.repository() == source.repository()
+        && origin.generation() == source.generation()
+        && origin.span().file() != source.span().file()
+        && origin.span().start_byte() == 0
+        && origin.line_hint().is_none()
 }
 
 /// Server interpretation of a locate query.
@@ -3344,6 +3427,10 @@ pub enum SourceEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceChunk {
+    /// Whole immediate container dependency for a virtual extracted source.
+    /// Byte offsets address this chunk's derived source, not the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceRef>,
     /// Selected generation-bound reference.
     pub source_ref: SourceRef,
     /// Repository-relative display path.
@@ -3390,6 +3477,7 @@ impl<'de> Deserialize<'de> for SourceChunk {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct WireSourceChunk {
+            extracted_from: Option<SourceRef>,
             source_ref: SourceRef,
             path: String,
             start_byte: u64,
@@ -3422,6 +3510,10 @@ impl<'de> Deserialize<'de> for SourceChunk {
                 && wire.end_line == Some(line_hint.end_line())
         });
         if !lines_are_valid
+            || wire
+                .extracted_from
+                .as_ref()
+                .is_some_and(|origin| !extracted_origin_matches_source(origin, &wire.source_ref))
             || represented_bytes != span_bytes
             || span.start_byte() != wire.start_byte
             || span.end_byte() != wire.end_byte
@@ -3435,6 +3527,7 @@ impl<'de> Deserialize<'de> for SourceChunk {
 
         Ok(Self {
             source_ref: wire.source_ref,
+            extracted_from: wire.extracted_from,
             path: wire.path,
             start_byte: wire.start_byte,
             end_byte: wire.end_byte,
@@ -4030,14 +4123,14 @@ mod tests {
                         VerticalTool::CodeLocate,
                         &input,
                         VerticalTool::CodeLocate
-                            .fourth_legacy_input_schema_json()
+                            .initial_input_schema_json()
                             .expect("retained 1.0 input"),
                     );
                     assert_round_trip_with_schema::<CodeLocateOutput>(
                         VerticalTool::CodeLocate,
                         &output,
                         VerticalTool::CodeLocate
-                            .fourth_legacy_output_schema_json()
+                            .initial_output_schema_json()
                             .expect("retained 1.0 output"),
                     );
                 }
@@ -4058,8 +4151,20 @@ mod tests {
                     );
                 }
                 "source.read" => {
-                    assert_round_trip::<SourceReadInput>(VerticalTool::SourceRead, &input, true);
-                    assert_round_trip::<SourceReadOutput>(VerticalTool::SourceRead, &output, false);
+                    assert_round_trip_with_schema::<SourceReadInput>(
+                        VerticalTool::SourceRead,
+                        &input,
+                        VerticalTool::SourceRead
+                            .previous_input_schema_json()
+                            .expect("retained 1.0 input"),
+                    );
+                    assert_round_trip_with_schema::<SourceReadOutput>(
+                        VerticalTool::SourceRead,
+                        &output,
+                        VerticalTool::SourceRead
+                            .previous_output_schema_json()
+                            .expect("retained 1.0 output"),
+                    );
                 }
                 "symbol.relationships" => {
                     assert_round_trip_with_schema::<SymbolRelationshipsInput>(
@@ -4342,15 +4447,26 @@ mod tests {
             assert_eq!(tool.third_legacy_contract_version(), Some("1.1"));
             assert_eq!(tool.fourth_legacy_contract_version(), Some("1.0"));
         }
-        for tool in [VerticalTool::CodeLocate, VerticalTool::QueryAdvanced] {
-            assert_eq!(tool.contract_version(), "1.5");
-            assert_eq!(tool.previous_contract_version(), Some("1.4"));
-            assert_eq!(tool.legacy_contract_version(), Some("1.3"));
-            assert_eq!(tool.second_legacy_contract_version(), Some("1.2"));
-            assert_eq!(tool.third_legacy_contract_version(), Some("1.1"));
-            assert_eq!(tool.fourth_legacy_contract_version(), Some("1.0"));
-            assert_eq!(tool.initial_contract_version(), None);
-        }
+        let tool = VerticalTool::QueryAdvanced;
+        assert_eq!(tool.contract_version(), "1.5");
+        assert_eq!(tool.previous_contract_version(), Some("1.4"));
+        assert_eq!(tool.legacy_contract_version(), Some("1.3"));
+        assert_eq!(tool.second_legacy_contract_version(), Some("1.2"));
+        assert_eq!(tool.third_legacy_contract_version(), Some("1.1"));
+        assert_eq!(tool.fourth_legacy_contract_version(), Some("1.0"));
+        assert_eq!(tool.initial_contract_version(), None);
+        let tool = VerticalTool::CodeLocate;
+        assert_eq!(tool.contract_version(), "1.6");
+        assert_eq!(tool.previous_contract_version(), Some("1.5"));
+        assert_eq!(tool.legacy_contract_version(), Some("1.4"));
+        assert_eq!(tool.second_legacy_contract_version(), Some("1.3"));
+        assert_eq!(tool.third_legacy_contract_version(), Some("1.2"));
+        assert_eq!(tool.fourth_legacy_contract_version(), Some("1.1"));
+        assert_eq!(tool.initial_contract_version(), Some("1.0"));
+        let tool = VerticalTool::SourceRead;
+        assert_eq!(tool.contract_version(), "1.1");
+        assert_eq!(tool.previous_contract_version(), Some("1.0"));
+        assert_eq!(tool.legacy_contract_version(), None);
         let tool = VerticalTool::SymbolExplain;
         assert_eq!(tool.contract_version(), "1.6");
         assert_eq!(tool.previous_contract_version(), Some("1.5"));
@@ -4377,6 +4493,7 @@ mod tests {
                     | VerticalTool::PlanChange
                     | VerticalTool::ContextPack
                     | VerticalTool::CodeLocate
+                    | VerticalTool::SourceRead
                     | VerticalTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
@@ -4465,14 +4582,14 @@ mod tests {
         let mut maximum = fixture.clone();
         maximum["next_cursor"] = json!("c".repeat(4_096));
         assert!(validator.is_valid(&maximum));
-        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_5>(maximum)
+        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_6>(maximum)
             .expect("maximum-sized cursor decodes");
 
         let mut oversized = fixture;
         oversized["next_cursor"] = json!("c".repeat(4_097));
         assert!(!validator.is_valid(&oversized));
         assert!(
-            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_5>(oversized)
+            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_6>(oversized)
                 .is_err()
         );
     }
@@ -4781,6 +4898,61 @@ mod tests {
         let mut mismatched_total = fixture;
         mismatched_total["data"]["total_source_bytes"] = json!(9);
         assert!(serde_json::from_value::<SourceReadOutput>(mismatched_total).is_err());
+    }
+
+    #[test]
+    fn extracted_source_chunks_reject_uncorrelated_origins() {
+        use rootlight_ids::{FileId, GenerationId, RepositoryId};
+        use rootlight_ir::SourceRef;
+
+        let fixture = retained_tool_output("source.read");
+        let source: SourceRef =
+            serde_json::from_value(fixture["data"]["chunks"][0]["source_ref"].clone()).unwrap();
+        let origin = SourceRef::new(
+            source.repository(),
+            source.generation(),
+            rootlight_ir::SourceSpan::new(FileId::from_bytes([87; 20]), 0, 4096).unwrap(),
+            source.content_hash(),
+            None,
+        );
+        let mut valid = fixture.clone();
+        valid["data"]["chunks"][0]["extracted_from"] = serde_json::to_value(&origin).unwrap();
+        serde_json::from_value::<SourceReadOutput>(valid.clone()).unwrap();
+        for bad_origin in [
+            source.clone(),
+            SourceRef::new(
+                source.repository(),
+                GenerationId::from_bytes([87; 20]),
+                origin.span(),
+                origin.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                RepositoryId::from_bytes([87; 16]),
+                source.generation(),
+                origin.span(),
+                origin.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                source.repository(),
+                source.generation(),
+                rootlight_ir::SourceSpan::new(origin.span().file(), 1, 4096).unwrap(),
+                origin.content_hash(),
+                None,
+            ),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["data"]["chunks"][0]["extracted_from"] =
+                serde_json::to_value(bad_origin).unwrap();
+            assert!(serde_json::from_value::<SourceReadOutput>(invalid).is_err());
+        }
+        let original: SourceReadOutput = serde_json::from_value(fixture).unwrap();
+        assert!(
+            !serde_json::to_string(&original)
+                .unwrap()
+                .contains("extracted_from")
+        );
     }
 
     #[test]

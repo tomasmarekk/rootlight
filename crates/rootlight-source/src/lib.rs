@@ -27,7 +27,7 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
-use rootlight_ir::{FileRecord, SourceRef};
+use rootlight_ir::{FileRecord, SourceMappingKind, SourceRef};
 use rootlight_storage::GenerationSnapshot;
 use rootlight_vfs::{MAX_PATH_BYTES, RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
 
@@ -227,6 +227,10 @@ pub enum SourceEncoding {
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SourceChunk {
+    /// Whole immediate container dependency, when this is an extracted source.
+    /// The display path is then virtual, not an editable filesystem path;
+    /// returned byte offsets address the derived source, not the container.
+    pub extracted_from: Option<SourceRef>,
     /// Exact indexed source reference selected by the caller.
     pub reference: SourceRef,
     /// Canonical repository-relative path from the pinned generation.
@@ -487,6 +491,7 @@ impl<'a> SourceService<'a> {
             push_preallocated(
                 &mut chunks,
                 SourceChunk {
+                    extracted_from: prepared_file.extracted_from.clone(),
                     reference: reference.clone(),
                     path,
                     start_byte: usize_to_u64(range.start)?,
@@ -586,6 +591,7 @@ impl<'a> SourceService<'a> {
                     PreparedFile {
                         file: file.id,
                         path,
+                        extracted_from: None,
                     },
                     control,
                 )?;
@@ -594,6 +600,18 @@ impl<'a> SourceService<'a> {
             push_preallocated(&mut file_slots, file_slot, control)?;
         }
 
+        // The validated generation guarantees unique, whole-file extraction
+        // ownership. Scan once per request, retaining only selected origins.
+        for mapping in &self.generation.document().source_mappings {
+            control.check()?;
+            if mapping.kind == SourceMappingKind::ExtractedFromContainer {
+                for file in &mut files {
+                    if file.file == mapping.from.span().file() {
+                        file.extracted_from = Some(mapping.to.clone());
+                    }
+                }
+            }
+        }
         Ok(PreparedRequest {
             file_slots,
             files,
@@ -663,6 +681,7 @@ struct PreparedRequest {
 }
 
 struct PreparedFile {
+    extracted_from: Option<SourceRef>,
     file: FileId,
     path: RelativePath,
 }

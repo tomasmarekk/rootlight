@@ -17,6 +17,30 @@ pub const EXPLAIN_VERSION: &str = "1.6";
 /// Contract revision for change results containing source entities.
 pub const CHANGE_VERSION: &str = "1.5";
 
+/// Contract revision for locate results with explicit extracted-source origins.
+pub const LOCATE_VERSION: &str = "1.6";
+/// Contract revision for source reads with explicit extracted-source origins.
+pub const SOURCE_READ_VERSION: &str = "1.1";
+
+/// Exact version of origin-aware locate responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum OriginLocateVersion {
+    /// Locate contract 1.6.
+    #[serde(rename = "1.6")]
+    V1_6,
+}
+
+/// Origin-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_6 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, OriginLocateVersion>,
+    OriginLocateVersion,
+>;
+/// Origin-aware `source.read` success or domain error.
+pub type SourceReadOutputV1_1 = EntityToolResponse<
+    EntityReadEnvelope<crate::vertical::SourceReadData, AnalysisSchemaVersion>,
+    AnalysisSchemaVersion,
+>;
+
 /// Exact version of source-kind explanation responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ExplainVersion {

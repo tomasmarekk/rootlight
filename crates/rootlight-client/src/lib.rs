@@ -1214,6 +1214,10 @@ pub struct RepositoryOperationStatus {
 /// One generation-pinned lexical result.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LocateHit {
+    /// Whole immediate container dependency for a virtual extracted source.
+    /// This is not byte-offset equivalence or an editable filesystem path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceReference>,
     /// Stable symbol identity, absent for a file-only source hit.
     pub symbol: Option<SymbolId>,
     /// Stable file identity.
@@ -1438,6 +1442,9 @@ impl Default for SourceReadOptions {
 /// One verified source chunk.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SourceChunk {
+    /// Whole immediate container dependency; offsets address the derived source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<SourceReference>,
     /// Exact immutable source selection.
     pub source: SourceReference,
     /// Untrusted repository-relative path.
@@ -13018,7 +13025,12 @@ fn parse_code_locate(
         if hit.score > 1_000 || source.as_ref().is_some_and(|source| source.file != file) {
             return Err(ClientError::InvalidResponseCorrelation);
         }
+        let extracted_from = parse_extracted_from(hit.extracted_from, file, &context)?;
+        if extracted_from.is_some() && source.is_none() {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
         hits.push(LocateHit {
+            extracted_from,
             symbol: hit
                 .symbol
                 .map(|symbol| parse_symbol(Some(symbol)))
@@ -13279,7 +13291,9 @@ fn parse_source_read(
         source_bytes = source_bytes
             .checked_add(length)
             .ok_or(ClientError::InvalidResponseCorrelation)?;
+        let extracted_from = parse_extracted_from(chunk.extracted_from, source.file, &context)?;
         chunks.push(SourceChunk {
+            extracted_from,
             source,
             path: chunk.path,
             start_byte: chunk.start_byte,
@@ -13728,6 +13742,23 @@ fn parse_token_accounting_profile(value: i32) -> Result<TokenAccountingProfile, 
         Ok(daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUnspecified)
         | Err(_) => Err(ClientError::InvalidResponseCorrelation),
     }
+}
+
+fn parse_extracted_from(
+    reference: Option<daemon::FirstSliceSourceRef>,
+    derived_file: FileId,
+    context: &QueryContext,
+) -> Result<Option<SourceReference>, ClientError> {
+    reference
+        .map(|reference| {
+            let origin = parse_source_reference(reference, context)?;
+            if origin.file == derived_file || origin.start_byte != 0 || origin.start_line.is_some()
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            Ok(origin)
+        })
+        .transpose()
 }
 
 fn parse_source_reference(
@@ -15618,6 +15649,7 @@ mod tests {
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
+                extracted_from: None,
                 symbol: Some(symbol_to_wire(symbol)),
                 file: Some(file_to_wire(source.file)),
                 identifier: "answer".to_owned(),
@@ -15679,6 +15711,7 @@ mod tests {
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 3)),
             chunks: vec![daemon::FirstSliceSourceChunk {
+                extracted_from: None,
                 source: Some(wire_source(source)),
                 path: "src/lib.rs".to_owned(),
                 start_byte: source.start_byte,
@@ -15699,6 +15732,84 @@ mod tests {
             truncated: false,
             completeness: None,
         }
+    }
+
+    #[test]
+    fn extracted_origins_survive_wire_decoding_and_reject_foreign_or_partial_references() {
+        let source = test_source(4, 0, 3);
+        let origin = SourceReference::new(
+            test_repository(),
+            test_generation(),
+            FileId::from_bytes([7; 20]),
+            0..4096,
+            ContentHash::from_bytes([7; 32]),
+            None,
+        )
+        .unwrap();
+        let parse = |wire_origin: daemon::FirstSliceSourceRef| {
+            let mut locate = wire_code_locate(SymbolId::from_bytes([5; 20]), &source);
+            locate.hits[0].extracted_from = Some(wire_origin.clone());
+            let located =
+                parse_code_locate(locate, test_repository(), GenerationSelector::Active, 1, 0);
+            let mut read = wire_source_read(&source);
+            read.chunks[0].extracted_from = Some(wire_origin);
+            let read = parse_source_read(
+                read,
+                test_repository(),
+                GenerationSelector::Active,
+                std::slice::from_ref(&source),
+                SourceReadOptions::new(),
+            );
+            (located, read)
+        };
+        let wire = wire_source(&origin);
+        let (located, read) = parse(wire.clone());
+        assert_eq!(
+            located.unwrap().hits[0].extracted_from.as_ref(),
+            Some(&origin)
+        );
+        assert_eq!(
+            read.unwrap().chunks[0].extracted_from.as_ref(),
+            Some(&origin)
+        );
+        let mut invalid = Vec::new();
+        let mut foreign_repository = wire.clone();
+        foreign_repository.repository = Some(repository_to_wire(RepositoryId::from_bytes([9; 16])));
+        invalid.push(foreign_repository);
+        let mut stale_generation = wire.clone();
+        stale_generation.generation = Some(generation_to_wire(GenerationId::from_bytes([9; 20])));
+        invalid.push(stale_generation);
+        let mut self_reference = wire.clone();
+        self_reference.file = Some(file_to_wire(source.file));
+        invalid.push(self_reference);
+        let mut partial_container = wire.clone();
+        partial_container.start_byte = 1;
+        invalid.push(partial_container);
+        let mut line_projection = wire.clone();
+        line_projection.start_line = Some(1);
+        line_projection.end_line = Some(1);
+        invalid.push(line_projection);
+        for candidate in invalid {
+            let (located, read) = parse(candidate);
+            assert!(matches!(
+                located,
+                Err(ClientError::InvalidResponseCorrelation)
+            ));
+            assert!(matches!(read, Err(ClientError::InvalidResponseCorrelation)));
+        }
+        let mut without_source = wire_code_locate(SymbolId::from_bytes([5; 20]), &source);
+        without_source.hits[0].source = None;
+        without_source.hits[0].extracted_from = Some(wire);
+        assert!(matches!(
+            parse_code_locate(
+                without_source,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
     }
 
     #[test]
@@ -18374,6 +18485,7 @@ mod tests {
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(2, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
+                extracted_from: None,
                 symbol: Some(symbol_to_wire(symbol)),
                 file: Some(file_to_wire(source.file)),
                 identifier: "answer".to_owned(),
@@ -18543,6 +18655,7 @@ mod tests {
         let second = test_source(5, 4, 5);
         let chunk = |reference: &SourceReference, start_byte: u64, end_byte: u64, content: &str| {
             daemon::FirstSliceSourceChunk {
+                extracted_from: None,
                 source: Some(wire_source(reference)),
                 path: "src/lib.rs".to_owned(),
                 start_byte,

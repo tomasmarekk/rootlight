@@ -62,6 +62,32 @@ fn read_module(
         .unwrap();
     assert_eq!(result.data.chunks[0].bytes, bytes);
     assert_eq!(reference.content_hash(), content_hash(bytes));
+    let origin = hit.extracted_from.as_ref().expect("derived locate origin");
+    assert_eq!(result.data.chunks[0].extracted_from.as_ref(), Some(origin));
+    assert_eq!(origin.repository(), reference.repository());
+    assert_eq!(origin.generation(), generation);
+    assert_ne!(origin.span().file(), reference.span().file());
+    assert_eq!(origin.span().start_byte(), 0);
+    assert!(origin.line_hint().is_none());
+    let container = service
+        .source_read_with_options_and_budget(
+            generation,
+            vec![origin.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(rootlight_source::SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &cancellation,
+        )
+        .unwrap();
+    let container = &container.data.chunks[0];
+    assert!(container.extracted_from.is_none());
+    assert_eq!(content_hash(&container.bytes), origin.content_hash());
+    assert_eq!(
+        u64::try_from(container.bytes.len()).unwrap(),
+        origin.span().end_byte()
+    );
     reference
 }
 

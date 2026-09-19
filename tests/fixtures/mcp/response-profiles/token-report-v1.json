@@ -77,7 +77,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1488,
       "o200k_tokens": 490,
-      "sha256": "81c6b0918e2925abbdb29100eaee01c1bf7b478a618f686140bed989ac733e10",
+      "sha256": "2639f5b959b0123898b1221f16a8c9b679317959753efcb75f2d3f88339e3ecd",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -88,7 +88,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1555,
       "o200k_tokens": 505,
-      "sha256": "3fae72c9edfe1b301f66f93c8ead95ffb1265f7a5a76e0362ea2699f9a50ed41",
+      "sha256": "31aede473beb4d0b98ad1713f6121cc79498173a5b7ed05c4f6ec2d01636d371",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -99,7 +99,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1616,
       "o200k_tokens": 522,
-      "sha256": "4e7dcbbdcff5a8e45d5a2797f5ee4001d444deea2f628c02353b4c5f565a228b",
+      "sha256": "5621d296466cd65984d54f67cef4be585325f294402ab54a5221f6623b0f3a7d",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -473,7 +473,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1388,
       "o200k_tokens": 464,
-      "sha256": "9a45e93625b534cd11c57d310804a26cc0014787ab29851ca814b25c4a8f1564",
+      "sha256": "832bf3628cbd1a0a6e401e24b302dc603fd55a2c4b04cad1f7fde7680388c22e",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -484,7 +484,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1416,
       "o200k_tokens": 474,
-      "sha256": "8ca143724dcec441aefc6760c223e44fb466eae8e0786d5b110859bccfb26faa",
+      "sha256": "d4861dbe5fd635522a93dca46d3f9e9ec24940438a1fbe299bef298e56150e24",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -495,7 +495,7 @@
       "framing": "compact_json_output_object",
       "serialized_bytes": 1458,
       "o200k_tokens": 487,
-      "sha256": "f0bca758cb646190e0ec90406c05b786aa29fddd0ac296f677301613c68c7b2b",
+      "sha256": "371fe87ee62c6d6fba8448455b2ed87f57ddb2ce9b4be65c1c38a94891959f5c",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true

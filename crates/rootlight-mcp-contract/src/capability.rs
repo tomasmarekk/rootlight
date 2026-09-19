@@ -1940,6 +1940,7 @@ mod tests {
                             | McpTool::PlanChange
                             | McpTool::ContextPack
                             | McpTool::CodeLocate
+                            | McpTool::SourceRead
                             | McpTool::QueryAdvanced
                     )
                 })

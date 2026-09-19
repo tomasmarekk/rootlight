@@ -1405,6 +1405,7 @@ mod tests {
                 Ok(SourceRead {
                     context: query_context(repository, generation, 1, source_bytes),
                     chunks: vec![SourceChunk {
+                        extracted_from: None,
                         source: reference.clone(),
                         path: SOURCE_PATH.to_owned(),
                         start_byte: reference.byte_range().start,

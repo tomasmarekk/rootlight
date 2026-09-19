@@ -28,9 +28,11 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 18;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 19;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.18";
+pub const PROTOCOL_VERSION: &str = "1.19";
+/// First daemon protocol carrying whole-container origins on locate and source results.
+pub const EXTRACTED_SOURCE_ORIGIN_PROTOCOL_MINOR: u32 = 19;
 /// First daemon protocol that applies explicit locate kind unions before paging.
 pub const CODE_LOCATE_KIND_FILTER_PROTOCOL_MINOR: u32 = 18;
 /// Maximum raw kind labels admitted in one locate union.

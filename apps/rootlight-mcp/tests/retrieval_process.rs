@@ -1516,7 +1516,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.5");
+        assert_eq!(output["schema_version"], "1.6");
         if let Some(unsupported) = unsupported {
             assert_eq!(
                 output["warnings"]

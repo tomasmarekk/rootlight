@@ -8127,7 +8127,13 @@ fn map_code_locate(
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
         let source_ref = hit.source.as_ref().map(client_source_ref).transpose()?;
+        let extracted_from = hit
+            .extracted_from
+            .as_ref()
+            .map(|origin| client_extracted_from(origin, source_ref.as_ref()))
+            .transpose()?;
         matches.push(LocatedItem {
+            extracted_from,
             symbol_id: hit.symbol,
             file_id: Some(hit.file),
             kind: entity_kind(&hit.kind)?,
@@ -8440,7 +8446,13 @@ fn map_source_read(
             }
             _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
         };
+        let extracted_from = chunk
+            .extracted_from
+            .as_ref()
+            .map(|origin| client_extracted_from(origin, Some(&source_ref)))
+            .transpose()?;
         chunks.push(SourceChunk {
+            extracted_from,
             source_ref,
             path: chunk.path,
             start_byte: chunk.start_byte,
@@ -8881,6 +8893,22 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)
+}
+
+fn client_extracted_from(
+    origin: &client::SourceReference,
+    source: Option<&SourceRef>,
+) -> Result<SourceRef, ToolExecutionError> {
+    let source = source.ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    if origin.repository() != source.repository()
+        || origin.generation() != source.generation()
+        || origin.file() == source.span().file()
+        || origin.byte_range().start != 0
+        || origin.line_range().is_some()
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    client_source_ref(origin)
 }
 
 fn client_source_ref(reference: &client::SourceReference) -> Result<SourceRef, ToolExecutionError> {

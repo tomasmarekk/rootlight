@@ -7768,6 +7768,25 @@ fn correlated_first_slice_response_for_minor(
 ) -> daemon::response_envelope::Response {
     select_first_slice_response_minor(&mut response, selected_protocol_minor);
     if first_slice_response_correlates_for_minor(request, &response, selected_protocol_minor) {
+        let has_extracted_origin = match &response {
+            FirstSliceIpcResponse::CodeLocate(result) => {
+                result.hits.iter().any(|hit| hit.extracted_from.is_some())
+            }
+            FirstSliceIpcResponse::SourceRead(result) => result
+                .chunks
+                .iter()
+                .any(|chunk| chunk.extracted_from.is_some()),
+            _ => false,
+        };
+        if has_extracted_origin
+            && selected_protocol_minor < rootlight_protocol::EXTRACTED_SOURCE_ORIGIN_PROTOCOL_MINOR
+        {
+            // An older decoder would discard the field and misrepresent a
+            // derived display path as an ordinary repository source.
+            return daemon::response_envelope::Response::Error(public_error_to_wire(
+                &protocol_mismatch("extracted source origins require a newer protocol"),
+            ));
+        }
         response.into_wire()
     } else {
         daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()))
@@ -20650,6 +20669,7 @@ mod tests {
         });
         let locate_hit =
             |symbol_byte: u8, source: &daemon::FirstSliceSourceRef| daemon::FirstSliceLocateHit {
+                extracted_from: None,
                 symbol: Some(common::SymbolId {
                     value: vec![symbol_byte; 20],
                 }),
@@ -20677,6 +20697,29 @@ mod tests {
             &locate_request,
             &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
         ));
+        let mut extracted = locate_response.clone();
+        let mut origin = correlation_source(&repository, &generation, 87, 0, 4096);
+        origin.start_line = None;
+        origin.end_line = None;
+        extracted.hits[0].extracted_from = Some(origin);
+        for minor in [18, 19] {
+            let reply = correlated_first_slice_response_for_minor(
+                &locate_request,
+                FirstSliceIpcResponse::CodeLocate(extracted.clone()),
+                minor,
+            );
+            if minor == 18 {
+                assert!(
+                    matches!(reply, daemon::response_envelope::Response::Error(error)
+                    if error.code == common::ErrorCode::ProtocolMismatch as i32)
+                );
+            } else {
+                assert!(
+                    matches!(reply, daemon::response_envelope::Response::CodeLocate(result)
+                    if result.hits[0].extracted_from.is_some())
+                );
+            }
+        }
         let mut incomplete_without_truncation = locate_response.clone();
         for (kinds, correlates) in [
             (vec![], false),
@@ -20879,6 +20922,7 @@ mod tests {
              start_byte: u64,
              end_byte: u64,
              content: &str| daemon::FirstSliceSourceChunk {
+                extracted_from: None,
                 source: Some(source.clone()),
                 path: "src/lib.rs".to_owned(),
                 start_byte,
@@ -20910,6 +20954,29 @@ mod tests {
             &source_request,
             &FirstSliceIpcResponse::SourceRead(source_response.clone())
         ));
+        let mut extracted = source_response.clone();
+        let mut origin = correlation_source(&repository, &generation, 87, 0, 4096);
+        origin.start_line = None;
+        origin.end_line = None;
+        extracted.chunks[0].extracted_from = Some(origin.clone());
+        for minor in [18, 19] {
+            let reply = correlated_first_slice_response_for_minor(
+                &source_request,
+                FirstSliceIpcResponse::SourceRead(extracted.clone()),
+                minor,
+            );
+            if minor == 18 {
+                assert!(
+                    matches!(reply, daemon::response_envelope::Response::Error(error)
+                    if error.code == common::ErrorCode::ProtocolMismatch as i32)
+                );
+            } else {
+                assert!(
+                    matches!(reply, daemon::response_envelope::Response::SourceRead(result)
+                    if result.chunks[0].extracted_from.as_ref() == Some(&origin))
+                );
+            }
+        }
         let mut wrong_usage = source_response.clone();
         wrong_usage
             .context
