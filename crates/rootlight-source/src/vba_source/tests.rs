@@ -589,3 +589,80 @@ fn missing_or_ambiguous_metadata_cannot_create_a_partial_inventory() {
         assert_eq!(project.modules()[0].stream_id(), Err(BindingError::Name));
     }
 }
+
+#[test]
+fn project_properties_are_siblings_and_cannot_hide_readable_modules() {
+    let cancel = Cancellation::new();
+    let body = b"readable";
+    for properties in [
+        vec![],
+        vec![Stream {
+            name: "PROJECT",
+            bytes: b"child".to_vec(),
+            inside: true,
+        }],
+        vec![
+            Stream {
+                name: "PROJECT",
+                bytes: b"first".to_vec(),
+                inside: false,
+            },
+            Stream {
+                name: "PROJECT",
+                bytes: b"second".to_vec(),
+                inside: false,
+            },
+        ],
+    ] {
+        let mut streams = vec![stream("Source", body)];
+        streams.extend(properties);
+        let input = fixture(&[("Source", 0)], streams);
+        let compound = parse(&input);
+        let project =
+            VbaProject::open(&compound, 1, ProjectReadLimits::default(), &cancel).unwrap();
+        assert!(matches!(
+            project.read_project_stream(4096, &cancel),
+            Err(SourceError::ProjectMetadata)
+        ));
+        assert_eq!(
+            project
+                .read_module(0, ModuleReadLimits::default(), &cancel)
+                .unwrap()
+                .bytes(),
+            body
+        );
+    }
+    let properties = b"unparsed original project bytes";
+    let input = fixture(
+        &[("Source", 0)],
+        vec![
+            stream("Source", body),
+            Stream {
+                name: "PROJECT",
+                bytes: properties.to_vec(),
+                inside: false,
+            },
+        ],
+    );
+    let compound = parse(&input);
+    let project = VbaProject::open(&compound, 1, ProjectReadLimits::default(), &cancel).unwrap();
+    let source = project
+        .read_project_stream(properties.len(), &cancel)
+        .unwrap();
+    assert_eq!(source.bytes(), properties);
+    for part in source.source_parts() {
+        assert_eq!(
+            &input[part.container_range()],
+            &source.bytes()[part.stream_range()]
+        );
+    }
+    assert!(matches!(
+        project.read_project_stream(properties.len() - 1, &cancel),
+        Err(SourceError::Compound(CompoundError::Limit { .. }))
+    ));
+    cancel.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        project.read_project_stream(4096, &cancel),
+        Err(SourceError::Cancelled(_))
+    ));
+}

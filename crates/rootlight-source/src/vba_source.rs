@@ -82,6 +82,9 @@ pub enum SourceError {
     /// The selected storage does not contain exactly one `dir` stream.
     #[error("vba directory stream is missing or ambiguous")]
     Metadata,
+    /// The enclosing project has no unique PROJECT sibling stream.
+    #[error("vba project properties stream is missing or ambiguous")]
+    ProjectMetadata,
     /// The requested ordinal is outside the complete declared module list.
     #[error("vba module ordinal is out of bounds: {ordinal}")]
     Ordinal {
@@ -350,6 +353,41 @@ impl<'container, 'input> VbaProject<'container, 'input> {
     #[must_use]
     pub fn decoded_directory(&self) -> &DecompressedContainer {
         &self.decoded_directory
+    }
+
+    /// Reads the unique PROJECT stream beside the selected VBA storage.
+    ///
+    /// The returned physical mappings are original container byte ranges. Parsing
+    /// with [`crate::vba_project::ProjectProperties`] is separate so malformed or
+    /// absent project properties do not suppress independently readable bodies.
+    ///
+    /// # Errors
+    /// Returns [`SourceError::ProjectMetadata`] for an absent, ambiguous or
+    /// non-stream sibling; returns a compound limit/read error or cancellation.
+    pub fn read_project_stream(
+        &self,
+        maximum_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<CompoundStream, SourceError> {
+        cancellation.check()?;
+        let parent = self
+            .compound
+            .entries()
+            .find(|entry| entry.id() == self.storage_id)
+            .and_then(CompoundEntry::parent)
+            .ok_or(SourceError::ProjectMetadata)?;
+        let mut selected = None;
+        for entry in self.compound.entries() {
+            cancellation.check()?;
+            if entry.parent() == Some(parent) && entry.name() == "PROJECT" {
+                if selected.is_some() || entry.kind() != CompoundEntryKind::Stream {
+                    return Err(SourceError::ProjectMetadata);
+                }
+                selected = Some(entry.id());
+            }
+        }
+        let id = selected.ok_or(SourceError::ProjectMetadata)?;
+        Ok(self.compound.read_stream(id, maximum_bytes, cancellation)?)
     }
 
     /// Reads one module's declared source bytes without decoding its code page.
