@@ -293,6 +293,192 @@ fn parse(bytes: &[u8]) -> CompoundFile<'_> {
     CompoundFile::parse(bytes, CompoundLimits::default(), &Cancellation::new()).unwrap()
 }
 
+fn renamed_entry(bytes: &mut [u8], id: usize, name: &str) {
+    let start = 1024 + id * 128;
+    bytes[start..start + 64].fill(0);
+    let wide: Vec<_> = name.encode_utf16().collect();
+    assert!(wide.len() <= 31);
+    for (index, unit) in wide.iter().enumerate() {
+        put16(bytes, start + index * 2, *unit);
+    }
+    put16(
+        bytes,
+        start + 64,
+        u16::try_from((wide.len() + 1) * 2).unwrap(),
+    );
+}
+
+fn ascii_case_variants(word: &str) -> Vec<String> {
+    assert!(word.is_ascii() && word.len() < 8);
+    (0..1usize << word.len())
+        .map(|mask| {
+            word.bytes()
+                .enumerate()
+                .map(|(index, byte)| {
+                    char::from(if mask & (1 << index) == 0 {
+                        byte.to_ascii_uppercase()
+                    } else {
+                        byte.to_ascii_lowercase()
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn reserved_storage_and_stream_names_ignore_ascii_case() {
+    let cancel = Cancellation::new();
+    let base = fixture(
+        &[("Source", 0)],
+        vec![
+            stream("Source", b"body"),
+            Stream {
+                name: "PROJECT",
+                bytes: b"properties".to_vec(),
+                inside: false,
+            },
+        ],
+    );
+    for (id, name) in [(1, "VBA"), (2, "dir"), (4, "PROJECT")] {
+        for variant in ascii_case_variants(name) {
+            let mut input = base.clone();
+            renamed_entry(&mut input, id, &variant);
+            let file = parse(&input);
+            let project =
+                VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+            assert_eq!(project.directory_id(), 2);
+            assert_eq!(
+                project.read_project_stream(64, &cancel).unwrap().bytes(),
+                b"properties"
+            );
+            assert_eq!(
+                project
+                    .read_module(0, ModuleReadLimits::default(), &cancel)
+                    .unwrap()
+                    .bytes(),
+                b"body"
+            );
+        }
+    }
+    for invalid in ["VBAx", " VBA", "ＶBA", "VBΑ"] {
+        let mut input = base.clone();
+        renamed_entry(&mut input, 1, invalid);
+        let file = parse(&input);
+        assert!(matches!(
+            VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel),
+            Err(SourceError::Storage)
+        ));
+    }
+}
+
+#[test]
+fn reserved_directory_aliases_are_ambiguous_but_storage_confined() {
+    let cancel = Cancellation::new();
+    for names in [["dir", "DIR"], ["DIR", "dir"]] {
+        let input = compound(&[
+            Stream {
+                name: names[0],
+                bytes: compress_literals(&directory(&[])),
+                inside: true,
+            },
+            Stream {
+                name: names[1],
+                bytes: compress_literals(&directory(&[])),
+                inside: true,
+            },
+        ]);
+        let file = parse(&input);
+        assert!(matches!(
+            VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel),
+            Err(SourceError::Metadata)
+        ));
+    }
+    let input = compound(&[
+        Stream {
+            name: "DIR",
+            bytes: compress_literals(&directory(&[])),
+            inside: true,
+        },
+        Stream {
+            name: "dir",
+            bytes: b"outside storage".to_vec(),
+            inside: false,
+        },
+    ]);
+    let file = parse(&input);
+    let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+    assert_eq!(project.directory_id(), 2);
+    assert!(project.modules().is_empty());
+}
+
+#[test]
+fn reserved_project_aliases_cannot_hide_or_cross_module_storage() {
+    let cancel = Cancellation::new();
+    for names in [["PROJECT", "project"], ["project", "PROJECT"]] {
+        let input = fixture(
+            &[("Source", 0)],
+            vec![
+                stream("Source", b"body"),
+                Stream {
+                    name: names[0],
+                    bytes: b"first".to_vec(),
+                    inside: false,
+                },
+                Stream {
+                    name: names[1],
+                    bytes: b"second".to_vec(),
+                    inside: false,
+                },
+            ],
+        );
+        let file = parse(&input);
+        let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+        assert!(matches!(
+            project.read_project_stream(64, &cancel),
+            Err(SourceError::ProjectMetadata)
+        ));
+        assert_eq!(
+            project
+                .read_module(0, ModuleReadLimits::default(), &cancel)
+                .unwrap()
+                .bytes(),
+            b"body"
+        );
+    }
+    for outside in ["pRoJeCt", "PROJECT.extra", "ＰROJECT"] {
+        let input = fixture(
+            &[("Source", 0)],
+            vec![
+                stream("Source", b"body"),
+                Stream {
+                    name: "PROJECT",
+                    bytes: b"inside".to_vec(),
+                    inside: true,
+                },
+                Stream {
+                    name: outside,
+                    bytes: b"outside".to_vec(),
+                    inside: false,
+                },
+            ],
+        );
+        let file = parse(&input);
+        let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+        if outside == "pRoJeCt" {
+            assert_eq!(
+                project.read_project_stream(64, &cancel).unwrap().bytes(),
+                b"outside"
+            );
+        } else {
+            assert!(matches!(
+                project.read_project_stream(64, &cancel),
+                Err(SourceError::ProjectMetadata)
+            ));
+        }
+    }
+}
+
 #[test]
 fn module_text_uses_its_own_declared_page_and_preserves_raw_source() {
     use crate::vba_text::{TextError, TextLimits};

@@ -251,10 +251,11 @@ impl fmt::Debug for VbaProject<'_, '_> {
 impl<'container, 'input> VbaProject<'container, 'input> {
     /// Opens the caller-selected `VBA` storage and binds its declared modules.
     ///
-    /// Only exact Unicode names among direct children are matched; this does not
-    /// perform CFB collation, MBCS/Unicode equivalence, PROJECT membership or VBA
-    /// semantic validation. Invalid individual bindings stay explicit in the
-    /// inventory. External references and performance caches are never executed.
+    /// Reserved ASCII names `VBA` and `dir` ignore case, as MS-OVBA requires.
+    /// Module streams still use exact Unicode names among direct children; this
+    /// does not perform general CFB collation, MBCS/Unicode equivalence, PROJECT
+    /// membership or VBA semantic validation. Invalid bindings stay explicit.
+    /// External references and performance caches are never executed.
     ///
     /// # Errors
     /// Returns [`SourceError`] for invalid storage selection, missing/ambiguous
@@ -269,24 +270,29 @@ impl<'container, 'input> VbaProject<'container, 'input> {
         let storage = compound
             .entries()
             .find(|entry| entry.id() == storage_id)
-            .filter(|entry| entry.kind() == CompoundEntryKind::Storage && entry.name() == "VBA")
+            .filter(|entry| {
+                entry.kind() == CompoundEntryKind::Storage
+                    && entry.name().eq_ignore_ascii_case("VBA")
+            })
             .ok_or(SourceError::Storage)?;
         let mut children: BTreeMap<&str, Option<&CompoundEntry>> = BTreeMap::new();
+        let mut directory = None;
         for entry in compound.entries() {
             cancellation.check()?;
             if entry.parent() == Some(storage.id()) {
+                if entry.name().eq_ignore_ascii_case("dir") {
+                    if directory.is_some() || entry.kind() != CompoundEntryKind::Stream {
+                        return Err(SourceError::Metadata);
+                    }
+                    directory = Some(entry);
+                }
                 children
                     .entry(entry.name())
                     .and_modify(|value| *value = None)
                     .or_insert(Some(entry));
             }
         }
-        let directory = children
-            .get("dir")
-            .copied()
-            .flatten()
-            .filter(|entry| entry.kind() == CompoundEntryKind::Stream)
-            .ok_or(SourceError::Metadata)?;
+        let directory = directory.ok_or(SourceError::Metadata)?;
         let encoded_directory =
             compound.read_stream(directory.id(), limits.compression.input_bytes, cancellation)?;
         let decoded_directory = vba_compression::decompress(
@@ -374,6 +380,8 @@ impl<'container, 'input> VbaProject<'container, 'input> {
 
     /// Reads the unique PROJECT stream beside the selected VBA storage.
     ///
+    /// The reserved ASCII name ignores case; all matching siblings participate
+    /// in ambiguity detection, independently of how their names are capitalized.
     /// The returned physical mappings are original container byte ranges. Parsing
     /// with [`crate::vba_project::ProjectProperties`] is separate so malformed or
     /// absent project properties do not suppress independently readable bodies.
@@ -396,7 +404,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
         let mut selected = None;
         for entry in self.compound.entries() {
             cancellation.check()?;
-            if entry.parent() == Some(parent) && entry.name() == "PROJECT" {
+            if entry.parent() == Some(parent) && entry.name().eq_ignore_ascii_case("PROJECT") {
                 if selected.is_some() || entry.kind() != CompoundEntryKind::Stream {
                     return Err(SourceError::ProjectMetadata);
                 }
