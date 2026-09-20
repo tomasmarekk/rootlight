@@ -132,6 +132,47 @@ fn parser_and_analyzer_share_included_range_validation() {
 }
 
 #[test]
+fn native_vba_context_requires_complete_vba_and_reaches_the_parser() {
+    use rootlight_adapter_sdk::NativeVbaModuleKind;
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    for (language, embedded) in [("vba", false), ("vba", true), ("rust", false)] {
+        let language = LanguageId::new(language).unwrap();
+        let ranges = if embedded {
+            vec![IncludedRange::new(
+                SourceSpan::new(snapshot.file(), 0, 4).unwrap(),
+                language.clone(),
+            )]
+        } else {
+            Vec::new()
+        };
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&snapshot, &source).unwrap(),
+            language.clone(),
+            EncodingId::utf8(),
+            ranges,
+            AnalysisTier::TierC,
+            BuildContextIdentity::new(snapshot.content_hash()),
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(request.native_vba_module(), None);
+        assert_eq!(request.to_parse_request().native_vba_module(), None);
+        for kind in [NativeVbaModuleKind::Procedural, NativeVbaModuleKind::Object] {
+            let result = request.clone().with_native_vba_module(kind);
+            if language.as_str() == "vba" && !embedded {
+                let bound = result.unwrap();
+                assert_eq!(bound.native_vba_module(), Some(kind));
+                assert_eq!(bound.to_parse_request().native_vba_module(), Some(kind));
+                assert_eq!(bound.source().source_ref(), &source);
+            } else {
+                assert_eq!(result.unwrap_err(), RequestError::NativeVbaContext);
+            }
+        }
+    }
+}
+
+#[test]
 fn parser_context_shares_checked_included_range_ownership() {
     let (_temporary, snapshot, source) = source_fixture();
     let limits = limits(2, IrLimits::default());

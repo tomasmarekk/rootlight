@@ -46,6 +46,60 @@ use crate::{
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
+
+fn apply_native_vba_module_kind(
+    candidates: &mut Vec<QueryCandidate>,
+    request: &ParseRequest<'_>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    use rootlight_adapter_sdk::NativeVbaModuleKind;
+    let Some(kind) = request.native_vba_module() else {
+        return Ok(());
+    };
+    let mut module = None;
+    let mut name = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        cancellation.check()?;
+        if candidate.role == StructuralRole::Module
+            && matches!(candidate.syntax, "vba.file" | "vba.class")
+            && module.replace(index).is_some()
+        {
+            return Err(provider_failure("vba-module-context-ambiguous"));
+        }
+        if candidate.role == StructuralRole::Definition
+            && candidate.syntax == "vba.module_name"
+            && name.replace(*candidate).is_some()
+        {
+            return Err(provider_failure("vba-module-context-ambiguous"));
+        }
+    }
+    let Some(index) = module else {
+        return Err(provider_failure("vba-module-context-missing"));
+    };
+    if kind == NativeVbaModuleKind::Procedural {
+        if candidates[index].syntax == "vba.class" {
+            return Err(provider_failure("vba-module-context-conflict"));
+        }
+        return Ok(());
+    }
+    if candidates[index].syntax == "vba.class" {
+        return Ok(());
+    }
+    let Some(mut signature) = name else {
+        return Err(provider_failure("vba-module-context-name"));
+    };
+    // Native PROJECT/dir metadata supplies the category. The real VB_Name span
+    // provides a body-independent signature without fabricating export bytes.
+    signature.role = StructuralRole::Signature;
+    signature.syntax = "vba.class";
+    signature.required = true;
+    candidates
+        .try_reserve(1)
+        .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+    candidates[index].syntax = "vba.class";
+    candidates.push(signature);
+    Ok(())
+}
 const LOGICAL_SYNTAX_FACT_BYTES: usize = 64;
 const MIN_SYNTAX_KIND_BYTES: usize = 1;
 const MIN_SYNTAX_FACT_OUTPUT_BYTES: usize = LOGICAL_SYNTAX_FACT_BYTES + MIN_SYNTAX_KIND_BYTES;
@@ -168,6 +222,7 @@ impl TreeSitterProvider {
             request.limits().max_syntax_nodes(),
             cancellation,
         )?;
+        apply_native_vba_module_kind(&mut candidates, request, cancellation)?;
         self.extract_embedded(
             &prepared.tree,
             request,
@@ -541,6 +596,7 @@ impl TreeSitterProvider {
             max_facts,
             cancellation,
         )?;
+        apply_native_vba_module_kind(&mut extraction.candidates, request, cancellation)?;
         let embedded_limits = self.extract_embedded(
             tree,
             request,

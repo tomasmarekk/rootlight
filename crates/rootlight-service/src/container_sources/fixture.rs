@@ -45,11 +45,11 @@ fn scalar(bytes: &mut Vec<u8>, id: u16, value: u32) {
     dword(bytes, value);
 }
 
-fn directory(modules: &[(&str, u32)]) -> Vec<u8> {
+fn directory(modules: &[(&str, u32, bool)]) -> Vec<u8> {
     directory_with_code_page(modules, 1252)
 }
 
-fn directory_with_code_page(modules: &[(&str, u32)], code_page: u16) -> Vec<u8> {
+fn directory_with_code_page(modules: &[(&str, u32, bool)], code_page: u16) -> Vec<u8> {
     let mut bytes = Vec::new();
     scalar(&mut bytes, 1, 1);
     scalar(&mut bytes, 2, 0x409);
@@ -71,7 +71,7 @@ fn directory_with_code_page(modules: &[(&str, u32)], code_page: u16) -> Vec<u8> 
     word(&mut bytes, u16::try_from(modules.len()).unwrap());
     header(&mut bytes, 19, 2);
     word(&mut bytes, 0);
-    for (name, offset) in modules {
+    for (name, offset, class) in modules {
         word(&mut bytes, 25);
         text(&mut bytes, name.as_bytes());
         pair(&mut bytes, 26, name);
@@ -80,7 +80,7 @@ fn directory_with_code_page(modules: &[(&str, u32)], code_page: u16) -> Vec<u8> 
         scalar(&mut bytes, 30, 0);
         header(&mut bytes, 44, 2);
         word(&mut bytes, 0);
-        header(&mut bytes, 33, 0);
+        header(&mut bytes, if *class { 34 } else { 33 }, 0);
         header(&mut bytes, 43, 0);
     }
     header(&mut bytes, 16, 0);
@@ -275,7 +275,7 @@ fn compound(streams: &[Stream<'_>]) -> Vec<u8> {
     bytes
 }
 
-fn fixture(modules: &[(&str, u32)], streams: Vec<Stream<'_>>) -> Vec<u8> {
+fn fixture(modules: &[(&str, u32, bool)], streams: Vec<Stream<'_>>) -> Vec<u8> {
     let mut all = vec![Stream {
         name: "dir",
         bytes: compress_literals(&directory(modules)),
@@ -365,19 +365,28 @@ fn package_entries() -> Vec<(String, Vec<u8>)> {
 }
 
 pub(super) fn book(modules: &[(&str, &[u8])]) -> Vec<u8> {
+    typed_book(
+        &modules
+            .iter()
+            .map(|(name, body)| (*name, *body, false))
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(super) fn typed_book(modules: &[(&str, &[u8], bool)]) -> Vec<u8> {
     let declarations = modules
         .iter()
-        .map(|(name, _)| (*name, 0))
+        .map(|(name, _, class)| (*name, 0, *class))
         .collect::<Vec<_>>();
     let mut streams = modules
         .iter()
-        .map(|(name, body)| stream(name, body))
+        .map(|(name, body, _)| stream(name, body))
         .collect::<Vec<_>>();
     streams.push(Stream {
         name: "PROJECT",
         bytes: format!("ID=\"{{01234567-89AB-CDEF-0123-456789ABCDEF}}\"\r\n{}Name=\"Project\"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n", modules
             .iter()
-            .map(|(name, _)| format!("Module={name}\r\n"))
+            .map(|(name, _, class)| format!("{}={name}\r\n", if *class {"Class"} else {"Module"}))
             .collect::<String>())
             .into_bytes(),
         inside: false,

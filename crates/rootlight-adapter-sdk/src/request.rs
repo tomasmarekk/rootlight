@@ -23,6 +23,17 @@ const MAX_PROJECT_ID_BYTES: usize = 1_024;
 const MAX_TRANSFORMATION_ID_BYTES: usize = 128;
 const GENERATED_ORIGIN_RULE_VERSION: &str = "rootlight.generated-origin.v1";
 
+/// Module category established by a host's verified VBA project metadata.
+///
+/// This is not inferred from file extensions or attribute-like body text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeVbaModuleKind {
+    /// A standard procedural module.
+    Procedural,
+    /// A class, document or designer module with instance-owned declarations.
+    Object,
+}
+
 /// Canonical identity for one project analysis unit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnalysisUnitId(String);
@@ -557,10 +568,17 @@ pub struct ParseRequest<'a> {
     language: LanguageId,
     encoding: EncodingId,
     included_ranges: Arc<Vec<IncludedRange>>,
+    native_vba_module: Option<NativeVbaModuleKind>,
     limits: &'a AnalysisLimits,
 }
 
 impl<'a> ParseRequest<'a> {
+    /// Returns the host-verified native VBA category preserved by the analysis request.
+    #[must_use]
+    pub const fn native_vba_module(&self) -> Option<NativeVbaModuleKind> {
+        self.native_vba_module
+    }
+
     /// Creates a checked per-file parse request.
     ///
     /// # Errors
@@ -580,6 +598,7 @@ impl<'a> ParseRequest<'a> {
             language,
             encoding,
             included_ranges: Arc::new(included_ranges),
+            native_vba_module: None,
             limits,
         })
     }
@@ -632,6 +651,7 @@ pub struct AnalysisRequest<'a> {
     encoding: EncodingId,
     included_ranges: Arc<Vec<IncludedRange>>,
     generated: Option<bool>,
+    native_vba_module: Option<NativeVbaModuleKind>,
     tier: AnalysisTier,
     build_context: BuildContextIdentity,
     limits: &'a AnalysisLimits,
@@ -692,6 +712,7 @@ impl<'a> AnalysisRequest<'a> {
             encoding,
             included_ranges: Arc::new(included_ranges),
             generated: None,
+            native_vba_module: None,
             tier,
             build_context,
             limits,
@@ -708,6 +729,31 @@ impl<'a> AnalysisRequest<'a> {
     pub const fn with_generated_status(mut self, generated: bool) -> Self {
         self.generated = Some(generated);
         self
+    }
+
+    /// Supplies the module category established by the host's verified project inventory.
+    ///
+    /// The caller must bind that inventory to this exact source and retain its
+    /// provenance. This changes structural ownership, not the source bytes, and
+    /// does not prove external types, host members or project relationships.
+    ///
+    /// # Errors
+    /// Returns [`RequestError::NativeVbaContext`] for non-VBA or embedded sources.
+    pub fn with_native_vba_module(
+        mut self,
+        kind: NativeVbaModuleKind,
+    ) -> Result<Self, RequestError> {
+        if self.language.as_str() != "vba" || !self.included_ranges.is_empty() {
+            return Err(RequestError::NativeVbaContext);
+        }
+        self.native_vba_module = Some(kind);
+        Ok(self)
+    }
+
+    /// Returns the host-verified native VBA module category, if supplied.
+    #[must_use]
+    pub const fn native_vba_module(&self) -> Option<NativeVbaModuleKind> {
+        self.native_vba_module
     }
 
     /// Returns the immutable generation-bound source.
@@ -746,6 +792,7 @@ impl<'a> AnalysisRequest<'a> {
             language: self.language.clone(),
             encoding: self.encoding.clone(),
             included_ranges: Arc::clone(&self.included_ranges),
+            native_vba_module: self.native_vba_module,
             limits: self.limits,
         }
     }

@@ -2,6 +2,7 @@
 //! These fixtures are authored, not copied from a diagnostic repository.
 
 use super::*;
+use rootlight_ir::OccurrenceTarget;
 use std::fs;
 
 #[path = "fixture.rs"]
@@ -89,6 +90,234 @@ fn read_module(
         origin.span().end_byte()
     );
     reference
+}
+
+#[test]
+fn native_office_classes_keep_exact_sources_members_and_restart_identity() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let body = "Attribute VB_Name = \"Counter\"\r\nAttribute VB_GlobalNameSpace = False\r\nAttribute VB_Creatable = False\r\nAttribute VB_PredeclaredId = False\r\nAttribute VB_Exposed = False\r\nPrivate total As Long\r\nPublic Sub Refresh()\r\ntotal = 1\r\nEnd Sub\r\nPublic Sub Run()\r\nMe.Refresh\r\nEnd Sub\r\n";
+    let path = derived_path("book.xlsm", "Counter", ModuleKind::Object).unwrap();
+    let mut previous = None;
+    for source in [body.to_owned(), body.replace("total = 1", "total = 2 + 3")] {
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::typed_book(&[
+                ("Counter", source.as_bytes(), true),
+                ("Beta", SECOND, false),
+            ]),
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 2);
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        read_module(
+            &service,
+            receipt.generation,
+            path.as_str(),
+            source.as_bytes(),
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|f| f.path == path.as_str())
+            .unwrap();
+        let owner = document
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "Counter")
+            .unwrap();
+        assert_eq!(owner.kind, EntityKind::Class);
+        let identities = document
+            .entities
+            .iter()
+            .filter(|e| {
+                e.evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|s| s.span().file() == file.id)
+            })
+            .map(|e| (e.canonical_name.clone(), e.id))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(prior) = &previous {
+            assert_eq!(&identities, prior);
+        }
+        previous = Some(identities.clone());
+        for (name, kind) in [
+            ("total", EntityKind::Field),
+            ("Refresh", EntityKind::Method),
+            ("Run", EntityKind::Method),
+        ] {
+            let member = document
+                .entities
+                .iter()
+                .find(|e| e.canonical_name == name)
+                .unwrap();
+            assert_eq!(member.kind, kind);
+            assert_eq!(
+                member.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+        }
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::CallSite
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: identities["Refresh"]
+                        })
+        );
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        read_module(
+            &restored,
+            receipt.generation,
+            path.as_str(),
+            source.as_bytes(),
+        );
+        let restored = restored
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        assert!(
+            restored
+                .document()
+                .entities
+                .iter()
+                .any(|e| e.id == owner.id && e.kind == EntityKind::Class)
+        );
+    }
+}
+
+#[test]
+fn native_office_metadata_changes_do_not_reuse_foreign_module_kinds() {
+    let root = tempdir();
+    let source = b"Attribute VB_Name = \"Counter\"\r\nPublic Sub Refresh()\r\nEnd Sub\r\nPublic Sub Run()\r\nMe.Refresh\r\nEnd Sub\r\n";
+    fs::write(
+        root.path().join("fixed.xlsm"),
+        fixture::typed_book(&[("Counter", source, true)]),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(8).unwrap();
+    let mut fixed_identity = None;
+    let mut prior_generation = None;
+    for object in [false, true, false] {
+        fs::write(
+            root.path().join("changing.xlsm"),
+            fixture::typed_book(&[("Counter", source, object)]),
+        )
+        .unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 2);
+        assert_ne!(prior_generation, Some(receipt.generation));
+        prior_generation = Some(receipt.generation);
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let owners: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|e| e.canonical_name == "Counter")
+            .collect();
+        assert_eq!(owners.len(), 2);
+        assert_ne!(owners[0].id, owners[1].id);
+        for (container, is_object) in [("changing.xlsm", object), ("fixed.xlsm", true)] {
+            let kind = if is_object {
+                ModuleKind::Object
+            } else {
+                ModuleKind::Procedural
+            };
+            let path = derived_path(container, "Counter", kind).unwrap();
+            let reference = read_module(&service, receipt.generation, path.as_str(), source);
+            let owner = owners
+                .iter()
+                .find(|e| {
+                    e.evidence.source.as_ref().unwrap().span().file() == reference.span().file()
+                })
+                .unwrap();
+            assert_eq!(
+                owner.kind,
+                if is_object {
+                    EntityKind::Class
+                } else {
+                    EntityKind::Module
+                }
+            );
+            if container == "fixed.xlsm" {
+                if let Some(previous) = fixed_identity {
+                    assert_eq!(owner.id, previous);
+                }
+                fixed_identity = Some(owner.id);
+            }
+            let refresh = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.canonical_name == "Refresh"
+                        && e.container == Some(rootlight_ir::ContainerRef::Entity(owner.id))
+                })
+                .unwrap();
+            assert_eq!(
+                refresh.kind,
+                if is_object {
+                    EntityKind::Method
+                } else {
+                    EntityKind::Function
+                }
+            );
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.self_invoked_member.reference"
+                        && site.source.span().file() == reference.span().file()
+                })
+                .unwrap();
+            if is_object {
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: refresh.id }
+                );
+            } else {
+                assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            }
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
 }
 
 #[test]

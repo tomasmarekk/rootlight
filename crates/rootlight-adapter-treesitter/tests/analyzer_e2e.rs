@@ -907,6 +907,42 @@ fn real_analyzer_produces_valid_deterministic_ir_for_all_grammars() {
 }
 
 #[test]
+fn artifact_identity_demand_distinguishes_roles_with_shared_fact_kinds() {
+    let provider = Arc::new(provider());
+    let budget = limits();
+    for (case, source) in [
+        (
+            groovy_native::GROOVY,
+            "class Item { int run() { def value = 1; return value } }\n",
+        ),
+        (nix_native::NIX, "{ nested.child = 1; }\n"),
+        (
+            objective_c_native::OBJECTIVE_C,
+            "@interface Item\n- (int)read:(int)value;\n@end\n",
+        ),
+    ] {
+        let fixture = Fixture::new(case, source.as_bytes());
+        let request = request(&fixture.snapshot, &fixture.source, case, &budget);
+        let (_, artifact) = analyzer(&provider, case)
+            .analyze_and_capture(
+                &request,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            provider
+                .required_syntax_fact_count(&request.to_parse_request(), &deadline())
+                .unwrap(),
+            artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            "{}",
+            case.name,
+        );
+    }
+}
+
+#[test]
 fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
     let case = CASES[0];
     let primary_provider = Arc::new(provider());

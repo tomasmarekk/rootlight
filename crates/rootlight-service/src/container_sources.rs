@@ -25,6 +25,7 @@ pub(super) struct PreparedSources {
     pub inputs: Vec<ManifestInput>,
     pub fingerprints: Vec<InputFingerprint>,
     origins: Vec<(FileId, FileId)>,
+    native_vba_modules: BTreeMap<FileId, rootlight_adapter_sdk::NativeVbaModuleKind>,
     issues: Vec<(FileId, String)>,
 }
 
@@ -98,6 +99,21 @@ pub(super) fn prepare(
 }
 
 impl PreparedSources {
+    pub(super) fn analysis_context<'a>(
+        &self,
+        request: rootlight_adapter_sdk::AnalysisRequest<'a>,
+    ) -> Result<rootlight_adapter_sdk::AnalysisRequest<'a>, FirstSliceError> {
+        match self
+            .native_vba_modules
+            .get(&request.source().source_ref().span().file())
+        {
+            Some(kind) => request
+                .with_native_vba_module(*kind)
+                .map_err(|_| FirstSliceError::Adapter),
+            None => Ok(request),
+        }
+    }
+
     fn issue(&mut self, file: FileId, message: String) -> Result<(), FirstSliceError> {
         self.issues
             .try_reserve(1)
@@ -489,6 +505,17 @@ fn prepare_office(
             decisive_rule: None,
         });
         prepared.origins.push((file, input.file));
+        if verified {
+            prepared.native_vba_modules.insert(
+                file,
+                match kind {
+                    ModuleKind::Procedural => {
+                        rootlight_adapter_sdk::NativeVbaModuleKind::Procedural
+                    }
+                    ModuleKind::Object => rootlight_adapter_sdk::NativeVbaModuleKind::Object,
+                },
+            );
+        }
         snapshots.push(snapshot);
         budget.bytes = budget
             .bytes

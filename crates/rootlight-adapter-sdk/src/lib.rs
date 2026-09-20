@@ -52,8 +52,8 @@ pub use report::{
 };
 pub use request::{
     AnalysisRequest, AnalysisUnitId, BuildTargetId, GeneratedOriginMapping,
-    GenerationBoundSnapshot, IncludedRange, ParseRequest, ProjectAnalysisRequest,
-    ProjectSourceInput, TransformationId,
+    GenerationBoundSnapshot, IncludedRange, NativeVbaModuleKind, ParseRequest,
+    ProjectAnalysisRequest, ProjectSourceInput, TransformationId,
 };
 pub use sink::{
     AdapterDiagnostic, AnalysisOutput, BoundedIrSink, BoundedSyntaxSink, DiagnosticCode, IrBatch,

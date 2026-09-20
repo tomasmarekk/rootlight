@@ -507,17 +507,19 @@ fn required_syntax_fact_count_from_output(
             .is_some_and(|(_, end)| *end <= fact.span().end_byte());
         let identity_fact = matches!(
             fact.kind(),
-            SyntaxFactKind::Root
-                | SyntaxFactKind::Module
-                | SyntaxFactKind::Declaration
-                | SyntaxFactKind::Signature
-        ) || (fact.kind() == SyntaxFactKind::Scope
-            && (contains_declaration
-                || fact.syntax_kind().as_str().starts_with("json.")
-                || fact.syntax_kind().as_str().starts_with("toml.")
-                || fact.syntax_kind().as_str().starts_with("yaml.")))
+            SyntaxFactKind::Root | SyntaxFactKind::Module | SyntaxFactKind::Declaration
+        ) || (fact.kind() == SyntaxFactKind::Signature
+            // Expressions share the wire fact kind but not the mandatory
+            // identity closure; count the retained structural role instead.
+            && !fact.syntax_kind().as_str().ends_with(".expression"))
+            || (fact.kind() == SyntaxFactKind::Scope
+                && (contains_declaration
+                    || fact.syntax_kind().as_str().starts_with("json.")
+                    || fact.syntax_kind().as_str().starts_with("toml.")
+                    || fact.syntax_kind().as_str().starts_with("yaml.")))
             || (fact.kind() == SyntaxFactKind::Occurrence
-                && fact.syntax_kind().as_str().ends_with(".definition"));
+                && (fact.syntax_kind().as_str().ends_with(".definition")
+                    || fact.syntax_kind().as_str().ends_with(".definition_part")));
         if identity_fact {
             required = required
                 .checked_add(1)
@@ -752,6 +754,11 @@ fn structural_parse_context_hash(
     hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
     hash_sized_bytes(&mut hasher, request.language().as_str().as_bytes())?;
     hash_sized_bytes(&mut hasher, request.encoding().as_str().as_bytes())?;
+    hasher.update(&[match request.native_vba_module() {
+        None => 0,
+        Some(rootlight_adapter_sdk::NativeVbaModuleKind::Procedural) => 1,
+        Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object) => 2,
+    }]);
     let range_count = u64::try_from(request.included_ranges().len())
         .map_err(|_| provider_failure("treesitter-structural-artifact-accounting"))?;
     hasher.update(&range_count.to_be_bytes());

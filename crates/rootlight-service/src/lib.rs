@@ -215,7 +215,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/145";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/146";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/35";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -7642,7 +7642,7 @@ impl FirstSliceService {
                     language,
                     &self.analysis_limits,
                 )?;
-                let parse_request = request.to_parse_request();
+                let parse_request = derived.analysis_context(request)?.to_parse_request();
                 let required = match self
                     .structural_parser
                     .required_syntax_fact_count(&parse_request, cancellation)
@@ -7747,6 +7747,7 @@ impl FirstSliceService {
                 language,
                 analysis_limits,
             )?;
+            let request = derived.analysis_context(request)?;
             let (file_document, artifact, normalized, normalized_reused) =
                 if let Some(entry) = reusable_entry {
                     // Normalized reuse is optional. Any policy, limit, extension,

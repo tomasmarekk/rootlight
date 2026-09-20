@@ -121,6 +121,9 @@ pub enum SnapshotError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RequestError {
+    /// Native VBA metadata was supplied for another language or an embedded view.
+    #[error("native vba context requires a complete vba source")]
+    NativeVbaContext,
     /// Snapshot and generation reference failed to bind.
     #[error(transparent)]
     Snapshot(#[from] SnapshotError),

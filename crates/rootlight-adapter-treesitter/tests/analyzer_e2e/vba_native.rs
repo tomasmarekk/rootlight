@@ -15,16 +15,124 @@ pub(super) const VBA: LanguageCase = LanguageCase {
 };
 
 fn output(source: &str) -> AnalysisOutput {
+    output_with_native_kind(source, None)
+}
+
+fn output_with_native_kind(
+    source: &str,
+    kind: Option<rootlight_adapter_sdk::NativeVbaModuleKind>,
+) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let fixture = Fixture::new(VBA, source.as_bytes());
     let budget = limits();
+    let request = request(&fixture.snapshot, &fixture.source, VBA, &budget);
+    let request = match kind {
+        Some(kind) => request.with_native_vba_module(kind).unwrap(),
+        None => request,
+    };
     let result = analyze(
         &analyzer(&provider, VBA),
-        &request(&fixture.snapshot, &fixture.source, VBA, &budget),
+        &request,
         &ExtensionSupport::default(),
     );
     validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
     result
+}
+
+#[test]
+fn vba_native_context_binds_artifacts_and_required_fact_budgets() {
+    use rootlight_adapter_sdk::NativeVbaModuleKind;
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, VBA);
+    let fixture = Fixture::new(
+        VBA,
+        b"Attribute VB_Name = \"Counter\"\nPrivate total As Long\nPublic Sub Run()\nMe.total = 1\nEnd Sub\n",
+    );
+    let budget = limits();
+    let extensions = ExtensionSupport::default();
+    let contexts = [
+        None,
+        Some(NativeVbaModuleKind::Procedural),
+        Some(NativeVbaModuleKind::Object),
+    ];
+    for kind in contexts {
+        let initial = request(&fixture.snapshot, &fixture.source, VBA, &budget);
+        let initial = match kind {
+            Some(kind) => initial.with_native_vba_module(kind).unwrap(),
+            None => initial,
+        };
+        let (_, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                extensions.clone(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let demand = provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap();
+        assert_eq!(
+            demand,
+            artifact.required_syntax_fact_count(&deadline()).unwrap()
+        );
+        let successor = fixture.next_generation();
+        for next_kind in contexts {
+            let next = request(&successor.snapshot, &successor.source, VBA, &budget);
+            let next = match next_kind {
+                Some(kind) => next.with_native_vba_module(kind).unwrap(),
+                None => next,
+            };
+            let replay = analyzer.analyze_from_artifact(
+                &next,
+                &artifact,
+                extensions.clone(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            );
+            if next_kind == kind {
+                let replay = replay.unwrap();
+                let fresh = analyze(&analyzer, &next, &extensions);
+                assert_eq!(replay.document(), fresh.document());
+                assert_eq!(replay.report(), fresh.report());
+            } else {
+                assert!(
+                    replay.is_err(),
+                    "changed module category must invalidate artifacts"
+                );
+            }
+        }
+        let bounded = limits_with_syntax_records(demand);
+        let request = request(&fixture.snapshot, &fixture.source, VBA, &bounded);
+        let request = match kind {
+            Some(kind) => request.with_native_vba_module(kind).unwrap(),
+            None => request,
+        };
+        let (fresh, bounded_artifact) = analyzer
+            .analyze_and_capture(
+                &request,
+                extensions.clone(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            demand,
+            bounded_artifact
+                .required_syntax_fact_count(&deadline())
+                .unwrap()
+        );
+        let replay = analyzer
+            .analyze_from_artifact(
+                &request,
+                &bounded_artifact,
+                extensions.clone(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(fresh.document(), replay.document());
+    }
 }
 
 #[test]
@@ -1965,6 +2073,100 @@ fn vba_self_members_bypass_locals_and_preserve_exact_name_sources() {
             OccurrenceTarget::Resolved { symbol: target.id }
         );
         assert_eq!(site.role, role);
+    }
+}
+
+#[test]
+fn vba_native_class_headers_preserve_members_sources_and_body_identity() {
+    let source = "Attribute VB_Name = \"Counter\"\nAttribute VB_GlobalNameSpace = False\nAttribute VB_Creatable = False\nAttribute VB_PredeclaredId = False\nAttribute VB_Exposed = False\nPrivate total As Long\nPublic Sub Refresh()\ntotal = 1\nEnd Sub\nPublic Sub Run()\nMe.Refresh\nEnd Sub\n";
+    let kind = Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object);
+    let first = output_with_native_kind(source, kind);
+    let second_source = source.replace("total = 1", "total = 2 + 3");
+    let second = output_with_native_kind(&second_source, kind);
+    for (result, bytes) in [
+        (&first, source.as_bytes()),
+        (&second, second_source.as_bytes()),
+    ] {
+        let document = result.document();
+        let owner = document
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "Counter")
+            .unwrap();
+        assert_eq!(owner.kind, EntityKind::Class);
+        for (name, kind) in [
+            ("Counter", EntityKind::Class),
+            ("total", EntityKind::Field),
+            ("Refresh", EntityKind::Method),
+            ("Run", EntityKind::Method),
+        ] {
+            let member = document
+                .entities
+                .iter()
+                .find(|e| e.canonical_name == name)
+                .unwrap();
+            assert_eq!(member.kind, kind);
+            assert_eq!(
+                member.id,
+                first
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|e| e.canonical_name == name)
+                    .unwrap()
+                    .id
+            );
+            if name != "Counter" {
+                assert_eq!(member.container, Some(ContainerRef::Entity(owner.id)));
+            }
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: member.id }
+                })
+                .unwrap();
+            let span = definition.source.span();
+            let text = &bytes[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert_eq!(std::str::from_utf8(text).unwrap().trim_matches('"'), name);
+        }
+        let refresh = document
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "Refresh")
+            .unwrap();
+        assert!(document.occurrences.iter().any(|site| site.target
+            == OccurrenceTarget::Resolved { symbol: refresh.id }
+            && site.role == OccurrenceRole::CallSite));
+    }
+}
+
+#[test]
+fn vba_native_module_category_requires_explicit_project_context() {
+    use rootlight_adapter_sdk::NativeVbaModuleKind;
+    for attributes in [
+        "",
+        "Attribute VB_Exposed = False\nAttribute VB_PredeclaredId = True\n",
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Worker\"\n{attributes}Public value As Long\nPublic Sub Run()\nEnd Sub\n"
+        );
+        for (context, expected) in [
+            (None, EntityKind::Module),
+            (Some(NativeVbaModuleKind::Procedural), EntityKind::Module),
+            (Some(NativeVbaModuleKind::Object), EntityKind::Class),
+        ] {
+            let result = output_with_native_kind(&source, context);
+            let entity = result
+                .document()
+                .entities
+                .iter()
+                .find(|e| e.canonical_name == "Worker")
+                .unwrap();
+            assert_eq!(entity.kind, expected);
+        }
     }
 }
 
