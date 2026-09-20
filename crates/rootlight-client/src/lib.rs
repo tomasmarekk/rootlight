@@ -874,10 +874,12 @@ pub struct RepositoryIndex {
     pub parent_generation: Option<GenerationId>,
     /// Newly published immutable generation after successful completion.
     pub published_generation: Option<GenerationId>,
-    /// Discovered repository inputs.
+    /// Physical repository inputs admitted by discovery.
     pub discovered_inputs: u64,
-    /// Rust source files included in the generation.
+    /// Total physical and extracted files retained by the generation.
     pub indexed_files: u64,
+    /// Subset of indexed files extracted from immutable containers.
+    pub extracted_files: u64,
     /// Indexed semantic entities.
     pub entities: u64,
     /// Monotonic indexing duration.
@@ -9410,7 +9412,15 @@ fn parse_repository_index_for_minor(
         .transpose()?;
     let diagnostics = parse_repository_index_diagnostics(response.diagnostics)?;
     if operation != expected_operation
-        || response.indexed_files > response.discovered_inputs
+        || response
+            .indexed_files
+            .checked_sub(response.extracted_files)
+            .is_none_or(|physical| {
+                physical > response.discovered_inputs
+                    || (physical == 0 && response.extracted_files != 0)
+            })
+        || (response.extracted_files != 0
+            && selected_protocol_minor < rootlight_protocol::EXTRACTED_SOURCE_COUNTS_PROTOCOL_MINOR)
         || semantic_operation == Some(operation)
         || semantic_operation.is_some() && state != OperationState::Succeeded
         || (mode == RepositoryIndexMode::Rebuild) != selected_analysis_mode.is_some()
@@ -9444,6 +9454,7 @@ fn parse_repository_index_for_minor(
         published_generation,
         discovered_inputs: response.discovered_inputs,
         indexed_files: response.indexed_files,
+        extracted_files: response.extracted_files,
         entities: response.entities,
         elapsed_micros: response.elapsed_micros,
         estimated_disk_bytes: response.estimated_disk_bytes,
@@ -15559,6 +15570,7 @@ mod tests {
             published_generation: Some(generation_to_wire(test_generation())),
             discovered_inputs: 1,
             indexed_files: 1,
+            extracted_files: 0,
             entities: 1,
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,
@@ -15567,6 +15579,34 @@ mod tests {
             semantic_operation: None,
             selected_analysis_mode: daemon::RepositoryIndexAnalysisMode::Unspecified as i32,
         }
+    }
+
+    #[test]
+    fn extracted_index_counts_preserve_physical_conservation_and_protocol_semantics() {
+        let operation = OperationId::from_bytes([3; 16]);
+        let mut response = wire_repository_index(operation);
+        response.indexed_files = 3;
+        response.extracted_files = 2;
+        let parsed = parse_repository_index_for_minor(response.clone(), operation, 20).unwrap();
+        assert_eq!(parsed.discovered_inputs, 1);
+        assert_eq!(parsed.indexed_files, 3);
+        assert_eq!(parsed.extracted_files, 2);
+        assert!(matches!(
+            parse_repository_index_for_minor(response.clone(), operation, 19),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        for extracted in [0, 1, 3, 4, u64::MAX] {
+            let mut invalid = response.clone();
+            invalid.extracted_files = extracted;
+            assert!(matches!(
+                parse_repository_index(invalid, operation),
+                Err(ClientError::InvalidResponseCorrelation)
+            ));
+        }
+        assert!(
+            parse_repository_index_for_minor(wire_repository_index(operation), operation, 19)
+                .is_ok()
+        );
     }
 
     fn wire_repository_status(operation: OperationId) -> daemon::RepositoryOperationStatusResponse {
@@ -18039,6 +18079,7 @@ mod tests {
             published_generation: Some(generation_to_wire(test_generation())),
             discovered_inputs: 5,
             indexed_files: 3,
+            extracted_files: 0,
             entities: 2,
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,

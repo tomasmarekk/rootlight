@@ -76,7 +76,8 @@ const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
 const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
 const PACKED_GENERATION_MANIFEST_VERSION: u16 = 2;
-const GENERATION_MANIFEST_VERSION: u16 = 3;
+const CATALOG_GENERATION_MANIFEST_VERSION: u16 = 3;
+const GENERATION_MANIFEST_VERSION: u16 = 4;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const LEGACY_SOURCE_STORAGE_VERSION: u16 = 1;
 const SOURCE_STORAGE_VERSION: u16 = 2;
@@ -1294,7 +1295,9 @@ fn source_storage_layout(
         (version, Some(storage))
             if matches!(
                 version,
-                PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+                PACKED_GENERATION_MANIFEST_VERSION
+                    | CATALOG_GENERATION_MANIFEST_VERSION
+                    | GENERATION_MANIFEST_VERSION
             ) && storage.version == LEGACY_SOURCE_STORAGE_VERSION
                 && storage.files.is_none()
                 && storage.packs.is_none()
@@ -1307,7 +1310,9 @@ fn source_storage_layout(
         (version, Some(storage))
             if matches!(
                 version,
-                PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+                PACKED_GENERATION_MANIFEST_VERSION
+                    | CATALOG_GENERATION_MANIFEST_VERSION
+                    | GENERATION_MANIFEST_VERSION
             ) && storage.version == SOURCE_STORAGE_VERSION
                 && storage.files.is_some()
                 && storage.packs.is_some()
@@ -3808,6 +3813,10 @@ impl DurablePreparedGeneration {
             || receipt.generation != self.generation
             || display_name.is_empty()
             || root_path.is_empty()
+            || receipt
+                .indexed_files
+                .checked_sub(receipt.extracted_files)
+                .is_none_or(|physical| physical > receipt.discovered_inputs)
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -5555,7 +5564,9 @@ fn read_generation_bootstrap_identity(
     // spellings can provide the redundant identity binding.
     if matches!(
         manifest.version,
-        PACKED_GENERATION_MANIFEST_VERSION | GENERATION_MANIFEST_VERSION
+        PACKED_GENERATION_MANIFEST_VERSION
+            | CATALOG_GENERATION_MANIFEST_VERSION
+            | GENERATION_MANIFEST_VERSION
     ) && let Some(root_path) = manifest.root_path.as_deref()
         && !root_path.contains('\u{fffd}')
         && (!Path::new(root_path).is_absolute()
@@ -5932,7 +5943,9 @@ fn restore_generation(
     let mut manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
-    if manifest.version != GENERATION_MANIFEST_VERSION && manifest.source_file_catalog.is_some() {
+    if manifest.version < CATALOG_GENERATION_MANIFEST_VERSION
+        && manifest.source_file_catalog.is_some()
+    {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     if manifest.receipt.repository != repository
@@ -6083,13 +6096,23 @@ fn restore_generation(
         )?
     };
     let sources = Vec::new();
-    if u64::try_from(verified.snapshot().file_count()).ok() != Some(manifest.receipt.indexed_files)
+    let (indexed_files, extracted_files) = super::verified_source_counts(
+        verified.snapshot(),
+        manifest.receipt.discovered_inputs,
+        cancellation,
+    )?;
+    if indexed_files != manifest.receipt.indexed_files
+        || (manifest.version == GENERATION_MANIFEST_VERSION
+            && extracted_files != manifest.receipt.extracted_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || lexical_documents != manifest.receipt.lexical_documents
         || allocated_bytes != manifest.receipt.oracle_allocated_bytes
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    // Older receipts counted all retained files but did not distinguish
+    // extraction. Reconstruct the subset only after validating the generation.
+    manifest.receipt.extracted_files = extracted_files;
     // The checksummed recovery snapshot and freshly built lexical projection are
     // the query authorities. Rehashing every canonical logical component here
     // only revalidates source-free observability evidence and can turn a bounded
@@ -8515,7 +8538,7 @@ mod tests {
         .expect("manifest is valid JSON");
         assert!(
             manifest["receipt"].get("logical_snapshot").is_none(),
-            "manifest-v2 receipt bytes must remain readable by the previous binary"
+            "logical identity remains in its sidecar, not duplicated in receipt bytes"
         );
 
         let durable = service.durable.as_ref().expect("durable catalog exists");

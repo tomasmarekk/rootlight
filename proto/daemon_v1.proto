@@ -482,6 +482,9 @@ message RepositoryIndexResponse {
   // Separately journaled semantic refinement created by Auto mode.
   optional rootlight.common.v1.OperationId semantic_operation = 15;
   RepositoryIndexAnalysisMode selected_analysis_mode = 16;
+  // Subset of indexed_files extracted from immutable containers. Physical
+  // indexed files are indexed_files minus extracted_files, not discovered_inputs.
+  uint64 extracted_files = 17;
 }
 
 // Action accepted by the first-slice operation status request.

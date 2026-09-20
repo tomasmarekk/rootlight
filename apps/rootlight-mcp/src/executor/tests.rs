@@ -3195,6 +3195,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             published_generation: Some(generation()),
             discovered_inputs: 4,
             indexed_files: 3,
+            extracted_files: 0,
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
@@ -3209,6 +3210,26 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         },
         Vec::new(),
     );
+    for (discovered, indexed, extracted, valid) in [
+        (1, 3, 2, true),
+        (0, 0, 0, true),
+        (1, 3, 0, false),
+        (1, 3, 1, false),
+        (1, 3, 3, false),
+        (1, 3, 4, false),
+        (1, 3, u64::MAX, false),
+        (0, 3, 2, false),
+    ] {
+        let mut counted = response.clone();
+        counted.result.discovered_inputs = discovered;
+        counted.result.indexed_files = indexed;
+        counted.result.extracted_files = extracted;
+        assert_eq!(
+            map_repository_index(counted, IndexMode::Auto).is_ok(),
+            valid,
+            "physical inputs {discovered}, retained sources {indexed}, extracted subset {extracted}"
+        );
+    }
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Ok(response)));
     let output: RepoIndexOutput = decode(
         execute(
@@ -3293,6 +3314,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
             published_generation: Some(generation()),
             discovered_inputs: 4,
             indexed_files: 3,
+            extracted_files: 0,
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
@@ -3347,6 +3369,7 @@ async fn repository_deep_mode_preserves_the_isolated_project_plan() {
             published_generation: Some(generation()),
             discovered_inputs: 4,
             indexed_files: 4,
+            extracted_files: 0,
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
@@ -3404,6 +3427,7 @@ async fn repository_rebuild_mode_preserves_the_clean_generation_plan() {
             published_generation: Some(generation()),
             discovered_inputs: 4,
             indexed_files: 4,
+            extracted_files: 0,
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
@@ -3454,6 +3478,7 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
                 published_generation: Some(generation()),
                 discovered_inputs: 4,
                 indexed_files: 3,
+                extracted_files: 0,
                 entities: 12,
                 elapsed_micros: 500,
                 estimated_disk_bytes: 4_096,
@@ -14349,6 +14374,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                         published_generation: Some(generation()),
                         discovered_inputs: 1,
                         indexed_files: 1,
+                        extracted_files: 0,
                         entities: 1,
                         elapsed_micros: 1,
                         estimated_disk_bytes: 1,

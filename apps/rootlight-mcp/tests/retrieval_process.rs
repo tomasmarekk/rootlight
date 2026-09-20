@@ -78,6 +78,122 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn office_modules_preserve_exact_sources_and_origins_across_processes() {
+    let alpha = b"Attribute VB_Name = \"Alpha\"\r\nPublic Function OfficeCompute() As Long\r\n OfficeCompute = 7\r\nEnd Function\r\n";
+    let beta = b"Attribute VB_Name = \"Beta\"\r\nPublic Sub OfficeDispatch()\r\nEnd Sub\r\n";
+    let original = include_bytes!("fixtures/office-modules.xlsm").as_slice();
+    let mut fixture =
+        RetrievalFixture::spawn_with_sources(&[("book.xlsm", original)], FixtureLayout::Data);
+    // A retained no-op must return the completed receipt through the client,
+    // rather than exercising only the zero-count pending response.
+    let arguments =
+        json!({"root": fixture._root.path().join("repository"), "mode": "auto", "detached": false});
+    let indexed = process_support::retry_transient_busy("office-noop", |attempt_id| {
+        fixture
+            .mcp
+            .call(attempt_id, "repo.index", arguments.clone())
+    });
+    assert_success(&indexed, "repo.index");
+    assert_eq!(
+        indexed["result"]["structuredContent"]["data"]["state"],
+        "published"
+    );
+    for (name, expected) in [
+        ("OfficeCompute", alpha.as_slice()),
+        ("OfficeDispatch", beta.as_slice()),
+    ] {
+        let located = fixture.standalone(
+            name,
+            "code.locate",
+            json!({"query": name, "search_modes": ["exact"], "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let definition = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["display_name"] == name)
+            .unwrap();
+        assert!(definition["symbol_id"].is_string());
+        let path = definition["path"].clone();
+        let origin = definition["extracted_from"].clone();
+        assert!(origin.is_object());
+        let file = fixture.standalone(
+            "office-file",
+            "code.locate",
+            json!({"query": path, "search_modes": ["path"], "kinds": ["file"], "response_profile": "evidence"}),
+        );
+        assert_success(&file, "code.locate");
+        let file = file["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == path && item["kind"] == "file")
+            .unwrap();
+        assert_eq!(file["extracted_from"], origin);
+        let reference = file["source_ref"].clone();
+        assert_eq!(reference["span"]["start_byte"], 0);
+        assert_eq!(
+            reference["span"]["end_byte"],
+            u64::try_from(expected.len()).unwrap()
+        );
+        assert_eq!(
+            reference["content_hash"],
+            rootlight_ids::content_hash(expected).to_string()
+        );
+        let read = fixture.standalone(
+            "office-read",
+            "source.read",
+            json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                "context_lines_after": 0, "response_profile": "evidence"}),
+        );
+        assert_success(&read, "source.read");
+        let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+        assert_eq!(chunk["content"].as_str().unwrap().as_bytes(), expected);
+        assert_eq!(chunk["extracted_from"], origin);
+        assert_eq!(origin["generation"], chunk["source_ref"]["generation"]);
+        assert_eq!(origin["repository"], chunk["source_ref"]["repository"]);
+        assert_eq!(
+            origin["content_hash"],
+            rootlight_ids::content_hash(original).to_string()
+        );
+        let container = fixture.standalone(
+            "office-container",
+            "source.read",
+            json!({"references": [{"source_ref": origin}], "encoding": "bytes_base64",
+                "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}),
+        );
+        assert_success(&container, "source.read");
+        let container = &container["result"]["structuredContent"]["data"]["chunks"][0];
+        assert_eq!(container["path"], "book.xlsm");
+        assert_eq!(container["encoding"], "base64");
+        assert!(container.get("extracted_from").is_none());
+        assert_exact_base64(original, container["content"].as_str().unwrap());
+    }
+    fixture.finish();
+}
+
+fn assert_exact_base64(expected: &[u8], encoded: &str) {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    assert_eq!(encoded.len(), expected.len().div_ceil(3) * 4);
+    for (input, output) in expected.chunks(3).zip(encoded.as_bytes().chunks_exact(4)) {
+        let mut padded = [0_u8; 3];
+        padded[..input.len()].copy_from_slice(input);
+        let bits =
+            (u32::from(padded[0]) << 16) | (u32::from(padded[1]) << 8) | u32::from(padded[2]);
+        for (index, character) in output.iter().enumerate() {
+            if index > input.len() {
+                assert_eq!(*character, b'=');
+            } else {
+                let shift = 18 - index * 6;
+                let digit = usize::try_from((bits >> shift) & 63).unwrap();
+                assert_eq!(*character, ALPHABET[digit]);
+            }
+        }
+    }
+}
+
+#[test]
 fn yaml_scalar_alias_keys_cross_real_process_boundaries() {
     data_properties_cross_process_boundaries(
         "yaml",
@@ -3264,7 +3380,10 @@ impl RetrievalFixture {
         Self::spawn_with_sources(extra_source.as_slice(), layout)
     }
 
-    fn spawn_with_sources(extra_sources: &[(&str, &str)], layout: FixtureLayout) -> Self {
+    fn spawn_with_sources(
+        extra_sources: &[(&str, impl AsRef<[u8]>)],
+        layout: FixtureLayout,
+    ) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))

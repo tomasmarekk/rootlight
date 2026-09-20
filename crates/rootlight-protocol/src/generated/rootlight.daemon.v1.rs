@@ -893,6 +893,11 @@ pub struct RepositoryIndexResponse {
     #[prost(enumeration = "RepositoryIndexAnalysisMode", tag = "16")]
     #[allow(missing_docs)]
     pub selected_analysis_mode: i32,
+    /// Subset of indexed_files extracted from immutable containers. Physical
+    /// indexed files are indexed_files minus extracted_files, not discovered_inputs.
+    #[prost(uint64, tag = "17")]
+    #[allow(missing_docs)]
+    pub extracted_files: u64,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

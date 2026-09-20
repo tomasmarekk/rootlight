@@ -7316,6 +7316,14 @@ fn map_repository_index(
     expected_mode: IndexMode,
 ) -> Result<RepoIndexSuccess, ToolExecutionError> {
     if response.accepted_plan.scope != IndexPlanScope::Repository
+        || response
+            .result
+            .indexed_files
+            .checked_sub(response.result.extracted_files)
+            .is_none_or(|physical| {
+                physical > response.result.discovered_inputs
+                    || (physical == 0 && response.result.extracted_files != 0)
+            })
         || !matches!(
             (expected_mode, response.accepted_plan.mode),
             (IndexMode::Auto, IndexMode::Structural | IndexMode::Deep)

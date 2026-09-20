@@ -117,6 +117,7 @@ fn derived_modules_survive_edit_noop_rebuild_removal_and_restart() {
         first.indexed_files, 3,
         "original container plus two real derived sources"
     );
+    assert_eq!(serde_json::to_value(&first).unwrap()["extracted_files"], 2);
     let alpha = derived_path("book.xlsm", "Alpha", ModuleKind::Procedural).unwrap();
     let beta = derived_path("book.xlsm", "Beta", ModuleKind::Procedural).unwrap();
     let stale = read_module(&service, first.generation, alpha.as_str(), FIRST);
@@ -170,6 +171,7 @@ fn derived_modules_survive_edit_noop_rebuild_removal_and_restart() {
     let updated = service
         .index_repository(root.path(), &cancellation)
         .unwrap();
+    assert_eq!(updated.extracted_files, 2);
     let current = read_module(&service, updated.generation, alpha.as_str(), &changed);
     assert_eq!(
         stale.span().file(),
@@ -198,11 +200,13 @@ fn derived_modules_survive_edit_noop_rebuild_removal_and_restart() {
         .unwrap();
     let clean = service.publish_prepared(prepared, &cancellation).unwrap();
     assert_eq!(updated.logical_snapshot, clean.logical_snapshot);
+    assert_eq!(clean.extracted_files, 2);
     fs::write(&book, fixture::book(&[("Alpha", &changed)])).unwrap();
     let removed = service
         .index_repository(root.path(), &cancellation)
         .unwrap();
     assert_eq!(removed.indexed_files, 2);
+    assert_eq!(removed.extracted_files, 1);
     assert!(
         !service
             .loaded_generation_snapshot(removed.generation)
@@ -218,6 +222,11 @@ fn derived_modules_survive_edit_noop_rebuild_removal_and_restart() {
     read_module(&restored, first.generation, alpha.as_str(), FIRST);
     read_module(&restored, updated.generation, alpha.as_str(), &changed);
     read_module(&restored, removed.generation, alpha.as_str(), &changed);
+    for receipt in [&first, &updated, &removed] {
+        let recovered = restored.receipts.get(&receipt.generation).unwrap();
+        assert_eq!(recovered.extracted_files, receipt.extracted_files);
+        assert_eq!(recovered.indexed_files - recovered.extracted_files, 1);
+    }
 }
 
 #[test]
@@ -232,6 +241,7 @@ fn unverified_module_keeps_source_and_does_not_hide_verified_sibling() {
     let mut service = FirstSliceService::new(2).unwrap();
     let receipt = service.index_repository(root.path(), &deadline()).unwrap();
     assert_eq!(receipt.indexed_files, 3);
+    assert_eq!(receipt.extracted_files, 2);
     read_module(
         &service,
         receipt.generation,
@@ -387,6 +397,7 @@ fn identical_module_names_in_distinct_containers_remain_distinct() {
     let receipt = service.index_repository(root.path(), &deadline()).unwrap();
     assert_eq!(receipt.discovered_inputs, 2);
     assert_eq!(receipt.indexed_files, 4);
+    assert_eq!(receipt.extracted_files, 2);
     let snapshot = service
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
@@ -407,4 +418,82 @@ fn identical_module_names_in_distinct_containers_remain_distinct() {
             .count(),
         2
     );
+}
+
+#[test]
+fn extracted_counts_restore_legacy_manifests_and_reject_false_current_counts() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let book = root.path().join("book.xlsm");
+    fs::write(&book, fixture::book(&[("Alpha", FIRST), ("Beta", SECOND)])).unwrap();
+    let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let manifest_path = paths
+        .state_dir()
+        .join("first-slice/repositories")
+        .join(receipt.repository.to_string())
+        .join(receipt.generation.to_string())
+        .join("manifest.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(manifest["version"], 4);
+    assert_eq!(manifest["receipt"]["extracted_files"], 2);
+    let retained_without_manifest = receipt
+        .retained_durable_bytes
+        .checked_sub(u64::try_from(original.len()).unwrap())
+        .unwrap();
+    fs::remove_file(&book).unwrap();
+    for (version, extracted, discovered, valid) in [
+        (4, Some(2), 1, true),
+        (4, None, 1, false),
+        (4, Some(0), 1, false),
+        (4, Some(3), 1, false),
+        (4, Some(u64::MAX), 1, false),
+        (4, Some(2), 0, false),
+        (3, None, 1, true),
+        (3, None, 0, false),
+    ] {
+        let mut changed = manifest.clone();
+        changed["version"] = version.into();
+        changed["receipt"]["discovered_inputs"] = discovered.into();
+        match extracted {
+            Some(count) => changed["receipt"]["extracted_files"] = count.into(),
+            None => {
+                changed["receipt"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("extracted_files");
+            }
+        }
+        let bytes = loop {
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            let retained = retained_without_manifest
+                .checked_add(u64::try_from(bytes.len()).unwrap())
+                .unwrap();
+            if changed["receipt"]["retained_durable_bytes"] == retained {
+                break bytes;
+            }
+            changed["receipt"]["retained_durable_bytes"] = retained.into();
+        };
+        fs::write(&manifest_path, bytes).unwrap();
+        let result = service.durable.as_ref().unwrap().restore_exact_generation(
+            receipt.repository,
+            receipt.generation,
+            &deadline(),
+        );
+        if valid {
+            let restored = result.unwrap();
+            assert_eq!(restored.receipt.discovered_inputs, 1);
+            assert_eq!(restored.receipt.indexed_files, 3);
+            assert_eq!(restored.receipt.extracted_files, 2);
+        } else {
+            assert!(matches!(result, Err(FirstSliceError::CatalogCorrupt)));
+        }
+    }
 }

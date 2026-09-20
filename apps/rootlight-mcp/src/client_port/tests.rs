@@ -313,6 +313,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 published_generation: (state == OperationState::Succeeded).then(generation),
                 discovered_inputs: 1,
                 indexed_files: 1,
+                extracted_files: 0,
                 entities: 1,
                 elapsed_micros: 10,
                 estimated_disk_bytes: 4_096,

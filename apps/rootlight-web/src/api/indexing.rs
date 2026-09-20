@@ -826,6 +826,7 @@ mod tests {
                     published_generation: None,
                     discovered_inputs: 0,
                     indexed_files: 0,
+                    extracted_files: 0,
                     entities: 0,
                     elapsed_micros: 0,
                     estimated_disk_bytes: 0,

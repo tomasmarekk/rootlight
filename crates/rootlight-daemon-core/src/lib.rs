@@ -7768,6 +7768,14 @@ fn correlated_first_slice_response_for_minor(
 ) -> daemon::response_envelope::Response {
     select_first_slice_response_minor(&mut response, selected_protocol_minor);
     if first_slice_response_correlates_for_minor(request, &response, selected_protocol_minor) {
+        if matches!(&response, FirstSliceIpcResponse::RepositoryIndex(result)
+            if result.extracted_files != 0)
+            && selected_protocol_minor < rootlight_protocol::EXTRACTED_SOURCE_COUNTS_PROTOCOL_MINOR
+        {
+            return daemon::response_envelope::Response::Error(public_error_to_wire(
+                &protocol_mismatch("extracted source counts require a newer protocol"),
+            ));
+        }
         let has_extracted_origin = match &response {
             FirstSliceIpcResponse::CodeLocate(result) => {
                 result.hits.iter().any(|hit| hit.extracted_from.is_some())
@@ -7874,7 +7882,13 @@ fn first_slice_response_correlates_for_minor(
                     response.selected_analysis_mode,
                     selected_protocol_minor,
                 )
-                && response.indexed_files <= response.discovered_inputs
+                && response
+                    .indexed_files
+                    .checked_sub(response.extracted_files)
+                    .is_some_and(|physical| {
+                        physical <= response.discovered_inputs
+                            && (physical != 0 || response.extracted_files == 0)
+                    })
         }
         (
             FirstSliceIpcRequest::RepositoryOperationStatus(request),
@@ -20296,6 +20310,7 @@ mod tests {
             published_generation: Some(generation.clone()),
             discovered_inputs: 2,
             indexed_files: 2,
+            extracted_files: 0,
             entities: 2,
             elapsed_micros: 1,
             estimated_disk_bytes: 4_096,
@@ -20308,6 +20323,36 @@ mod tests {
             &index_request,
             &FirstSliceIpcResponse::RepositoryIndex(index_response.clone())
         ));
+        let mut extracted_index = index_response.clone();
+        extracted_index.discovered_inputs = 1;
+        extracted_index.indexed_files = 3;
+        extracted_index.extracted_files = 2;
+        for minor in [19, 20] {
+            let response = correlated_first_slice_response_for_minor(
+                &index_request,
+                FirstSliceIpcResponse::RepositoryIndex(extracted_index.clone()),
+                minor,
+            );
+            if minor == 19 {
+                assert!(
+                    matches!(response, daemon::response_envelope::Response::Error(error)
+                    if error.code == common::ErrorCode::ProtocolMismatch as i32)
+                );
+            } else {
+                assert!(
+                    matches!(response, daemon::response_envelope::Response::RepositoryIndex(result)
+                    if result.discovered_inputs == 1 && result.indexed_files == 3 && result.extracted_files == 2)
+                );
+            }
+        }
+        for extracted in [0, 1, 3, 4, u64::MAX] {
+            let mut invalid = extracted_index.clone();
+            invalid.extracted_files = extracted;
+            assert!(!first_slice_response_correlates(
+                &index_request,
+                &FirstSliceIpcResponse::RepositoryIndex(invalid),
+            ));
+        }
         let mut substituted_mode = index_response.clone();
         substituted_mode.mode = daemon::RepositoryIndexMode::RepositoryIndexDeep as i32;
         assert!(!first_slice_response_correlates(

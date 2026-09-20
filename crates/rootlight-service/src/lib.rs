@@ -364,8 +364,14 @@ pub struct FirstSliceIndexReceipt {
     /// Other inputs omitted by explicit discovery policy or safe-read rules.
     #[serde(default)]
     pub policy_excluded_inputs: u64,
-    /// Files committed into normalized IR.
+    /// Total physical and extracted files retained by the generation.
     pub indexed_files: u64,
+    /// Subset of indexed files extracted from immutable containers.
+    ///
+    /// Subtract this from `indexed_files` before comparing with physical
+    /// discovery. Legacy durable receipts reconstruct it from verified IR.
+    #[serde(default)]
+    pub extracted_files: u64,
     /// Semantic entities committed into normalized IR.
     pub entities: u64,
     /// Lexical documents committed into the generation-pinned reader.
@@ -390,6 +396,30 @@ pub struct FirstSliceIndexReceipt {
 
 const fn complete_discovery_by_default() -> bool {
     true
+}
+
+fn verified_source_counts(
+    snapshot: &rootlight_storage::GenerationSnapshot,
+    discovered_inputs: u64,
+    cancellation: &Cancellation,
+) -> Result<(u64, u64), FirstSliceError> {
+    let indexed = u64::try_from(snapshot.file_count()).map_err(|_| FirstSliceError::Limits)?;
+    let mut extracted = 0_u64;
+    // IR validation guarantees exactly one whole-container dependency per
+    // extracted file, including nested containers, independently of its path.
+    for mapping in &snapshot.document().source_mappings {
+        check_cancellation(cancellation)?;
+        if mapping.kind == SourceMappingKind::ExtractedFromContainer {
+            extracted = extracted.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        }
+    }
+    if indexed
+        .checked_sub(extracted)
+        .is_none_or(|physical| physical > discovered_inputs)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok((indexed, extracted))
 }
 
 /// One committed generation plus confirmed durable bytes written by its operation.
@@ -1995,9 +2025,11 @@ pub struct RepositoryCoverageEntryDto {
     pub tier: String,
     /// Aggregate completeness label, such as `complete` or `bounded`.
     pub status: String,
-    /// Inputs admitted by deterministic discovery.
+    /// Retained logical sources of this language, including extracted files.
+    ///
+    /// This coverage denominator is not a count of physical discovery inputs.
     pub discovered_files: u64,
-    /// Files committed into normalized IR.
+    /// Logical sources without an unsupported-language or encoding fallback.
     pub indexed_files: u64,
 }
 
@@ -8211,8 +8243,11 @@ impl FirstSliceService {
             fully_examined_bytes,
             written_bytes,
         ));
-        let indexed_files =
-            u64::try_from(verified.snapshot().file_count()).map_err(|_| FirstSliceError::Limits)?;
+        let (indexed_files, extracted_files) = verified_source_counts(
+            verified.snapshot(),
+            manifest.coverage.included,
+            cancellation,
+        )?;
         let entities = u64::try_from(verified.document().entities.len())
             .map_err(|_| FirstSliceError::Limits)?;
         let mut receipt = FirstSliceIndexReceipt {
@@ -8245,6 +8280,7 @@ impl FirstSliceService {
                     total.checked_add(*count).ok_or(FirstSliceError::Limits)
                 })?,
             indexed_files,
+            extracted_files,
             entities,
             lexical_documents,
             oracle_allocated_bytes,
@@ -8732,6 +8768,7 @@ impl FirstSliceService {
                     total.checked_add(*count).ok_or(FirstSliceError::Limits)
                 })?,
             indexed_files: streamed_files,
+            extracted_files: 0,
             entities: 0,
             lexical_documents: streamed_files,
             oracle_allocated_bytes,
@@ -40702,7 +40739,7 @@ mod tests {
                 .expect("generation manifest remains readable"),
         )
         .expect("generation manifest is valid JSON");
-        assert_eq!(generation_manifest["version"], 3);
+        assert_eq!(generation_manifest["version"], 4);
         assert!(generation_manifest.get("recovery").is_none());
         assert_eq!(generation_manifest["source_storage"]["version"], 1);
         assert!(active_directory.join("oracle.sqlite3").is_file());
