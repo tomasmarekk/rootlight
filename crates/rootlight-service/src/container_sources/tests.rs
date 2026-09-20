@@ -93,6 +93,252 @@ fn read_module(
 }
 
 #[test]
+fn automatic_object_receivers_keep_project_types_and_calls_after_restart() {
+    for native in [false, true] {
+        for declaration in [
+            "Public Sub Run()\r\nDim receiver As New Worker\r\n",
+            "Public Sub Run()\r\nDim receiver As _\r\n New Worker\r\n",
+            "Private receiver As New Worker\r\nPublic Sub Run()\r\n",
+        ] {
+            let root = tempdir();
+            let storage = tempdir();
+            let client = format!(
+                "Attribute VB_Name = \"Client\"\r\n{declaration}receiver.Apply\r\nEnd Sub\r\n"
+            );
+            let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+            if native {
+                fs::write(
+                    root.path().join("book.xlsm"),
+                    fixture::typed_book(&[
+                        ("Client", client.as_bytes(), false),
+                        ("Worker", worker, true),
+                    ]),
+                )
+                .unwrap();
+            } else {
+                fs::write(root.path().join("Client.bas"), &client).unwrap();
+                fs::write(
+                    root.path().join("Worker.cls"),
+                    [b"VERSION 1.0 CLASS\r\n".as_slice(), worker].concat(),
+                )
+                .unwrap();
+                fs::write(
+                    root.path().join("project.vbp"),
+                    "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n",
+                )
+                .unwrap();
+            }
+            let paths = rootlight_runtime::RuntimePaths::new(
+                storage.path().join("state"),
+                storage.path().join("runtime"),
+            )
+            .unwrap();
+            paths.prepare_owner().unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+            assert_eq!(
+                service.index_repository(root.path(), &deadline()).unwrap(),
+                receipt
+            );
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            for (syntax, name, kind) in [
+                (
+                    "vba.automatic_type_identifier.reference",
+                    "Worker",
+                    EntityKind::Class,
+                ),
+                ("vba.invoked_member.reference", "Apply", EntityKind::Method),
+            ] {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|e| e.canonical_name == name && e.kind == kind)
+                    .unwrap();
+                let sites: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|o| o.syntax_kind == syntax)
+                    .collect();
+                assert_eq!(sites.len(), 1, "native={native} {declaration} {syntax}");
+                assert_eq!(
+                    sites[0].target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+                assert!(!document.skipped_regions.iter().any(|gap| {
+                    gap.source == sites[0].source
+                        && matches!(
+                            gap.detail.as_str(),
+                            "vba-type-target-unavailable" | "vba-member-target-unavailable"
+                        )
+                }));
+                let proof = document
+                    .provenance
+                    .iter()
+                    .find(|p| p.id == sites[0].provenance)
+                    .unwrap();
+                assert!(
+                    proof
+                        .input_sources
+                        .iter()
+                        .chain(&proof.evidence_sources)
+                        .all(|s| s.generation() == receipt.generation)
+                );
+                assert!(document.relations.iter().any(|r| {
+                    r.object == RelationEndpoint::Entity(target.id)
+                        && r.predicate
+                            == if kind == EntityKind::Class {
+                                RelationPredicate::UsesType
+                            } else {
+                                RelationPredicate::Calls
+                            }
+                        && r.evidence.source.as_ref() == Some(&sites[0].source)
+                }));
+            }
+            let rebuilt = service
+                .prepare_repository_with_options(
+                    root.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                service
+                    .publish_prepared(rebuilt, &deadline())
+                    .unwrap()
+                    .logical_snapshot,
+                receipt.logical_snapshot
+            );
+            drop(service);
+            let restored =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            assert_eq!(
+                restored
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap()
+                    .document(),
+                document
+            );
+        }
+    }
+}
+
+#[test]
+fn automatic_object_types_do_not_invent_class_or_member_bindings() {
+    let root = tempdir();
+    let mut service = FirstSliceService::new(4).unwrap();
+    for scenario in [
+        "missing",
+        "record",
+        "enum",
+        "collision",
+        "local-record",
+        "local-enum",
+        "private-method",
+        "parameter",
+        "array",
+        "shadowed-receiver",
+    ] {
+        let local = match scenario {
+            "local-record" => "Private Type Worker\r\nApply As Long\r\nEnd Type\r\n",
+            "local-enum" => "Private Enum Worker\r\nApply = 1\r\nEnd Enum\r\n",
+            _ => "",
+        };
+        let declaration = match scenario {
+            "parameter" => "Public Sub Run(ByVal receiver As New Worker)\r\n",
+            "array" => "Public Sub Run()\r\nDim receiver() As New Worker\r\n",
+            "shadowed-receiver" => {
+                "Private receiver As New Worker\r\nPublic Sub Run(ByVal receiver As Variant)\r\n"
+            }
+            _ => "Public Sub Run()\r\nDim receiver As New Worker\r\n",
+        };
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\n{local}{declaration}receiver.Apply\r\nEnd Sub\r\n"
+        );
+        let exported = match scenario {
+            "record" | "collision" => "Public Type Worker\r\nApply As Long\r\nEnd Type\r\n",
+            "enum" => "Public Enum Worker\r\nApply = 1\r\nEnd Enum\r\n",
+            _ => "",
+        };
+        let globals = format!("Attribute VB_Name = \"Globals\"\r\n{exported}");
+        let access = if scenario == "private-method" {
+            "Private"
+        } else {
+            "Public"
+        };
+        let worker =
+            format!("Attribute VB_Name = \"Worker\"\r\n{access} Sub Apply()\r\nEnd Sub\r\n");
+        let mut modules = vec![
+            ("Client", client.as_bytes(), false),
+            ("Globals", globals.as_bytes(), false),
+        ];
+        if !matches!(scenario, "missing" | "record" | "enum") {
+            modules.push(("Worker", worker.as_bytes(), true));
+        }
+        fs::write(root.path().join("book.xlsm"), fixture::typed_book(&modules)).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let client_path = derived_path("book.xlsm", "Client", ModuleKind::Procedural).unwrap();
+        let client_file = document
+            .files
+            .iter()
+            .find(|f| f.path == client_path.as_str())
+            .unwrap();
+        let member = document
+            .occurrences
+            .iter()
+            .find(|o| o.file == client_file.id && o.syntax_kind == "vba.invoked_member.reference")
+            .unwrap();
+        assert!(
+            matches!(member.target, OccurrenceTarget::Unresolved { .. }),
+            "{scenario}: {:?}",
+            member.target
+        );
+        let type_site = document
+            .occurrences
+            .iter()
+            .find(|o| {
+                o.file == client_file.id && o.syntax_kind.contains("automatic_type_identifier")
+            })
+            .unwrap();
+        if matches!(scenario, "private-method" | "shadowed-receiver") {
+            assert!(
+                matches!(type_site.target, OccurrenceTarget::Resolved { .. }),
+                "{scenario}"
+            );
+        } else {
+            assert!(
+                matches!(type_site.target, OccurrenceTarget::Unresolved { .. }),
+                "{scenario}: {:?}",
+                type_site.target
+            );
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == type_site.source
+                        && gap.detail == "vba-type-target-unavailable"),
+                "{scenario}"
+            );
+        }
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|r| r.predicate == RelationPredicate::Calls
+                    && r.evidence.source.as_ref() == Some(&member.source)),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
 fn native_predeclared_lookup_respects_enum_namespace_tiers() {
     let root = tempdir();
     let surface = b"Attribute VB_Name = \"Surface\"\r\nAttribute VB_PredeclaredId = True\r\nPublic Sub Apply()\r\nEnd Sub\r\n";

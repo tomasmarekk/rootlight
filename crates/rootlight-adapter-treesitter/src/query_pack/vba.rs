@@ -252,14 +252,9 @@ pub(super) fn reference_syntax(
         .parent()
         .filter(|node| node.kind() == "type_expression")
     {
-        let direct = if let Some(clause) =
+        let syntax = if let Some(clause) =
             ty.parent().filter(|node| node.kind() == "as_type_clause")
             && let Some(declaration) = clause.parent()
-            && matches!(
-                declaration.kind(),
-                "variable_declarator" | "parameter" | "type_member"
-            )
-            && declaration.child_by_field_name("bounds").is_none()
         {
             // The grammar's anonymous regex keywords are invisible to child
             // traversal. Check only the native clause prefix, preserving New
@@ -270,26 +265,43 @@ pub(super) fn reference_syntax(
             let mut words = prefix
                 .split(u8::is_ascii_whitespace)
                 .filter(|word| !word.is_empty() && *word != b"_");
-            let mut direct = words
+            let starts_as = words
                 .next()
-                .is_some_and(|word| word.eq_ignore_ascii_case(b"As"))
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"As"));
+            let modifier = words.next();
+            let automatic = starts_as
+                && modifier.is_some_and(|word| word.eq_ignore_ascii_case(b"New"))
                 && words.next().is_none();
+            let mut scalar = declaration.child_by_field_name("bounds").is_none();
             let mut cursor = clause.walk();
             for part in clause.children(&mut cursor) {
                 cancellation.check()?;
                 if part.kind() == "array_bounds" {
-                    direct = false;
+                    scalar = false;
                 }
             }
-            direct
-        } else {
-            false
-        };
-        return Ok(if direct {
-            "vba.direct_type_identifier"
+            if automatic {
+                if scalar && matches!(declaration.kind(), "variable_declarator" | "type_member") {
+                    "vba.automatic_type_identifier"
+                } else {
+                    "vba.unsupported_automatic_type_identifier"
+                }
+            } else if starts_as
+                && modifier.is_none()
+                && scalar
+                && matches!(
+                    declaration.kind(),
+                    "variable_declarator" | "parameter" | "type_member"
+                )
+            {
+                "vba.direct_type_identifier"
+            } else {
+                "vba.type_identifier"
+            }
         } else {
             "vba.type_identifier"
-        });
+        };
+        return Ok(syntax);
     }
     while let Some(parent) = child.parent() {
         cancellation.check()?;
@@ -479,6 +491,72 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_type_capture_requires_a_scalar_variable_or_field() {
+        for (source, expected) in [
+            (
+                "Sub Run()\nDim receiver As New Worker\nEnd Sub\n",
+                "vba.automatic_type_identifier",
+            ),
+            (
+                "Sub Run()\nDim receiver As _\r\n New Worker\nEnd Sub\n",
+                "vba.automatic_type_identifier",
+            ),
+            (
+                "Private receiver As New Worker\n",
+                "vba.automatic_type_identifier",
+            ),
+            (
+                "Type Holder\nreceiver As New Worker\nEnd Type\n",
+                "vba.automatic_type_identifier",
+            ),
+            (
+                "Sub Run(ByRef receiver As New Worker)\nEnd Sub\n",
+                "vba.unsupported_automatic_type_identifier",
+            ),
+            (
+                "Dim receiver() As New Worker\n",
+                "vba.unsupported_automatic_type_identifier",
+            ),
+            (
+                "Dim receiver As New Worker()\n",
+                "vba.unsupported_automatic_type_identifier",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_vba::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let family = super::super::GrammarFamily::Vba;
+            let pack =
+                super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+                    .unwrap();
+            let extraction = pack
+                .extract(
+                    family,
+                    &tree,
+                    source.as_bytes(),
+                    1024,
+                    1024,
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            let labels: Vec<_> = extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Reference)
+                .map(|candidate| candidate.syntax)
+                .collect();
+            assert_eq!(
+                labels,
+                [expected],
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
 
     #[test]
     fn declared_type_capture_distinguishes_arrays_and_automatic_objects() {

@@ -616,7 +616,11 @@ impl<'a> ClassicIndex<'a> {
             cancellation.check()?;
             work.consume()?;
             if occurrence.role != OccurrenceRole::TypeUse
-                || occurrence.syntax_kind != "vba.direct_type_identifier.reference"
+                || !matches!(
+                    occurrence.syntax_kind.as_str(),
+                    "vba.direct_type_identifier.reference"
+                        | "vba.automatic_type_identifier.reference"
+                )
                 || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             {
                 continue;
@@ -660,6 +664,13 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
+            // As New requires a named class (MS-VBAL 5.2.3.1.4), not a
+            // UDT/enum that happens to occupy the same type lookup tier.
+            if occurrence.syntax_kind == "vba.automatic_type_identifier.reference"
+                && target.kind != EntityKind::Class
+            {
+                continue;
+            }
             result.proofs.insert(
                 occurrence.id,
                 Proof {

@@ -5308,9 +5308,10 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
-        "vba.direct_type_identifier.reference" | "vba.type_identifier.reference" => {
-            Some("vba-type-target-unavailable")
-        }
+        "vba.direct_type_identifier.reference"
+        | "vba.automatic_type_identifier.reference"
+        | "vba.unsupported_automatic_type_identifier.reference"
+        | "vba.type_identifier.reference" => Some("vba-type-target-unavailable"),
         "vba.instance.reference" => Some("vba-instance-owner-unavailable"),
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
         "vba.identifier.reference"
@@ -5435,6 +5436,8 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                 fact.syntax_kind().as_str(),
                 "typescript.type_identifier.reference"
                     | "vba.direct_type_identifier.reference"
+                    | "vba.automatic_type_identifier.reference"
+                    | "vba.unsupported_automatic_type_identifier.reference"
                     | "vba.type_identifier.reference"
                     | "typescript.type_member_name.reference"
                     | "typescript.type_export_local.reference"

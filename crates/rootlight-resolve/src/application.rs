@@ -593,7 +593,10 @@ fn reconcile_classic_target_gaps(
         cancellation.check()?;
         let selection: (&[&str], &str) = match record.rule.as_deref() {
             Some("classic-project-type-v1.indexed_snapshot") => (
-                &["vba.direct_type_identifier.reference"],
+                &[
+                    "vba.direct_type_identifier.reference",
+                    "vba.automatic_type_identifier.reference",
+                ],
                 "vba-type-target-unavailable",
             ),
             Some("classic-project-member-v1.indexed_snapshot") => (
