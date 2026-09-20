@@ -14,6 +14,106 @@ fn parse<'a>(text: &'a DecodedText<'_>, kind: ModuleKind) -> Result<HeaderName<'
 }
 
 #[test]
+fn predeclared_id_uses_last_explicit_literal_and_exact_coordinates() {
+    let input = b"Attribute VB_Name = \"Caf\xe9\"\r\nAttribute VB_PredeclaredId = False\r\nAttribute vb_predeclaredid _\r\n = _\r\n tRuE\r\nSub Work()\r\nAttribute VB_PredeclaredId = False\r\nEnd Sub\r\n";
+    let text = decode(input, 1252);
+    let header = parse(&text, ModuleKind::Object).unwrap();
+    let value = header.predeclared_id().unwrap();
+    assert!(value.value());
+    assert_eq!(&input[value.original_range()], b"tRuE");
+    assert_eq!(&text.text()[value.utf8_range()], "tRuE");
+    assert_eq!(value.utf8_range().start, value.original_range().start + 1);
+    for (attributes, expected) in [
+        ("", None),
+        ("Attribute VB_PredeclaredId = True\n", Some(true)),
+        (
+            "Attribute VB_PredeclaredId = True\nAttribute VB_PredeclaredId = False\n",
+            Some(false),
+        ),
+        ("Attribute VB_GlobalNameSpace = True\n", None),
+        (
+            "Attribute VB_Description = \"VB_PredeclaredId = True\"\n",
+            None,
+        ),
+    ] {
+        let input = format!("Attribute VB_Name = \"Object\"\n{attributes}");
+        let text = decode(input.as_bytes(), 65001);
+        let header = parse(&text, ModuleKind::Object).unwrap();
+        assert_eq!(header.predeclared_id().map(HeaderBoolean::value), expected);
+    }
+}
+
+#[test]
+fn malformed_predeclared_values_never_establish_instance_identity() {
+    for value in [
+        "1",
+        "-1",
+        "\"True\"",
+        "TrueX",
+        "True:False",
+        "True ' comment",
+        "Tr _\nue",
+        "",
+    ] {
+        let input =
+            format!("Attribute VB_Name = \"Object\"\nAttribute VB_PredeclaredId = {value}\n");
+        let text = decode(input.as_bytes(), 65001);
+        assert!(
+            matches!(
+                parse(&text, ModuleKind::Object),
+                Err(HeaderError::Invalid { .. })
+            ),
+            "{value}"
+        );
+    }
+    let text = decode(
+        b"Attribute VB_Name = \"Module\"\nAttribute VB_PredeclaredId = True\n",
+        65001,
+    );
+    assert!(matches!(
+        parse(&text, ModuleKind::Procedural),
+        Err(HeaderError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn predeclared_attributes_obey_header_limits_and_truncation() {
+    let input = "Attribute VB_Name = \"Object\"\nAttribute VB_PredeclaredId = True\n";
+    for end in 0..=input.len() {
+        let text = decode(&input.as_bytes()[..end], 65001);
+        for maximum in [0, end.saturating_sub(1), end] {
+            if let Ok(header) = HeaderName::parse(
+                &text,
+                ModuleKind::Object,
+                HeaderLimits {
+                    bytes: maximum,
+                    attributes: 2,
+                },
+                &Cancellation::new(),
+            ) && let Some(attribute) = header.predeclared_id()
+            {
+                assert!(attribute.value());
+                assert_eq!(&text.text()[attribute.utf8_range()], "True");
+                assert!(attribute.utf8_range().end <= maximum);
+            }
+        }
+    }
+    let text = decode(input.as_bytes(), 65001);
+    assert!(matches!(
+        HeaderName::parse(
+            &text,
+            ModuleKind::Object,
+            HeaderLimits {
+                bytes: input.len(),
+                attributes: 1
+            },
+            &Cancellation::new()
+        ),
+        Err(HeaderError::Limit)
+    ));
+}
+
+#[test]
 fn effective_name_retains_original_codepage_bytes() {
     let bytes = b"Attribute VB_Description = \"\x80\"\r\nAttribute VB_Name = \"Caf\xe9\"\r\nOption Explicit\r\n";
     let text = decode(bytes, 1252);

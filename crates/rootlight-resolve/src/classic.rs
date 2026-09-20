@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{ContentHash, FactId, FileId, content_hash};
+use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
     Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityKind,
     EntityRecord, EntityVisibility, FactDomain, FactRef, OccurrenceRecord, OccurrenceRole,
@@ -71,6 +71,9 @@ pub struct NativeClassicMember {
     pub name: Option<String>,
     /// Source module category; extension categories do not supply host-defined members.
     pub kind: Option<NativeClassicMemberKind>,
+    /// UTF-8 range of the effective True VB_PredeclaredId literal in verified source.
+    /// None denotes the False default or an explicit False; only class members may set it.
+    pub predeclared_id: Option<std::ops::Range<usize>>,
 }
 
 /// Native categories whose project lookup matches the classic BASIC resolver.
@@ -108,6 +111,14 @@ struct Member {
     name: String,
     location: MemberLocation,
     class: bool,
+    predeclared_id: Option<std::ops::Range<usize>>,
+}
+
+struct ResolvedProject {
+    types: BTreeMap<String, Option<SymbolId>>,
+    default_instances: BTreeMap<SymbolId, SourceRef>,
+    value_names: BTreeSet<String>,
+    evidence: Arc<ProjectEvidence>,
 }
 
 enum MemberLocation {
@@ -236,6 +247,7 @@ fn parse_project(
                 name,
                 location: MemberLocation::Path(path),
                 class: key.eq_ignore_ascii_case("Class"),
+                predeclared_id: None,
             });
         } else if [
             "Form",
@@ -379,6 +391,7 @@ impl<'a> ClassicIndex<'a> {
                 members.push(Member {
                     name: name.unwrap_or_default(),
                     location: MemberLocation::Indexed(member.file),
+                    predeclared_id: member.predeclared_id.clone(),
                     // Extension source declarations belong to their named class
                     // (MS-VBAL 4.2.1/5.2.4). Host members are not inferred here.
                     class: matches!(
@@ -422,6 +435,8 @@ impl<'a> ClassicIndex<'a> {
             };
             evidence.sources.push(source.clone());
             let mut types = BTreeMap::from([(project.name, None)]);
+            let mut default_instances = BTreeMap::new();
+            let mut value_names = BTreeSet::new();
             work.consume_many(members.len())?;
             let member_files: Vec<_> = members
                 .iter()
@@ -495,6 +510,59 @@ impl<'a> ClassicIndex<'a> {
                     complete = false;
                     break;
                 }
+                if let Some(range) = member.predeclared_id {
+                    work.consume()?;
+                    let literal = sources
+                        .get(&file.id)
+                        .and_then(|bytes| bytes.get(range.clone()));
+                    if !member.class
+                        || !literal.is_some_and(|text| text.eq_ignore_ascii_case(b"True"))
+                    {
+                        return Err(ResolutionError::ClassicSourceIdentity);
+                    }
+                    let source = file
+                        .evidence
+                        .source
+                        .as_ref()
+                        .ok_or(ResolutionError::ClassicSourceIdentity)?;
+                    let span = rootlight_ir::SourceSpan::new(
+                        file.id,
+                        u64::try_from(range.start).map_err(|_| ResolutionError::CountOverflow)?,
+                        u64::try_from(range.end).map_err(|_| ResolutionError::CountOverflow)?,
+                    )
+                    .map_err(ResolutionError::InvalidProducer)?;
+                    default_instances.insert(
+                        named[0].id,
+                        SourceRef::new(
+                            source.repository(),
+                            source.generation(),
+                            span,
+                            source.content_hash(),
+                            None,
+                        ),
+                    );
+                }
+                if !member.class {
+                    for entity in records {
+                        cancellation.check()?;
+                        work.consume()?;
+                        let namespace = if let Some(ContainerRef::Entity(owner)) = entity.container
+                            && let Some(owner) =
+                                entities.get(&owner).filter(|e| e.kind == EntityKind::Enum)
+                        {
+                            (owner.visibility != EntityVisibility::Private)
+                                .then_some(owner.container)
+                                .flatten()
+                        } else {
+                            entity.container
+                        };
+                        if namespace == Some(ContainerRef::Entity(named[0].id))
+                            && entity.visibility != EntityVisibility::Private
+                        {
+                            value_names.insert(entity.canonical_name.to_ascii_lowercase());
+                        }
+                    }
+                }
                 // Public UDT/enum names cannot collide with any module or the
                 // project name. Keep barriers sticky across manifest order.
                 types
@@ -537,7 +605,12 @@ impl<'a> ClassicIndex<'a> {
             evidence.sources.dedup();
             evidence.facts.sort_unstable();
             evidence.facts.dedup();
-            projects.push(complete.then_some((types, Arc::new(evidence))));
+            projects.push(complete.then_some(ResolvedProject {
+                types,
+                default_instances,
+                value_names,
+                evidence: Arc::new(evidence),
+            }));
         }
         for occurrence in occurrences {
             cancellation.check()?;
@@ -578,7 +651,7 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             }
             let Some(target) = project
-                .0
+                .types
                 .get(&name)
                 .copied()
                 .flatten()
@@ -591,7 +664,7 @@ impl<'a> ClassicIndex<'a> {
                 occurrence.id,
                 Proof {
                     target,
-                    context: Arc::clone(&project.1),
+                    context: Arc::clone(&project.evidence),
                     receiver: None,
                 },
             );
@@ -609,6 +682,18 @@ impl<'a> ClassicIndex<'a> {
                     .entry((owner, entity.canonical_name.to_ascii_lowercase()))
                     .and_modify(|prior| *prior = None)
                     .or_insert(Some(*entity));
+                // Enum constants also occupy the enclosing module namespace
+                // (MS-VBAL 5.6.10), including private or ambiguous local enums.
+                if let Some(enumeration) =
+                    entities.get(&owner).filter(|e| e.kind == EntityKind::Enum)
+                    && let Some(ContainerRef::Entity(module)) = enumeration.container
+                {
+                    work.consume()?;
+                    members
+                        .entry((module, entity.canonical_name.to_ascii_lowercase()))
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(Some(*entity));
+                }
             }
         }
         for occurrence in occurrences {
@@ -671,9 +756,9 @@ impl<'a> ClassicIndex<'a> {
             let Some((receiver, member)) = text.split_once('.') else {
                 continue;
             };
-            if identifier(receiver).is_none() {
+            let Some(receiver_name) = identifier(receiver) else {
                 continue;
-            }
+            };
             let Some(name) = identifier(member) else {
                 continue;
             };
@@ -686,15 +771,73 @@ impl<'a> ClassicIndex<'a> {
             let receiver_span =
                 rootlight_ir::SourceSpan::new(occurrence.file, span.start_byte(), receiver_end)
                     .map_err(ResolutionError::InvalidProducer)?;
-            let Some(value) = receivers.get(&receiver_span).copied().flatten() else {
+            let binding = if let Some(value) = receivers.get(&receiver_span) {
+                value
+                    .and_then(|value| value_types.get(&value))
+                    .and_then(Option::as_ref)
+                    .map(|(owner, class, context, source)| {
+                        (*owner, *class, Arc::clone(context), source.clone())
+                    })
+            } else {
+                let Some(project) = memberships
+                    .get(&occurrence.file)
+                    .copied()
+                    .flatten()
+                    .and_then(|i| projects.get(i))
+                    .and_then(Option::as_ref)
+                else {
+                    continue;
+                };
+                // A named default instance is a value lookup, not a class-name
+                // shortcut. Explicit lexical or exported declarations win even
+                // when the local analyzer could not select a unique target.
+                if project.value_names.contains(&receiver_name) {
+                    continue;
+                }
+                let mut scope = occurrence.enclosing;
+                let mut unshadowed = false;
+                for _ in 0..entities.len() {
+                    cancellation.check()?;
+                    work.consume()?;
+                    let Some(owner) = scope.and_then(|id| entities.get(&id)) else {
+                        break;
+                    };
+                    if members.contains_key(&(owner.id, receiver_name.clone())) {
+                        break;
+                    }
+                    match owner.container {
+                        Some(ContainerRef::Entity(parent)) => scope = Some(parent),
+                        Some(ContainerRef::File(file)) if file == occurrence.file => {
+                            unshadowed = true;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                if !unshadowed {
+                    continue;
+                }
+                project
+                    .types
+                    .get(&receiver_name)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| {
+                        project
+                            .default_instances
+                            .get(&id)
+                            .map(|source| (id, source))
+                    })
+                    .and_then(|(id, source)| {
+                        entities.get(&id).map(|owner| {
+                            (*owner, id, Arc::clone(&project.evidence), source.clone())
+                        })
+                    })
+            };
+            let Some((owner, class, context, type_source)) = binding else {
                 continue;
             };
-            let Some((owner, class, context, type_source)) =
-                value_types.get(&value).and_then(Option::as_ref)
-            else {
-                continue;
-            };
-            let Some(target) = members.get(&(*class, name)).copied().flatten() else {
+            let Some(target) = members.get(&(class, name)).copied().flatten() else {
                 continue;
             };
             if !matches!(
@@ -708,8 +851,8 @@ impl<'a> ClassicIndex<'a> {
                 occurrence.id,
                 Proof {
                     target,
-                    context: Arc::clone(context),
-                    receiver: Some((owner, type_source.clone())),
+                    context,
+                    receiver: Some((owner, type_source)),
                 },
             );
         }

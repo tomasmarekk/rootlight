@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/3";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/4";
 
 #[cfg(test)]
 mod tests;
@@ -434,6 +434,7 @@ fn prepare_office(
                 file: None,
                 name: record.and_then(|r| r.name()).map(str::to_owned),
                 kind,
+                predeclared_id: None,
             });
     }
     for (ordinal, descriptor) in project.modules().iter().enumerate() {
@@ -486,11 +487,12 @@ fn prepare_office(
             | ProjectModuleKind::Document { .. }
             | ProjectModuleKind::Designer => ModuleKind::Object,
         });
+        let header = HeaderName::parse(&text, kind, HeaderLimits::default(), cancellation).ok();
         let verified = record
             .and_then(|record| {
-                HeaderName::parse(&text, kind, HeaderLimits::default(), cancellation)
-                    .ok()
-                    .and_then(|header| record.check_source_name(&header).ok())
+                header
+                    .as_ref()
+                    .and_then(|header| record.check_source_name(header).ok())
             })
             .is_some_and(|matched| !matched.needs_non_ascii_case_validation());
         check_cancellation(cancellation)?;
@@ -566,11 +568,18 @@ fn prepare_office(
             decisive_rule: None,
         });
         prepared.origins.push((file, input.file));
-        native_project
+        let member = native_project
             .members
             .get_mut(ordinal)
-            .ok_or(FirstSliceError::Identity)?
-            .file = Some(file);
+            .ok_or(FirstSliceError::Identity)?;
+        member.file = Some(file);
+        if verified {
+            member.predeclared_id = header
+                .as_ref()
+                .and_then(HeaderName::predeclared_id)
+                .filter(|attribute| attribute.value())
+                .map(|attribute| attribute.utf8_range());
+        }
         native_project.inventory_complete &= verified;
         if verified
             && matched.is_some_and(|m| {
@@ -581,7 +590,7 @@ fn prepare_office(
             })
         {
             prepared.incomplete_native_contexts.insert(file);
-            prepared.issue(file, "vba extension context incomplete: project resolution includes explicit source declarations; host-defined members, designer controls and default instances are not established".to_owned())?;
+            prepared.issue(file, "vba extension context incomplete: project resolution includes explicit source declarations; host-defined members and designer controls are not established".to_owned())?;
         }
         if verified {
             prepared.native_vba_modules.insert(

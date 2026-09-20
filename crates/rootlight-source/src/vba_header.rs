@@ -1,4 +1,4 @@
-//! Reads effective VB_Name attributes only from a native module's leading header.
+//! Reads effective identity and predeclared-instance attributes from native headers.
 //! Names borrow decoded text and retain original module-byte coordinates; this
 //! is not designer-preamble parsing or validation of the module's program body.
 
@@ -35,7 +35,7 @@ pub enum HeaderError {
     /// No VB_Name occurs in the leading attribute block.
     #[error("vba module header has no name")]
     Missing,
-    /// A recognized attribute has malformed framing or a malformed name value.
+    /// A recognized attribute has malformed framing, name or boolean value.
     #[error("invalid vba module header at utf8 byte {offset}")]
     Invalid {
         /// Offset in the decoded UTF-8 view, not compressed/container bytes.
@@ -62,6 +62,35 @@ pub struct HeaderName<'a> {
     original_range: Range<usize>,
     declarations: usize,
     kind: ModuleKind,
+    predeclared_id: Option<HeaderBoolean>,
+}
+
+/// One effective boolean attribute with exact decoded and original value ranges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderBoolean {
+    value: bool,
+    utf8_range: Range<usize>,
+    original_range: Range<usize>,
+}
+
+impl HeaderBoolean {
+    /// Returns the explicit boolean value, not an inferred class characteristic.
+    #[must_use]
+    pub const fn value(&self) -> bool {
+        self.value
+    }
+
+    /// Returns the literal's range in the decoded UTF-8 view.
+    #[must_use]
+    pub fn utf8_range(&self) -> Range<usize> {
+        self.utf8_range.clone()
+    }
+
+    /// Returns the literal's range in the original decompressed module bytes.
+    #[must_use]
+    pub fn original_range(&self) -> Range<usize> {
+        self.original_range.clone()
+    }
 }
 
 impl fmt::Debug for HeaderName<'_> {
@@ -71,6 +100,7 @@ impl fmt::Debug for HeaderName<'_> {
             .field("original_range", &self.original_range)
             .field("declarations", &self.declarations)
             .field("kind", &self.kind)
+            .field("predeclared_id", &self.predeclared_id)
             .finish()
     }
 }
@@ -80,8 +110,9 @@ impl<'a> HeaderName<'a> {
     ///
     /// Stops at the first non-attribute line; never searches comments, procedures,
     /// designer preambles or string payloads for a later name. Physical newlines
-    /// and explicit continuations follow MS-VBAL 3.2. Non-name attribute values
-    /// remain opaque. Class headers use the last VB_Name (MS-VBAL 4.2); procedural
+    /// and explicit continuations follow MS-VBAL 3.2. Attributes other than
+    /// VB_Name and VB_PredeclaredId remain opaque. Class headers use the last
+    /// value for each recognized attribute (MS-VBAL 4.2); procedural
     /// headers reject repeated names. EOF may terminate the final physical line.
     /// Names are bounded, unescaped non-whitespace spellings, not proof of every
     /// codepage-dependent identifier rule or locale-dependent case equivalence.
@@ -107,6 +138,7 @@ impl<'a> HeaderName<'a> {
         let mut attributes = 0;
         let mut declarations = 0;
         let mut selected = None;
+        let mut predeclared_id = None;
         while position < input.len() {
             cancellation.check()?;
             let start = position;
@@ -147,12 +179,30 @@ impl<'a> HeaderName<'a> {
             let line = input
                 .get(token + 9..end)
                 .ok_or(HeaderError::Invalid { offset: token })?;
-            if let Some((name, range)) = attribute_name(line, token + 9, cancellation)? {
-                if declarations > 0 && kind == ModuleKind::Procedural {
-                    return Err(HeaderError::Duplicate);
+            match attribute(line, token + 9, cancellation)? {
+                Attribute::Name(name, range) => {
+                    if declarations > 0 && kind == ModuleKind::Procedural {
+                        return Err(HeaderError::Duplicate);
+                    }
+                    declarations += 1;
+                    selected = Some((name, range));
                 }
-                declarations += 1;
-                selected = Some((name, range));
+                Attribute::Predeclared(value, utf8_range) => {
+                    if kind == ModuleKind::Procedural {
+                        return Err(HeaderError::Invalid { offset: token });
+                    }
+                    let original_range =
+                        text.original_range(utf8_range.clone())
+                            .ok_or(HeaderError::Invalid {
+                                offset: utf8_range.start,
+                            })?;
+                    predeclared_id = Some(HeaderBoolean {
+                        value,
+                        utf8_range,
+                        original_range,
+                    });
+                }
+                Attribute::Other => {}
             }
             position = next;
         }
@@ -169,6 +219,7 @@ impl<'a> HeaderName<'a> {
             original_range,
             declarations,
             kind,
+            predeclared_id,
         })
     }
 
@@ -196,6 +247,13 @@ impl<'a> HeaderName<'a> {
     #[must_use]
     pub const fn kind(&self) -> ModuleKind {
         self.kind
+    }
+
+    /// Returns the last explicit VB_PredeclaredId value and its exact source ranges.
+    /// Absence means the False default, not evidence for a named instance.
+    #[must_use]
+    pub const fn predeclared_id(&self) -> Option<&HeaderBoolean> {
+        self.predeclared_id.as_ref()
     }
 }
 
@@ -264,11 +322,17 @@ fn logical_line(
     Ok((at, at))
 }
 
-fn attribute_name<'a>(
+enum Attribute<'a> {
+    Name(&'a str, Range<usize>),
+    Predeclared(bool, Range<usize>),
+    Other,
+}
+
+fn attribute<'a>(
     line: &'a str,
     offset: usize,
     cancellation: &Cancellation,
-) -> Result<Option<(&'a str, Range<usize>)>, HeaderError> {
+) -> Result<Attribute<'a>, HeaderError> {
     let invalid = || HeaderError::Invalid { offset };
     let mut cursor = Cursor {
         text: line,
@@ -291,8 +355,31 @@ fn attribute_name<'a>(
     if cursor.position == line.len() {
         return Err(invalid());
     }
+    if key.eq_ignore_ascii_case("VB_PredeclaredId") {
+        let begin = cursor.position;
+        while let Some(c) = cursor.peek().filter(|c| c.is_ascii_alphabetic()) {
+            cursor.advance(c.len_utf8())?;
+        }
+        let finish = cursor.position;
+        let literal = line.get(begin..finish).ok_or_else(invalid)?;
+        let value = if literal.eq_ignore_ascii_case("True") {
+            true
+        } else if literal.eq_ignore_ascii_case("False") {
+            false
+        } else {
+            return Err(invalid());
+        };
+        cursor.whitespace()?;
+        if cursor.position != line.len() {
+            return Err(invalid());
+        }
+        return Ok(Attribute::Predeclared(
+            value,
+            offset + begin..offset + finish,
+        ));
+    }
     if !key.eq_ignore_ascii_case("VB_Name") {
-        return Ok(None);
+        return Ok(Attribute::Other);
     }
     if cursor.peek() != Some('"') {
         return Err(invalid());
@@ -317,7 +404,7 @@ fn attribute_name<'a>(
     if cursor.position != line.len() {
         return Err(invalid());
     }
-    Ok(Some((name, offset + begin..offset + finish)))
+    Ok(Attribute::Name(name, offset + begin..offset + finish))
 }
 
 struct Cursor<'a> {

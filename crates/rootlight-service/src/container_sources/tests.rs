@@ -93,6 +93,343 @@ fn read_module(
 }
 
 #[test]
+fn native_predeclared_lookup_respects_enum_namespace_tiers() {
+    let root = tempdir();
+    let surface = b"Attribute VB_Name = \"Surface\"\r\nAttribute VB_PredeclaredId = True\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    let mut service = FirstSliceService::new(4).unwrap();
+    for (access, kind, local, expected) in [
+        ("Public", ProjectModuleKind::Procedural, "", false),
+        ("Private", ProjectModuleKind::Procedural, "", true),
+        ("Public", ProjectModuleKind::Class, "", true),
+        (
+            "Private",
+            ProjectModuleKind::Procedural,
+            "Private Enum FirstState\r\nSurface = 1\r\nEnd Enum\r\n",
+            false,
+        ),
+        (
+            "Private",
+            ProjectModuleKind::Procedural,
+            "Private Enum FirstState\r\nSurface = 1\r\nEnd Enum\r\nPrivate Enum SecondState\r\nSurface = 2\r\nEnd Enum\r\n",
+            false,
+        ),
+    ] {
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\n{local}Public Sub Run()\r\nSurface.Apply\r\nEnd Sub\r\n"
+        );
+        let globals = format!(
+            "Attribute VB_Name = \"Globals\"\r\n{access} Enum Phase\r\nSurface = 1\r\nEnd Enum\r\n"
+        );
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::native_book(
+                &[
+                    ("Client", client.as_bytes(), ProjectModuleKind::Procedural),
+                    ("Surface", surface, ProjectModuleKind::Class),
+                    ("Globals", globals.as_bytes(), kind),
+                ],
+                "\"Project\"",
+            ),
+        )
+        .unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let source = read_module(
+            &service,
+            receipt.generation,
+            derived_path("book.xlsm", "Client", ModuleKind::Procedural)
+                .unwrap()
+                .as_str(),
+            client.as_bytes(),
+        );
+        let site = document
+            .occurrences
+            .iter()
+            .find(|o| {
+                o.file == source.span().file() && o.syntax_kind == "vba.invoked_member.reference"
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            expected,
+            "{access} {kind:?} {local}"
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|r| r.subject == RelationEndpoint::Occurrence(site.id)
+                    && r.predicate == RelationPredicate::Calls)
+                .count(),
+            usize::from(expected)
+        );
+    }
+}
+
+#[test]
+fn native_predeclared_members_follow_effective_attributes_and_lexical_shadowing() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\nSurface.Apply\r\nEnd Sub\r\nPublic Sub Shadow(ByVal Surface As Object)\r\nSurface.Apply\r\nEnd Sub\r\nPublic Sub Typed(ByVal Surface As Worker)\r\nSurface.Apply\r\nEnd Sub\r\n";
+    let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    let enabled = "Attribute VB_PredeclaredId = True\r\n";
+    let fixed =
+        format!("Attribute VB_Name = \"Surface\"\r\n{enabled}Public Sub Apply()\r\nEnd Sub\r\n");
+    let globals = b"Attribute VB_Name = \"Globals\"\r\nPublic Other As Object\r\n";
+    let collision = b"Attribute VB_Name = \"Globals\"\r\nPublic Surface As Object\r\n";
+    fs::write(
+        root.path().join("fixed.xlsm"),
+        fixture::native_book(
+            &[
+                ("Client", client, ProjectModuleKind::Procedural),
+                ("Surface", fixed.as_bytes(), ProjectModuleKind::Class),
+                ("Worker", worker, ProjectModuleKind::Class),
+                ("Globals", globals, ProjectModuleKind::Procedural),
+            ],
+            "\"Project\"",
+        ),
+    )
+    .unwrap();
+    let mut previous = None;
+    for (attributes, kind, public, conflicting, expected) in [
+        ("", ProjectModuleKind::Class, true, false, false),
+        (enabled, ProjectModuleKind::Class, true, false, true),
+        (
+            "Attribute VB_PredeclaredId = True\r\nAttribute VB_PredeclaredId = False\r\n",
+            ProjectModuleKind::Class,
+            true,
+            false,
+            false,
+        ),
+        (
+            "Attribute VB_PredeclaredId = False\r\nAttribute VB_PredeclaredId = True\r\n",
+            ProjectModuleKind::Document {
+                automation_version: 0,
+            },
+            true,
+            false,
+            true,
+        ),
+        (enabled, ProjectModuleKind::Designer, true, false, true),
+        (enabled, ProjectModuleKind::Designer, false, false, false),
+        (enabled, ProjectModuleKind::Class, true, true, false),
+        (enabled, ProjectModuleKind::Class, true, false, true),
+    ] {
+        let body = format!(
+            "Attribute VB_Name = \"Surface\"\r\n{attributes}{} Sub Apply()\r\nEnd Sub\r\n",
+            if public { "Public" } else { "Private" }
+        );
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::native_book(
+                &[
+                    ("Client", client, ProjectModuleKind::Procedural),
+                    ("Surface", body.as_bytes(), kind),
+                    ("Worker", worker, ProjectModuleKind::Class),
+                    (
+                        "Globals",
+                        if conflicting {
+                            collision.as_slice()
+                        } else {
+                            globals.as_slice()
+                        },
+                        ProjectModuleKind::Procedural,
+                    ),
+                ],
+                "\"Project\"",
+            ),
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 8);
+        assert_ne!(Some(receipt.generation), previous);
+        previous = Some(receipt.generation);
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        for container in ["book.xlsm", "fixed.xlsm"] {
+            let source = read_module(
+                &service,
+                receipt.generation,
+                derived_path(container, "Surface", ModuleKind::Object)
+                    .unwrap()
+                    .as_str(),
+                if container == "book.xlsm" {
+                    body.as_bytes()
+                } else {
+                    fixed.as_bytes()
+                },
+            );
+            let client_source = read_module(
+                &service,
+                receipt.generation,
+                derived_path(container, "Client", ModuleKind::Procedural)
+                    .unwrap()
+                    .as_str(),
+                client,
+            );
+            let worker_source = read_module(
+                &service,
+                receipt.generation,
+                derived_path(container, "Worker", ModuleKind::Object)
+                    .unwrap()
+                    .as_str(),
+                worker,
+            );
+            let method = |file| {
+                document
+                    .entities
+                    .iter()
+                    .find(|e| {
+                        e.canonical_name == "Apply"
+                            && e.evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|s| s.span().file() == file)
+                    })
+                    .unwrap()
+            };
+            let target = method(source.span().file());
+            let typed_target = method(worker_source.span().file());
+            let mut sites: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|o| {
+                    o.file == client_source.span().file()
+                        && o.syntax_kind == "vba.invoked_member.reference"
+                })
+                .collect();
+            sites.sort_by_key(|o| o.source.span().start_byte());
+            assert_eq!(sites.len(), 3);
+            let targets = [
+                (expected || container == "fixed.xlsm").then_some(target.id),
+                None,
+                Some(typed_target.id),
+            ];
+            for (site, expected) in sites.iter().zip(targets) {
+                assert_eq!(
+                    match site.target {
+                        OccurrenceTarget::Resolved { symbol } => Some(symbol),
+                        _ => None,
+                    },
+                    expected,
+                    "{container}: {}",
+                    site.source.span().start_byte()
+                );
+                let edges: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|r| {
+                        r.predicate == RelationPredicate::Calls
+                            && r.subject == RelationEndpoint::Occurrence(site.id)
+                    })
+                    .collect();
+                assert_eq!(edges.len(), usize::from(expected.is_some()));
+                if let Some(expected) = expected {
+                    assert_eq!(edges[0].object, RelationEndpoint::Entity(expected));
+                }
+            }
+            if targets[0].is_some() {
+                let provenance = document
+                    .provenance
+                    .iter()
+                    .find(|p| p.id == sites[0].provenance)
+                    .unwrap();
+                let bytes = if container == "book.xlsm" {
+                    body.as_bytes()
+                } else {
+                    fixed.as_bytes()
+                };
+                assert!(provenance.evidence_sources.iter().any(|s| s.span().file()
+                    == source.span().file()
+                    && bytes.get(
+                        usize::try_from(s.span().start_byte()).unwrap()
+                            ..usize::try_from(s.span().end_byte()).unwrap()
+                    ) == Some(b"True".as_slice())));
+            }
+            let run = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.canonical_name == "Run"
+                        && e.evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|s| s.span().file() == client_source.span().file())
+                })
+                .unwrap();
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run.id]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(!relationships.data.truncated);
+            let refs = relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|g| &g.items)
+                .flat_map(|i| i.source_refs.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                refs,
+                if targets[0].is_some() {
+                    BTreeSet::from([sites[0].source.clone()])
+                } else {
+                    BTreeSet::new()
+                }
+            );
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .publish_prepared(prepared, &deadline())
+                .unwrap()
+                .logical_snapshot,
+            receipt.logical_snapshot
+        );
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document(),
+            document
+        );
+    }
+}
+
+#[test]
 fn native_extensions_resolve_declared_members_without_inventing_host_context() {
     let storage = tempdir();
     let root = tempdir();
@@ -1128,6 +1465,49 @@ fn prepared_fixture(
 }
 
 #[test]
+fn native_predeclared_inventory_retains_only_verified_effective_evidence() {
+    for (attributes, valid, expected) in [
+        (
+            "Attribute VB_PredeclaredId = True\r\n",
+            true,
+            Some(b"True".as_slice()),
+        ),
+        (
+            "Attribute VB_PredeclaredId = True\r\nAttribute VB_PredeclaredId = False\r\n",
+            true,
+            None,
+        ),
+        ("Attribute VB_PredeclaredId = \"True\"\r\n", false, None),
+        ("", true, None),
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Object\"\r\n{attributes}Public Sub Run()\r\nEnd Sub\r\n"
+        );
+        let bytes = fixture::native_book(
+            &[("Object", source.as_bytes(), ProjectModuleKind::Class)],
+            "\"Project\"",
+        );
+        let (prepared, snapshots) = prepared_fixture(&bytes, 1, 1_000_000, &deadline());
+        let project = &prepared.native_projects[0];
+        assert_eq!(project.inventory_complete, valid);
+        let member = &project.members[0];
+        let retained = snapshots[&member.file.unwrap()].content();
+        assert_eq!(retained, source.as_bytes());
+        assert_eq!(
+            member.predeclared_id.clone().map(|range| &retained[range]),
+            expected
+        );
+        assert_eq!(
+            prepared
+                .native_vba_modules
+                .contains_key(&member.file.unwrap()),
+            valid
+        );
+        assert_eq!(prepared.issues.is_empty(), valid);
+    }
+}
+
+#[test]
 fn native_project_inventory_keeps_unadmitted_and_unverified_members() {
     let bytes = fixture::book(&[("Alpha", FIRST), ("Beta", SECOND)]);
     for (files, admitted) in [(1, 1), (2, 2)] {
@@ -1203,6 +1583,7 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
             file: Some(file.id),
             name: Some(name.to_owned()),
             kind: Some(NativeClassicMemberKind::Procedural),
+            predeclared_id: None,
         });
         inputs.push(ClassicProjectSource::new(file.id, body));
     }
@@ -1268,6 +1649,20 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
         Err(ResolutionError::ClassicSourceIdentity)
     ));
     project.content_hash = container.content_hash;
+    for range in [0..4, 0..usize::MAX] {
+        project.members[0].predeclared_id = Some(range);
+        assert!(matches!(
+            engine.apply_document_bounded_with_native_projects(
+                document.clone(),
+                context,
+                &inputs,
+                std::slice::from_ref(&project),
+                &deadline()
+            ),
+            Err(ResolutionError::ClassicSourceIdentity)
+        ));
+    }
+    project.members[0].predeclared_id = None;
     inputs[0] = ClassicProjectSource::new(project.members[0].file.unwrap(), b"stale source");
     assert!(matches!(
         engine.apply_document_bounded_with_native_projects(
