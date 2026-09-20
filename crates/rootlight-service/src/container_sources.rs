@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/2";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/3";
 
 #[cfg(test)]
 mod tests;
@@ -26,6 +26,7 @@ pub(super) struct PreparedSources {
     pub fingerprints: Vec<InputFingerprint>,
     origins: Vec<(FileId, FileId)>,
     native_vba_modules: BTreeMap<FileId, rootlight_adapter_sdk::NativeVbaModuleKind>,
+    incomplete_native_contexts: BTreeSet<FileId>,
     pub(super) native_projects: Vec<rootlight_resolve::NativeClassicProject>,
     issues: Vec<(FileId, String)>,
 }
@@ -259,6 +260,18 @@ impl PreparedSources {
             let CoverageScope::File(file) = record.scope else {
                 continue;
             };
+            // File/source and explicit declaration inventories stay exact; the
+            // additional host namespace has not been enumerated or resolved.
+            if self.incomplete_native_contexts.contains(&file)
+                && matches!(
+                    record.domain,
+                    IrFactDomain::Occurrences | IrFactDomain::Relations
+                )
+            {
+                record.status = CoverageStatus::Unknown;
+                record.id =
+                    derive_coverage_record_id(record).map_err(|_| FirstSliceError::Identity)?;
+            }
             if let Some(count) = increments.get(&(file, record.domain)) {
                 record.discovered = record
                     .discovered
@@ -405,12 +418,15 @@ fn prepare_office(
             .and_then(|m| m.directory_records().get(ordinal));
         let kind = record
             .and_then(|r| r.outcome().ok())
-            .and_then(|m| match m.kind() {
-                ProjectModuleKind::Class => Some(rootlight_resolve::NativeClassicMemberKind::Class),
+            .map(|m| match m.kind() {
+                ProjectModuleKind::Class => rootlight_resolve::NativeClassicMemberKind::Class,
                 ProjectModuleKind::Procedural => {
-                    Some(rootlight_resolve::NativeClassicMemberKind::Procedural)
+                    rootlight_resolve::NativeClassicMemberKind::Procedural
                 }
-                ProjectModuleKind::Document { .. } | ProjectModuleKind::Designer => None,
+                ProjectModuleKind::Document { .. } => {
+                    rootlight_resolve::NativeClassicMemberKind::Document
+                }
+                ProjectModuleKind::Designer => rootlight_resolve::NativeClassicMemberKind::Designer,
             });
         native_project
             .members
@@ -556,6 +572,17 @@ fn prepare_office(
             .ok_or(FirstSliceError::Identity)?
             .file = Some(file);
         native_project.inventory_complete &= verified;
+        if verified
+            && matched.is_some_and(|m| {
+                matches!(
+                    m.kind(),
+                    ProjectModuleKind::Document { .. } | ProjectModuleKind::Designer
+                )
+            })
+        {
+            prepared.incomplete_native_contexts.insert(file);
+            prepared.issue(file, "vba extension context incomplete: project resolution includes explicit source declarations; host-defined members, designer controls and default instances are not established".to_owned())?;
+        }
         if verified {
             prepared.native_vba_modules.insert(
                 file,

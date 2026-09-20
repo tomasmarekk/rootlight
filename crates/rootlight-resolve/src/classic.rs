@@ -69,7 +69,7 @@ pub struct NativeClassicMember {
     pub file: Option<FileId>,
     /// Decoded metadata spelling; the resolver still checks its syntax and entity.
     pub name: Option<String>,
-    /// Ordinary class or procedural module; host/designer declarations stay unsupported.
+    /// Source module category; extension categories do not supply host-defined members.
     pub kind: Option<NativeClassicMemberKind>,
 }
 
@@ -80,6 +80,10 @@ pub enum NativeClassicMemberKind {
     Class,
     /// A standard procedural module.
     Procedural,
+    /// Source declarations extending a host document class.
+    Document,
+    /// Source declarations extending a designer class, not its generated controls.
+    Designer,
 }
 
 #[derive(Default)]
@@ -375,7 +379,16 @@ impl<'a> ClassicIndex<'a> {
                 members.push(Member {
                     name: name.unwrap_or_default(),
                     location: MemberLocation::Indexed(member.file),
-                    class: member.kind == Some(NativeClassicMemberKind::Class),
+                    // Extension source declarations belong to their named class
+                    // (MS-VBAL 4.2.1/5.2.4). Host members are not inferred here.
+                    class: matches!(
+                        member.kind,
+                        Some(
+                            NativeClassicMemberKind::Class
+                                | NativeClassicMemberKind::Document
+                                | NativeClassicMemberKind::Designer
+                        )
+                    ),
                 });
             }
             inventories.push((

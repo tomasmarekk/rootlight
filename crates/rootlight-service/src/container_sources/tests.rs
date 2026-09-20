@@ -93,6 +93,279 @@ fn read_module(
 }
 
 #[test]
+fn native_extensions_resolve_declared_members_without_inventing_host_context() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal value As Surface, ByVal worker As Worker)\r\nvalue.Apply\r\nworker.Perform\r\nvalue.HostOnly\r\nSurface.Apply\r\nEnd Sub\r\n";
+    let public = b"Attribute VB_Name = \"Surface\"\r\nAttribute VB_PredeclaredId = False\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    let private = b"Attribute VB_Name = \"Surface\"\r\nAttribute VB_PredeclaredId = False\r\nPrivate Sub Apply()\r\nEnd Sub\r\n";
+    let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Perform()\r\nEnd Sub\r\n";
+    let document_kind = ProjectModuleKind::Document {
+        automation_version: 0,
+    };
+    fs::write(
+        root.path().join("fixed.xlsm"),
+        fixture::native_book(
+            &[
+                ("Client", client, ProjectModuleKind::Procedural),
+                ("Surface", public, document_kind),
+                ("Worker", worker, ProjectModuleKind::Class),
+            ],
+            "\"Project\"",
+        ),
+    )
+    .unwrap();
+    let mut previous = None;
+    for (kind, body, callable) in [
+        (ProjectModuleKind::Class, public.as_slice(), true),
+        (document_kind, public, true),
+        (ProjectModuleKind::Designer, public, true),
+        (ProjectModuleKind::Designer, private, false),
+        (ProjectModuleKind::Class, public, true),
+    ] {
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::native_book(
+                &[
+                    ("Client", client, ProjectModuleKind::Procedural),
+                    ("Surface", body, kind),
+                    ("Worker", worker, ProjectModuleKind::Class),
+                ],
+                "\"Project\"",
+            ),
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 6);
+        assert_ne!(Some(receipt.generation), previous);
+        previous = Some(receipt.generation);
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let warnings: Vec<_> = document
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.starts_with("vba extension context incomplete:"))
+            .collect();
+        let active_extension = kind != ProjectModuleKind::Class;
+        assert_eq!(warnings.len(), 1 + usize::from(active_extension));
+        for container in ["book.xlsm", "fixed.xlsm"] {
+            let surface_path = derived_path(container, "Surface", ModuleKind::Object).unwrap();
+            let source = read_module(
+                &service,
+                receipt.generation,
+                surface_path.as_str(),
+                if container == "book.xlsm" {
+                    body
+                } else {
+                    public
+                },
+            );
+            let client_path = derived_path(container, "Client", ModuleKind::Procedural).unwrap();
+            let client_source =
+                read_module(&service, receipt.generation, client_path.as_str(), client);
+            let surface = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.kind == EntityKind::Class
+                        && e.canonical_name == "Surface"
+                        && e.evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|s| s.span().file() == source.span().file())
+                })
+                .unwrap();
+            let method = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.canonical_name == "Apply"
+                        && e.evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|s| s.span().file() == source.span().file())
+                })
+                .unwrap();
+            let type_site = document
+                .occurrences
+                .iter()
+                .find(|o| {
+                    o.file == client_source.span().file()
+                        && o.syntax_kind == "vba.direct_type_identifier.reference"
+                        && &client[usize::try_from(o.source.span().start_byte()).unwrap()
+                            ..usize::try_from(o.source.span().end_byte()).unwrap()]
+                            == b"Surface"
+                })
+                .unwrap();
+            assert_eq!(
+                type_site.target,
+                OccurrenceTarget::Resolved { symbol: surface.id }
+            );
+            let mut calls = BTreeSet::new();
+            for (text, expected) in [
+                ("value.Apply", callable || container == "fixed.xlsm"),
+                ("worker.Perform", true),
+                ("value.HostOnly", false),
+                ("Surface.Apply", false),
+            ] {
+                let begin = u64::try_from(std::str::from_utf8(client).unwrap().find(text).unwrap())
+                    .unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|o| {
+                        o.file == client_source.span().file()
+                            && o.syntax_kind == "vba.invoked_member.reference"
+                            && o.source.span().start_byte() == begin
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    expected,
+                    "{container} {text}"
+                );
+                let edges: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|r| {
+                        r.predicate == RelationPredicate::Calls
+                            && r.subject == RelationEndpoint::Occurrence(site.id)
+                    })
+                    .collect();
+                assert_eq!(edges.len(), usize::from(expected), "{container} {text}");
+                if expected {
+                    calls.insert(site.source.clone());
+                    if text == "value.Apply" {
+                        assert_eq!(
+                            site.target,
+                            OccurrenceTarget::Resolved { symbol: method.id }
+                        );
+                        assert_eq!(edges[0].object, RelationEndpoint::Entity(method.id));
+                    }
+                }
+            }
+            let run = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.canonical_name == "Run"
+                        && e.evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|s| s.span().file() == client_source.span().file())
+                })
+                .unwrap();
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([run.id]),
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Outbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(!relationships.data.truncated);
+            assert_eq!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.items)
+                    .flat_map(|i| i.source_refs.iter().cloned())
+                    .collect::<BTreeSet<_>>(),
+                calls
+            );
+            let scoped: Vec<_> = warnings
+                .iter()
+                .filter(|d| {
+                    d.source
+                        .as_ref()
+                        .is_some_and(|s| s.span().file() == source.span().file())
+                })
+                .collect();
+            let extension = container == "fixed.xlsm" || active_extension;
+            if extension {
+                assert_eq!(
+                    service
+                        .source_file_coverage(receipt.generation, source.span().file())
+                        .unwrap()
+                        .status,
+                    CoverageStatus::Unknown
+                );
+            }
+            for coverage in document
+                .coverage_records
+                .iter()
+                .filter(|c| c.scope == CoverageScope::File(source.span().file()))
+            {
+                if matches!(
+                    coverage.domain,
+                    IrFactDomain::Files | IrFactDomain::Entities
+                ) {
+                    assert_eq!(coverage.status, CoverageStatus::Complete);
+                    assert_eq!(coverage.discovered, coverage.indexed);
+                    assert_eq!(coverage.skipped, 0);
+                }
+                if matches!(
+                    coverage.domain,
+                    IrFactDomain::Occurrences | IrFactDomain::Relations
+                ) {
+                    assert_eq!(coverage.status == CoverageStatus::Unknown, extension);
+                }
+            }
+            assert_eq!(
+                scoped.len(),
+                usize::from(container == "fixed.xlsm" || active_extension)
+            );
+            for diagnostic in scoped {
+                assert_eq!(diagnostic.coverage_effect, CoverageStatus::Unknown);
+                assert_eq!(diagnostic.source.as_ref(), Some(&source));
+            }
+        }
+        let rebuilt = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .publish_prepared(rebuilt, &deadline())
+                .unwrap()
+                .logical_snapshot,
+            receipt.logical_snapshot
+        );
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document(),
+            document
+        );
+    }
+}
+
+#[test]
 fn native_project_links_follow_container_membership_and_metadata_after_restart() {
     let storage = tempdir();
     let root = tempdir();

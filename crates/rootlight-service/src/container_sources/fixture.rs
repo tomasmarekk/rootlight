@@ -378,9 +378,40 @@ pub(super) fn typed_book(modules: &[(&str, &[u8], bool)]) -> Vec<u8> {
 }
 
 pub(super) fn book_with_project_value(modules: &[(&str, &[u8], bool)], value: &str) -> Vec<u8> {
+    use rootlight_source::vba_project::ProjectModuleKind;
+    native_book(
+        &modules
+            .iter()
+            .map(|(name, body, class)| {
+                (
+                    *name,
+                    *body,
+                    if *class {
+                        ProjectModuleKind::Class
+                    } else {
+                        ProjectModuleKind::Procedural
+                    },
+                )
+            })
+            .collect::<Vec<_>>(),
+        value,
+    )
+}
+
+// These authored source fixtures deliberately omit host/type-library and
+// designer-generated definitions. Tests must require explicit coverage gaps.
+pub(super) fn native_book(
+    modules: &[(
+        &str,
+        &[u8],
+        rootlight_source::vba_project::ProjectModuleKind,
+    )],
+    value: &str,
+) -> Vec<u8> {
+    use rootlight_source::vba_project::ProjectModuleKind;
     let declarations = modules
         .iter()
-        .map(|(name, _, class)| (*name, 0, *class))
+        .map(|(name, _, kind)| (*name, 0, *kind != ProjectModuleKind::Procedural))
         .collect::<Vec<_>>();
     let mut streams = modules
         .iter()
@@ -390,7 +421,12 @@ pub(super) fn book_with_project_value(modules: &[(&str, &[u8], bool)], value: &s
         name: "PROJECT",
         bytes: format!("ID=\"{{01234567-89AB-CDEF-0123-456789ABCDEF}}\"\r\n{}Name={value}\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n", modules
             .iter()
-            .map(|(name, _, class)| format!("{}={name}\r\n", if *class {"Class"} else {"Module"}))
+            .map(|(name, _, kind)| match kind {
+                ProjectModuleKind::Class => format!("Class={name}\r\n"),
+                ProjectModuleKind::Procedural => format!("Module={name}\r\n"),
+                ProjectModuleKind::Document { automation_version } => format!("Document={name}/&H{automation_version:08X}\r\n"),
+                ProjectModuleKind::Designer => format!("BaseClass={name}\r\n"),
+            })
             .collect::<String>())
             .into_bytes(),
         inside: false,
