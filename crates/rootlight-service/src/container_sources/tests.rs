@@ -93,6 +93,176 @@ fn read_module(
 }
 
 #[test]
+fn native_project_links_follow_container_membership_and_metadata_after_restart() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal value As Worker)\r\nvalue.Apply\r\nEnd Sub\r\n";
+    let class = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    fs::write(
+        root.path().join("fixed.xlsm"),
+        fixture::typed_book(&[("Client", client, false), ("Worker", class, true)]),
+    )
+    .unwrap();
+    let mut previous = None;
+    for (project_name, sibling, worker, linked, callable) in [
+        ("\"Project\"", SECOND, class.as_slice(), true, true),
+        ("\"Different\"", SECOND, class, false, false),
+        ("\"Project\"", FIRST, class, false, false),
+        (
+            "\"Project\"",
+            SECOND,
+            b"Attribute VB_Name = \"Worker\"\r\nPrivate Sub Apply()\r\nEnd Sub\r\n",
+            true,
+            false,
+        ),
+        ("\"Project\"", SECOND, class, true, true),
+    ] {
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::book_with_project_value(
+                &[
+                    ("Client", client, false),
+                    ("Worker", worker, true),
+                    ("Beta", sibling, false),
+                ],
+                project_name,
+            ),
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 5);
+        assert_ne!(previous, Some(receipt.generation));
+        previous = Some(receipt.generation);
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        for container in ["book.xlsm", "fixed.xlsm"] {
+            let client_path = derived_path(container, "Client", ModuleKind::Procedural).unwrap();
+            let class_path = derived_path(container, "Worker", ModuleKind::Object).unwrap();
+            let source = read_module(&service, receipt.generation, client_path.as_str(), client);
+            let target_file = document
+                .files
+                .iter()
+                .find(|f| f.path == class_path.as_str())
+                .unwrap();
+            for (syntax, name, expected) in [
+                ("vba.direct_type_identifier.reference", "Worker", linked),
+                ("vba.invoked_member.reference", "Apply", callable),
+            ] {
+                let sites: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|o| o.file == source.span().file() && o.syntax_kind == syntax)
+                    .collect();
+                assert_eq!(sites.len(), 1, "{container} {syntax}");
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|e| {
+                        e.canonical_name == name
+                            && e.evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|s| s.span().file() == target_file.id)
+                    })
+                    .unwrap();
+                if expected || container == "fixed.xlsm" {
+                    assert_eq!(
+                        sites[0].target,
+                        OccurrenceTarget::Resolved { symbol: target.id },
+                        "{container} {syntax}"
+                    );
+                    let explained = service
+                        .symbol_explain(receipt.generation, target.id, &deadline())
+                        .unwrap();
+                    assert_eq!(explained.data.entity.id, target.id);
+                    assert_eq!(
+                        explained
+                            .data
+                            .entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .unwrap()
+                            .span()
+                            .file(),
+                        target_file.id
+                    );
+                } else {
+                    assert!(
+                        matches!(sites[0].target, OccurrenceTarget::Unresolved { .. }),
+                        "{container} {syntax}"
+                    );
+                }
+            }
+            let container_file = document.files.iter().find(|f| f.path == container).unwrap();
+            let roots: Vec<_> = document
+                .provenance
+                .iter()
+                .filter(|p| {
+                    p.rule.as_deref() == Some("native-classic-project-membership-v1.leaf")
+                        && p.input_sources
+                            .iter()
+                            .chain(&p.evidence_sources)
+                            .any(|s| s.span().file() == container_file.id)
+                })
+                .collect();
+            assert_eq!(!roots.is_empty(), linked || container == "fixed.xlsm");
+            for provenance in roots {
+                assert_eq!(provenance.language, "vba");
+                for reference in provenance
+                    .input_sources
+                    .iter()
+                    .chain(&provenance.evidence_sources)
+                {
+                    assert_eq!(reference.generation(), receipt.generation);
+                    let file = document
+                        .files
+                        .iter()
+                        .find(|f| f.id == reference.span().file())
+                        .unwrap();
+                    assert!(
+                        file.path == container
+                            || file.path.starts_with(&format!("{container}/@vba/"))
+                    );
+                }
+            }
+        }
+        let rebuilt = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(rebuilt, &deadline()).unwrap();
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document(),
+            document
+        );
+    }
+}
+
+#[test]
 fn native_project_identity_issues_preserve_sources_and_follow_metadata_after_restart() {
     let storage = tempdir();
     let root = tempdir();
@@ -682,6 +852,160 @@ fn prepared_fixture(
     )
     .unwrap();
     (prepared, snapshots)
+}
+
+#[test]
+fn native_project_inventory_keeps_unadmitted_and_unverified_members() {
+    let bytes = fixture::book(&[("Alpha", FIRST), ("Beta", SECOND)]);
+    for (files, admitted) in [(1, 1), (2, 2)] {
+        let (prepared, snapshots) = prepared_fixture(&bytes, files, 1_000_000, &deadline());
+        assert_eq!(prepared.native_projects.len(), 1);
+        let project = &prepared.native_projects[0];
+        assert_eq!(project.content_hash, content_hash(&bytes));
+        assert_eq!(snapshots[&project.container].content(), bytes);
+        assert_eq!(project.name.as_deref(), Some("Project"));
+        assert_eq!(project.members.len(), 2);
+        assert_eq!(
+            project.members.iter().filter(|m| m.file.is_some()).count(),
+            admitted
+        );
+        assert_eq!(project.members[0].name.as_deref(), Some("Alpha"));
+        assert_eq!(project.members[1].name.as_deref(), Some("Beta"));
+    }
+    let bytes = fixture::book(&[("Alpha", FIRST), ("Beta", FIRST)]);
+    let (prepared, _) = prepared_fixture(&bytes, 2, 1_000_000, &deadline());
+    let project = &prepared.native_projects[0];
+    assert!(!project.inventory_complete);
+    assert_eq!(project.members.len(), 2);
+    assert!(project.members.iter().all(|m| m.file.is_some()));
+    assert_eq!(
+        prepared
+            .inputs
+            .iter()
+            .filter(|i| i
+                .language_signals
+                .iter()
+                .any(|s| s.language == "vba-unverified"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn native_project_resolution_checks_identity_and_charges_preparation_work() {
+    use rootlight_resolve::{
+        ClassicProjectSource, NativeClassicMember, NativeClassicMemberKind, NativeClassicProject,
+        ResolutionError,
+    };
+    let root = tempdir();
+    let bytes = fixture::book(&[("Alpha", FIRST), ("Beta", SECOND)]);
+    fs::write(root.path().join("book.xlsm"), &bytes).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let container = document
+        .files
+        .iter()
+        .find(|f| f.path == "book.xlsm")
+        .unwrap();
+    let mut project = NativeClassicProject {
+        container: container.id,
+        content_hash: container.content_hash,
+        name: Some("Project".to_owned()),
+        members: Vec::new(),
+        inventory_complete: true,
+    };
+    let mut inputs = Vec::new();
+    for (name, body) in [("Alpha", FIRST), ("Beta", SECOND)] {
+        let path = derived_path("book.xlsm", name, ModuleKind::Procedural).unwrap();
+        let file = document
+            .files
+            .iter()
+            .find(|f| f.path == path.as_str())
+            .unwrap();
+        project.members.push(NativeClassicMember {
+            file: Some(file.id),
+            name: Some(name.to_owned()),
+            kind: Some(NativeClassicMemberKind::Procedural),
+        });
+        inputs.push(ClassicProjectSource::new(file.id, body));
+    }
+    let context = ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED));
+    let engine = ResolutionEngine::default();
+    let (complete, estimate) = engine
+        .apply_document_bounded_with_native_projects(
+            document.clone(),
+            context,
+            &inputs,
+            std::slice::from_ref(&project),
+            &deadline(),
+        )
+        .unwrap();
+    assert!(estimate.fits());
+    assert_eq!(&complete, document);
+    let limits = ResolutionLimits::with_work_limit(8, 1).unwrap();
+    let (bounded, estimate) = ResolutionEngine::new(limits)
+        .apply_document_bounded_with_native_projects(
+            document.clone(),
+            context,
+            &inputs,
+            std::slice::from_ref(&project),
+            &deadline(),
+        )
+        .unwrap();
+    assert!(!estimate.fits());
+    assert_eq!(&bounded, document);
+    let warned = apply_bounded_resolution_with_native_projects(
+        document.clone(),
+        limits,
+        context,
+        &inputs,
+        std::slice::from_ref(&project),
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        warned
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "resolution-work-bounded")
+    );
+    assert!(matches!(
+        engine.apply_document_bounded_with_native_projects(
+            document.clone(),
+            context,
+            &inputs,
+            &[project.clone(), project.clone()],
+            &deadline()
+        ),
+        Err(ResolutionError::ClassicSourceIdentity)
+    ));
+    project.content_hash = content_hash(b"stale container");
+    assert!(matches!(
+        engine.apply_document_bounded_with_native_projects(
+            document.clone(),
+            context,
+            &inputs,
+            std::slice::from_ref(&project),
+            &deadline()
+        ),
+        Err(ResolutionError::ClassicSourceIdentity)
+    ));
+    project.content_hash = container.content_hash;
+    inputs[0] = ClassicProjectSource::new(project.members[0].file.unwrap(), b"stale source");
+    assert!(matches!(
+        engine.apply_document_bounded_with_native_projects(
+            document.clone(),
+            context,
+            &inputs,
+            &[project],
+            &deadline()
+        ),
+        Err(ResolutionError::ClassicSourceIdentity)
+    ));
 }
 
 #[test]

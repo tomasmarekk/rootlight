@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/1";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/2";
 
 #[cfg(test)]
 mod tests;
@@ -26,6 +26,7 @@ pub(super) struct PreparedSources {
     pub fingerprints: Vec<InputFingerprint>,
     origins: Vec<(FileId, FileId)>,
     native_vba_modules: BTreeMap<FileId, rootlight_adapter_sdk::NativeVbaModuleKind>,
+    pub(super) native_projects: Vec<rootlight_resolve::NativeClassicProject>,
     issues: Vec<(FileId, String)>,
 }
 
@@ -378,6 +379,47 @@ fn prepare_office(
             }
         }
     }
+    // Keep the entire directory inventory before admitting any module bytes.
+    // An unreadable or unadmitted sibling can compete with every surviving type.
+    let mut native_project = rootlight_resolve::NativeClassicProject {
+        container: input.file,
+        content_hash: snapshot.content_hash(),
+        name: membership
+            .as_ref()
+            .and_then(|m| m.identity().name().ok())
+            .map(str::to_owned),
+        members: Vec::new(),
+        inventory_complete: membership.as_ref().is_some_and(|m| {
+            m.project_records().iter().all(|r| r.outcome().is_ok())
+                && m.directory_records().len() == project.modules().len()
+        }),
+    };
+    native_project
+        .members
+        .try_reserve_exact(project.modules().len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    for ordinal in 0..project.modules().len() {
+        check_cancellation(cancellation)?;
+        let record = membership
+            .as_ref()
+            .and_then(|m| m.directory_records().get(ordinal));
+        let kind = record
+            .and_then(|r| r.outcome().ok())
+            .and_then(|m| match m.kind() {
+                ProjectModuleKind::Class => Some(rootlight_resolve::NativeClassicMemberKind::Class),
+                ProjectModuleKind::Procedural => {
+                    Some(rootlight_resolve::NativeClassicMemberKind::Procedural)
+                }
+                ProjectModuleKind::Document { .. } | ProjectModuleKind::Designer => None,
+            });
+        native_project
+            .members
+            .push(rootlight_resolve::NativeClassicMember {
+                file: None,
+                name: record.and_then(|r| r.name()).map(str::to_owned),
+                kind,
+            });
+    }
     for (ordinal, descriptor) in project.modules().iter().enumerate() {
         check_cancellation(cancellation)?;
         if budget.files == 0 || budget.bytes == 0 || budget.work == 0 {
@@ -508,6 +550,12 @@ fn prepare_office(
             decisive_rule: None,
         });
         prepared.origins.push((file, input.file));
+        native_project
+            .members
+            .get_mut(ordinal)
+            .ok_or(FirstSliceError::Identity)?
+            .file = Some(file);
+        native_project.inventory_complete &= verified;
         if verified {
             prepared.native_vba_modules.insert(
                 file,
@@ -526,6 +574,11 @@ fn prepare_office(
             .ok_or(FirstSliceError::Limits)?;
         budget.files -= 1;
     }
+    prepared
+        .native_projects
+        .try_reserve(1)
+        .map_err(|_| FirstSliceError::Limits)?;
+    prepared.native_projects.push(native_project);
     Ok(())
 }
 

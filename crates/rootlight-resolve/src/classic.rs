@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{FactId, FileId, content_hash};
+use rootlight_ids::{ContentHash, FactId, FileId, content_hash};
 use rootlight_ir::{
     Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityKind,
     EntityRecord, EntityVisibility, FactDomain, FactRef, OccurrenceRecord, OccurrenceRole,
@@ -42,6 +42,46 @@ impl<'a> ClassicProjectSource<'a> {
     }
 }
 
+/// Host-supplied native project inventory bound to one immutable container.
+///
+/// The host must reconcile both metadata inventories and source headers from
+/// this exact container. This is an analysis input, not an untrusted wire format.
+/// Missing or unsupported declarations must remain represented, never filtered.
+#[derive(Debug, Clone)]
+pub struct NativeClassicProject {
+    /// Indexed container that owns every member, independent of project spelling.
+    pub container: FileId,
+    /// Hash of the original bytes used to verify the inventory.
+    pub content_hash: ContentHash,
+    /// Reconciled project name, absent when either metadata identity is invalid.
+    pub name: Option<String>,
+    /// All directory declarations, including modules not admitted for analysis.
+    pub members: Vec<NativeClassicMember>,
+    /// Both metadata inventories and all retained source headers were reconciled.
+    /// Missing member fields independently prevent resolution even when this is true.
+    pub inventory_complete: bool,
+}
+
+/// One native declaration; absent fields are barriers to project-wide uniqueness.
+#[derive(Debug, Clone)]
+pub struct NativeClassicMember {
+    /// Exact retained file identity, absent when extraction or admission failed.
+    pub file: Option<FileId>,
+    /// Decoded metadata spelling; the resolver still checks its syntax and entity.
+    pub name: Option<String>,
+    /// Ordinary class or procedural module; host/designer declarations stay unsupported.
+    pub kind: Option<NativeClassicMemberKind>,
+}
+
+/// Native categories whose project lookup matches the classic BASIC resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeClassicMemberKind {
+    /// An ordinary class, not a host document or designer object.
+    Class,
+    /// A standard procedural module.
+    Procedural,
+}
+
 #[derive(Default)]
 pub(crate) struct ClassicIndex<'a> {
     proofs: BTreeMap<FactId, Proof<'a>>,
@@ -55,19 +95,26 @@ pub(crate) struct Proof<'a> {
 
 pub(crate) struct ProjectEvidence {
     pub(crate) manifest: FileId,
+    pub(crate) native: bool,
     pub(crate) sources: Vec<SourceRef>,
     pub(crate) facts: Vec<FactRef>,
 }
 
 struct Member {
     name: String,
-    path: String,
+    location: MemberLocation,
     class: bool,
+}
+
+enum MemberLocation {
+    Path(String),
+    Indexed(Option<FileId>),
 }
 
 struct Project {
     name: String,
     members: Vec<Member>,
+    complete: bool,
 }
 
 fn is_manifest(path: &str) -> bool {
@@ -183,7 +230,7 @@ fn parse_project(
             }
             members.push(Member {
                 name,
-                path,
+                location: MemberLocation::Path(path),
                 class: key.eq_ignore_ascii_case("Class"),
             });
         } else if [
@@ -203,7 +250,11 @@ fn parse_project(
     }
     Ok(project_name
         .filter(|_| project_type && !members.is_empty())
-        .map(|name| Project { name, members }))
+        .map(|name| Project {
+            name,
+            members,
+            complete: true,
+        }))
 }
 
 impl<'a> ClassicIndex<'a> {
@@ -212,6 +263,7 @@ impl<'a> ClassicIndex<'a> {
         coverage: &[CoverageRecord],
         occurrences: &[OccurrenceRecord],
         inputs: &[ClassicProjectSource<'_>],
+        native: &[NativeClassicProject],
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
     ) -> Result<Self, ResolutionError> {
@@ -219,7 +271,7 @@ impl<'a> ClassicIndex<'a> {
         let entities = &index.entities;
         let provenance = &index.provenance;
         let mut result = Self::default();
-        if !files.values().any(|file| is_manifest(&file.path)) {
+        if native.is_empty() && !files.values().any(|file| is_manifest(&file.path)) {
             return Ok(result);
         }
         let mut sources = BTreeMap::new();
@@ -284,6 +336,7 @@ impl<'a> ClassicIndex<'a> {
         }
         let mut memberships = BTreeMap::new();
         let mut projects = Vec::new();
+        let mut inventories = Vec::new();
         for manifest in files.values().filter(|file| is_manifest(&file.path)) {
             cancellation.check()?;
             let Some(bytes) = sources.get(&manifest.id) else {
@@ -292,12 +345,62 @@ impl<'a> ClassicIndex<'a> {
             let Some(project) = parse_project(&manifest.path, bytes, cancellation, work)? else {
                 return Ok(result);
             };
+            inventories.push((*manifest, project, false));
+        }
+        let mut native_containers = BTreeSet::new();
+        for project in native {
+            cancellation.check()?;
+            work.consume()?;
+            if !native_containers.insert(project.container) {
+                return Err(ResolutionError::ClassicSourceIdentity);
+            }
+            let manifest = files
+                .get(&project.container)
+                .filter(|file| {
+                    file.content_hash == project.content_hash && file.language == "office-open-xml"
+                })
+                .ok_or(ResolutionError::ClassicSourceIdentity)?;
+            if project.members.len() > MAX_MANIFEST_ITEMS {
+                return Ok(result);
+            }
+            let name = project.name.as_deref().and_then(identifier);
+            let mut complete =
+                project.inventory_complete && name.is_some() && !project.members.is_empty();
+            let mut members = Vec::new();
+            for member in &project.members {
+                cancellation.check()?;
+                work.consume()?;
+                let name = member.name.as_deref().and_then(identifier);
+                complete &= name.is_some() && member.file.is_some() && member.kind.is_some();
+                members.push(Member {
+                    name: name.unwrap_or_default(),
+                    location: MemberLocation::Indexed(member.file),
+                    class: member.kind == Some(NativeClassicMemberKind::Class),
+                });
+            }
+            inventories.push((
+                *manifest,
+                Project {
+                    name: name.unwrap_or_default(),
+                    members,
+                    complete,
+                },
+                true,
+            ));
+        }
+        let member_file = |member: &Member| match &member.location {
+            MemberLocation::Path(path) => paths.get(path).copied().flatten(),
+            MemberLocation::Indexed(file) => file.and_then(|file| files.get(&file).copied()),
+        };
+        for (manifest, project, native) in inventories {
+            cancellation.check()?;
             let members = project.members;
             // Project inventories can overlap. Admit their retained evidence
             // before allocation rather than relying on later ambiguity pruning.
             work.consume_many(4)?;
             let mut evidence = ProjectEvidence {
                 manifest: manifest.id,
+                native,
                 sources: Vec::new(),
                 facts: vec![FactRef::File(manifest.id)],
             };
@@ -309,19 +412,13 @@ impl<'a> ClassicIndex<'a> {
             work.consume_many(members.len())?;
             let member_files: Vec<_> = members
                 .iter()
-                .filter_map(|member| {
-                    paths
-                        .get(&member.path)
-                        .copied()
-                        .flatten()
-                        .map(|file| file.id)
-                })
+                .filter_map(|member| member_file(member).map(|file| file.id))
                 .collect();
-            let mut complete = true;
+            let mut complete = project.complete;
             for member in members {
                 cancellation.check()?;
                 work.consume_many(5)?;
-                let Some(file) = paths.get(&member.path).copied().flatten() else {
+                let Some(file) = member_file(&member) else {
                     complete = false;
                     break;
                 };
@@ -676,7 +773,8 @@ mod tests {
         let project = parse("app/project.vbp", b"Type=OleDll\r\nName=\"Primary\"\r\nClass=Worker; ..\\shared\\Worker.cls\r\nModule=Client; Client.bas\r\n", &cancel).unwrap().unwrap();
         assert_eq!(project.name, "primary");
         assert_eq!(project.members.len(), 2);
-        assert_eq!(project.members[0].path, "shared/worker.cls");
+        assert!(matches!(&project.members[0].location,
+            MemberLocation::Path(path) if path == "shared/worker.cls"));
         assert!(project.members[0].class);
         assert_eq!(project.members[1].name, "client");
     }

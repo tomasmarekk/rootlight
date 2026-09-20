@@ -216,7 +216,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/147";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/35";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/36";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -8012,11 +8012,12 @@ impl FirstSliceService {
             u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
         let structural_artifacts = structural_entries.finish(cancellation)?;
         let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
-        let classic_sources = if document.files.iter().any(|file| {
-            file.path
-                .rsplit_once('.')
-                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
-        }) {
+        let classic_sources = if !derived.native_projects.is_empty()
+            || document.files.iter().any(|file| {
+                file.path
+                    .rsplit_once('.')
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
+            }) {
             retained_sources
                 .iter()
                 .map(|source| {
@@ -8029,11 +8030,12 @@ impl FirstSliceService {
         } else {
             Vec::new()
         };
-        let mut document = apply_bounded_resolution_with_classic_sources(
+        let mut document = apply_bounded_resolution_with_native_projects(
             document,
             resolution_limits,
             ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
             &classic_sources,
+            &derived.native_projects,
             cancellation,
         )?;
         // Project fallback may discard parser mappings. Container dependencies
@@ -19752,6 +19754,7 @@ fn apply_bounded_resolution(
     apply_bounded_resolution_with_classic_sources(document, limits, context, &[], cancellation)
 }
 
+#[cfg(test)]
 fn apply_bounded_resolution_with_classic_sources(
     document: NormalizedIrDocument,
     limits: ResolutionLimits,
@@ -19759,9 +19762,33 @@ fn apply_bounded_resolution_with_classic_sources(
     sources: &[rootlight_resolve::ClassicProjectSource<'_>],
     cancellation: &Cancellation,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
+    apply_bounded_resolution_with_native_projects(
+        document,
+        limits,
+        context,
+        sources,
+        &[],
+        cancellation,
+    )
+}
+
+fn apply_bounded_resolution_with_native_projects(
+    document: NormalizedIrDocument,
+    limits: ResolutionLimits,
+    context: ResolverFactContext,
+    sources: &[rootlight_resolve::ClassicProjectSource<'_>],
+    native: &[rootlight_resolve::NativeClassicProject],
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
     let engine = ResolutionEngine::new(limits);
     let (mut document, estimate) = engine
-        .apply_document_bounded_with_classic_sources(document, context, sources, cancellation)
+        .apply_document_bounded_with_native_projects(
+            document,
+            context,
+            sources,
+            native,
+            cancellation,
+        )
         .map_err(|error| map_resolution_error(error, cancellation))?;
     if !estimate.fits() {
         append_resolution_work_bounded_diagnostic(

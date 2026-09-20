@@ -14,7 +14,9 @@ mod model;
 mod perl;
 mod quality;
 
-pub use classic::ClassicProjectSource;
+pub use classic::{
+    ClassicProjectSource, NativeClassicMember, NativeClassicMemberKind, NativeClassicProject,
+};
 pub use engine::ResolutionEngine;
 pub use foreign::{
     AppliedForeignLinks, ForeignLinkBatch, ForeignLinkDecision, ForeignLinkEngine,

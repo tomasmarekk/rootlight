@@ -147,7 +147,7 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<NormalizedIrDocument, ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, false, &[])
+        self.apply_document_with_work_selection(document, context, cancellation, false, &[], &[])
             .map(|(document, _)| document)
     }
 
@@ -168,7 +168,7 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, true, &[])
+        self.apply_document_with_work_selection(document, context, cancellation, true, &[], &[])
     }
 
     /// Resolves native facts with exact retained classic BASIC project sources.
@@ -186,7 +186,34 @@ impl ResolutionEngine {
         sources: &[crate::ClassicProjectSource<'_>],
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, true, sources)
+        self.apply_document_with_work_selection(document, context, cancellation, true, sources, &[])
+    }
+
+    /// Resolves classic project facts with additional host-verified native inventories.
+    ///
+    /// Native inventories must describe the exact indexed container version and
+    /// retain failed members. Unsupported or incomplete projects establish no links.
+    /// Source bytes remain generation-checked; no container or filesystem I/O occurs.
+    ///
+    /// # Errors
+    /// Returns [`ResolutionError`] for stale input identity, invalid IR, exhausted
+    /// output limits, cancellation, or failed provenance/identity construction.
+    pub fn apply_document_bounded_with_native_projects(
+        &self,
+        document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        sources: &[crate::ClassicProjectSource<'_>],
+        native: &[crate::NativeClassicProject],
+        cancellation: &Cancellation,
+    ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
+        self.apply_document_with_work_selection(
+            document,
+            context,
+            cancellation,
+            true,
+            sources,
+            native,
+        )
     }
 
     fn apply_document_with_work_selection(
@@ -196,6 +223,7 @@ impl ResolutionEngine {
         cancellation: &Cancellation,
         bounded: bool,
         sources: &[crate::ClassicProjectSource<'_>],
+        native: &[crate::NativeClassicProject],
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
         cancellation.check()?;
         let ir_limits = IrLimits::default();
@@ -219,6 +247,7 @@ impl ResolutionEngine {
             &document.coverage_records,
             &document.occurrences,
             sources,
+            native,
             cancellation,
             &mut work,
         ) {
@@ -320,11 +349,18 @@ impl ResolutionEngine {
                     template.producer = producer.clone();
                     template.binary_digest = context.binary_digest();
                     template.frontend_version = Some(RESOLVER_PROVIDER_VERSION.to_owned());
+                    if proof.context.native {
+                        template.language = "vba".to_owned();
+                    }
                     let root = append_shared_provenance(
                         ProvenanceTree {
                             sources: &proof.context.sources,
                             facts: &proof.context.facts,
-                            rule: "classic-project-membership-v1",
+                            rule: if proof.context.native {
+                                "native-classic-project-membership-v1"
+                            } else {
+                                "classic-project-membership-v1"
+                            },
                         },
                         template,
                         &ir_limits,

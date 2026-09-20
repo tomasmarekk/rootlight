@@ -494,7 +494,7 @@ pub struct AppliedResolution {
 /// Semantic resolution failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
-    /// Supplied classic BASIC project bytes differ from indexed file identity.
+    /// Classic source bytes or native container identity are stale or duplicated.
     #[error("classic project source identity differs from the indexed generation")]
     ClassicSourceIdentity,
     /// The normalized input failed validation.
