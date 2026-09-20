@@ -131,6 +131,8 @@ pub struct ProjectProperties<'a> {
     end: usize,
     modules: Vec<ProjectModule<'a>>,
     packages: Vec<Range<usize>>,
+    name_value: &'a [u8],
+    name_value_range: Range<usize>,
 }
 
 impl fmt::Debug for ProjectProperties<'_> {
@@ -252,6 +254,7 @@ impl<'a> ProjectProperties<'a> {
         }
         // Only the ProjectItem region supplies module identities. In particular,
         // text in descriptions or the UI suffix must never be scanned for names.
+        let mut name = None;
         for (expected, required) in [
             (b"HelpFile".as_slice(), false),
             (b"ExeName32".as_slice(), false),
@@ -263,8 +266,12 @@ impl<'a> ProjectProperties<'a> {
             (b"DPB".as_slice(), true),
             (b"GC".as_slice(), true),
         ] {
-            let (key, _) = next.property()?;
+            let (key, value) = next.property()?;
             if key.eq_ignore_ascii_case(expected) {
+                if expected == b"Name" {
+                    let start = next.start + key.len() + 1;
+                    name = Some((value, start..start + value.len()));
+                }
                 next = reader.line()?;
             } else if required {
                 return Err(next.invalid());
@@ -273,12 +280,28 @@ impl<'a> ProjectProperties<'a> {
         if !next.bytes.is_empty() {
             return Err(next.invalid());
         }
+        let (name_value, name_value_range) = name.ok_or_else(|| next.invalid())?;
         Ok(Self {
             bytes,
             end: reader.offset,
             modules,
             packages,
+            name_value,
+            name_value_range,
         })
+    }
+
+    /// Returns the original Name property value, including any quotation marks.
+    /// Framing alone does not validate its quoting, codepage or dir agreement.
+    #[must_use]
+    pub fn name_value(&self) -> &[u8] {
+        self.name_value
+    }
+
+    /// Returns the Name value range in PROJECT, including any quotation marks.
+    #[must_use]
+    pub fn name_value_range(&self) -> Range<usize> {
+        self.name_value_range.clone()
     }
 
     /// Returns every written module declaration in order, including duplicates.

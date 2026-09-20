@@ -374,6 +374,10 @@ pub(super) fn book(modules: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 pub(super) fn typed_book(modules: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    book_with_project_value(modules, "\"Project\"")
+}
+
+pub(super) fn book_with_project_value(modules: &[(&str, &[u8], bool)], value: &str) -> Vec<u8> {
     let declarations = modules
         .iter()
         .map(|(name, _, class)| (*name, 0, *class))
@@ -384,7 +388,7 @@ pub(super) fn typed_book(modules: &[(&str, &[u8], bool)]) -> Vec<u8> {
         .collect::<Vec<_>>();
     streams.push(Stream {
         name: "PROJECT",
-        bytes: format!("ID=\"{{01234567-89AB-CDEF-0123-456789ABCDEF}}\"\r\n{}Name=\"Project\"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n", modules
+        bytes: format!("ID=\"{{01234567-89AB-CDEF-0123-456789ABCDEF}}\"\r\n{}Name={value}\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n", modules
             .iter()
             .map(|(name, _, class)| format!("{}={name}\r\n", if *class {"Class"} else {"Module"}))
             .collect::<String>())

@@ -217,6 +217,7 @@ pub struct ProjectDirectory<'a> {
     bytes: &'a [u8],
     information_range: Range<usize>,
     code_page: u16,
+    name: TextField<'a>,
     references: Vec<ReferenceRecord>,
     modules: Vec<ModuleRecord<'a>>,
 }
@@ -268,6 +269,13 @@ impl<'a> ProjectDirectory<'a> {
     #[must_use]
     pub const fn code_page(&self) -> u16 {
         self.code_page
+    }
+
+    /// Returns the original PROJECTNAME payload and its decompressed byte range.
+    /// The bounded, nonempty MBCS bytes are not yet decoded or matched to PROJECT.
+    #[must_use]
+    pub fn name(&self) -> &TextField<'a> {
+        &self.name
     }
     /// Returns references in their original order, never resolved or executed.
     #[must_use]

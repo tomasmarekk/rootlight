@@ -93,6 +93,109 @@ fn read_module(
 }
 
 #[test]
+fn native_project_identity_issues_preserve_sources_and_follow_metadata_after_restart() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    fs::write(
+        root.path().join("fixed.xlsm"),
+        fixture::book(&[("Alpha", FIRST)]),
+    )
+    .unwrap();
+    let mut fixed_symbol = None;
+    let mut previous_generation = None;
+    for (value, issue) in [
+        ("\"Project\"", None),
+        ("\"Different\"", Some("Mismatch")),
+        ("Project", Some("Quoting")),
+        ("\"Project\"", None),
+    ] {
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::book_with_project_value(&[("Alpha", FIRST, false)], value),
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(receipt.extracted_files, 2);
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        if let Some(previous) = previous_generation {
+            assert_ne!(receipt.generation, previous);
+        }
+        previous_generation = Some(receipt.generation);
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let diagnostics = document
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.starts_with("vba project identity:"))
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), usize::from(issue.is_some()));
+        if let Some(issue) = issue {
+            let diagnostic = diagnostics[0];
+            assert_eq!(diagnostic.message, format!("vba project identity: {issue}"));
+            assert_eq!(diagnostic.coverage_effect, CoverageStatus::Unknown);
+            let file = diagnostic.source.as_ref().unwrap().span().file();
+            assert_eq!(
+                document.files.iter().find(|f| f.id == file).unwrap().path,
+                "book.xlsm"
+            );
+        }
+        for container in ["book.xlsm", "fixed.xlsm"] {
+            let path = derived_path(container, "Alpha", ModuleKind::Procedural).unwrap();
+            let reference = read_module(&service, receipt.generation, path.as_str(), FIRST);
+            let symbol = document
+                .entities
+                .iter()
+                .find(|e| {
+                    e.canonical_name == "Compute"
+                        && e.evidence.source.as_ref().unwrap().span().file()
+                            == reference.span().file()
+                })
+                .unwrap()
+                .id;
+            if container == "fixed.xlsm" {
+                if let Some(previous) = fixed_symbol {
+                    assert_eq!(symbol, previous);
+                }
+                fixed_symbol = Some(symbol);
+            }
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let restored_snapshot = restored
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        assert_eq!(
+            restored_snapshot.document().diagnostics,
+            document.diagnostics
+        );
+        let path = derived_path("book.xlsm", "Alpha", ModuleKind::Procedural).unwrap();
+        read_module(&restored, receipt.generation, path.as_str(), FIRST);
+    }
+}
+
+#[test]
 fn native_office_classes_keep_exact_sources_members_and_restart_identity() {
     let storage = tempdir();
     let root = tempdir();

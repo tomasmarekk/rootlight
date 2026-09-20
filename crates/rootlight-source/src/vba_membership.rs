@@ -71,6 +71,63 @@ pub enum MembershipIssue {
     SourceKindMismatch,
 }
 
+/// A project name that cannot establish exact agreement between both streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProjectIdentityIssue {
+    /// The Name value does not use the MS-OVBA quoted-character grammar.
+    Quoting,
+    /// The decoded name is empty, contains NUL, or exceeds 128 characters.
+    Name,
+    /// No reviewed decoder exists for the declared codepage.
+    UnsupportedCodePage,
+    /// One name cannot be decoded without replacing invalid bytes.
+    InvalidEncoding,
+    /// Decoded spellings differ, including case or Unicode normalization.
+    Mismatch,
+}
+
+/// A project name check with original coordinates in both metadata streams.
+/// Agreement is not a globally unique project identity or complete name binding.
+pub struct ProjectIdentity {
+    name: Result<String, ProjectIdentityIssue>,
+    directory_name_range: Range<usize>,
+    property_value_range: Range<usize>,
+}
+
+impl fmt::Debug for ProjectIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProjectIdentity")
+            .field("issue", &self.name.as_ref().err())
+            .field("directory_name_range", &self.directory_name_range)
+            .field("property_value_range", &self.property_value_range)
+            .finish()
+    }
+}
+
+impl ProjectIdentity {
+    /// Returns the exact decoded spelling agreed by PROJECT and dir.
+    /// No case folding, normalization, or identifier-grammar restriction is used.
+    ///
+    /// # Errors
+    /// Returns the typed identity issue while both raw streams remain available.
+    pub fn name(&self) -> Result<&str, ProjectIdentityIssue> {
+        self.name.as_deref().map_err(|issue| *issue)
+    }
+
+    /// Returns the MBCS payload range in the decompressed dir stream.
+    #[must_use]
+    pub fn directory_name_range(&self) -> Range<usize> {
+        self.directory_name_range.clone()
+    }
+
+    /// Returns the PROJECT value range, including quotes and doubled quote bytes.
+    #[must_use]
+    pub fn property_value_range(&self) -> Range<usize> {
+        self.property_value_range.clone()
+    }
+}
+
 /// One unique compatible pair under exact Unicode plus ASCII-case comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MembershipMatch {
@@ -184,6 +241,7 @@ impl MembershipRecord {
 #[derive(Debug)]
 pub struct ProjectMembership {
     project_stream: CompoundStream,
+    identity: ProjectIdentity,
     directory_records: Vec<MembershipRecord>,
     project_records: Vec<MembershipRecord>,
 }
@@ -217,8 +275,10 @@ impl ProjectMembership {
         )?;
         let (directory_records, project_records) =
             reconcile(&directory, &properties, cancellation)?;
+        let identity = project_identity(&directory, &properties, cancellation)?;
         Ok(Self {
             project_stream,
+            identity,
             directory_records,
             project_records,
         })
@@ -241,6 +301,91 @@ impl ProjectMembership {
     pub fn project_stream(&self) -> &CompoundStream {
         &self.project_stream
     }
+
+    /// Returns project-name agreement separately from per-module membership.
+    /// An invalid project name does not erase independently paired module records.
+    #[must_use]
+    pub fn identity(&self) -> &ProjectIdentity {
+        &self.identity
+    }
+}
+
+fn project_identity(
+    directory: &ProjectDirectory<'_>,
+    properties: &ProjectProperties<'_>,
+    cancellation: &Cancellation,
+) -> Result<ProjectIdentity, Cancelled> {
+    fn decode(
+        bytes: &[u8],
+        page: u16,
+        cancellation: &Cancellation,
+    ) -> Result<Result<String, ProjectIdentityIssue>, Cancelled> {
+        // At most 128 four-byte characters, each possibly represented by a
+        // doubled quote, plus the enclosing quotes. No stream-sized allocation.
+        let limits = TextLimits {
+            input_bytes: 1026,
+            output_bytes: 4104,
+            mapping_points: 5,
+        };
+        Ok(
+            match DecodedText::decode(bytes, page, limits, cancellation) {
+                Ok(text) => Ok(text.text().to_owned()),
+                Err(TextError::Cancelled(error)) => return Err(error),
+                Err(TextError::Unsupported { .. }) => {
+                    Err(ProjectIdentityIssue::UnsupportedCodePage)
+                }
+                Err(TextError::Invalid { .. }) => Err(ProjectIdentityIssue::InvalidEncoding),
+                Err(TextError::Limits | TextError::Limit { .. }) => Err(ProjectIdentityIssue::Name),
+            },
+        )
+    }
+    fn unquote(value: &str) -> Result<String, ProjectIdentityIssue> {
+        let text = value
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix('"'))
+            .ok_or(ProjectIdentityIssue::Quoting)?;
+        let mut result = String::new();
+        let mut chars = text.chars();
+        let mut count = 0;
+        while let Some(character) = chars.next() {
+            if character == '"' && chars.next() != Some('"') {
+                return Err(ProjectIdentityIssue::Quoting);
+            }
+            if character != '\t' && character < ' ' {
+                return Err(ProjectIdentityIssue::Quoting);
+            }
+            count += 1;
+            if count > 128 {
+                return Err(ProjectIdentityIssue::Name);
+            }
+            result.push(character);
+        }
+        if result.is_empty() {
+            return Err(ProjectIdentityIssue::Name);
+        }
+        Ok(result)
+    }
+    cancellation.check()?;
+    let left = decode(
+        directory.name().bytes(),
+        directory.code_page(),
+        cancellation,
+    )?;
+    let right = decode(properties.name_value(), directory.code_page(), cancellation)?;
+    let name = left.and_then(|left| {
+        let right = unquote(&right?)?;
+        if left == right {
+            Ok(left)
+        } else {
+            Err(ProjectIdentityIssue::Mismatch)
+        }
+    });
+    cancellation.check()?;
+    Ok(ProjectIdentity {
+        name,
+        directory_name_range: directory.name().range(),
+        property_value_range: properties.name_value_range(),
+    })
 }
 
 fn name(

@@ -151,6 +151,8 @@ fn ordered_metadata_retains_all_reference_variants_and_exact_module_ranges() {
     assert_eq!(directory.bytes(), input);
     assert_eq!(directory.information_range(), 0..info_end);
     assert_eq!(directory.code_page(), 932);
+    assert_eq!(directory.name().bytes(), b"Project");
+    assert_eq!(&input[directory.name().range()], b"Project");
     assert_eq!(
         directory
             .references()
@@ -378,6 +380,8 @@ fn deterministic_mutations_never_escape_input_or_record_budgets() {
         changed[position] ^= 0xa5;
         if let Ok(parsed) = parse(&changed) {
             assert_eq!(parsed.bytes(), changed);
+            assert_eq!(&changed[parsed.name().range()], parsed.name().bytes());
+            assert!(parsed.name().range().end <= parsed.information_range().end);
             assert!(parsed.modules().len() <= 4096 && parsed.references().len() <= 4096);
             let mut last = parsed.information_range().end;
             for range in parsed

@@ -786,6 +786,13 @@ fn membership_reads_own_project_and_preserves_lazy_source_access() {
     );
     assert_eq!(membership.project_records().len(), 2);
     assert_eq!(membership.project_stream().bytes(), properties);
+    let identity = membership.identity();
+    assert_eq!(identity.name(), Ok("Project"));
+    assert_eq!(&properties[identity.property_value_range()], b"\"Project\"");
+    assert_eq!(
+        &project.decoded_directory().bytes()[identity.directory_name_range()],
+        b"Project"
+    );
     for part in membership.project_stream().source_parts() {
         assert_eq!(
             &input[part.container_range()],

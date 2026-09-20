@@ -112,6 +112,10 @@ fn pair(out: &mut Vec<u8>, id: u16, value: &str) {
 }
 
 fn directory(page: u16, modules: &[Module<'_>]) -> Vec<u8> {
+    named_directory(page, b"Project", modules)
+}
+
+fn named_directory(page: u16, name: &[u8], modules: &[Module<'_>]) -> Vec<u8> {
     let mut out = Vec::new();
     scalar(&mut out, 1, 1);
     scalar(&mut out, 2, 0x409);
@@ -119,7 +123,7 @@ fn directory(page: u16, modules: &[Module<'_>]) -> Vec<u8> {
     header(&mut out, 3, 2);
     word(&mut out, page);
     word(&mut out, 4);
-    bytes(&mut out, b"Project");
+    bytes(&mut out, name);
     pair(&mut out, 5, "");
     pair(&mut out, 6, "");
     scalar(&mut out, 7, 0);
@@ -151,12 +155,160 @@ fn directory(page: u16, modules: &[Module<'_>]) -> Vec<u8> {
 }
 
 fn properties(items: &[u8]) -> Vec<u8> {
+    named_properties(items, b"\"Project\"")
+}
+
+fn named_properties(items: &[u8], value: &[u8]) -> Vec<u8> {
     let mut out = b"ID=\"{01234567-89AB-CDEF-0123-456789ABCDEF}\"\r\n".to_vec();
     out.extend(items);
-    out.extend(
-        b"Name=\"Project\"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n",
-    );
+    out.extend(b"Name=");
+    out.extend(value);
+    out.extend(b"\r\nHelpContextID=\"0\"\r\nCMG=\"00\"\r\nDPB=\"00\"\r\nGC=\"00\"\r\n\r\n");
     out
+}
+
+#[test]
+fn project_identity_reconciles_exact_decoded_names_and_original_ranges() {
+    for (page, name, value, expected) in [
+        (
+            1252,
+            b"Project".as_slice(),
+            b"\"Project\"".as_slice(),
+            "Project",
+        ),
+        (1252, b"Caf\xe9", b"\"Caf\xe9\"", "Café"),
+        (65001, "Δelta".as_bytes(), "\"Δelta\"".as_bytes(), "Δelta"),
+        (1252, b"With\"Quote", b"\"With\"\"Quote\"", "With\"Quote"),
+        (1252, b"\"", b"\"\"\"\"", "\""),
+        (
+            1252,
+            b" not-an-identifier\t",
+            b"\" not-an-identifier\t\"",
+            " not-an-identifier\t",
+        ),
+    ] {
+        let d = named_directory(page, name, &[]);
+        let mut p = named_properties(b"", value);
+        p.extend(b"[Workspace]\r\nName=\"Injected\"\r\n");
+        let cancel = Cancellation::new();
+        let directory = ProjectDirectory::parse(&d, DirectoryLimits::default(), &cancel).unwrap();
+        let properties = ProjectProperties::parse(&p, ProjectLimits::default(), &cancel).unwrap();
+        let identity = project_identity(&directory, &properties, &cancel).unwrap();
+        assert_eq!(identity.name(), Ok(expected));
+        assert_eq!(&d[identity.directory_name_range()], name);
+        assert_eq!(&p[identity.property_value_range()], value);
+        assert!(!format!("{identity:?}").contains(&format!("{expected:?}")));
+    }
+}
+
+#[test]
+fn project_identity_failures_do_not_erase_module_membership() {
+    for (page, name, value, expected) in [
+        (
+            1252,
+            b"Project".as_slice(),
+            b"\"PROJECT\"".as_slice(),
+            ProjectIdentityIssue::Mismatch,
+        ),
+        (1252, b"Project", b"Project", ProjectIdentityIssue::Quoting),
+        (1252, b"Project", b"\"\"", ProjectIdentityIssue::Name),
+        (
+            1252,
+            b"Project",
+            b"\"Bad\"Quote\"",
+            ProjectIdentityIssue::Quoting,
+        ),
+        (
+            1252,
+            b"Project",
+            b"\"Bad\x01\"",
+            ProjectIdentityIssue::Quoting,
+        ),
+        (
+            1252,
+            b"Project",
+            b"\"\x81\"",
+            ProjectIdentityIssue::InvalidEncoding,
+        ),
+        (
+            65001,
+            b"\xff",
+            b"\"Project\"",
+            ProjectIdentityIssue::InvalidEncoding,
+        ),
+        (
+            932,
+            b"Project",
+            b"\"Project\"",
+            ProjectIdentityIssue::UnsupportedCodePage,
+        ),
+        (
+            65001,
+            "é".as_bytes(),
+            "\"e\u{301}\"".as_bytes(),
+            ProjectIdentityIssue::Mismatch,
+        ),
+    ] {
+        let d = named_directory(
+            page,
+            name,
+            &[Module {
+                name: b"Source",
+                wide: None,
+                object: false,
+            }],
+        );
+        let p = named_properties(b"Module=Source\r\n", value);
+        let cancel = Cancellation::new();
+        let directory = ProjectDirectory::parse(&d, DirectoryLimits::default(), &cancel).unwrap();
+        let properties = ProjectProperties::parse(&p, ProjectLimits::default(), &cancel).unwrap();
+        let identity = project_identity(&directory, &properties, &cancel).unwrap();
+        assert_eq!(identity.name(), Err(expected));
+        let (left, right) = reconcile(&directory, &properties, &cancel).unwrap();
+        assert_eq!((left.len(), right.len()), (1, 1));
+        if page != 932 {
+            assert!(left[0].outcome().is_ok());
+            assert!(right[0].outcome().is_ok());
+        }
+        assert_eq!(&d[identity.directory_name_range()], name);
+        assert_eq!(&p[identity.property_value_range()], value);
+    }
+}
+
+#[test]
+fn project_identity_bounds_quoting_expansion_and_observes_cancellation() {
+    let cancel = Cancellation::new();
+    for character in [b'A', b'"', 0xe9] {
+        let name = vec![character; 128];
+        let mut value = vec![b'"'];
+        for byte in &name {
+            value.push(*byte);
+            if *byte == b'"' {
+                value.push(*byte);
+            }
+        }
+        value.push(b'"');
+        let d = named_directory(1252, &name, &[]);
+        let p = named_properties(b"", &value);
+        let directory = ProjectDirectory::parse(&d, DirectoryLimits::default(), &cancel).unwrap();
+        let properties = ProjectProperties::parse(&p, ProjectLimits::default(), &cancel).unwrap();
+        let identity = project_identity(&directory, &properties, &cancel).unwrap();
+        assert_eq!(identity.name().unwrap().chars().count(), 128);
+        let mut excess = vec![b'"'];
+        excess.extend([b'A'; 129]);
+        excess.push(b'"');
+        let p = named_properties(b"", &excess);
+        let properties = ProjectProperties::parse(&p, ProjectLimits::default(), &cancel).unwrap();
+        assert_eq!(
+            project_identity(&directory, &properties, &cancel)
+                .unwrap()
+                .name(),
+            Err(ProjectIdentityIssue::Name)
+        );
+        let stopped = Cancellation::new();
+        stopped.cancel(CancellationReason::ClientRequest);
+        assert!(project_identity(&directory, &properties, &stopped).is_err());
+    }
 }
 
 fn run(

@@ -32,6 +32,8 @@ fn module_kinds_and_original_ranges_survive_both_newline_pairs() {
         let project = parse(&bytes).unwrap();
         assert_eq!(project.range(), 0..bytes.len());
         assert_eq!(project.remainder_range(), bytes.len()..bytes.len());
+        assert_eq!(project.name_value(), b"\"Project\"");
+        assert_eq!(&bytes[project.name_value_range()], project.name_value());
         assert_eq!(project.package_ranges().len(), 1);
         let expected = [
             (b"Standard".as_slice(), ProjectModuleKind::Procedural),
@@ -192,6 +194,8 @@ fn deterministic_mutations_preserve_bounded_original_ranges() {
             bytes[index] = replacement;
             if let Ok(project) = parse(&bytes) {
                 assert!(project.range().end <= bytes.len());
+                assert_eq!(&bytes[project.name_value_range()], project.name_value());
+                assert!(project.name_value_range().end <= project.range().end);
                 for module in project.modules() {
                     assert_eq!(&bytes[module.name_range()], module.name());
                     assert!(module.range().end <= project.range().end);

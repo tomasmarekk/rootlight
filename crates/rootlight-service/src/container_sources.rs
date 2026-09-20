@@ -366,6 +366,9 @@ fn prepare_office(
         }
     };
     if let Some(membership) = &membership {
+        if let Err(error) = membership.identity().name() {
+            prepared.issue(input.file, format!("vba project identity: {error:?}"))?;
+        }
         for (ordinal, record) in membership.project_records().iter().enumerate() {
             if let Err(error) = record.outcome() {
                 prepared.issue(

@@ -26,7 +26,7 @@ pub(super) fn parse<'a>(
         position: 0,
         cancellation,
     };
-    let code_page = reader.information()?;
+    let (code_page, name) = reader.information()?;
     let information_range = 0..reader.position;
     let mut references = Vec::new();
     while reader.peek()? != 0x000f {
@@ -51,6 +51,7 @@ pub(super) fn parse<'a>(
         bytes,
         information_range,
         code_page,
+        name,
         references,
         modules,
     })
@@ -205,7 +206,7 @@ impl<'a> Reader<'a, '_> {
         Ok((mbcs, self.unicode()?))
     }
 
-    fn information(&mut self) -> Result<u16, DirectoryError> {
+    fn information(&mut self) -> Result<(u16, TextField<'a>), DirectoryError> {
         self.header(1, 4)?;
         if self.u32()? > 3 {
             return Err(self.invalid());
@@ -221,7 +222,8 @@ impl<'a> Reader<'a, '_> {
         self.header(3, 2)?;
         let code_page = self.u16()?;
         self.id(4)?;
-        if self.text(128)?.bytes.is_empty() {
+        let name = self.text(128)?;
+        if name.bytes.is_empty() {
             return Err(self.invalid());
         }
         self.pair(5, 2000)?;
@@ -242,7 +244,7 @@ impl<'a> Reader<'a, '_> {
         if self.peek()? == 0x000c {
             self.pair(0x000c, 1015)?;
         }
-        Ok(code_page)
+        Ok((code_page, name))
     }
 
     fn reference(&mut self) -> Result<ReferenceRecord, DirectoryError> {
