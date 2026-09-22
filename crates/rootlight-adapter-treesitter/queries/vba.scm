@@ -5,7 +5,9 @@
 (source_file) @reference
 (source_file) @signature
 (preprocessor_if) @scope
+(preprocessor_block) @scope
 (type_preprocessor_if) @scope
+(type_preprocessor_block) @scope
 (sub_declaration name: (_) @definition) @declaration @scope @signature
 (function_declaration name: (_) @definition) @declaration @scope @signature
 (conditional_sub_declaration name: (_) @definition) @declaration @scope @signature

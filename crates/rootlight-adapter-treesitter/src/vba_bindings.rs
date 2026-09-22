@@ -882,7 +882,10 @@ impl<'a> VbaBindings<'a> {
                 if !kind.starts_with("vba.") {
                     return Ok(None);
                 }
-                if kind == "vba.preprocessor.scope" {
+                if matches!(
+                    kind,
+                    "vba.preprocessor.scope" | "vba.preprocessor_branch.scope"
+                ) {
                     conditional = true;
                 } else {
                     return Ok(Some((

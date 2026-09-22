@@ -1119,6 +1119,131 @@ fn native_project_links_follow_container_membership_and_metadata_after_restart()
 }
 
 #[test]
+fn native_project_resolution_survives_duplicate_private_types_in_conditional_branches() {
+    let storage = tempdir();
+    let root = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\nDim receiver As New Worker\r\nreceiver.Apply\r\nEnd Sub\r\n";
+    let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    let options = b"Attribute VB_Name = \"Options\"\r\n#If VBA7 Then\r\nPrivate Type Configuration\r\nValue As Long\r\nEnd Type\r\n#Else\r\nPrivate Type Configuration\r\nValue As Integer\r\nEnd Type\r\n#End If\r\n";
+    fs::write(
+        root.path().join("book.xlsm"),
+        fixture::book_with_project_value(
+            &[
+                ("Client", client, false),
+                ("Worker", worker, true),
+                ("Options", options, false),
+            ],
+            "\"Project\"",
+        ),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_eq!(
+        service.index_repository(root.path(), &deadline()).unwrap(),
+        receipt
+    );
+    let document = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap()
+        .document()
+        .clone();
+    let client_path = derived_path("book.xlsm", "Client", ModuleKind::Procedural).unwrap();
+    let worker_path = derived_path("book.xlsm", "Worker", ModuleKind::Object).unwrap();
+    let options_path = derived_path("book.xlsm", "Options", ModuleKind::Procedural).unwrap();
+    let client_source = read_module(&service, receipt.generation, client_path.as_str(), client);
+    let worker_file = document
+        .files
+        .iter()
+        .find(|file| file.path == worker_path.as_str())
+        .unwrap();
+    let options_file = document
+        .files
+        .iter()
+        .find(|file| file.path == options_path.as_str())
+        .unwrap();
+    for (syntax, name) in [
+        ("vba.automatic_type_identifier.reference", "Worker"),
+        ("vba.invoked_member.reference", "Apply"),
+    ] {
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.file == client_source.span().file() && site.syntax_kind == syntax)
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == name
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == worker_file.id)
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.source.generation(), receipt.generation);
+    }
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Struct
+                    && entity.canonical_name == "Configuration"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == options_file.id)
+            })
+            .count(),
+        2
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .all(|gap| gap.domain != IrFactDomain::Entities
+                || gap.source.span().file() != options_file.id)
+    );
+    let rebuilt = service
+        .prepare_repository_with_options(
+            root.path(),
+            FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .publish_prepared(rebuilt, &deadline())
+            .unwrap()
+            .logical_snapshot,
+        receipt.logical_snapshot
+    );
+    drop(service);
+    let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        restored
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap()
+            .document(),
+        &document
+    );
+}
+
+#[test]
 fn native_project_identity_issues_preserve_sources_and_follow_metadata_after_restart() {
     let storage = tempdir();
     let root = tempdir();

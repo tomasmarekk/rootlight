@@ -136,6 +136,70 @@ fn vba_native_context_binds_artifacts_and_required_fact_budgets() {
 }
 
 #[test]
+fn vba_preprocessor_branches_keep_duplicate_private_types_source_distinct() {
+    let source = "Attribute VB_Name = \"Options\"\n#If VBA7 Then\nPrivate Type Configuration\nValue As Long\nEnd Type\n#Else\nPrivate Type Configuration\nValue As Integer\nEnd Type\n#End If\n";
+    let result = output_with_native_kind(
+        source,
+        Some(rootlight_adapter_sdk::NativeVbaModuleKind::Procedural),
+    );
+    let document = result.document();
+    let types: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Struct && entity.canonical_name == "Configuration"
+        })
+        .collect();
+    assert_eq!(types.len(), 2);
+    assert_ne!(types[0].id, types[1].id);
+    let mut actual_starts = types
+        .iter()
+        .map(|entity| entity.evidence.source.as_ref().unwrap().span().start_byte())
+        .collect::<Vec<_>>();
+    actual_starts.sort_unstable();
+    assert_eq!(
+        actual_starts,
+        source
+            .match_indices("Private Type Configuration")
+            .map(|(offset, _)| u64::try_from(offset).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .all(|gap| gap.domain != FactDomain::Entities),
+        "{:?}",
+        document.skipped_regions
+    );
+}
+
+#[test]
+fn vba_nested_preprocessor_branches_preserve_private_type_inventory() {
+    let source = "Attribute VB_Name = \"Options\"\n#If PLATFORM Then\n#If VBA7 Then\nPrivate Type Configuration\nValue As Long\nEnd Type\n#Else\nPrivate Type Configuration\nValue As Integer\nEnd Type\n#End If\n#End If\n";
+    let result = output_with_native_kind(
+        source,
+        Some(rootlight_adapter_sdk::NativeVbaModuleKind::Procedural),
+    );
+    let document = result.document();
+    let types: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Struct && entity.canonical_name == "Configuration"
+        })
+        .collect();
+    assert_eq!(types.len(), 2);
+    assert_ne!(types[0].id, types[1].id);
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .all(|gap| gap.domain != FactDomain::Entities)
+    );
+}
+
+#[test]
 fn vba_enum_members_bind_in_module_and_qualified_value_contexts() {
     let source = "Private Enum Phase\nReady = 1\nDone = Ready + 1\nEnd Enum\nSub Run(Optional ByVal selected As Long = Done)\nDim answer As Long\nanswer = Ready\nanswer = Phase.Done\nanswer = [Phase].[Ready]\nanswer = Phase.Done(1)\nEnd Sub\n";
     let result = output(source);

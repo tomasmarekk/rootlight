@@ -163,6 +163,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "frm_version_statement" if role == StructuralRole::Signature => "vba.class",
         "source_file" => "vba.file",
         "preprocessor_if" | "type_preprocessor_if" => "vba.preprocessor",
+        "preprocessor_block" | "type_preprocessor_block" => "vba.preprocessor_branch",
         "identifier" | "bang_identifier" => "vba.identifier",
         "qualified_member_expression" | "implicit_member_expression" => "vba.member",
         "call_expression" | "call_statement" if role == StructuralRole::Reference => {

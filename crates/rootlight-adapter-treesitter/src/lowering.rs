@@ -2819,10 +2819,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // These dynamic languages record source occurrences, not evaluated environments. Anonymous
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
+                // Alternate VBA branches need separate source identities without selecting one.
                 let written_scope_identity = if matches!(
                     self.language_for_fact(fact),
                     "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
-                ) {
+                ) || fact.syntax_kind().as_str()
+                    == "vba.preprocessor_branch.scope"
+                {
                     // Named MATLAB workspaces survive unrelated sibling insertion;
                     // only indistinguishable same-name siblings need an ordinal.
                     let name = matlab_scope_names.get(&fact.span()).copied().flatten();
@@ -4311,6 +4314,8 @@ fn written_source_identity(
         "rootlight.perl-source-occurrence/1"
     } else if language == "groovy" {
         "rootlight.groovy-source-occurrence/1"
+    } else if language == "vba" {
+        "rootlight.vba-preprocessor-branch/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
