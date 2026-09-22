@@ -89,10 +89,7 @@ impl AssetInventory {
             if HEXLOWER.encode(Sha256::digest(&bytes).as_ref()) != record.sha256 {
                 return Err(WebError::AssetsUnavailable);
             }
-            let content_type = mime_guess::from_path(&record.path)
-                .first_raw()
-                .unwrap_or("application/octet-stream")
-                .to_owned();
+            let content_type = content_type_for_path(&record.path).to_owned();
             if assets
                 .insert(
                     record.path,
@@ -138,6 +135,31 @@ fn validate_asset_path(path: &str) -> Result<(), WebError> {
         return Err(WebError::AssetsUnavailable);
     }
     Ok(())
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    let extension = path.rsplit_once('.').map_or("", |(_, extension)| extension);
+    match extension.to_ascii_lowercase().as_str() {
+        "html" | "htm" => "text/html",
+        "js" => "text/javascript",
+        "mjs" => "application/javascript",
+        "css" => "text/css",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "jpeg" | "jpg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "woff" => "application/font-woff",
+        "woff2" => "font/woff2",
+        "otf" => "application/font-sfnt",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "map" | "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
 }
 
 fn validate_asset_root(root: &Path) -> Result<(), WebError> {
@@ -297,6 +319,75 @@ mod tests {
                 .expect("script exists")
                 .immutable
         );
+    }
+
+    #[test]
+    fn inventory_keeps_production_asset_content_types() {
+        let root = TempDir::new().expect("asset root exists");
+        fs::create_dir(root.path().join("assets")).expect("asset directory creates");
+        let cases = [
+            ("index.html", "text/html"),
+            ("assets/app-a1b2c3d4.js", "text/javascript"),
+            ("assets/app-a1b2c3d4.css", "text/css"),
+            ("assets/icon-a1b2c3d4.svg", "image/svg+xml"),
+            ("assets/data-a1b2c3d4.json", "application/json"),
+            ("assets/data-a1b2c3d4.unknown", "application/octet-stream"),
+        ];
+        for (path, _) in cases {
+            fs::write(root.path().join(path), b"asset").expect("asset writes");
+        }
+        write_manifest(
+            root.path(),
+            cases
+                .iter()
+                .map(|(path, _)| asset_record(path, b"asset"))
+                .collect(),
+        );
+        let inventory = AssetInventory::load(root.path()).expect("inventory validates");
+        for (path, content_type) in cases {
+            assert_eq!(
+                inventory.get(path).unwrap().content_type,
+                content_type,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_content_types_cover_supported_extensions() {
+        let cases = [
+            ("html", "text/html"),
+            ("htm", "text/html"),
+            ("js", "text/javascript"),
+            ("mjs", "application/javascript"),
+            ("css", "text/css"),
+            ("json", "application/json"),
+            ("svg", "image/svg+xml"),
+            ("avif", "image/avif"),
+            ("gif", "image/gif"),
+            ("ico", "image/x-icon"),
+            ("jpeg", "image/jpeg"),
+            ("jpg", "image/jpeg"),
+            ("png", "image/png"),
+            ("webp", "image/webp"),
+            ("woff", "application/font-woff"),
+            ("woff2", "font/woff2"),
+            ("otf", "application/font-sfnt"),
+            ("ttf", "font/ttf"),
+            ("wasm", "application/wasm"),
+            ("map", "text/plain"),
+            ("txt", "text/plain"),
+            ("unknown", "application/octet-stream"),
+        ];
+        for (extension, content_type) in cases {
+            let path = format!("assets/file-a1b2c3d4.{extension}");
+            assert_eq!(content_type_for_path(&path), content_type, "{path}");
+            assert_eq!(
+                content_type_for_path(&path.to_ascii_uppercase()),
+                content_type,
+                "{path}"
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]
