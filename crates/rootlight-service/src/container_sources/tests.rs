@@ -1128,9 +1128,9 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
     )
     .unwrap();
     paths.prepare_owner().unwrap();
-    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\nDim receiver As New Worker\r\nreceiver.Apply\r\nEnd Sub\r\n";
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\nDim receiver As New Worker\r\nreceiver.Apply\r\nDim result As Long\r\nresult = Options.Combine(1)\r\nEnd Sub\r\n";
     let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
-    let options = b"Attribute VB_Name = \"Options\"\r\n#If VBA7 Then\r\nPrivate Type Configuration\r\nValue As Long\r\nEnd Type\r\n#Else\r\nPrivate Type Configuration\r\nValue As Integer\r\nEnd Type\r\n#End If\r\n";
+    let options = b"Attribute VB_Name = \"Options\"\r\n#If VBA7 Then\r\nPrivate Type Configuration\r\nValue As Long\r\nEnd Type\r\n#Else\r\nPrivate Type Configuration\r\nValue As Integer\r\nEnd Type\r\n#End If\r\nPublic Function Combine(ByVal value As Long) As Long\r\nCombine = value + 1\r\nEnd Function\r\n";
     fs::write(
         root.path().join("book.xlsm"),
         fixture::book_with_project_value(
@@ -1172,10 +1172,23 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
         ("vba.automatic_type_identifier.reference", "Worker"),
         ("vba.invoked_member.reference", "Apply"),
     ] {
+        let expected_source: &[u8] = if name == "Apply" {
+            b"receiver.Apply"
+        } else {
+            b"Worker"
+        };
         let site = document
             .occurrences
             .iter()
-            .find(|site| site.file == client_source.span().file() && site.syntax_kind == syntax)
+            .find(|site| {
+                if site.file != client_source.span().file() || site.syntax_kind != syntax {
+                    return false;
+                }
+                let span = site.source.span();
+                let start = usize::try_from(span.start_byte()).unwrap();
+                let end = usize::try_from(span.end_byte()).unwrap();
+                client.get(start..end) == Some(expected_source)
+            })
             .unwrap();
         let target = document
             .entities
@@ -1218,6 +1231,46 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
             .all(|gap| gap.domain != IrFactDomain::Entities
                 || gap.source.span().file() != options_file.id)
     );
+    let qualified_call = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            if site.file != client_source.span().file()
+                || site.syntax_kind != "vba.invoked_member.reference"
+            {
+                return false;
+            }
+            let span = site.source.span();
+            let start = usize::try_from(span.start_byte()).unwrap();
+            let end = usize::try_from(span.end_byte()).unwrap();
+            client.get(start..end) == Some(b"Options.Combine".as_slice())
+        })
+        .unwrap();
+    let module_target = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Function
+                && entity.canonical_name == "Combine"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == options_file.id)
+        })
+        .unwrap();
+    assert_eq!(
+        qualified_call.target,
+        OccurrenceTarget::Resolved {
+            symbol: module_target.id
+        }
+    );
+    assert!(document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(qualified_call.id)
+            && edge.object == RelationEndpoint::Entity(module_target.id)
+            && edge.predicate == RelationPredicate::Calls
+            && edge.evidence.source.as_ref() == Some(&qualified_call.source)
+    }));
     let rebuilt = service
         .prepare_repository_with_options(
             root.path(),
@@ -1241,6 +1294,105 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
             .document(),
         &document
     );
+}
+
+#[test]
+fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
+    for (visibility, local, foreign, expected) in [
+        ("Public", "", false, true),
+        ("Private", "", false, false),
+        ("Public", "Dim Utility As Object\r\n", false, false),
+        ("Public", "", true, false),
+    ] {
+        let storage = tempdir();
+        let root = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\n{local}Dim result As Long\r\nresult = Utility.Compute(1)\r\nEnd Sub\r\n"
+        );
+        let utility = format!(
+            "Attribute VB_Name = \"Utility\"\r\n{visibility} Function Compute(ByVal value As Long) As Long\r\nCompute = value + 1\r\nEnd Function\r\n"
+        );
+        if foreign {
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::book_with_project_value(
+                    &[("Client", client.as_bytes(), false)],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+            fs::write(
+                root.path().join("other.xlsm"),
+                fixture::book_with_project_value(
+                    &[("Utility", utility.as_bytes(), false)],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+        } else {
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::book_with_project_value(
+                    &[
+                        ("Client", client.as_bytes(), false),
+                        ("Utility", utility.as_bytes(), false),
+                    ],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+        }
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let client_path = derived_path("book.xlsm", "Client", ModuleKind::Procedural).unwrap();
+        let client_file = document
+            .files
+            .iter()
+            .find(|file| file.path == client_path.as_str())
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                if site.file != client_file.id || site.syntax_kind != "vba.invoked_member.reference"
+                {
+                    return false;
+                }
+                let span = site.source.span();
+                let start = usize::try_from(span.start_byte()).unwrap();
+                let end = usize::try_from(span.end_byte()).unwrap();
+                client.as_bytes().get(start..end) == Some(b"Utility.Compute".as_slice())
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            expected,
+            "{visibility} {local} {foreign}"
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.predicate == RelationPredicate::Calls
+                })
+                .count(),
+            usize::from(expected),
+            "{visibility} {local} {foreign}"
+        );
+    }
 }
 
 #[test]

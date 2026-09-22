@@ -116,6 +116,7 @@ struct Member {
 
 struct ResolvedProject {
     types: BTreeMap<String, Option<SymbolId>>,
+    modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
     value_names: BTreeSet<String>,
     evidence: Arc<ProjectEvidence>,
@@ -434,7 +435,8 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             };
             evidence.sources.push(source.clone());
-            let mut types = BTreeMap::from([(project.name, None)]);
+            let mut types = BTreeMap::from([(project.name.clone(), None)]);
+            let mut modules = BTreeMap::from([(project.name, None)]);
             let mut default_instances = BTreeMap::new();
             let mut value_names = BTreeSet::new();
             work.consume_many(members.len())?;
@@ -565,6 +567,11 @@ impl<'a> ClassicIndex<'a> {
                 }
                 // Public UDT/enum names cannot collide with any module or the
                 // project name. Keep barriers sticky across manifest order.
+                work.consume()?;
+                modules
+                    .entry(member.name.clone())
+                    .and_modify(|prior| *prior = None)
+                    .or_insert((!member.class).then_some(named[0].id));
                 types
                     .entry(member.name)
                     .and_modify(|prior| *prior = None)
@@ -583,6 +590,11 @@ impl<'a> ClassicIndex<'a> {
                         && entity.container == Some(ContainerRef::Entity(named[0].id))
                         && local_types.get(&(file.id, name.clone())) == Some(&true))
                     .then_some(entity.id);
+                    work.consume()?;
+                    modules
+                        .entry(name.clone())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(None);
                     types
                         .entry(name)
                         .and_modify(|prior| *prior = None)
@@ -607,6 +619,7 @@ impl<'a> ClassicIndex<'a> {
             evidence.facts.dedup();
             projects.push(complete.then_some(ResolvedProject {
                 types,
+                modules,
                 default_instances,
                 value_names,
                 evidence: Arc::new(evidence),
@@ -799,9 +812,9 @@ impl<'a> ClassicIndex<'a> {
                 else {
                     continue;
                 };
-                // A named default instance is a value lookup, not a class-name
-                // shortcut. Explicit lexical or exported declarations win even
-                // when the local analyzer could not select a unique target.
+                // Explicit lexical or exported values outrank both named default
+                // instances and project module qualification. An uncertain local
+                // binding must not expose an unrelated project-wide spelling.
                 if project.value_names.contains(&receiver_name) {
                     continue;
                 }
@@ -844,6 +857,26 @@ impl<'a> ClassicIndex<'a> {
                             (*owner, id, Arc::clone(&project.evidence), source.clone())
                         })
                     })
+                    .or_else(|| {
+                        // Standard modules have no instance. Their verified
+                        // project declaration itself owns the qualified member.
+                        project
+                            .modules
+                            .get(&receiver_name)
+                            .copied()
+                            .flatten()
+                            .and_then(|id| entities.get(&id).copied())
+                            .and_then(|owner| {
+                                owner.evidence.source.as_ref().map(|source| {
+                                    (
+                                        owner,
+                                        owner.id,
+                                        Arc::clone(&project.evidence),
+                                        source.clone(),
+                                    )
+                                })
+                            })
+                    })
             };
             let Some((owner, class, context, type_source)) = binding else {
                 continue;
@@ -854,8 +887,16 @@ impl<'a> ClassicIndex<'a> {
             if !matches!(
                 target.visibility,
                 EntityVisibility::Public | EntityVisibility::Restricted
-            ) || !matches!(target.kind, EntityKind::Method | EntityKind::Field)
-            {
+            ) || !match owner.kind {
+                EntityKind::Module => matches!(
+                    target.kind,
+                    EntityKind::Function
+                        | EntityKind::Variable
+                        | EntityKind::Field
+                        | EntityKind::Constant
+                ),
+                _ => matches!(target.kind, EntityKind::Method | EntityKind::Field),
+            } {
                 continue;
             }
             result.proofs.insert(
@@ -876,9 +917,9 @@ impl<'a> ClassicIndex<'a> {
 
     pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {
         occurrence.syntax_kind == "vba.invoked_member.reference"
-            && self
-                .proof(occurrence)
-                .is_some_and(|proof| proof.target.kind == EntityKind::Method)
+            && self.proof(occurrence).is_some_and(|proof| {
+                matches!(proof.target.kind, EntityKind::Method | EntityKind::Function)
+            })
     }
 
     pub(crate) fn resolve(&self, occurrence: &OccurrenceRecord) -> Option<ResolutionDecision> {
