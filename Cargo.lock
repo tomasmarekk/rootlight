@@ -2457,7 +2457,6 @@ dependencies = [
 name = "rootlight-launcher"
 version = "0.1.0"
 dependencies = [
- "fs2",
  "nt-token",
  "rootlight-build",
  "rustix",

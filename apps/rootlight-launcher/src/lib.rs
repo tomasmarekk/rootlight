@@ -798,14 +798,11 @@ fn cleanup_deferred_installation(
     root: &Path,
     expected_request: &DeferredUninstallRequest,
 ) -> Result<(), LauncherError> {
-    use fs2::FileExt as _;
-
     let state = root.join("state");
     let lock_path = state.join("update.lock");
     verify_private_windows_dacl(&lock_path)?;
     let lock = open_regular_no_follow(&lock_path).map_err(LauncherError::UninstallCleanup)?;
-    lock.try_lock_exclusive()
-        .map_err(|_| LauncherError::UninstallBusy)?;
+    lock.try_lock().map_err(|_| LauncherError::UninstallBusy)?;
 
     validate_private_install_root(root)?;
     let request_path = state.join(DEFERRED_UNINSTALL_FILE);
@@ -1794,6 +1791,29 @@ mod tests {
 
         assert!(target.executable.starts_with(root.join("versions/1.0.0")));
         assert_eq!(target.version, "1.0.0");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deferred_uninstall_respects_existing_update_lock() {
+        let (_temporary, root, unrelated, request) = deferred_uninstall_fixture();
+        let lock = open_regular_no_follow(&root.join("state/update.lock"))
+            .expect("fixture lock opens without following reparse points");
+        lock.try_lock().expect("fixture owns the update lock");
+
+        assert!(matches!(
+            cleanup_deferred_installation(&root, &request),
+            Err(LauncherError::UninstallBusy)
+        ));
+        assert!(root.join("current/bin/rootlight.exe").is_file());
+        assert_eq!(
+            fs::read(&unrelated).expect("unrelated data remains"),
+            b"unrelated"
+        );
+
+        drop(lock);
+        cleanup_deferred_installation(&root, &request)
+            .expect("deferred uninstall resumes after the lock is released");
     }
 
     #[cfg(windows)]
