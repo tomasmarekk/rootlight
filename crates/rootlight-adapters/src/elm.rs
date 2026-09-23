@@ -114,6 +114,7 @@ impl ParseProvider for ElmParseProvider {
         ));
         let mut next_id = 2_u64;
         let mut constructor_index = 0_usize;
+        let mut field_index = 0_usize;
         for (index, header) in parsed.headers.iter().enumerate() {
             cancellation.check()?;
             let local_id = next_id;
@@ -172,6 +173,31 @@ impl ParseProvider for ElmParseProvider {
                 ));
                 constructor_index += 1;
             }
+            while let Some(field) = parsed.record_fields.get(field_index)
+                && field.owner_index == index
+            {
+                let field_id = next_id;
+                next_id = next_id
+                    .checked_add(2)
+                    .ok_or_else(|| failure("elm-syntax-node-limit"))?;
+                facts.push(SyntaxFact::new(
+                    field_id,
+                    Some(local_id),
+                    SyntaxFactKind::Declaration,
+                    source_span(file, field.name_start, field.span_end)?,
+                    2,
+                    label("elm.field.declaration"),
+                ));
+                facts.push(SyntaxFact::new(
+                    field_id + 1,
+                    Some(field_id),
+                    SyntaxFactKind::Occurrence,
+                    source_span(file, field.name_start, field.name_end)?,
+                    3,
+                    label("elm.name.definition"),
+                ));
+                field_index += 1;
+            }
         }
         for batch in facts.chunks(32) {
             cancellation.check()?;
@@ -192,7 +218,8 @@ impl ParseProvider for ElmParseProvider {
             .iter()
             .filter(|header| header.kind != SyntaxFactKind::Import)
             .count()
-            .saturating_add(parsed.constructors.len());
+            .saturating_add(parsed.constructors.len())
+            .saturating_add(parsed.record_fields.len());
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
             CoverageStatus::Bounded,
@@ -249,9 +276,18 @@ struct Constructor {
     span_end: usize,
 }
 
+#[derive(Clone, Copy)]
+struct RecordField {
+    owner_index: usize,
+    name_start: usize,
+    name_end: usize,
+    span_end: usize,
+}
+
 struct ParsedSource {
     headers: Vec<Header>,
     constructors: Vec<Constructor>,
+    record_fields: Vec<RecordField>,
 }
 
 struct ConstructorCollector<'a> {
@@ -259,6 +295,13 @@ struct ConstructorCollector<'a> {
     cancellation: &'a Cancellation,
     max_items: usize,
     constructors: Vec<Constructor>,
+}
+
+struct RecordFieldCollector<'a> {
+    masked: &'a [u8],
+    cancellation: &'a Cancellation,
+    max_items: usize,
+    fields: Vec<RecordField>,
 }
 
 fn syntax_fact_count(source: &ParsedSource) -> usize {
@@ -273,6 +316,7 @@ fn syntax_fact_count(source: &ParsedSource) -> usize {
             })
         })
         .saturating_add(source.constructors.len().saturating_mul(2))
+        .saturating_add(source.record_fields.len().saturating_mul(2))
 }
 
 fn required_syntax_fact_count(source: &ParsedSource) -> usize {
@@ -282,6 +326,7 @@ fn required_syntax_fact_count(source: &ParsedSource) -> usize {
         .filter(|header| header.kind != SyntaxFactKind::Import)
         .count()
         .saturating_add(source.constructors.len())
+        .saturating_add(source.record_fields.len())
         .saturating_mul(2)
         .saturating_add(1)
 }
@@ -351,9 +396,30 @@ fn scan_source(
             .map_or(masked.len(), |next| next.line_start);
         collector.scan(header.name_end, end, owner_index)?;
     }
+    let remaining = max_syntax_nodes
+        .checked_sub(header_fact_count)
+        .and_then(|count| count.checked_sub(collector.constructors.len().saturating_mul(2)))
+        .ok_or_else(|| failure("elm-syntax-node-limit"))?;
+    let mut fields = RecordFieldCollector {
+        masked: &masked,
+        cancellation,
+        max_items: remaining / 2,
+        fields: Vec::new(),
+    };
+    for (owner_index, header) in headers.iter().enumerate() {
+        cancellation.check()?;
+        if header.label != "elm.type_alias.declaration" {
+            continue;
+        }
+        let end = headers
+            .get(owner_index + 1)
+            .map_or(masked.len(), |next| next.line_start);
+        fields.scan(header.name_end, end, owner_index)?;
+    }
     Ok(ParsedSource {
         headers,
         constructors: collector.constructors,
+        record_fields: fields.fields,
     })
 }
 
@@ -421,6 +487,102 @@ impl ConstructorCollector<'_> {
             .try_reserve(1)
             .map_err(|_| SinkError::AllocationFailed)?;
         self.constructors.push(Constructor {
+            owner_index,
+            name_start,
+            name_end,
+            span_end,
+        });
+        Ok(())
+    }
+}
+
+impl RecordFieldCollector<'_> {
+    fn scan(&mut self, start: usize, end: usize, owner_index: usize) -> Result<(), AdapterError> {
+        let Some(equals) = self.masked[start..end]
+            .iter()
+            .position(|byte| *byte == b'=')
+            .map(|offset| start + offset)
+        else {
+            return Ok(());
+        };
+        let Some(open) = self.masked[equals + 1..end]
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .map(|offset| equals + 1 + offset)
+            .filter(|offset| self.masked[*offset] == b'{')
+        else {
+            return Ok(());
+        };
+        let initial_count = self.fields.len();
+        let mut depth = 1_usize;
+        let mut segment_start = open + 1;
+        for index in open + 1..end {
+            if index % CHECK_INTERVAL == 0 {
+                self.cancellation.check()?;
+            }
+            match self.masked[index] {
+                b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
+                b')' | b']' | b'}' if depth > 1 => depth -= 1,
+                b'}' if depth == 1 => {
+                    self.capture(segment_start, index, owner_index)?;
+                    return Ok(());
+                }
+                b',' if depth == 1 => {
+                    self.capture(segment_start, index, owner_index)?;
+                    segment_start = index + 1;
+                }
+                b'|' if depth == 1 && self.fields.len() == initial_count => {
+                    segment_start = index + 1;
+                }
+                b')' | b']' if depth == 1 => break,
+                _ => {}
+            }
+        }
+        // An unclosed alias does not prove any field declaration.
+        self.fields.truncate(initial_count);
+        Ok(())
+    }
+
+    fn capture(
+        &mut self,
+        start: usize,
+        end: usize,
+        owner_index: usize,
+    ) -> Result<(), AdapterError> {
+        let segment = &self.masked[start..end];
+        let Some(prefix) = segment.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            return Ok(());
+        };
+        let name_start = start + prefix;
+        if !self.masked[name_start].is_ascii_lowercase() {
+            return Ok(());
+        }
+        let name_end = self.masked[name_start..end]
+            .iter()
+            .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+            .map_or(end, |length| name_start + length);
+        let tail = &self.masked[name_end..end];
+        let Some(colon) = tail
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .filter(|offset| tail[*offset] == b':')
+        else {
+            return Ok(());
+        };
+        let Some(last) = segment.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
+            return Ok(());
+        };
+        let span_end = start + last + 1;
+        if name_end + colon + 1 >= span_end {
+            return Ok(());
+        }
+        if self.fields.len() >= self.max_items {
+            return Err(failure("elm-syntax-node-limit"));
+        }
+        self.fields
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        self.fields.push(RecordField {
             owner_index,
             name_start,
             name_end,
@@ -703,9 +865,40 @@ mod tests {
                 .iter()
                 .all(|constructor| constructor.owner_index == 1)
         );
-        assert_eq!(required_syntax_fact_count(&parsed), 13);
-        assert_eq!(syntax_fact_count(&parsed), 13);
-        assert!(scan_source(source, 12, &Cancellation::new()).is_err());
+        assert_eq!(parsed.record_fields.len(), 1);
+        assert_eq!(
+            &source[parsed.record_fields[0].name_start..parsed.record_fields[0].name_end],
+            b"x"
+        );
+        assert_eq!(parsed.record_fields[0].owner_index, 2);
+        assert_eq!(required_syntax_fact_count(&parsed), 15);
+        assert_eq!(syntax_fact_count(&parsed), 15);
+        assert!(scan_source(source, 14, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn record_fields_preserve_outer_alias_spans_and_shared_fact_limit() {
+        let source = b"module Demo exposing (Model)\ntype State = Ready\ntype alias Model =\n    { name : String\n    , config : { enabled : Bool, label : String }\n    , count : Int {- phantom : String -}\n    }\n";
+        let parsed = scan_source(source, 15, &Cancellation::new()).expect("bounded Elm source");
+        let names = parsed
+            .record_fields
+            .iter()
+            .map(|field| &source[field.name_start..field.name_end])
+            .collect::<Vec<_>>();
+        assert_eq!(names, [b"name".as_slice(), b"config", b"count"]);
+        assert!(
+            parsed
+                .record_fields
+                .iter()
+                .all(|field| field.owner_index == 2)
+        );
+        assert_eq!(required_syntax_fact_count(&parsed), 15);
+        assert_eq!(syntax_fact_count(&parsed), 15);
+        assert!(scan_source(source, 14, &Cancellation::new()).is_err());
+        let unclosed = b"module Demo exposing (Model)\ntype alias Model = { name : String";
+        let parsed =
+            scan_source(unclosed, 5, &Cancellation::new()).expect("bounded malformed source");
+        assert!(parsed.record_fields.is_empty());
     }
 
     #[test]

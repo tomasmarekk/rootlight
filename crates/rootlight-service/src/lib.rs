@@ -29544,6 +29544,58 @@ mod tests {
     }
 
     #[test]
+    fn elm_record_alias_fields_have_nested_source_bound_identities() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Demo exposing (Model, Extensible)\n\ntype alias Model =\n    { name : String\n    , config : { enabled : Bool, label : String }\n    , count : Int {- phantom : String -}\n    }\n\ntype alias Extensible r =\n    { r | id : Int }\n\nview =\n    { wrong = 1 }\n";
+        fs::write(fixture.path().join("Demo.elm"), source).expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm record aliases index");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        for (name, parent) in [
+            ("name", "Model"),
+            ("config", "Model"),
+            ("count", "Model"),
+            ("id", "Extensible"),
+        ] {
+            let alias = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == parent && entity.kind == EntityKind::TypeAlias
+                })
+                .expect("record alias has symbol identity");
+            let field = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name && entity.kind == EntityKind::Field)
+                .expect("record field has symbol identity");
+            assert_eq!(
+                field.container,
+                Some(rootlight_ir::ContainerRef::Entity(alias.id))
+            );
+            let reference = field.evidence.source.clone().expect("field has source");
+            assert_eq!(reference.generation(), receipt.generation);
+            let start = usize::try_from(reference.span().start_byte()).expect("offset fits");
+            let end = usize::try_from(reference.span().end_byte()).expect("offset fits");
+            assert!(source.as_bytes()[start..end].starts_with(name.as_bytes()));
+            let read = service
+                .source_read(receipt.generation, vec![reference.clone()], &deadline())
+                .expect("field source reads");
+            assert_eq!(read.data.chunks[0].reference, reference);
+        }
+        for absent in ["enabled", "label", "phantom", "wrong"] {
+            assert!(!document.entities.iter().any(|entity| {
+                entity.kind == EntityKind::Field && entity.canonical_name == absent
+            }));
+        }
+    }
+
+    #[test]
     fn elm_ports_and_typed_functions_keep_exact_declaration_sources() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "port module Demo exposing (send, receive, render)\n\nport send : String -> Cmd msg\nport receive : (String -> msg) -> Sub msg\n\nrender : Model -> String\nrender model =\n    \"ready\"\n";
