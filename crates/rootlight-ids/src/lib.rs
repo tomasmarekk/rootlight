@@ -8,7 +8,6 @@
 
 use std::{fmt, str::FromStr, sync::LazyLock};
 
-use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 const CHECKSUM_BYTES: usize = 4;
@@ -18,6 +17,7 @@ const SYMBOL_CONTEXT: &str = "rootlight/symbol/v1";
 const FILE_CONTEXT: &str = "rootlight/file/v1";
 const FACT_CONTEXT: &str = "rootlight/fact/v1";
 const TEXT_CHECKSUM_CONTEXT: &str = "rootlight/id-text-checksum/v1";
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 static TEXT_CHECKSUM_HASHER: LazyLock<blake3::Hasher> =
     LazyLock::new(|| blake3::Hasher::new_derive_key(TEXT_CHECKSUM_CONTEXT));
 
@@ -140,7 +140,7 @@ macro_rules! define_stable_id {
                     [0_u8; $prefix.len() + (($size + CHECKSUM_BYTES) * 8).div_ceil(5)];
                 encoded[..$prefix.len()].copy_from_slice($prefix.as_bytes());
                 let suffix = &mut encoded[$prefix.len()..];
-                BASE32_NOPAD.encode_mut(&payload, suffix);
+                base32_encode_into(&payload, suffix);
                 suffix.make_ascii_lowercase();
                 consume(std::str::from_utf8(&encoded).expect("ID alphabet and prefix are ASCII"))
             }
@@ -451,14 +451,115 @@ impl CanonicalEncoder {
     }
 }
 
+fn base32_encode_into(input: &[u8], output: &mut [u8]) {
+    // ID families allocate the exact fixed width before calling this codec.
+    debug_assert_eq!(output.len(), (input.len() * 8).div_ceil(5));
+    let mut bits = 0_u8;
+    let mut pending = 0_u16;
+    let mut written = 0;
+    for &byte in input {
+        pending = (pending << 8) | u16::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let quintet = usize::from(pending >> bits & 31);
+            output[written] = BASE32_ALPHABET[quintet];
+            written += 1;
+        }
+        pending &= (1_u16 << bits) - 1;
+    }
+    if bits != 0 {
+        let quintet = usize::from((pending << (5 - bits)) & 31);
+        output[written] = BASE32_ALPHABET[quintet];
+        written += 1;
+    }
+    debug_assert_eq!(written, output.len());
+}
+
+fn base32_decode_into(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
+    if matches!(input.len() % 8, 1 | 3 | 6)
+        || input.len().checked_mul(5).ok_or(())? / 8 != output.len()
+    {
+        return Err(());
+    }
+    let mut bits = 0_u8;
+    let mut pending = 0_u16;
+    let mut written = 0;
+    for &byte in input {
+        let quintet = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return Err(()),
+        };
+        pending = (pending << 5) | u16::from(quintet);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            let decoded = u8::try_from(pending >> bits).map_err(|_| ())?;
+            *output.get_mut(written).ok_or(())? = decoded;
+            written += 1;
+        }
+        pending &= (1_u16 << bits) - 1;
+    }
+    // Unused trailing bits must be zero, or multiple spellings could decode
+    // to the same checked identifier.
+    if pending != 0 || written != output.len() {
+        return Err(());
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 fn encode_text(prefix: &str, raw: &[u8]) -> String {
     let checksum = text_checksum(prefix, raw);
     let mut payload = Vec::with_capacity(raw.len() + CHECKSUM_BYTES);
     payload.extend_from_slice(raw);
     payload.extend_from_slice(&checksum);
-    let encoded = BASE32_NOPAD.encode(&payload).to_ascii_lowercase();
+    let encoded = base32_reference_encode(&payload).to_ascii_lowercase();
     format!("{prefix}{encoded}")
+}
+
+#[cfg(test)]
+fn base32_reference_encode(input: &[u8]) -> String {
+    let bits: Vec<_> = input
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |shift| (*byte >> shift) & 1))
+        .collect();
+    bits.chunks(5)
+        .map(|chunk| {
+            let quintet = chunk
+                .iter()
+                .fold(0_usize, |value, bit| (value << 1) | usize::from(*bit))
+                << (5 - chunk.len());
+            char::from(BASE32_ALPHABET[quintet])
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn base32_reference_decode(input: &[u8]) -> Option<Vec<u8>> {
+    if matches!(input.len() % 8, 1 | 3 | 6) {
+        return None;
+    }
+    let mut bits = Vec::with_capacity(input.len().checked_mul(5)?);
+    for &byte in input {
+        let value = BASE32_ALPHABET.iter().position(|&letter| letter == byte)?;
+        bits.extend((0..5).rev().map(|shift| (value >> shift) & 1));
+    }
+    let mut chunks = bits.chunks_exact(8);
+    let decoded = chunks
+        .by_ref()
+        .map(|chunk| {
+            chunk
+                .iter()
+                .fold(0_u8, |value, bit| (value << 1) | u8::from(*bit != 0))
+        })
+        .collect();
+    chunks
+        .remainder()
+        .iter()
+        .all(|bit| *bit == 0)
+        .then_some(decoded)
 }
 
 fn decode_text<const N: usize>(
@@ -497,9 +598,8 @@ fn decode_text<const N: usize>(
     debug_assert_eq!(payload.len(), expected_length);
     encoded_buffer.copy_from_slice(encoded.as_bytes());
     encoded_buffer.make_ascii_uppercase();
-    let decoded_length = BASE32_NOPAD
-        .decode_mut(encoded_buffer, payload)
-        .map_err(|_| IdParseError::InvalidAlphabet)?;
+    let decoded_length =
+        base32_decode_into(encoded_buffer, payload).map_err(|_| IdParseError::InvalidAlphabet)?;
     if decoded_length != expected_length {
         return Err(IdParseError::InvalidLength {
             expected: expected_length,
@@ -516,7 +616,7 @@ fn decode_text<const N: usize>(
     bytes.copy_from_slice(raw);
     // Reuse the verified payload, including its checksum, for the canonical
     // round-trip check instead of deriving and allocating the entire ID again.
-    BASE32_NOPAD.encode_mut(payload, encoded_buffer);
+    base32_encode_into(payload, encoded_buffer);
     encoded_buffer.make_ascii_lowercase();
     if encoded_buffer != encoded.as_bytes() {
         return Err(IdParseError::NonCanonical);
@@ -649,9 +749,8 @@ mod tests {
                 actual: encoded.len(),
             });
         }
-        let payload = BASE32_NOPAD
-            .decode(encoded.to_ascii_uppercase().as_bytes())
-            .map_err(|_| IdParseError::InvalidAlphabet)?;
+        let payload = base32_reference_decode(encoded.to_ascii_uppercase().as_bytes())
+            .ok_or(IdParseError::InvalidAlphabet)?;
         if payload.len() != expected_length {
             return Err(IdParseError::InvalidLength {
                 expected: expected_length,
@@ -674,6 +773,38 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn base32_codec_preserves_canonical_vectors_and_rejects_tail_bits() {
+        for (raw, encoded) in [
+            (b"".as_slice(), ""),
+            (b"f".as_slice(), "MY"),
+            (b"fo".as_slice(), "MZXQ"),
+            (b"foo".as_slice(), "MZXW6"),
+            (b"foob".as_slice(), "MZXW6YQ"),
+            (b"fooba".as_slice(), "MZXW6YTB"),
+            (b"foobar".as_slice(), "MZXW6YTBOI"),
+        ] {
+            let mut text = vec![0; (raw.len() * 8).div_ceil(5)];
+            base32_encode_into(raw, &mut text);
+            assert_eq!(text, encoded.as_bytes());
+            let mut decoded = vec![0; raw.len()];
+            assert_eq!(base32_decode_into(&text, &mut decoded), Ok(raw.len()));
+            assert_eq!(decoded, raw);
+        }
+        for invalid in [
+            b"M".as_slice(),
+            b"MZ",
+            b"MZX",
+            b"MZXR",
+            b"MZXW7",
+            b"M0",
+            b"my",
+        ] {
+            let mut decoded = vec![0; invalid.len() * 5 / 8];
+            assert_eq!(base32_decode_into(invalid, &mut decoded), Err(()));
+        }
+    }
 
     fn uncached_text_checksum(prefix: &str, raw: &[u8]) -> [u8; CHECKSUM_BYTES] {
         let mut encoder = CanonicalEncoder::default();
@@ -843,6 +974,19 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn base32_codec_matches_independent_bit_reference(raw in prop::collection::vec(any::<u8>(), 0..=128)) {
+            let expected = base32_reference_encode(&raw);
+            let mut encoded = vec![0; expected.len()];
+            base32_encode_into(&raw, &mut encoded);
+            prop_assert_eq!(&encoded, expected.as_bytes());
+            let mut decoded = vec![0; raw.len()];
+            prop_assert_eq!(base32_decode_into(&encoded, &mut decoded), Ok(raw.len()));
+            prop_assert_eq!(decoded.as_slice(), raw.as_slice());
+            let reference = base32_reference_decode(&encoded);
+            prop_assert_eq!(reference.as_deref(), Some(raw.as_slice()));
+        }
+
         #[test]
         fn text_checksum_matches_uncached_canonical_recipe(
             short in any::<[u8; 16]>(),

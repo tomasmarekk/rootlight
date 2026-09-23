@@ -13,7 +13,6 @@ schema = ["dep:schemars"]
 
 [dependencies]
 blake3.workspace = true
-data-encoding.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
