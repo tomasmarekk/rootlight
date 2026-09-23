@@ -603,7 +603,18 @@ enum FactNode {
     Extension(ExtensionEnvelope),
 }
 
-impl FactNode {
+enum FactNodeRef<'a> {
+    Occurrence(&'a OccurrenceRecord),
+    Relation(&'a RelationRecord),
+    Provenance(&'a ProvenanceRecord),
+    SourceMapping(&'a SourceMappingRecord),
+    Coverage(&'a CoverageRecord),
+    Skipped(&'a SkippedRegion),
+    Diagnostic(&'a DiagnosticRecord),
+    Extension(&'a ExtensionEnvelope),
+}
+
+impl FactNodeRef<'_> {
     fn dependencies(
         &self,
         checkpoint: &mut impl FnMut() -> bool,
@@ -760,6 +771,21 @@ impl FactLocation {
             Self::Extension(index) => FactNode::Extension(document.extensions[index].clone()),
         }
     }
+
+    fn node_ref(self, document: &NormalizedIrDocument) -> FactNodeRef<'_> {
+        match self {
+            Self::Occurrence(index) => FactNodeRef::Occurrence(&document.occurrences[index]),
+            Self::Relation(index) => FactNodeRef::Relation(&document.relations[index]),
+            Self::Provenance(index) => FactNodeRef::Provenance(&document.provenance[index]),
+            Self::SourceMapping(index) => {
+                FactNodeRef::SourceMapping(&document.source_mappings[index])
+            }
+            Self::Coverage(index) => FactNodeRef::Coverage(&document.coverage_records[index]),
+            Self::Skipped(index) => FactNodeRef::Skipped(&document.skipped_regions[index]),
+            Self::Diagnostic(index) => FactNodeRef::Diagnostic(&document.diagnostics[index]),
+            Self::Extension(index) => FactNodeRef::Extension(&document.extensions[index]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -864,7 +890,7 @@ fn derive_fact_id_map(
         .map_err(|_| NormalizedRebindError::ResourceLimit)?;
     for (node_index, (_, location)) in locations.iter().enumerate() {
         ensure_projection_continues(&mut checkpoint)?;
-        let dependencies = location.node(document).dependencies(&mut checkpoint)?;
+        let dependencies = location.node_ref(document).dependencies(&mut checkpoint)?;
         for dependency in dependencies {
             ensure_projection_continues(&mut checkpoint)?;
             let dependency_index = ids.index(dependency)?;
