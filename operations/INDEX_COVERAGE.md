@@ -26,9 +26,14 @@ The JSON output records:
 - Effective configuration identity and the separate raw configuration input hash.
 - Language-scoped indexed counts and every retained file record.
 - Exact generation-bound source retrieval for every retained file, using bounded
-  chunks with no added context, compared to live file bytes and hashes. Valid
-  UTF-8 uses character-aligned chunks; other retained encodings use exact raw-byte
-  reads without transcoding.
+  chunks with no added context and a complete returned-byte hash. Physical files
+  are also compared to live file bytes and hashes. Valid physical UTF-8 uses
+  character-aligned chunks; other retained encodings use exact raw-byte reads
+  without transcoding.
+- For extracted sources, the complete mapped physical container is checked
+  against the live file once. The derived source has no editable filesystem path:
+  its source read and origin are verified, while independent extraction-byte
+  equivalence remains explicitly unproven by this diagnostic.
 - Per-file occurrence counts by syntax and resolution, plus explicit skipped
   regions from the normalized index.
 
@@ -38,6 +43,10 @@ without changing the independent 32 MiB default and 128 MiB hard transfer
 ceilings. The report explicitly records that no sharing round-trip occurred.
 This diagnostic includes normalized and file-only retained records, but does not
 qualify the sharing API; validate that boundary separately where required.
+`source_exact` is true only for a directly compared physical file. Extracted
+rows report `source_read_exact`, `container_live_exact`, and
+`extraction_independently_verified: false` separately; do not count the last
+field as a successful extraction proof.
 
 A successful run establishes these checks only. Independently compare the output
 against a complete repository inventory to account for excluded files. Missing

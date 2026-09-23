@@ -3,7 +3,7 @@
 //! describe recorded evidence, not an independent semantic completeness oracle.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fs,
     io::Read,
@@ -12,7 +12,7 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
-use rootlight_ir::{OccurrenceTarget, SourceRef, SourceSpan};
+use rootlight_ir::{FileRecord, OccurrenceTarget, SourceMappingKind, SourceRef, SourceSpan};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{FirstSliceBudget, FirstSliceService, FirstSliceStoragePolicy};
 use rootlight_source::{SourceEncoding, SourceReadOptions};
@@ -34,6 +34,21 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, Box<dyn Error>> {
         return Err("diagnostic input exceeds its read bound".into());
     }
     Ok(bytes)
+}
+
+fn read_live_file(repository: &Path, file: &FileRecord) -> Result<Vec<u8>, Box<dyn Error>> {
+    let relative = rootlight_vfs::RelativePath::parse(Path::new(&file.path))?;
+    let path = fs::canonicalize(repository.join(relative.as_str()))?;
+    if !path.starts_with(repository) {
+        return Err("source escaped repository".into());
+    }
+    let live = read_bounded(&path, file.byte_length)?;
+    if u64::try_from(live.len())? != file.byte_length
+        || rootlight_ids::content_hash(&live) != file.content_hash
+    {
+        return Err("live source identity differs from the indexed file".into());
+    }
+    Ok(live)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -92,7 +107,7 @@ fn inspect(
         },
     )??;
     Ok(json!({
-        "schema":"rootlight-index-coverage-diagnostic/2", "explicit_configuration":config.is_some(),
+        "schema":"rootlight-index-coverage-diagnostic/3", "explicit_configuration":config.is_some(),
         "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
         "configuration_hash":configuration_hash,
         "cold":cold,"cold_wall_micros":cold_micros,"no_op_same_generation":true,"no_op_wall_micros":no_op_micros,
@@ -112,6 +127,17 @@ fn inspect_files(
     generation: rootlight_ids::GenerationId,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     let document = snapshot.document();
+    let mut origins = BTreeMap::new();
+    for mapping in &document.source_mappings {
+        if mapping.kind == SourceMappingKind::ExtractedFromContainer
+            && origins
+                .insert(mapping.from.span().file(), &mapping.to)
+                .is_some()
+        {
+            return Err("extracted source has multiple container origins".into());
+        }
+    }
+    let mut verified_containers = BTreeSet::new();
     let mut rows = Vec::new();
     for file in document.files.iter().chain(
         snapshot
@@ -128,29 +154,42 @@ fn inspect_files(
         if source.generation() != generation {
             return Err("file source belongs to a different generation".into());
         }
-        let relative = rootlight_vfs::RelativePath::parse(std::path::Path::new(&file.path))?;
-        let path = fs::canonicalize(repository.join(relative.as_str()))?;
-        if !path.starts_with(repository) {
-            return Err("source escaped repository".into());
+        let origin = origins.get(&file.id).copied();
+        if let Some(container_ref) = origin {
+            let container = snapshot
+                .find_file(container_ref.span().file())
+                .ok_or("extracted source has no retained container")?;
+            if container_ref.repository() != file.repository
+                || container_ref.generation() != generation
+                || container_ref.span().start_byte() != 0
+                || container_ref.span().end_byte() != container.byte_length
+                || container_ref.content_hash() != container.content_hash
+            {
+                return Err("extracted source has an invalid container reference".into());
+            }
+            if verified_containers.insert(container.id) {
+                read_live_file(repository, container)?;
+            }
         }
-        let live = read_bounded(&path, file.byte_length)?;
-        if u64::try_from(live.len())? != file.byte_length
-            || rootlight_ids::content_hash(&live) != file.content_hash
-        {
-            return Err("live source identity differs from the indexed file".into());
-        }
-        let text = (file.encoding == "utf-8")
-            .then(|| std::str::from_utf8(&live).ok())
-            .flatten();
+        let live = origin
+            .is_none()
+            .then(|| read_live_file(repository, file))
+            .transpose()?;
+        let text = live
+            .as_deref()
+            .filter(|_| file.encoding == "utf-8")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let encoding = if text.is_some() {
             SourceEncoding::Utf8
         } else {
             SourceEncoding::Bytes
         };
+        let file_length = usize::try_from(file.byte_length)?;
+        let mut returned_hasher = blake3::Hasher::new();
         let mut start = 0_usize;
         loop {
             let end = text.map_or_else(
-                || start.saturating_add(16 * 1024).min(live.len()),
+                || start.saturating_add(16 * 1024).min(file_length),
                 |text| chunk_end(text, start),
             );
             let part = SourceRef::new(
@@ -179,17 +218,33 @@ fn inspect_files(
             }
             let chunk = &read.data.chunks[0];
             if chunk.reference != part
+                || chunk.extracted_from.as_ref() != origin
+                || chunk.path != file.path
+                || chunk.content_hash != file.content_hash
+                || chunk.language != file.language
                 || chunk.start_byte != u64::try_from(start)?
                 || chunk.end_byte != u64::try_from(end)?
-                || Some(chunk.bytes.as_slice()) != live.get(start..end)
+                || live
+                    .as_ref()
+                    .is_some_and(|bytes| Some(chunk.bytes.as_slice()) != bytes.get(start..end))
             {
-                return Err(format!("source retrieval differs from the live file: {} at {start}..{end}, returned {}..{} ({} bytes)",
+                return Err(format!("source retrieval differs from indexed evidence: {} at {start}..{end}, returned {}..{} ({} bytes)",
                     file.path, chunk.start_byte, chunk.end_byte, chunk.bytes.len()).into());
             }
-            if end == live.len() {
+            returned_hasher.update(&chunk.bytes);
+            if end == file_length {
                 break;
             }
             start = end;
+        }
+        if rootlight_ids::ContentHash::from_bytes(*returned_hasher.finalize().as_bytes())
+            != file.content_hash
+        {
+            return Err(format!(
+                "retrieved source hash differs from indexed file: {}",
+                file.path
+            )
+            .into());
         }
         let mut occurrences = BTreeMap::<String, usize>::new();
         for site in &document.occurrences {
@@ -210,7 +265,22 @@ fn inspect_files(
             .iter()
             .filter(|gap| gap.source.span().file() == file.id)
             .collect();
-        rows.push(json!({"file":file,"source_exact":true,"occurrences":occurrences,"gaps":gaps}));
+        let container_path = origin.and_then(|reference| {
+            snapshot
+                .find_file(reference.span().file())
+                .map(|container| container.path.as_str())
+        });
+        rows.push(json!({
+            "file":file,
+            "source_exact":live.is_some(),
+            "source_read_exact":true,
+            "extracted_from":origin,
+            "container_path":container_path,
+            "container_live_exact":origin.map(|_| true),
+            "extraction_independently_verified":origin.map(|_| false),
+            "occurrences":occurrences,
+            "gaps":gaps
+        }));
     }
     if rows.len() != snapshot.file_count() {
         return Err("inspection omitted a retained file record".into());
@@ -284,6 +354,8 @@ mod tests {
         let files = report["files"].as_array().unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|file| file["source_exact"] == true));
+        assert!(files.iter().all(|file| file["source_read_exact"] == true));
+        assert!(files.iter().all(|file| file["extracted_from"].is_null()));
         assert!(
             files
                 .iter()
@@ -333,6 +405,7 @@ mod tests {
             let files = report["files"].as_array().unwrap();
             assert_eq!(files.len(), 3);
             assert!(files.iter().all(|file| file["source_exact"] == true));
+            assert!(files.iter().all(|file| file["source_read_exact"] == true));
             let module = files
                 .iter()
                 .find(|file| file["file"]["path"] == "module.bas")
