@@ -885,13 +885,13 @@ mod tests {
         body::to_bytes,
         http::{Method, Request, header::HOST},
     };
-    use data_encoding::HEXLOWER;
     use rootlight_client::{
         ClientError, GenerationId, RepositoryCatalogEntry, RepositoryCatalogFreshness,
         RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
         RepositoryCatalogState, RepositoryCoverageEntry, RepositoryId, RepositoryStatus,
         RepositoryStatusRequest,
     };
+    use rootlight_encoding::HEXLOWER;
     use serde_json::json;
     use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;

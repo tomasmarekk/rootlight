@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 axum.workspace = true
-data-encoding.workspace = true
+rootlight-encoding = { path = "../../crates/rootlight-encoding" }
 directories.workspace = true
 form_urlencoded.workspace = true
 getrandom.workspace = true

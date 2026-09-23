@@ -14,7 +14,6 @@ use axum::{
     },
     response::{IntoResponse as _, Response},
 };
-use data_encoding::BASE64;
 use rootlight_client::{
     AnalysisTier, ChangeImpact, ContinuationAvailability, ContinuationGuidance, CoverageStatus,
     GenerationId, GenerationSelector, LimitingResourceKind, QueryContext, QueryFreshness,
@@ -22,6 +21,7 @@ use rootlight_client::{
     ResultCompletenessState, SourceChunk, SourceEncoding, SourceRead, SourceReadOptions, SymbolId,
     SymbolRelationships, TokenAccountingProfile,
 };
+use rootlight_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -1185,7 +1185,6 @@ mod tests {
             header::{CONTENT_TYPE, COOKIE, HOST},
         },
     };
-    use data_encoding::HEXLOWER;
     use rootlight_client::{
         ChangeImpactEntry, ChangeImpactGroup, ChangeImpactResolvedChange, ChangeImpactRiskSummary,
         ChangeImpactTest, ClientError, ContentHash, FileId, Health, LimitingResource, QueryUsage,
@@ -1193,6 +1192,7 @@ mod tests {
         RepositoryStatus, RepositoryStatusRequest, SourceReference, SymbolExplain,
         SymbolExplanation,
     };
+    use rootlight_encoding::HEXLOWER;
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;

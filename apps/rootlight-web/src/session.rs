@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use data_encoding::BASE64URL_NOPAD;
+use rootlight_encoding::BASE64URL_NOPAD;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 

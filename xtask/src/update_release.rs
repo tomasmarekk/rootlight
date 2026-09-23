@@ -228,7 +228,7 @@ pub(crate) fn build(options: &Options) -> Result<(), ReleaseUpdateError> {
                 return Err(ReleaseUpdateError::KeyMismatch);
             }
             let signature = key_pair.sk.sign(&metadata_bytes, None);
-            let signature_hex = data_encoding::HEXLOWER.encode(signature.as_ref());
+            let signature_hex = rootlight_encoding::HEXLOWER.encode(signature.as_ref());
             let artifact_message = canonical_artifact_signature_message(&metadata)
                 .map_err(ReleaseUpdateError::Metadata)?;
             let artifact_signature = key_pair.sk.sign(&artifact_message, None);
@@ -237,7 +237,7 @@ pub(crate) fn build(options: &Options) -> Result<(), ReleaseUpdateError> {
                 .verify(&artifact_message, &artifact_signature)
                 .map_err(|_| ReleaseUpdateError::InvalidSignature)?;
             let artifact_signature_hex =
-                data_encoding::HEXLOWER.encode(artifact_signature.as_ref());
+                rootlight_encoding::HEXLOWER.encode(artifact_signature.as_ref());
 
             // A successful self-verification prevents publishing a signature
             // or compatibility envelope that the production verifier cannot
@@ -330,7 +330,7 @@ fn read_private_seed(path: &Path) -> Result<[u8; 32], ReleaseUpdateError> {
         return Err(ReleaseUpdateError::InvalidPrivateSeed);
     }
     let mut seed = [0_u8; 32];
-    data_encoding::HEXLOWER_PERMISSIVE
+    rootlight_encoding::HEXLOWER_PERMISSIVE
         .decode_mut(value.as_bytes(), &mut seed)
         .map_err(|_| ReleaseUpdateError::InvalidPrivateSeed)?;
     Ok(seed)
@@ -355,7 +355,7 @@ fn hash_regular_file(path: &Path, maximum: u64) -> Result<FileDigest, ReleaseUpd
     }
     Ok(FileDigest {
         bytes,
-        sha256: data_encoding::HEXLOWER.encode(&digest.finalize()),
+        sha256: rootlight_encoding::HEXLOWER.encode(&digest.finalize()),
     })
 }
 
@@ -607,10 +607,10 @@ mod tests {
         let seed = [0x11_u8; 32];
         write_private_seed(
             &private_seed,
-            &format!("{}\n", data_encoding::HEXLOWER.encode(&seed)),
+            &format!("{}\n", rootlight_encoding::HEXLOWER.encode(&seed)),
         );
         let key_pair = KeyPair::from_seed(Seed::new(seed));
-        let public_key_hex = data_encoding::HEXLOWER.encode(key_pair.pk.as_ref());
+        let public_key_hex = rootlight_encoding::HEXLOWER.encode(key_pair.pk.as_ref());
         let options = Options {
             archive: archive.clone(),
             sbom,

@@ -2309,11 +2309,11 @@ name = "rootlight-client"
 version = "0.1.0"
 dependencies = [
  "cap-std",
- "data-encoding",
  "ed25519-compact",
  "fs2",
  "nt-token",
  "rootlight-build",
+ "rootlight-encoding",
  "rootlight-error",
  "rootlight-ids",
  "rootlight-ipc",
@@ -2414,6 +2414,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "rootlight-encoding"
+version = "0.1.0"
 
 [[package]]
 name = "rootlight-error"
@@ -2710,8 +2714,8 @@ dependencies = [
 name = "rootlight-semantic-host"
 version = "0.1.0"
 dependencies = [
- "data-encoding",
  "rootlight-cancel",
+ "rootlight-encoding",
  "rootlight-ids",
  "rootlight-semantic",
  "serde",
@@ -2809,12 +2813,12 @@ name = "rootlight-web"
 version = "0.1.0"
 dependencies = [
  "axum",
- "data-encoding",
  "directories",
  "form_urlencoded",
  "getrandom 0.3.4",
  "rootlight-cancel",
  "rootlight-client",
+ "rootlight-encoding",
  "rootlight-runtime",
  "rootlight-vfs",
  "serde",
@@ -4328,7 +4332,6 @@ dependencies = [
  "anyhow",
  "blake3",
  "cargo_metadata",
- "data-encoding",
  "ed25519-compact",
  "getrandom 0.3.4",
  "jsonschema",
@@ -4341,6 +4344,7 @@ dependencies = [
  "rootlight-catalog",
  "rootlight-client",
  "rootlight-config",
+ "rootlight-encoding",
  "rootlight-error",
  "rootlight-ids",
  "rootlight-ipc",

@@ -8,8 +8,8 @@
 
 use std::io::{self, BufRead, Write};
 
-use data_encoding::BASE64URL_NOPAD;
 use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_encoding::BASE64URL_NOPAD;
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
 use rootlight_semantic::{
     BuiltSemanticArtifact, SemanticAccounting, SemanticContext, SemanticError, SemanticItem,

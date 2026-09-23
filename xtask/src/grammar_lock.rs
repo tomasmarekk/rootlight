@@ -596,7 +596,7 @@ fn vendored_source_digest(files: &BTreeMap<String, String>) -> Result<String, Gr
         digest.update(checksum.as_bytes());
         digest.update([0]);
     }
-    Ok(data_encoding::HEXLOWER.encode(&digest.finalize()))
+    Ok(rootlight_encoding::HEXLOWER.encode(&digest.finalize()))
 }
 
 fn is_source_relative_path(path: &str) -> bool {

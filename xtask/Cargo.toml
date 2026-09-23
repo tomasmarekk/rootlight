@@ -11,7 +11,7 @@ publish = false
 anyhow.workspace = true
 blake3.workspace = true
 cargo_metadata.workspace = true
-data-encoding.workspace = true
+rootlight-encoding = { path = "../crates/rootlight-encoding" }
 ed25519-compact.workspace = true
 getrandom.workspace = true
 jsonschema.workspace = true

@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::body::Bytes;
-use data_encoding::HEXLOWER;
+use rootlight_encoding::HEXLOWER;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 

@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use data_encoding::BASE64URL_NOPAD;
 use rootlight_client::{GenerationId, RepositoryId, SourceReference};
+use rootlight_encoding::BASE64URL_NOPAD;
 use sha2::Digest as _;
 use subtle::ConstantTimeEq as _;
 

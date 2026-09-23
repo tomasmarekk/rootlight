@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 cap-std.workspace = true
-data-encoding.workspace = true
+rootlight-encoding = { path = "../rootlight-encoding" }
 ed25519-compact.workspace = true
 fs2.workspace = true
 rootlight-build = { path = "../rootlight-build" }

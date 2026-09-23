@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use data_encoding::BASE64URL_NOPAD;
 use rootlight_cancel::Cancellation;
+use rootlight_encoding::BASE64URL_NOPAD;
 use rootlight_vfs::{BrowseDirectory, BrowseDirectorySnapshot, BrowseError};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;

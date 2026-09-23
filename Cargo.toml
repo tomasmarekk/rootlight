@@ -25,6 +25,7 @@ members = [
     "crates/rootlight-ir",
     "crates/rootlight-incremental",
     "crates/rootlight-discovery",
+    "crates/rootlight-encoding",
     "crates/rootlight-mcp-contract",
     "crates/rootlight-observability",
     "crates/rootlight-operations",
@@ -81,7 +82,6 @@ blake3 = { version = "1.8.5", default-features = false, features = ["pure", "std
 cap-fs-ext = { version = "3.4.5", default-features = false, features = ["std"] }
 cap-std = { version = "3.4.5", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
-data-encoding = { version = "2.9.0", default-features = false, features = ["std"] }
 directories = { version = "6.0.0", default-features = false }
 ed25519-compact = { version = "=2.3.1", default-features = false }
 form_urlencoded = { version = "1.2.2", default-features = false, features = ["alloc"] }

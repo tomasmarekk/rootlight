@@ -3050,7 +3050,7 @@ mod tests {
         artifact: &[u8],
         key_pair: &KeyPair,
     ) -> UpdateInputPaths {
-        use data_encoding::BASE64;
+        use rootlight_encoding::BASE64;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

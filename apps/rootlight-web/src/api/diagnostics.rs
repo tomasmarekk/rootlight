@@ -12,8 +12,8 @@ use axum::{
     },
     response::Response,
 };
-use data_encoding::HEXLOWER;
 use rootlight_client::{DiagnosticOutcome, DiagnosticsQuick, HealthStatus, RequestTimeout};
+use rootlight_encoding::HEXLOWER;
 use serde::Serialize;
 
 use crate::{

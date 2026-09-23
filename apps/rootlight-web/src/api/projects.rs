@@ -7,7 +7,6 @@ use axum::{
     extract::{Path, RawQuery, State},
     http::StatusCode,
 };
-use data_encoding::BASE64URL_NOPAD;
 use rootlight_client::{
     GenerationId, GenerationSelector, OperationKind, OperationState,
     REPOSITORY_CATALOG_SORT_VERSION, RepositoryCatalogEntry, RepositoryCatalogFreshness,
@@ -16,6 +15,7 @@ use rootlight_client::{
     RepositoryStatusCoverageDetail, RepositoryStatusFreshnessRequirement,
     RepositoryStatusOperation, RepositoryStatusRequest, RequestTimeout,
 };
+use rootlight_encoding::BASE64URL_NOPAD;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{ApiError, AppState};

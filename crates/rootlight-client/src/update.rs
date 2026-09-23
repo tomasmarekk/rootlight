@@ -8,8 +8,8 @@ use std::{
     io::{self, Cursor, Read},
 };
 
-use data_encoding::BASE64;
 use ed25519_compact::{PublicKey, Signature};
+use rootlight_encoding::BASE64;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

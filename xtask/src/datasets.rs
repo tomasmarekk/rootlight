@@ -291,11 +291,11 @@ fn observe_tree(
         files.push(CacheFile {
             path: relative,
             bytes: size,
-            sha256: data_encoding::HEXLOWER.encode(&file_digest),
+            sha256: rootlight_encoding::HEXLOWER.encode(&file_digest),
         });
     }
     Ok(DatasetObservation {
-        tree_sha256: data_encoding::HEXLOWER.encode(&tree.finalize()),
+        tree_sha256: rootlight_encoding::HEXLOWER.encode(&tree.finalize()),
         bytes: total_bytes,
         files,
     })
@@ -567,7 +567,7 @@ fn validate_source_revision(value: &str) -> Result<(), DatasetError> {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
+    rootlight_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
 }
 
 fn invalid_catalog<T>(detail: impl Into<String>) -> Result<T, DatasetError> {

@@ -362,7 +362,7 @@ fn archive_digests(path: &Path) -> Result<(String, String), PackageError> {
         blake3.update(&buffer[..read]);
     }
     Ok((
-        data_encoding::HEXLOWER.encode(&sha256.finalize()),
+        rootlight_encoding::HEXLOWER.encode(&sha256.finalize()),
         blake3.finalize().to_hex().to_string(),
     ))
 }
@@ -1330,7 +1330,7 @@ fn signed_lifecycle_inputs(
     let mut seed = [0_u8; 32];
     getrandom::fill(&mut seed).map_err(|_| PackageError::RandomUnavailable)?;
     let key_pair = KeyPair::from_seed(Seed::new(seed));
-    let public_key_hex = data_encoding::HEXLOWER.encode(key_pair.pk.as_ref());
+    let public_key_hex = rootlight_encoding::HEXLOWER.encode(key_pair.pk.as_ref());
     let public_key =
         UpdatePublicKey::from_hex(&public_key_hex).map_err(PackageError::UpdateMetadata)?;
     let policy = TrustedUpdatePolicy::new(
@@ -1384,11 +1384,11 @@ fn signed_lifecycle_inputs(
     let metadata_bytes =
         canonical_update_metadata_bytes(&metadata).map_err(PackageError::UpdateMetadata)?;
     let signature = key_pair.sk.sign(&metadata_bytes, None);
-    let signature_hex = data_encoding::HEXLOWER.encode(signature.as_ref());
+    let signature_hex = rootlight_encoding::HEXLOWER.encode(signature.as_ref());
     let artifact_signature_message =
         canonical_artifact_signature_message(&metadata).map_err(PackageError::UpdateMetadata)?;
     let artifact_signature = key_pair.sk.sign(&artifact_signature_message, None);
-    let artifact_signature_hex = data_encoding::HEXLOWER.encode(artifact_signature.as_ref());
+    let artifact_signature_hex = rootlight_encoding::HEXLOWER.encode(artifact_signature.as_ref());
     let directory = tempfile::tempdir().map_err(PackageError::WorkingDir)?;
     let metadata_path = directory.path().join("candidate.update.json");
     let metadata_signature_path = directory.path().join("candidate.update.sig");
@@ -1504,7 +1504,7 @@ fn lifecycle_provenance(
     .expect("lifecycle provenance uses only serializable values");
     serde_json::to_vec(&serde_json::json!({
         "dsseEnvelope": {
-            "payload": data_encoding::BASE64.encode(&statement),
+            "payload": rootlight_encoding::BASE64.encode(&statement),
             "payloadType": "application/vnd.in-toto+json",
             "signatures": [{"keyid": "rootlight-lifecycle-test", "sig": "local"}]
         },
@@ -1819,7 +1819,7 @@ fn invalid_install<T>(detail: impl Into<String>) -> Result<T, PackageError> {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
+    rootlight_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
 }
 
 fn blake3_hex(bytes: &[u8]) -> String {

@@ -695,11 +695,11 @@ mod tests {
             header::{CONTENT_TYPE, COOKIE, HOST},
         },
     };
-    use data_encoding::HEXLOWER;
     use rootlight_client::{
         ClientError, DaemonLifecycle, Health, RepositoryCatalogPage, RepositoryCatalogPageRequest,
         RepositoryStatus, RepositoryStatusRequest, RequestTimeout, ResourcePressure,
     };
+    use rootlight_encoding::HEXLOWER;
     use serde_json::{Value, json};
     use tower::ServiceExt as _;
 

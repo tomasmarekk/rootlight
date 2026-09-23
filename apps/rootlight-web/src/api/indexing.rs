@@ -488,12 +488,12 @@ mod tests {
             header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN},
         },
     };
-    use data_encoding::HEXLOWER;
     use rootlight_cancel::Cancellation;
     use rootlight_client::{
         ClientError, Health, RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryStatus,
         RepositoryStatusRequest,
     };
+    use rootlight_encoding::HEXLOWER;
     use rootlight_vfs::BrowseDirectory;
     use serde_json::{Value, json};
     use tempfile::TempDir;

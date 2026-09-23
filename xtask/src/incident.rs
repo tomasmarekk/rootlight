@@ -421,7 +421,7 @@ fn read_regular_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, IncidentEr
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
+    rootlight_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
 }
 
 fn invalid_tabletop<T>(detail: impl Into<String>) -> Result<T, IncidentError> {

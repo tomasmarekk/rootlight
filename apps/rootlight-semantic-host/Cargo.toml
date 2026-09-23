@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-data-encoding.workspace = true
+rootlight-encoding = { path = "../../crates/rootlight-encoding" }
 rootlight-cancel = { path = "../../crates/rootlight-cancel" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-semantic = { path = "../../crates/rootlight-semantic" }
