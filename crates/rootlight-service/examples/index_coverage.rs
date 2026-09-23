@@ -14,7 +14,10 @@ use std::{
 use rootlight_cancel::Cancellation;
 use rootlight_ir::{FileRecord, OccurrenceTarget, SourceMappingKind, SourceRef, SourceSpan};
 use rootlight_runtime::RuntimePaths;
-use rootlight_service::{FirstSliceBudget, FirstSliceService, FirstSliceStoragePolicy};
+use rootlight_service::{
+    FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
+    FirstSliceStoragePolicy,
+};
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use serde_json::json;
 
@@ -85,12 +88,8 @@ fn inspect(
     paths.prepare_owner()?;
     let mut service =
         FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()?)?;
-    let cold_start = Instant::now();
-    let cold = service.index_repository(&repository, &deadline()?)?;
-    let cold_micros = cold_start.elapsed().as_micros();
-    let no_op_start = Instant::now();
-    let no_op = service.index_repository(&repository, &deadline()?)?;
-    let no_op_micros = no_op_start.elapsed().as_micros();
+    let (cold, cold_timing) = index_with_timing(&mut service, &repository)?;
+    let (no_op, no_op_timing) = index_with_timing(&mut service, &repository)?;
     if cold.generation != no_op.generation {
         return Err("unchanged repository produced a different generation".into());
     }
@@ -107,10 +106,11 @@ fn inspect(
         },
     )??;
     Ok(json!({
-        "schema":"rootlight-index-coverage-diagnostic/3", "explicit_configuration":config.is_some(),
+        "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
         "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
         "configuration_hash":configuration_hash,
-        "cold":cold,"cold_wall_micros":cold_micros,"no_op_same_generation":true,"no_op_wall_micros":no_op_micros,
+        "cold":cold,"cold_wall_micros":cold_timing["wall_micros"],"cold_timing":cold_timing,
+        "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],"no_op_timing":no_op_timing,
         "generation_inspection_method":"local_identity_verified_snapshot",
         "shared_bundle_roundtrip":false,
         "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
@@ -118,6 +118,66 @@ fn inspect(
         "files":rows,"full_semantic_completeness_proven":false,
         "installed_mcp_qualified":false
     }))
+}
+
+fn index_with_timing(
+    service: &mut FirstSliceService,
+    repository: &Path,
+) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
+    let cancellation = deadline()?;
+    let started = Instant::now();
+    let mut timeline = Vec::new();
+    let prepared = service.prepare_repository_with_mode_and_progress(
+        repository,
+        FirstSliceIndexMode::Structural,
+        &cancellation,
+        |progress: FirstSliceIndexProgress| {
+            timeline.push((Instant::now(), progress));
+        },
+    )?;
+    let prepared_at = Instant::now();
+    let receipt = service.publish_prepared(prepared, &cancellation)?;
+    let published_at = Instant::now();
+    let mut previous_event = started;
+    let mut previous_completed = started;
+    let mut completed = 0;
+    let mut stages = Vec::new();
+    let mut events = Vec::new();
+    for (observed_at, progress) in timeline {
+        events.push(json!({
+            "stage":format!("{:?}", progress.stage),
+            "completed":progress.completed,
+            "since_start_micros":observed_at.duration_since(started).as_micros(),
+            "since_previous_event_micros":observed_at.duration_since(previous_event).as_micros(),
+            "files_examined":progress.files_examined,
+            "bytes_examined":progress.bytes_examined,
+            "written_bytes":progress.written_bytes,
+        }));
+        previous_event = observed_at;
+        if progress.completed > completed {
+            stages.push(json!({
+                "stage":format!("{:?}", progress.stage),
+                "completed":progress.completed,
+                "wall_micros":observed_at.duration_since(previous_completed).as_micros(),
+                "files_examined":progress.files_examined,
+                "bytes_examined":progress.bytes_examined,
+                "written_bytes":progress.written_bytes,
+            }));
+            previous_completed = observed_at;
+            completed = progress.completed;
+        }
+    }
+    Ok((
+        receipt,
+        json!({
+            "wall_micros":published_at.duration_since(started).as_micros(),
+            "prepare_micros":prepared_at.duration_since(started).as_micros(),
+            "publish_micros":published_at.duration_since(prepared_at).as_micros(),
+            "after_last_progress_micros":prepared_at.duration_since(previous_completed).as_micros(),
+            "completed_stages":stages,
+            "progress_events":events,
+        }),
+    ))
 }
 
 fn inspect_files(
@@ -394,8 +454,31 @@ mod tests {
         for (mode, config) in [("default", None), ("configured", Some(configured))] {
             let state = root.join(mode);
             let report = inspect(&repository, &state, config).unwrap();
+            assert_eq!(report["schema"], "rootlight-index-coverage-diagnostic/4");
             assert_eq!(report["explicit_configuration"], config.is_some());
             assert_eq!(report["no_op_same_generation"], true);
+            assert!(report["cold_timing"]["prepare_micros"].as_u64().is_some());
+            assert!(report["cold_timing"]["publish_micros"].as_u64().is_some());
+            assert!(
+                !report["cold_timing"]["completed_stages"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                report["no_op_timing"]["completed_stages"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                report["cold_wall_micros"],
+                report["cold_timing"]["wall_micros"]
+            );
+            assert_eq!(
+                report["no_op_wall_micros"],
+                report["no_op_timing"]["wall_micros"]
+            );
             assert_eq!(report["full_semantic_completeness_proven"], false);
             assert_eq!(
                 report["generation_inspection_method"],

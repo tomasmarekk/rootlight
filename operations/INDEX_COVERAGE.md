@@ -23,6 +23,15 @@ The JSON output records:
 
 - Cold indexing and unchanged-repository no-op observations, with identical
   generation identity required for the no-op.
+- Separate preparation and publication wall times. Completed cold preparation
+  stages record the elapsed time since the preceding milestone, plus examined
+  and written counters; `after_last_progress_micros` accounts for work after
+  the last milestone. A retained no-op can finish before any completed-stage
+  callback, so its stage list may be empty. Timings include the synchronous
+  progress observer and are diagnostic wall time, not CPU profiles. The ordered
+  `progress_events` include intermediate callbacks and intervals since the
+  preceding event. Each interval brackets multiple operations and must not be
+  attributed to one internal function without finer profiling.
 - Effective configuration identity and the separate raw configuration input hash.
 - Language-scoped indexed counts and every retained file record.
 - Exact generation-bound source retrieval for every retained file, using bounded
