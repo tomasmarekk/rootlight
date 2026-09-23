@@ -3,6 +3,7 @@
 pub(crate) mod diagnostics;
 pub(crate) mod evidence;
 pub(crate) mod filesystem;
+mod form;
 pub(crate) mod graph;
 pub(crate) mod indexing;
 pub(crate) mod projects;

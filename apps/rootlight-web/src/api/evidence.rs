@@ -942,7 +942,7 @@ fn parse_detail_query(raw_query: Option<&str>) -> Result<GenerationId, ApiError>
     let mut generation = None;
     let mut kind = None;
     let mut count = 0_usize;
-    for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
+    for (key, value) in super::form::pairs(raw_query) {
         count = count.saturating_add(1);
         if count > MAX_DETAIL_QUERY_PARAMETERS {
             return Err(ApiError::invalid_node_request());
@@ -1213,6 +1213,19 @@ mod tests {
     const TEST_PORT: u16 = 43_127;
     const SOURCE_TEXT: &[u8] = b"let secret_source = 7;\n";
     const SOURCE_PATH: &str = "src/private.rs";
+
+    #[test]
+    fn detail_query_decodes_encoded_keys_without_relaxing_validation() {
+        let raw = format!("generat%69on={}&kind=sym%62ol", generation());
+        assert_eq!(parse_detail_query(Some(&raw)).unwrap(), generation());
+        assert!(
+            parse_detail_query(Some(&format!(
+                "generation={}&kind=sym%62ol&kind=symbol",
+                generation()
+            )))
+            .is_err()
+        );
+    }
 
     struct TestHarness {
         router: Router,

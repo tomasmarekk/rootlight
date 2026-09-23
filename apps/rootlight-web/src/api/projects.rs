@@ -305,7 +305,7 @@ fn parse_query_pairs(
         return Err(ApiError::bad_request());
     }
     let mut parameters = Vec::with_capacity(MAX_QUERY_PARAMETERS);
-    for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
+    for (key, value) in super::form::pairs(raw_query) {
         if parameters.len() == MAX_QUERY_PARAMETERS {
             return Err(ApiError::bad_request());
         }
@@ -591,6 +591,13 @@ mod tests {
         );
         assert!(decode_snapshot(&"x".repeat(SNAPSHOT_ENCODED_BYTES + 1)).is_err());
         assert!(decode_sort_key(&"x".repeat(MAX_SORT_KEY_ENCODED_BYTES + 1)).is_err());
+        assert_eq!(
+            parse_query_pairs(Some("page%5Fsize=10&state=ready"), MAX_CATALOG_QUERY_BYTES).unwrap(),
+            [
+                ("page_size".to_owned(), "10".to_owned()),
+                ("state".to_owned(), "ready".to_owned())
+            ]
+        );
     }
 
     #[test]

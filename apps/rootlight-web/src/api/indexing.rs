@@ -249,7 +249,7 @@ fn parse_operation_query(raw: Option<&str>) -> Result<OperationQuery, ApiError> 
     }
     let mut query = OperationQuery::default();
     let mut count = 0usize;
-    for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
+    for (key, value) in super::form::pairs(raw) {
         count = count.saturating_add(1);
         if count > MAX_OPERATION_QUERY_PARAMETERS {
             return Err(ApiError::invalid_operation_request());
@@ -521,6 +521,12 @@ mod tests {
             .expect("bounded query parses");
         assert_eq!(query.wait_ms, Some(30_000));
         assert_eq!(query.after_revision, Some(9));
+        assert_eq!(
+            parse_operation_query(Some("wait%5Fms=1"))
+                .expect("encoded parameter parses")
+                .wait_ms,
+            Some(1)
+        );
         assert!(parse_operation_query(Some("after_revision=9")).is_err());
         assert!(parse_operation_query(Some("wait_ms=30001")).is_err());
         assert!(parse_operation_query(Some("wait_ms=1&wait_ms=2")).is_err());
