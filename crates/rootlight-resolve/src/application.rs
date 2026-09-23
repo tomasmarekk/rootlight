@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{FactId, SymbolId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, ExtensionSupport, FactEvidence,
-    FactRef, IrDocumentValidationError, IrLimits, NormalizedIrDocument, OccurrenceRecord,
-    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, canonicalize_ir_document,
-    derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
-    validate_ir_document,
+    AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, EntityFlag, EntityKind,
+    EvidenceKind, ExtensionSupport, FactEvidence, FactRef, IrDocumentValidationError, IrLimits,
+    NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity,
+    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    canonicalize_ir_document, derive_occurrence_record_id, derive_provenance_record_id,
+    derive_relation_record_id, validate_ir_document,
 };
 
 use crate::{
@@ -122,6 +122,7 @@ impl ResolutionEngine {
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
+        reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
@@ -420,6 +421,7 @@ impl ResolutionEngine {
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
+        reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
         reconcile_classic_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
@@ -940,6 +942,110 @@ fn reconcile_elm_import_gaps(
             rootlight_ir::derive_skipped_region_id(gap).map_err(ResolutionError::FactIdentity)?;
         if old != gap.id {
             remap.insert(old, gap.id);
+        }
+    }
+    ensure_relation_remap_is_safe(document, &remap)
+}
+
+fn reconcile_elm_import_relations(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let producers = document
+        .provenance
+        .iter()
+        .filter(|record| record.rule.as_deref() == Some("elm-module-import-v1.indexed_snapshot"))
+        .map(|record| record.id)
+        .collect::<BTreeSet<_>>();
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let elm_files = document
+        .files
+        .iter()
+        .filter(|file| file.language == "elm")
+        .map(|file| file.id)
+        .collect::<BTreeSet<_>>();
+    let mut module_by_file = BTreeMap::new();
+    for entity in &document.entities {
+        cancellation.check()?;
+        let Some(file) = entity
+            .evidence
+            .source
+            .as_ref()
+            .map(|source| source.span().file())
+        else {
+            continue;
+        };
+        if entity.language != "elm"
+            || entity.kind != EntityKind::Module
+            || entity.flags.contains(&EntityFlag::Synthetic)
+            || entity.container != Some(ContainerRef::File(file))
+            || !elm_files.contains(&file)
+        {
+            continue;
+        }
+        module_by_file
+            .entry(file)
+            .and_modify(|prior| *prior = None)
+            .or_insert(Some(entity.id));
+    }
+    let imports = document
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            if occurrence.syntax_kind != "elm.import"
+                || occurrence.role != OccurrenceRole::ImportUse
+                || !producers.contains(&occurrence.provenance)
+            {
+                return None;
+            }
+            let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                return None;
+            };
+            Some((
+                occurrence.id,
+                (
+                    occurrence.file,
+                    symbol,
+                    &occurrence.source,
+                    occurrence.provenance,
+                ),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut remap = BTreeMap::new();
+    for relation in &mut document.relations {
+        cancellation.check()?;
+        let RelationEndpoint::Occurrence(occurrence) = relation.subject else {
+            continue;
+        };
+        let Some((file, target, source, provenance)) = imports.get(&occurrence) else {
+            continue;
+        };
+        let Some(Some(owner)) = module_by_file.get(file) else {
+            continue;
+        };
+        if relation.predicate != RelationPredicate::Imports
+            || relation.object != RelationEndpoint::Entity(*target)
+            || relation.provenance != *provenance
+            || relation.evidence.source.as_ref() != Some(source)
+        {
+            continue;
+        }
+        // The unique authored module owns this source-bound import statement.
+        let old = relation.id;
+        relation.subject = RelationEndpoint::Entity(*owner);
+        for parent in &mut relation.evidence.derivation {
+            if *parent == FactRef::Fact(occurrence) {
+                *parent = FactRef::Entity(*owner);
+            }
+        }
+        relation.evidence.derivation.sort_unstable();
+        relation.evidence.derivation.dedup();
+        relation.id = derive_relation_record_id(relation).map_err(ResolutionError::FactIdentity)?;
+        if old != relation.id {
+            remap.insert(old, relation.id);
         }
     }
     ensure_relation_remap_is_safe(document, &remap)

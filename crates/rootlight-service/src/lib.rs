@@ -29623,6 +29623,15 @@ mod tests {
                     && entity.canonical_name == "Shared"
             })
             .expect("declared module has symbol identity");
+        let importer = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == "elm"
+                    && entity.kind == EntityKind::Module
+                    && entity.canonical_name == "Main"
+            })
+            .expect("importer has source-declared module identity");
         let import = document
             .occurrences
             .iter()
@@ -29639,9 +29648,29 @@ mod tests {
         );
         assert!(document.relations.iter().any(|relation| {
             relation.predicate == rootlight_ir::RelationPredicate::Imports
+                && relation.subject == rootlight_ir::RelationEndpoint::Entity(importer.id)
                 && relation.object == rootlight_ir::RelationEndpoint::Entity(module.id)
                 && relation.evidence.source.as_ref() == Some(&import.source)
         }));
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([module.id]),
+                vec![RelationFamily::Imports],
+                Some(RelationDirection::Inbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("source-backed import is queryable");
+        assert!(
+            relationships
+                .data
+                .groups
+                .iter()
+                .any(|group| { group.items.iter().any(|item| item.symbol == importer.id) })
+        );
         assert!(!document.skipped_regions.iter().any(|gap| {
             gap.detail == "unresolved-import-target" && gap.source == import.source
         }));
