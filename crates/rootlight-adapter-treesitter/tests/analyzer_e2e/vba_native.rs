@@ -1361,12 +1361,6 @@ fn vba_result_references_keep_type_scope_and_index_barriers() {
             "mEaSuRe",
         ),
         (
-            "#If Enabled Then\nFunction Measure() As Variant\n",
-            "mEaSuRe = 1",
-            "End Function\n#End If\n",
-            "mEaSuRe",
-        ),
-        (
             "Property Get Measure() As Variant\nDim value As Variant\n",
             "value = mEaSuRe(0)",
             "End Property\n",
@@ -1420,6 +1414,53 @@ fn vba_result_references_keep_type_scope_and_index_barriers() {
             }),
             "{source}"
         );
+    }
+}
+
+#[test]
+fn vba_conditional_procedure_results_bind_within_their_body() {
+    for (header, end, kind) in [
+        (
+            "Private Function Measure() As Variant",
+            "Function",
+            EntityKind::Function,
+        ),
+        (
+            "Private Property Get Measure() As Variant",
+            "Property",
+            EntityKind::Property,
+        ),
+    ] {
+        let source = format!("#If Mac Then\n\n{header}\n    Measure = 1\nEnd {end}\n\n#End If\n");
+        let result = output(&source);
+        let document = result.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == kind && entity.canonical_name == "Measure")
+            .unwrap();
+        let site = reference_at(document, &source, "Measure = 1");
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+        }));
+    }
+}
+
+#[test]
+fn vba_conditional_procedure_result_does_not_escape_or_override_a_local() {
+    let source = "#If Mac Then\n\nPrivate Function Measure() As Variant\n    Dim Measure As Variant\n    Measure = 1\nEnd Function\n\n#End If\nPublic Sub Consumer()\n    Dim result As Variant\n    result = Measure\nEnd Sub\n";
+    let result = output(source);
+    for marker in ["Measure = 1", "Measure\nEnd Sub"] {
+        let site = reference_at(result.document(), source, marker);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.domain == FactDomain::Relations && gap.source.span() == site.source.span()
+        }));
     }
 }
 

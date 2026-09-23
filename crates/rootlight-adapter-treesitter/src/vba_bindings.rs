@@ -254,7 +254,9 @@ impl<'a> VbaBindings<'a> {
                     declaration.syntax_kind().as_str(),
                     "vba.function.declaration" | "vba.get_property.declaration"
                 ) {
-                    let result_binding = match symbol {
+                    // The procedure body owns its result slot even when an
+                    // enclosing compile-time branch hides the outer binding.
+                    let result_binding = match candidate {
                         Some(Binding::Function { symbol, .. }) => {
                             Some(Binding::FunctionResult(symbol))
                         }
