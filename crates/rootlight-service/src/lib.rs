@@ -34595,6 +34595,10 @@ mod tests {
                 "Private Function MakePacket() As Variant\nEnd Function\n",
                 "MakePacket().Count",
             ),
+            (
+                "Private Function MakePacket(ByVal packet As Packet) As Variant\nEnd Function\n",
+                "MakePacket(0).Count",
+            ),
             ("", "MakePacket(0).Count"),
             (
                 "Private Function MakePacket() As Packet\nEnd Function\n",
