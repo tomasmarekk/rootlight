@@ -34,6 +34,12 @@ enum Binding {
     Property(PropertyAccessors),
 }
 
+enum ConditionalBinding<'a> {
+    Absent,
+    Value(&'a Option<Binding>),
+    Ambiguous,
+}
+
 #[derive(Clone, Copy, Default)]
 struct PropertyAccessors {
     get: Option<SymbolId>,
@@ -73,6 +79,10 @@ struct DeclaredType {
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
+    branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
+    // A shared None also represents conditional shadowing, so it cannot tell
+    // whether a same-named unconditional declaration makes a branch ambiguous.
+    unconditional_names: BTreeMap<u64, BTreeSet<String>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
     class_module: Option<&'a SyntaxFact>,
@@ -98,6 +108,8 @@ impl<'a> VbaBindings<'a> {
         let mut result = Self {
             facts: BTreeMap::new(),
             bindings: BTreeMap::new(),
+            branch_bindings: BTreeMap::new(),
+            unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
             class_module: None,
@@ -143,7 +155,8 @@ impl<'a> VbaBindings<'a> {
             let Some(declaration) = result.declaration(fact.parent(), cancellation)? else {
                 continue;
             };
-            let Some((mut owner, conditional)) = result.scope(fact.parent(), cancellation)? else {
+            let Some((mut owner, mut conditional)) = result.scope(fact.parent(), cancellation)?
+            else {
                 continue;
             };
             let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
@@ -151,55 +164,68 @@ impl<'a> VbaBindings<'a> {
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
                 .map_err(|_| invalid_capture())?;
             let name = structural_captured_name_for_fact("vba", fact, text, maximum_name_bytes);
-            let mut symbol = if conditional {
-                None
-            } else {
-                symbols.get(&fact.local_id()).copied().and_then(|symbol| {
-                    match declaration.syntax_kind().as_str() {
-                        "vba.parameter.declaration"
+            let candidate = symbols.get(&fact.local_id()).copied().and_then(|symbol| {
+                match declaration.syntax_kind().as_str() {
+                    "vba.parameter.declaration"
+                    | "vba.omittable_parameter.declaration"
+                    | "vba.variable.declaration"
+                    | "vba.constant.declaration" => Some(Binding::Value(symbol)),
+                    "vba.enum_constant.declaration" => Some(Binding::EnumMember {
+                        symbol,
+                        defined_at: declaration.span().start_byte(),
+                    }),
+                    "vba.enum.declaration" => Some(Binding::EnumType {
+                        symbol,
+                        scope: owner,
+                        defined_at: declaration.span().start_byte(),
+                    }),
+                    "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
+                    "vba.function.declaration" => Some(Binding::Function {
+                        symbol,
+                        accepts_empty: !required_parameter_scopes.contains(&owner),
+                    }),
+                    "vba.external_sub_function.declaration"
+                    | "vba.external_function.declaration" => {
+                        Some(Binding::ExternalProcedure(symbol))
+                    }
+                    "vba.get_property.declaration" => Some(Binding::Property(PropertyAccessors {
+                        get: Some(symbol),
+                        ..PropertyAccessors::default()
+                    })),
+                    "vba.let_property.declaration" => Some(Binding::Property(PropertyAccessors {
+                        let_value: Some(symbol),
+                        ..PropertyAccessors::default()
+                    })),
+                    "vba.set_property.declaration" => Some(Binding::Property(PropertyAccessors {
+                        set: Some(symbol),
+                        ..PropertyAccessors::default()
+                    })),
+                    _ => None,
+                }
+            });
+            let mut symbol = if conditional { None } else { candidate };
+            if conditional
+                && matches!(
+                    declaration.syntax_kind().as_str(),
+                    "vba.parameter.declaration"
                         | "vba.omittable_parameter.declaration"
                         | "vba.variable.declaration"
-                        | "vba.constant.declaration" => Some(Binding::Value(symbol)),
-                        "vba.enum_constant.declaration" => Some(Binding::EnumMember {
-                            symbol,
-                            defined_at: declaration.span().start_byte(),
-                        }),
-                        "vba.enum.declaration" => Some(Binding::EnumType {
-                            symbol,
-                            scope: owner,
-                            defined_at: declaration.span().start_byte(),
-                        }),
-                        "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
-                        "vba.function.declaration" => Some(Binding::Function {
-                            symbol,
-                            accepts_empty: !required_parameter_scopes.contains(&owner),
-                        }),
-                        "vba.external_sub_function.declaration"
-                        | "vba.external_function.declaration" => {
-                            Some(Binding::ExternalProcedure(symbol))
-                        }
-                        "vba.get_property.declaration" => {
-                            Some(Binding::Property(PropertyAccessors {
-                                get: Some(symbol),
-                                ..PropertyAccessors::default()
-                            }))
-                        }
-                        "vba.let_property.declaration" => {
-                            Some(Binding::Property(PropertyAccessors {
-                                let_value: Some(symbol),
-                                ..PropertyAccessors::default()
-                            }))
-                        }
-                        "vba.set_property.declaration" => {
-                            Some(Binding::Property(PropertyAccessors {
-                                set: Some(symbol),
-                                ..PropertyAccessors::default()
-                            }))
-                        }
-                        _ => None,
-                    }
-                })
-            };
+                        | "vba.constant.declaration"
+                )
+                && let Some(branch) =
+                    result.conditional_owner(fact.parent(), owner, cancellation)?
+                && let Some(name) = name.as_deref().filter(|name| name.is_ascii())
+            {
+                // Same-branch uses may bind to this declaration even when the
+                // compile flag is unknown; the enclosing owner keeps a barrier.
+                result
+                    .branch_bindings
+                    .entry(branch)
+                    .or_default()
+                    .entry(name.to_ascii_lowercase())
+                    .and_modify(|existing| *existing = None)
+                    .or_insert(candidate);
+            }
             if declaration.syntax_kind().as_str() == "vba.constant.declaration"
                 && let Some(Binding::Value(symbol)) = symbol
             {
@@ -212,13 +238,14 @@ impl<'a> VbaBindings<'a> {
                 result.insert(owner, name.as_deref(), symbol);
             }
             if owns_scope(declaration) || enum_member {
-                let Some((parent, conditional)) =
+                let Some((parent, parent_conditional)) =
                     result.scope(result.fact(owner)?.parent(), cancellation)?
                 else {
                     continue;
                 };
-                if conditional {
+                if parent_conditional {
                     symbol = None;
+                    conditional = true;
                 }
                 // MS-VBAL 5.6.2.1 evaluates a bare enclosing Function/Get name
                 // as its return value. Keep that declaration reference local;
@@ -239,6 +266,13 @@ impl<'a> VbaBindings<'a> {
                     result.insert(owner, name.as_deref(), result_binding);
                 }
                 owner = parent;
+            }
+            if !conditional && let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
+                result
+                    .unconditional_names
+                    .entry(owner)
+                    .or_default()
+                    .insert(name.to_ascii_lowercase());
             }
             if enum_member || declaration.syntax_kind().as_str() == "vba.enum.declaration" {
                 enum_module_bindings.push((declaration.span().start_byte(), owner, name, symbol));
@@ -719,7 +753,20 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
-            if let Some(binding) = self.bindings.get(&owner).and_then(|names| names.get(&key)) {
+            let conditional =
+                if self_member || instance || default_constant || self.branch_bindings.is_empty() {
+                    ConditionalBinding::Absent
+                } else {
+                    self.conditional_binding(parent, owner, &key, cancellation)?
+                };
+            let binding = match conditional {
+                ConditionalBinding::Absent => {
+                    self.bindings.get(&owner).and_then(|names| names.get(&key))
+                }
+                ConditionalBinding::Value(binding) => Some(binding),
+                ConditionalBinding::Ambiguous => return Ok(None),
+            };
+            if let Some(binding) = binding {
                 return Ok(match binding {
                     Some(Binding::EnumMember { symbol, defined_at })
                         if !self_member
@@ -863,6 +910,71 @@ impl<'a> VbaBindings<'a> {
                 };
             })
             .or_insert(symbol);
+    }
+
+    fn conditional_owner(
+        &self,
+        mut parent: Option<u64>,
+        owner: u64,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let id = parent.ok_or_else(invalid_capture)?;
+            let fact = self.fact(id)?;
+            if id == owner {
+                return Ok(fact
+                    .syntax_kind()
+                    .as_str()
+                    .starts_with("vba.conditional_")
+                    .then_some(id));
+            }
+            if fact.kind() == SyntaxFactKind::Scope
+                && fact.syntax_kind().as_str() == "vba.preprocessor_branch.scope"
+            {
+                return Ok(Some(id));
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn conditional_binding<'b>(
+        &'b self,
+        mut parent: Option<u64>,
+        owner: u64,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<ConditionalBinding<'b>, AdapterError> {
+        let mut matched = None;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let id = parent.ok_or_else(invalid_capture)?;
+            let fact = self.fact(id)?;
+            if fact.kind() == SyntaxFactKind::Scope
+                && (fact.syntax_kind().as_str() == "vba.preprocessor_branch.scope"
+                    || (id == owner && fact.syntax_kind().as_str().starts_with("vba.conditional_")))
+                && let Some(binding) = self
+                    .branch_bindings
+                    .get(&id)
+                    .and_then(|names| names.get(name))
+            {
+                if matched.is_some()
+                    || self
+                        .unconditional_names
+                        .get(&owner)
+                        .is_some_and(|names| names.contains(name))
+                {
+                    return Ok(ConditionalBinding::Ambiguous);
+                }
+                matched = Some(binding);
+            }
+            if id == owner {
+                return Ok(matched.map_or(ConditionalBinding::Absent, ConditionalBinding::Value));
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
     }
 
     fn scope(

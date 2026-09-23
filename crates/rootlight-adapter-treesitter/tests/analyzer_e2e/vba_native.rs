@@ -3059,6 +3059,68 @@ fn vba_conditional_local_declarations_block_outer_fallthrough() {
 }
 
 #[test]
+fn vba_conditional_local_values_resolve_within_their_branch() {
+    let source = "Public Sub Update()\n#If Enabled Then\nDim payload As Long\npayload = 1\n#End If\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let local = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "payload")
+        .unwrap();
+    let site = reference_at(document, source, "payload = 1");
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.source.span() == site.source.span() && gap.detail == "vba-binding-target-unavailable"
+    }));
+}
+
+#[test]
+fn vba_conditional_sibling_branches_keep_distinct_local_bindings() {
+    let source = "Public Sub Update()\n#If Enabled Then\nDim payload As Long\npayload = 1\n#Else\nDim payload As String\npayload = \"text\"\n#End If\npayload = 2\nEnd Sub\n";
+    let result = output(source);
+    let first = reference_at(result.document(), source, "payload = 1");
+    let second = reference_at(result.document(), source, "payload = \"text\"");
+    let outside = reference_at(result.document(), source, "payload = 2");
+    let (
+        OccurrenceTarget::Resolved {
+            symbol: first_symbol,
+        },
+        OccurrenceTarget::Resolved {
+            symbol: second_symbol,
+        },
+    ) = (&first.target, &second.target)
+    else {
+        panic!("each conditional branch must resolve its own local variable");
+    };
+    assert_ne!(first_symbol, second_symbol);
+    assert!(matches!(
+        outside.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn vba_conditional_local_collision_with_unconditional_local_stays_unresolved() {
+    let source = "Public Sub Update()\nDim payload As Long\n#If Enabled Then\nDim payload As Long\npayload = 1\n#End If\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_at(result.document(), source, "payload = 1").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn vba_nested_conditional_duplicate_locals_stay_unresolved() {
+    let source = "Public Sub Update()\n#If Outer Then\nDim payload As Long\n#If Inner Then\nDim payload As Long\npayload = 1\n#End If\n#End If\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_at(result.document(), source, "payload = 1").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
 fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
     let source = "Public Type Model\nValue As Long\nEnd Type\nPublic Sub Update(ByVal Model As Long, ByVal Finish As Long, ByVal size As Long)\nDim item As Model\nGoTo Finish\nFinish:\nCall Visit(size:=size)\nEnd Sub\n";
     let result = output(source);
