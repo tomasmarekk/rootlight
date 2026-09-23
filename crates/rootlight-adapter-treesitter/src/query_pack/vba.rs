@@ -248,7 +248,7 @@ pub(super) fn reference_syntax(
             && parent.child_by_field_name("function") == Some(expression))
             || (parent.kind() == "call_statement"
                 && parent.child_by_field_name("callee") == Some(expression))
-    });
+    }) || split_output_argument_is_invoked(expression, source);
     if let Some(ty) = child
         .parent()
         .filter(|node| node.kind() == "type_expression")
@@ -387,6 +387,29 @@ pub(super) fn reference_syntax(
     } else {
         "vba.identifier"
     })
+}
+
+fn split_output_argument_is_invoked(expression: Node<'_>, source: &[u8]) -> bool {
+    let Some(output) = expression.parent() else {
+        return false;
+    };
+    let Some(statement) = output.parent() else {
+        return false;
+    };
+    let Some(next) = statement.next_named_sibling() else {
+        return false;
+    };
+    // The grammar can end an output statement at F in `Print F(x) & tail`
+    // and put `(x) & tail` in an adjacent expression node. Binding still
+    // distinguishes a declared function from an indexed value.
+    output.kind() == "output_list"
+        && output.child_by_field_name("value") == Some(expression)
+        && statement.kind() == "call_statement"
+        && statement.child_by_field_name("arguments") == Some(output)
+        && next.kind() == "expression_statement"
+        && !next.has_error()
+        && next.start_byte() == expression.end_byte()
+        && source.get(expression.end_byte()) == Some(&b'(')
 }
 
 pub(super) fn member_syntax(

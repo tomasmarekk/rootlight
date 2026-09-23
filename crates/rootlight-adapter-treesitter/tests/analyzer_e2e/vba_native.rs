@@ -1673,6 +1673,84 @@ fn vba_bare_function_values_resolve_in_expression_contexts() {
 }
 
 #[test]
+fn vba_nested_function_argument_resolves_to_local_declaration() {
+    let source = "Attribute VB_Name = \"Utility\"\nPublic Function Normalize(ByVal value As Long) As Long\nNormalize = value\nEnd Function\nPublic Sub Run(ByVal input As Object, ByVal output As Object)\nIf input.Visible Then\nDebug.Print \"header\" & Format(Now, \"Long Time\")\nDebug.Print Normalize(input.Status) & \" \" & output.Render(input)\nEnd If\nEnd Sub\n".replace('\n', "\r\n");
+    let result = output(&source);
+    let document = result.document();
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "Normalize")
+        .unwrap();
+    let start = u64::try_from(source.find("Normalize(input.Status)").unwrap()).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start
+                && site.source.span().end_byte() == start + 9
+                && site.syntax_kind.ends_with("identifier.reference")
+        })
+        .unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_vba::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(&source, None).unwrap();
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved {
+            symbol: function.id
+        },
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    assert_eq!(site.role, OccurrenceRole::CallSite);
+    assert!(document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::Calls
+            && edge.subject == RelationEndpoint::Occurrence(site.id)
+            && edge.object == RelationEndpoint::Entity(function.id)
+    }));
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.source.span() == site.source.span()
+            && gap.detail == "vba-call-or-index-target-unavailable"
+    }));
+}
+
+#[test]
+fn vba_nested_index_argument_does_not_call_shadowed_function() {
+    let source = "Attribute VB_Name = \"Utility\"\nPublic Function Normalize(ByVal value As Long) As Long\nNormalize = value\nEnd Function\nPublic Sub Run(ByVal input As Object, ByVal output As Object)\nDim Normalize(2) As Long\nIf input.Visible Then\nDebug.Print \"header\" & Format(Now, \"Long Time\")\nDebug.Print Normalize(0) & \" \" & output.Render(input)\nEnd If\nEnd Sub\n".replace('\n', "\r\n");
+    let result = output(&source);
+    let document = result.document();
+    let variable = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "Normalize")
+        .unwrap();
+    let start = u64::try_from(source.find("Normalize(0)").unwrap()).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start
+                && site.source.span().end_byte() == start + 9
+                && site.syntax_kind.ends_with("identifier.reference")
+        })
+        .unwrap();
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved {
+            symbol: variable.id
+        }
+    );
+    assert_eq!(site.role, OccurrenceRole::Reference);
+    assert!(!document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::Calls
+            && edge.subject == RelationEndpoint::Occurrence(site.id)
+    }));
+}
+
+#[test]
 fn vba_function_values_do_not_guess_required_arguments_or_sub_results() {
     for declaration in [
         "Function Measure(ByVal input As Long) As Long\nEnd Function",
