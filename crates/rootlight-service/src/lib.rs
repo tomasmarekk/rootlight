@@ -73,7 +73,7 @@ use rootlight_discovery::{
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
-    RevisionSelector as GitRevisionSelector, collect_repository, collect_revision_range,
+    WorktreeChangeSelection, collect_revision_range, collect_worktree_change_paths,
     collect_worktree_status, revision_resolves_to_head,
 };
 use rootlight_ids::{
@@ -5181,6 +5181,15 @@ impl Drop for GenerationMemoryReservation {
     }
 }
 
+struct CachedRevisionChangePaths {
+    repository: RepositoryId,
+    root: PathBuf,
+    base: String,
+    head: String,
+    maximum_output_bytes: usize,
+    paths: Vec<String>,
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -5223,6 +5232,9 @@ pub struct FirstSliceService {
     // Catalog pagination mutates only bounded cursor state. Its independent
     // lock keeps catalog reads concurrent with long immutable analysis reads.
     catalog_snapshots: Mutex<CatalogSnapshotStore>,
+    // One bounded immutable diff is enough to reuse evidence across the
+    // analytical subcalls of a composed MCP request.
+    revision_change_paths: Mutex<Option<CachedRevisionChangePaths>>,
     durable: Option<Arc<DurableCatalog>>,
     storage_policy: FirstSliceStoragePolicy,
     maximum_generations_per_repository: usize,
@@ -5643,22 +5655,75 @@ impl FirstSliceService {
             first_slice_git_limits(maximum_output_bytes, command_timeout)?;
         let mut paths = BTreeSet::new();
         if let Some(selection) = working_tree {
-            let snapshot =
-                collect_repository(&root, repository, &limits, collect_limits, cancellation)
-                    .map_err(|error| first_slice_git_error(error.code()))?;
-            for change_set in &snapshot.as_input().change_sets {
-                if first_slice_working_tree_change_matches(selection, change_set) {
-                    collect_first_slice_git_change_paths(change_set, &mut paths);
-                }
-            }
+            let selection = match selection {
+                FirstSliceWorkingTreeSelection::Staged => WorktreeChangeSelection::Staged,
+                FirstSliceWorkingTreeSelection::Unstaged => WorktreeChangeSelection::Unstaged,
+                FirstSliceWorkingTreeSelection::All => WorktreeChangeSelection::All,
+            };
+            paths.extend(
+                collect_worktree_change_paths(
+                    &root,
+                    selection,
+                    &limits,
+                    collect_limits,
+                    cancellation,
+                )
+                .map_err(|error| first_slice_git_error(error.code()))?,
+            );
         }
         if let Some((base, head)) = revision_range {
             validate_first_slice_git_revision(base)?;
             validate_first_slice_git_revision(head)?;
-            let change_set =
-                collect_revision_range(&root, base, head, &limits, collect_limits, cancellation)
-                    .map_err(|error| first_slice_git_error(error.code()))?;
-            collect_first_slice_git_change_paths(&change_set, &mut paths);
+            let immutable = full_git_object_id(base) && full_git_object_id(head);
+            let cached = if immutable {
+                self.revision_change_paths
+                    .lock()
+                    .map_err(|_| FirstSliceGitEvidenceError::Unavailable)?
+                    .as_ref()
+                    .filter(|entry| {
+                        entry.repository == repository
+                            && entry.root == root
+                            && entry.base == base
+                            && entry.head == head
+                            && entry.maximum_output_bytes <= maximum_output_bytes
+                    })
+                    .map(|entry| entry.paths.clone())
+            } else {
+                None
+            };
+            cancellation
+                .check()
+                .map_err(|_| FirstSliceGitEvidenceError::Cancelled)?;
+            if let Some(cached) = cached {
+                paths.extend(cached);
+            } else {
+                let change_set = collect_revision_range(
+                    &root,
+                    base,
+                    head,
+                    &limits,
+                    collect_limits,
+                    cancellation,
+                )
+                .map_err(|error| first_slice_git_error(error.code()))?;
+                let mut revision_paths = BTreeSet::new();
+                collect_first_slice_git_change_paths(&change_set, &mut revision_paths);
+                if immutable {
+                    *self
+                        .revision_change_paths
+                        .lock()
+                        .map_err(|_| FirstSliceGitEvidenceError::Unavailable)? =
+                        Some(CachedRevisionChangePaths {
+                            repository,
+                            root: root.clone(),
+                            base: base.to_owned(),
+                            head: head.to_owned(),
+                            maximum_output_bytes,
+                            paths: revision_paths.iter().cloned().collect(),
+                        });
+                }
+                paths.extend(revision_paths);
+            }
         }
         if paths.len() > MAX_FIRST_SLICE_GIT_CHANGE_PATHS {
             return Err(FirstSliceGitEvidenceError::Unavailable);
@@ -6104,6 +6169,7 @@ impl FirstSliceService {
                 catalog::CatalogSnapshotLimits::default(),
                 catalog_instance_nonce,
             )),
+            revision_change_paths: Mutex::new(None),
             durable,
             storage_policy,
             maximum_generations_per_repository: maximum_generations,
@@ -20553,18 +20619,8 @@ fn validate_first_slice_git_revision(revision: &str) -> Result<(), FirstSliceGit
     Ok(())
 }
 
-fn first_slice_working_tree_change_matches(
-    selection: FirstSliceWorkingTreeSelection,
-    change_set: &GitChangeSet,
-) -> bool {
-    let base_is_index = matches!(change_set.base, GitRevisionSelector::Index { .. });
-    let head_is_index = matches!(change_set.head, GitRevisionSelector::Index { .. });
-    let head_is_working = matches!(change_set.head, GitRevisionSelector::WorkingTree { .. });
-    match selection {
-        FirstSliceWorkingTreeSelection::Staged => head_is_index,
-        FirstSliceWorkingTreeSelection::Unstaged => base_is_index && head_is_working,
-        FirstSliceWorkingTreeSelection::All => head_is_working || head_is_index,
-    }
+fn full_git_object_id(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn collect_first_slice_git_change_paths(change_set: &GitChangeSet, paths: &mut BTreeSet<String>) {
@@ -20821,6 +20877,70 @@ mod tests {
                 &cancellation,
             ),
             Err(FirstSliceGitEvidenceError::InvalidSelector)
+        );
+
+        let git = |arguments: &[&str]| {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(fixture.path())
+                .output()
+                .expect("Git fixture command starts");
+            assert!(output.status.success(), "Git fixture command succeeds");
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_owned()
+        };
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["add", "--", "lib.rs"]);
+        git(&["commit", "--quiet", "-m", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let range = (base.as_str(), head.as_str());
+        assert_eq!(
+            service
+                .collect_git_change_paths(
+                    receipt.repository,
+                    None,
+                    Some(range),
+                    1024 * 1024,
+                    Duration::from_secs(5),
+                    &cancellation,
+                )
+                .expect("immutable diff is collected"),
+            vec!["lib.rs"]
+        );
+        assert!(
+            service
+                .revision_change_paths
+                .lock()
+                .expect("revision cache lock is available")
+                .is_some()
+        );
+        fs::write(fixture.path().join("new.rs"), "fn fresh() {}\n")
+            .expect("new working-tree source writes");
+        assert_eq!(
+            service
+                .collect_git_change_paths(
+                    receipt.repository,
+                    Some(FirstSliceWorkingTreeSelection::All),
+                    Some(range),
+                    1024 * 1024,
+                    Duration::from_secs(5),
+                    &cancellation,
+                )
+                .expect("cached revision and fresh worktree compose"),
+            vec!["lib.rs", "new.rs"]
+        );
+        assert_eq!(
+            service.collect_git_change_paths(
+                receipt.repository,
+                None,
+                Some(range),
+                1,
+                Duration::from_secs(5),
+                &cancellation,
+            ),
+            Err(FirstSliceGitEvidenceError::Unavailable)
         );
     }
 

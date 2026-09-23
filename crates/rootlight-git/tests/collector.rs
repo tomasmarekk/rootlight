@@ -9,8 +9,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_git::{
     FileChangeKind, GitCollectErrorCode, GitCollectLimits, GitLimits, HeadState, HistoryState,
     HistoryTruncation, ObjectFormat, RenameEvidenceKind, RepositoryState, SubmoduleCheckoutState,
-    collect_repository, collect_revision_range, collect_tracked_paths, collect_worktree_status,
-    revision_resolves_to_head,
+    WorktreeChangeSelection, collect_repository, collect_revision_range, collect_tracked_paths,
+    collect_worktree_change_paths, collect_worktree_status, revision_resolves_to_head,
 };
 use rootlight_ids::{RepositoryId, derive_repository};
 use tempfile::TempDir;
@@ -71,6 +71,41 @@ fn write_and_commit(root: &Path, path: &str, body: &str, message: &str) {
 fn collection_limits(history_commits: usize) -> GitCollectLimits {
     GitCollectLimits::new(history_commits, 2 * 1024 * 1024, Duration::from_secs(10))
         .expect("fixture collection limits are valid")
+}
+
+#[test]
+fn focused_worktree_paths_match_staged_unstaged_and_untracked_states() {
+    let directory = initialized_repository();
+    let root = directory.path();
+    write_and_commit(root, "staged.rs", "fn staged() {}\n", "base");
+    fs::write(root.join("staged.rs"), "fn staged() { changed() }\n")
+        .expect("staged fixture changes");
+    run_git(root, &["add", "--", "staged.rs"]);
+    fs::write(root.join("staged.rs"), "fn staged() { changed_again() }\n")
+        .expect("unstaged fixture changes");
+    fs::write(root.join("untracked.rs"), "fn untracked() {}\n").expect("untracked fixture writes");
+
+    let collect = |selection| {
+        collect_worktree_change_paths(
+            root,
+            selection,
+            &GitLimits::default(),
+            collection_limits(1),
+            &Cancellation::new(),
+        )
+        .expect("focused worktree paths collect")
+        .into_iter()
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(collect(WorktreeChangeSelection::Staged), ["staged.rs"]);
+    assert_eq!(
+        collect(WorktreeChangeSelection::Unstaged),
+        ["staged.rs", "untracked.rs"]
+    );
+    assert_eq!(
+        collect(WorktreeChangeSelection::All),
+        ["staged.rs", "untracked.rs"]
+    );
 }
 
 #[test]

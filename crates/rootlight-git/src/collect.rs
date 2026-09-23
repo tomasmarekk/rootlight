@@ -409,6 +409,90 @@ pub fn collect_worktree_status(
     collect_status(&runner, contract_limits, cancellation).map(|(status, _)| status)
 }
 
+/// Selects the changed paths visible in one working-tree state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeChangeSelection {
+    /// Index changes relative to `HEAD`.
+    Staged,
+    /// Working-tree changes relative to the index, including untracked files.
+    Unstaged,
+    /// Both staged and unstaged changes.
+    All,
+}
+
+/// Collects bounded changed paths without importing history or repository metadata.
+///
+/// The porcelain status probe uses the same shell-free, read-only Git runner as
+/// full collection; rename detection and submodule inspection stay disabled.
+///
+/// # Errors
+///
+/// Returns [`GitCollectError`] when Git fails, reports malformed paths, exceeds
+/// the configured change limit, or is cancelled.
+pub fn collect_worktree_change_paths(
+    repository_root: &Path,
+    selection: WorktreeChangeSelection,
+    contract_limits: &GitLimits,
+    collect_limits: GitCollectLimits,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, GitCollectError> {
+    let runner = GitRunner::new(repository_root, collect_limits);
+    let output = runner.required(
+        GitCollectOperation::Status,
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+            "--ignore-submodules=all",
+        ],
+        cancellation,
+    )?;
+    parse_worktree_change_paths(&output, selection, contract_limits, cancellation)
+}
+
+fn parse_worktree_change_paths(
+    output: &[u8],
+    selection: WorktreeChangeSelection,
+    limits: &GitLimits,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, GitCollectError> {
+    let mut paths = BTreeSet::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        cancellation.check()?;
+        let [index, worktree, b' ', path @ ..] = record else {
+            return Err(GitCollectError::InvalidOutput {
+                operation: GitCollectOperation::Status,
+            });
+        };
+        let selected = match (*index, *worktree) {
+            (b'!', b'!') => false,
+            (b'?', b'?') => selection != WorktreeChangeSelection::Staged,
+            (index, worktree) => match selection {
+                WorktreeChangeSelection::Staged => index != b' ',
+                WorktreeChangeSelection::Unstaged => worktree != b' ',
+                WorktreeChangeSelection::All => index != b' ' || worktree != b' ',
+            },
+        };
+        let path = parse_text(path, GitCollectOperation::Status)?;
+        if selected {
+            paths.insert(path);
+            if paths.len() > limits.max_changes() {
+                return Err(GitContractError::CollectionLimit {
+                    collection: GitCollection::Changes,
+                    maximum: limits.max_changes(),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(paths)
+}
+
 /// Checks whether one bounded revision expression resolves to the current HEAD.
 ///
 /// Both expressions are peeled to commits by one hardened `rev-parse`
@@ -494,21 +578,34 @@ pub fn collect_revision_range(
         });
     }
     let runner = GitRunner::new(repository_root, collect_limits);
-    let detected = runner.run(
-        GitCollectOperation::DetectRepository,
-        ["rev-parse", "--is-inside-work-tree"],
+    let runner = runner.with_disabled_filters(cancellation)?;
+    let base_commit = format!("{base_revision}^{{commit}}");
+    let head_commit = format!("{head_revision}^{{commit}}");
+    // Resolve both selectors together so the diff remains pinned to immutable
+    // commits without paying for separate object-format and revision probes.
+    let resolved = runner.required(
+        GitCollectOperation::Revision,
+        [
+            "rev-parse",
+            "--revs-only",
+            "--end-of-options",
+            base_commit.as_str(),
+            head_commit.as_str(),
+        ],
         cancellation,
     )?;
-    if !detected.status.success() || trim_ascii(&detected.stdout) != b"true" {
-        return Err(GitCollectError::CommandFailed {
-            operation: GitCollectOperation::DetectRepository,
-            exit_code: detected.status.code(),
+    let mut object_ids = resolved
+        .split(|byte| *byte == b'\n')
+        .map(trim_ascii)
+        .filter(|line| !line.is_empty());
+    let base = parse_resolved_commit(object_ids.next(), GitCollectOperation::Revision)?;
+    let head = parse_resolved_commit(object_ids.next(), GitCollectOperation::Revision)?;
+    if object_ids.next().is_some() || std::mem::discriminant(&base) != std::mem::discriminant(&head)
+    {
+        return Err(GitCollectError::InvalidOutput {
+            operation: GitCollectOperation::Revision,
         });
     }
-    let runner = runner.with_disabled_filters(cancellation)?;
-    let format = collect_object_format(&runner, cancellation)?;
-    let base = resolve_revision(&runner, base_revision, format, cancellation)?;
-    let head = resolve_revision(&runner, head_revision, format, cancellation)?;
     let base_object_name = object_id_hex(base);
     let head_object_name = object_id_hex(head);
     collect_diff(
@@ -523,6 +620,19 @@ pub fn collect_revision_range(
         contract_limits,
         cancellation,
     )
+}
+
+fn parse_resolved_commit(
+    value: Option<&[u8]>,
+    operation: GitCollectOperation,
+) -> Result<ObjectId, GitCollectError> {
+    let value = value.ok_or(GitCollectError::InvalidOutput { operation })?;
+    let format = match value.len() {
+        40 => ObjectFormat::Sha1,
+        64 => ObjectFormat::Sha256,
+        _ => return Err(GitCollectError::InvalidOutput { operation }),
+    };
+    parse_object_id(value, format, operation)
 }
 
 struct GitRunner<'a> {
@@ -1265,21 +1375,6 @@ fn valid_hex_object_id(object_id: &[u8]) -> bool {
     matches!(object_id.len(), 40 | 64) && object_id.iter().all(u8::is_ascii_hexdigit)
 }
 
-fn resolve_revision(
-    runner: &GitRunner<'_>,
-    revision: &str,
-    format: ObjectFormat,
-    cancellation: &Cancellation,
-) -> Result<ObjectId, GitCollectError> {
-    let peeled = format!("{revision}^{{commit}}");
-    let output = runner.required(
-        GitCollectOperation::Revision,
-        ["rev-parse", "--verify", "--end-of-options", peeled.as_str()],
-        cancellation,
-    )?;
-    parse_object_id(trim_ascii(&output), format, GitCollectOperation::Revision)
-}
-
 fn object_id_hex(object: ObjectId) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = match &object {
@@ -1628,6 +1723,40 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_change_paths_select_staged_unstaged_and_untracked() {
+        let limits = GitLimits::new(1, 8, 8, 1, 8, 1_024).expect("fixture limits are valid");
+        let output = b"M  staged.rs\0 M unstaged.rs\0MM both.rs\0?? new.rs\0!! ignored.rs\0";
+        let cancellation = Cancellation::new();
+        let selected = |selection| {
+            parse_worktree_change_paths(output, selection, &limits, &cancellation)
+                .expect("porcelain paths parse")
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            selected(WorktreeChangeSelection::Staged),
+            ["both.rs", "staged.rs"]
+        );
+        assert_eq!(
+            selected(WorktreeChangeSelection::Unstaged),
+            ["both.rs", "new.rs", "unstaged.rs"]
+        );
+        assert_eq!(
+            selected(WorktreeChangeSelection::All),
+            ["both.rs", "new.rs", "staged.rs", "unstaged.rs"]
+        );
+        assert!(
+            parse_worktree_change_paths(
+                b"malformed\0",
+                WorktreeChangeSelection::All,
+                &limits,
+                &cancellation,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn hex_object_bytes_require_complete_valid_pairs() {
