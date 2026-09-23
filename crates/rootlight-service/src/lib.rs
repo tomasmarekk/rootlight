@@ -29664,13 +29664,12 @@ mod tests {
                 &deadline(),
             )
             .expect("source-backed import is queryable");
-        assert!(
-            relationships
-                .data
-                .groups
+        assert!(relationships.data.groups.iter().any(|group| {
+            group
+                .items
                 .iter()
-                .any(|group| { group.items.iter().any(|item| item.symbol == importer.id) })
-        );
+                .any(|item| item.symbol == importer.id && item.source_refs.contains(&import.source))
+        }));
         assert!(!document.skipped_regions.iter().any(|gap| {
             gap.detail == "unresolved-import-target" && gap.source == import.source
         }));
