@@ -186,6 +186,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "java.annotation_element.declaration" => {
             Some(EntityKind::Method)
         }
+        SyntaxFactKind::Declaration if label == "elm.port.declaration" => {
+            Some(EntityKind::Function)
+        }
         SyntaxFactKind::Declaration if label.contains("constructor") => {
             Some(EntityKind::Constructor)
         }
@@ -678,6 +681,23 @@ mod tests {
             assert_eq!(structural_entity_kind(&fact), Some(base), "{label}");
             assert_eq!(structural_type_member_kind(&fact, base), member, "{label}");
         }
+    }
+
+    #[test]
+    fn elm_port_declarations_retain_function_identity() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let fact = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+            0,
+            SyntaxKindLabel::new("elm.port.declaration").unwrap(),
+        );
+        assert_eq!(structural_entity_kind(&fact), Some(EntityKind::Function));
     }
 
     #[test]

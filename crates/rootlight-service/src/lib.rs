@@ -29544,6 +29544,59 @@ mod tests {
     }
 
     #[test]
+    fn elm_ports_and_typed_functions_keep_exact_declaration_sources() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "port module Demo exposing (send, receive, render)\n\nport send : String -> Cmd msg\nport receive : (String -> msg) -> Sub msg\n\nrender : Model -> String\nrender model =\n    \"ready\"\n";
+        fs::write(fixture.path().join("Demo.elm"), source).expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm port module indexes");
+        for (name, source_prefix) in [
+            ("send", "port send :"),
+            ("receive", "port receive :"),
+            ("render", "render : Model -> String"),
+        ] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("Elm declaration locates");
+            let symbol = located
+                .data
+                .hits
+                .iter()
+                .find_map(|hit| hit.symbol)
+                .expect("Elm declaration has symbol identity");
+            let explained = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .expect("Elm declaration explains");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            assert_eq!(explained.data.entity.kind, EntityKind::Function);
+            let source_ref = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("Elm declaration has source evidence");
+            assert_eq!(source_ref.generation(), receipt.generation);
+            let span = source_ref.span();
+            let start = usize::try_from(span.start_byte()).expect("fixture offset fits");
+            let end = usize::try_from(span.end_byte()).expect("fixture offset fits");
+            assert!(source.as_bytes()[start..end].starts_with(source_prefix.as_bytes()));
+            let read = service
+                .source_read(receipt.generation, vec![source_ref.clone()], &deadline())
+                .expect("Elm declaration source reads");
+            assert_eq!(read.data.chunks[0].reference, source_ref);
+        }
+    }
+
+    #[test]
     fn groovy_named_sources_do_not_fall_back_to_foreign_shebangs() {
         for path in ["Jenkinsfile", "flow.jenkins"] {
             let fixture = TempDir::new().unwrap();

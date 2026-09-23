@@ -233,6 +233,13 @@ struct Header {
 }
 
 #[derive(Clone, Copy)]
+struct Annotation {
+    line_start: usize,
+    name_start: usize,
+    name_end: usize,
+}
+
+#[derive(Clone, Copy)]
 struct Constructor {
     owner_index: usize,
     name_start: usize,
@@ -286,20 +293,34 @@ fn scan_source(
     let mut headers = Vec::new();
     let max_items = (max_syntax_nodes - 1) / 2;
     let mut start = 0;
+    let mut annotation: Option<Annotation> = None;
     while start < masked.len() {
         cancellation.check()?;
         let end = masked[start..]
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(masked.len(), |offset| start + offset);
-        if let Some(header) = parse_header(&masked[start..end], start) {
+        let line = &masked[start..end];
+        if let Some(mut header) = parse_header(line, start) {
             if headers.len() >= max_items {
                 return Err(failure("elm-syntax-node-limit"));
             }
+            if header.label == "elm.function.declaration"
+                && let Some(prior) = annotation
+                && masked[prior.name_start..prior.name_end]
+                    == masked[header.name_start..header.name_end]
+            {
+                header.line_start = prior.line_start;
+            }
+            annotation = None;
             headers
                 .try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
             headers.push(header);
+        } else if let Some(candidate) = parse_annotation(line, start) {
+            annotation = Some(candidate);
+        } else if line.first().is_some_and(|byte| !byte.is_ascii_whitespace()) {
+            annotation = None;
         }
         start = end.saturating_add(1);
     }
@@ -411,6 +432,13 @@ fn parse_header(line: &[u8], start: usize) -> Option<Header> {
         (7, SyntaxFactKind::Module, "elm.module", true)
     } else if line.starts_with(b"import ") {
         (7, SyntaxFactKind::Import, "elm.import", true)
+    } else if line.starts_with(b"port ") {
+        (
+            5,
+            SyntaxFactKind::Declaration,
+            "elm.port.declaration",
+            false,
+        )
     } else if line.starts_with(b"type alias ") {
         (
             11,
@@ -457,6 +485,14 @@ fn parse_header(line: &[u8], start: usize) -> Option<Header> {
     {
         return None;
     }
+    if label == "elm.port.declaration"
+        && line[name_end..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace())
+            != Some(&b':')
+    {
+        return None;
+    }
     if prefix == 0 && !line[name_end..].contains(&b'=') {
         return None;
     }
@@ -466,6 +502,29 @@ fn parse_header(line: &[u8], start: usize) -> Option<Header> {
         name_end: start + name_end,
         kind,
         label,
+    })
+}
+
+fn parse_annotation(line: &[u8], start: usize) -> Option<Annotation> {
+    let first = *line.first()?;
+    if !first.is_ascii_lowercase() {
+        return None;
+    }
+    let name_end = line
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        .unwrap_or(line.len());
+    if line[name_end..]
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(&b':')
+    {
+        return None;
+    }
+    Some(Annotation {
+        line_start: start,
+        name_start: start,
+        name_end: start + name_end,
     })
 }
 
@@ -621,5 +680,22 @@ mod tests {
         assert_eq!(required_syntax_fact_count(&parsed), 13);
         assert_eq!(syntax_fact_count(&parsed), 13);
         assert!(scan_source(source, 12, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn ports_and_matching_type_annotations_preserve_source_boundaries() {
+        let source = b"port module Demo exposing (..)\nport send : String -> Cmd msg\nrender : Model -> String\nrender model = \"ready\"\norphan : Int\nother = 1\n";
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let names: Vec<_> = parsed
+            .headers
+            .iter()
+            .map(|header| &source[header.name_start..header.name_end])
+            .collect();
+        assert_eq!(names, [b"Demo".as_slice(), b"send", b"render", b"other"]);
+        assert_eq!(parsed.headers[1].label, "elm.port.declaration");
+        assert!(source[parsed.headers[2].line_start..].starts_with(b"render :"));
+        assert!(source[parsed.headers[3].line_start..].starts_with(b"other ="));
+        assert_eq!(required_syntax_fact_count(&parsed), 9);
+        assert!(scan_source(source, 8, &Cancellation::new()).is_err());
     }
 }
