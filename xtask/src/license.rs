@@ -6,7 +6,7 @@
 
 use std::{fs, path::Path};
 
-use cargo_metadata::{Metadata, MetadataCommand};
+use crate::cargo_metadata::{Metadata, MetadataCommand, MetadataError};
 use sha2::Digest as _;
 
 const LICENSE_PATH: &str = "LICENSE";
@@ -23,7 +23,7 @@ pub(crate) fn check() -> Result<(), LicenseError> {
         .no_deps()
         .exec()
         .map_err(LicenseError::Metadata)?;
-    let root = metadata.workspace_root.as_std_path();
+    let root = metadata.workspace_root.as_path();
 
     let license_bytes = read_required(root, LICENSE_PATH)?;
     require_license_digest(&license_bytes)?;
@@ -116,7 +116,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LicenseError {
     #[error("failed to read cargo metadata")]
-    Metadata(#[source] cargo_metadata::Error),
+    Metadata(#[source] MetadataError),
     #[error("failed to read {relative}")]
     Read {
         relative: &'static str,

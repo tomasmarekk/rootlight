@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, Package, TargetKind};
+use crate::cargo_metadata::{DependencyKind, Metadata, MetadataCommand, MetadataError, Package};
 use serde::Deserialize;
 
 const POLICY_PATH: &str = "policy/architecture.toml";
@@ -63,7 +63,7 @@ fn load_metadata_and_policy(
             let metadata = MetadataCommand::new()
                 .exec()
                 .map_err(ArchitectureError::Metadata)?;
-            let policy_path = metadata.workspace_root.as_std_path().join(POLICY_PATH);
+            let policy_path = metadata.workspace_root.join(POLICY_PATH);
             Ok((metadata, policy_path))
         }
     }
@@ -140,7 +140,7 @@ fn validate_package(
             });
         }
         if dependency.kind == DependencyKind::Normal
-            && !dev_only.contains(package.name.as_ref())
+            && !dev_only.contains(package.name.as_str())
             && dev_only.contains(canonical_name)
         {
             return Err(ArchitectureError::ShippingDependsOnDevTool {
@@ -153,7 +153,7 @@ fn validate_package(
     let has_build_script = package
         .targets
         .iter()
-        .any(|target| target.kind.contains(&TargetKind::CustomBuild));
+        .any(|target| target.kind.iter().any(|kind| kind == "custom-build"));
     if has_build_script && !policy.allow_build_script {
         return Err(ArchitectureError::UnapprovedBuildScript(
             package.name.to_string(),
@@ -263,7 +263,7 @@ pub(crate) enum ArchitectureError {
         source: toml::de::Error,
     },
     #[error("failed to read Cargo metadata")]
-    Metadata(#[source] cargo_metadata::Error),
+    Metadata(#[source] MetadataError),
     #[error("ARCH_POLICY_VERSION: unsupported architecture policy version {0}")]
     UnsupportedPolicyVersion(String),
     #[error("ARCH_MEMBER_MISMATCH: expected {expected:?}, observed {observed:?}")]

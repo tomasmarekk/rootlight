@@ -9,7 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use cargo_metadata::{Metadata, MetadataCommand, Package, TargetKind};
+use crate::cargo_metadata::{Metadata, MetadataCommand, MetadataError, Package};
 use serde::Deserialize;
 use sha2::Digest as _;
 use syn::{
@@ -29,11 +29,11 @@ const NATIVE_UNSAFE_INVENTORY_PACKAGE: &str = "rootlight-sandbox";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
-        .features(cargo_metadata::CargoOpt::AllFeatures)
-        .other_options(vec!["--locked".to_owned()])
+        .all_features()
+        .locked()
         .exec()
         .map_err(PolicyError::Metadata)?;
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let workspace_root = metadata.workspace_root.as_path();
     let supply_chain: SupplyChainPolicy =
         read_policy(&workspace_root.join(SUPPLY_CHAIN_POLICY_PATH))?;
     let action_policy: ActionPolicy = read_policy(&workspace_root.join(ACTION_POLICY_PATH))?;
@@ -153,8 +153,8 @@ fn validate_dependency_surfaces(
                 });
             }
         } else if !workspace_ids.contains(&package.id) {
-            let manifest = package.manifest_path.as_std_path();
-            let relative = manifest.strip_prefix(metadata.workspace_root.as_std_path());
+            let manifest = package.manifest_path.as_path();
+            let relative = manifest.strip_prefix(metadata.workspace_root.as_path());
             let Ok(relative) = relative else {
                 return Err(PolicyError::UnapprovedPathDependency {
                     package: package_key(package),
@@ -176,14 +176,14 @@ fn validate_dependency_surfaces(
         if package
             .targets
             .iter()
-            .any(|target| target.kind.contains(&TargetKind::CustomBuild))
+            .any(|target| target.kind.iter().any(|kind| kind == "custom-build"))
         {
             observed_build_scripts.insert(key.clone());
         }
         if package
             .targets
             .iter()
-            .any(|target| target.kind.contains(&TargetKind::ProcMacro))
+            .any(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
         {
             observed_proc_macros.insert(key.clone());
         }
@@ -766,7 +766,7 @@ fn scan_workspace_unsafe(
     let boundaries = validate_unsafe_boundaries(&root, metadata, policy)?;
     let mut observed = BTreeMap::new();
     for package in metadata.workspace_packages() {
-        let Some(manifest_parent) = package.manifest_path.as_std_path().parent() else {
+        let Some(manifest_parent) = package.manifest_path.parent() else {
             return Err(PolicyError::InvalidUnsafeBoundary {
                 detail: format!("package {} has no manifest parent", package.name),
             });
@@ -879,8 +879,8 @@ fn validate_unsafe_boundaries<'a>(
             .iter()
             .filter(|package| {
                 package.name == boundary.package
-                    && package.version.to_string() == boundary.package_version
-                    && fs::canonicalize(package.manifest_path.as_std_path())
+                    && package.version == boundary.package_version
+                    && fs::canonicalize(&package.manifest_path)
                         .is_ok_and(|manifest| manifest == absolute_manifest)
             })
             .copied()
@@ -895,7 +895,7 @@ fn validate_unsafe_boundaries<'a>(
                 ),
             });
         };
-        let Some(manifest_parent) = package.manifest_path.as_std_path().parent() else {
+        let Some(manifest_parent) = package.manifest_path.parent() else {
             return Err(PolicyError::InvalidUnsafeBoundary {
                 detail: format!("package {} has no manifest parent", boundary.package),
             });
@@ -994,9 +994,9 @@ fn package_target_defining_module(
     for target in package
         .targets
         .iter()
-        .filter(|target| target.kind.contains(&TargetKind::Lib))
+        .filter(|target| target.kind.iter().any(|kind| kind == "lib"))
     {
-        let target_path = target.src_path.as_std_path();
+        let target_path = target.src_path.as_path();
         if path_is_link_or_reparse(target_path)? {
             return Err(PolicyError::InvalidUnsafeBoundary {
                 detail: format!(
@@ -1210,7 +1210,7 @@ fn validate_unsafe_boundary_governance(
     boundary: &UnsafeBoundary,
     enabled_boundary_count: usize,
 ) -> Result<(), PolicyError> {
-    let manifest_path = package.manifest_path.as_std_path();
+    let manifest_path = package.manifest_path.as_path();
     let manifest_text = fs::read_to_string(manifest_path).map_err(|source| PolicyError::Read {
         path: manifest_path.to_path_buf(),
         source,
@@ -2116,7 +2116,7 @@ pub(crate) enum PolicyError {
         source: toml::de::Error,
     },
     #[error("failed to read Cargo metadata")]
-    Metadata(#[source] cargo_metadata::Error),
+    Metadata(#[source] MetadataError),
     #[error("POLICY_VERSION: unsupported version {version} in {path}")]
     UnsupportedPolicyVersion { path: String, version: String },
     #[error("POLICY_SOURCE_REGISTRY: {package} uses unapproved registry {origin}")]

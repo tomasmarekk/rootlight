@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cargo_metadata::MetadataCommand;
+use crate::cargo_metadata::{MetadataCommand, MetadataError};
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_catalog::{catalog_schema_compatibility, oracle_schema_compatibility};
@@ -128,7 +128,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 17] = [
     ("1.18", "protobuf/1.18/rootlight.desc"),
     ("1.19", "protobuf/1.19/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 24] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 25] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -151,6 +151,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 24] = [
     "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
     "tests/fixtures/mcp/2.0/repo-list-contract.json",
     "xtask/Cargo.toml",
+    "xtask/src/cargo_metadata.rs",
     "xtask/src/main.rs",
     "xtask/src/schemas.rs",
 ];
@@ -744,7 +745,7 @@ fn workspace_root() -> Result<PathBuf, SchemaError> {
     MetadataCommand::new()
         .no_deps()
         .exec()
-        .map(|metadata| metadata.workspace_root.into_std_path_buf())
+        .map(|metadata| metadata.workspace_root)
         .map_err(SchemaError::Metadata)
 }
 
@@ -3321,7 +3322,7 @@ pub(crate) enum SchemaError {
     #[error("COMPAT_PROTOBUF_BASELINE_EXISTS: daemon protocol baseline already exists: {0}")]
     ProtocolBaselineAlreadyExists(PathBuf),
     #[error("failed to read Cargo metadata for schema generation")]
-    Metadata(#[source] cargo_metadata::Error),
+    Metadata(#[source] MetadataError),
     #[error("schema generator package is missing from Cargo metadata: {0}")]
     MissingGeneratorPackage(String),
     #[error("failed to locate vendored protoc")]

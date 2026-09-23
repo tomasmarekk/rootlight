@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
-cargo_metadata.workspace = true
 rootlight-build = { path = "../crates/rootlight-build" }
 rootlight-encoding = { path = "../crates/rootlight-encoding" }
 ed25519-compact.workspace = true

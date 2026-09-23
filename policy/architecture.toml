@@ -19,6 +19,7 @@ workspace_members = [
   "rootlight-daemon",
   "rootlight-daemon-core",
   "rootlight-discovery",
+  "rootlight-encoding",
   "rootlight-error",
   "rootlight-git",
   "rootlight-ids",
@@ -99,6 +100,7 @@ allow_build_script = false
 name = "rootlight-semantic-host"
 allowed_internal_dependencies = [
   "rootlight-cancel",
+  "rootlight-encoding",
   "rootlight-ids",
   "rootlight-semantic",
 ]
@@ -109,6 +111,7 @@ name = "rootlight-web"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-client",
+  "rootlight-encoding",
   "rootlight-runtime",
   "rootlight-vfs",
 ]
@@ -192,9 +195,15 @@ allowed_internal_dependencies = [
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-encoding"
+allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-client"
 allowed_internal_dependencies = [
   "rootlight-build",
+  "rootlight-encoding",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
@@ -437,9 +446,11 @@ name = "xtask"
 allowed_internal_dependencies = [
   "rootlight-agent",
   "rootlight-bench",
+  "rootlight-build",
   "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
+  "rootlight-encoding",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",

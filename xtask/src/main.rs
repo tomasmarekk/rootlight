@@ -8,6 +8,7 @@
 mod architecture;
 mod budget_conformance;
 mod capability;
+mod cargo_metadata;
 mod contract_matrix;
 mod daemon_lifecycle;
 mod datasets;

@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "eed4c657af166217f36844b9837b5cc4d74129c026cb3a3a6af4ff8829dae80a"
+      "blake3": "6d0e7b658efddc22635cb694bcc6e66a8b5b4be70f56ca9e59ea5a810ed0d430"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -26,7 +26,7 @@
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
-      "blake3": "a5e498b1c39480962e529a4151a245b3d44e59a80ed39b10db0b8642ac85e701"
+      "blake3": "70d6285b169a82d4d04cf31f23d97cf0a121c57ccdd3b7c034e3ed2bf9b1dc21"
     },
     {
       "path": "crates/rootlight-ir/src/lexical.rs",
@@ -254,15 +254,19 @@
     },
     {
       "path": "xtask/Cargo.toml",
-      "blake3": "acb3fd8ad8582d277efa2e63dbaf368cfc923070a2d7c079cc085223e4ae8e7f"
+      "blake3": "8a973220cc05b34def3f6d4ce3b75bbe97871fb0a3663dab77793a11edceb3db"
+    },
+    {
+      "path": "xtask/src/cargo_metadata.rs",
+      "blake3": "c73788ce5aa3396f1dec533e66929ce5c9302ad8ddfb17389df90b12996c7e65"
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "170cb0c6de948fda2d458743ea7453a821506d5f44fa3f4b31d2448a5c61387d"
+      "blake3": "dd55749f7748af359fc764a5e32e644a613d224273caf92713469c293dd79fc1"
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "2d44115398c804575896e440c9530af9a7d9510e20e0b14a1e3225bb9b2a0b23"
+      "blake3": "c15a64bfb6b40e36de2f4191b2e2cd43aa299141669b7b1254a17ea1583f978e"
     }
   ],
   "artifacts": [

@@ -34,7 +34,6 @@ allowed_build_scripts = [
   "ahash@0.8.12",
   "anyhow@1.0.103",
   "blake3@1.8.5",
-  "camino@1.2.4",
   "cap-fs-ext@3.4.5",
   "cap-primitives@3.4.5",
   "cap-std@3.4.5",

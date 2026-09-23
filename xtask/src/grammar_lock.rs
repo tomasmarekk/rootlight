@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cargo_metadata::{Dependency, Metadata};
+use crate::cargo_metadata::{Dependency, DependencyKind, Metadata};
 use serde::Deserialize;
 use sha2::Digest as _;
 
@@ -671,10 +671,7 @@ fn validate_dependency_profile(
     expected_path: Option<&Path>,
 ) -> Result<(), GrammarLockError> {
     let source_matches = match expected_path {
-        Some(path) => {
-            dependency.source.is_none()
-                && dependency.path.as_ref().map(|path| path.as_std_path()) == Some(path)
-        }
+        Some(path) => dependency.source.is_none() && dependency.path.as_deref() == Some(path),
         None => {
             dependency.path.is_none()
                 && dependency
@@ -685,8 +682,8 @@ fn validate_dependency_profile(
                     == Some(CRATES_IO_SOURCE)
         }
     };
-    if dependency.req.to_string() != format!("={version}")
-        || dependency.kind != cargo_metadata::DependencyKind::Normal
+    if dependency.req != format!("={version}")
+        || dependency.kind != DependencyKind::Normal
         || dependency.optional
         || dependency.uses_default_features
         || dependency.rename.is_some()
@@ -797,10 +794,10 @@ fn validate_vendored_sources(
             .iter()
             .find(|package| {
                 package.name.as_str() == grammar.crate_name
-                    && package.version.to_string() == grammar.crate_version
+                    && package.version == grammar.crate_version
             })
             .ok_or_else(invalid)?;
-        if package.source.is_some() || package.manifest_path.as_std_path() != expected_manifest {
+        if package.source.is_some() || package.manifest_path != expected_manifest {
             return Err(invalid());
         }
         let directory = expected_manifest.parent().ok_or_else(invalid)?;
@@ -1572,7 +1569,7 @@ mod tests {
         let mut profiles = Vec::new();
 
         let mut development = baseline.clone();
-        development.kind = cargo_metadata::DependencyKind::Development;
+        development.kind = DependencyKind::Development;
         profiles.push(development);
 
         let mut optional = baseline.clone();
@@ -1663,7 +1660,7 @@ mod tests {
                 "version" => dependency.req = ">=0.14.1".parse().unwrap(),
                 "renamed" => dependency.rename = Some("replacement".into()),
                 "target" => dependency.target = Some("cfg(windows)".parse().unwrap()),
-                "development" => dependency.kind = cargo_metadata::DependencyKind::Development,
+                "development" => dependency.kind = DependencyKind::Development,
                 "default_features" => dependency.uses_default_features = true,
                 _ => unreachable!(),
             }
