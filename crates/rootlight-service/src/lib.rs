@@ -29208,6 +29208,12 @@ mod tests {
                 "opaqueWidget configures lexicalFallback\n",
                 "unknown",
             ),
+            ("Module.agda", "module Module where\n", "agda"),
+            ("Shape.carbon", "fn MakeShape() {}\n", "carbon"),
+            ("Main.elm", "module Main exposing (main)\n", "elm"),
+            ("Main.idr", "module Main\n", "idris"),
+            ("Algebra.lean", "namespace Algebra\n", "lean"),
+            ("actor.pony", "actor Main\n", "pony"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -29284,7 +29290,16 @@ mod tests {
                 && gap.language.as_deref() == Some("unknown")
                 && gap.files == 1
         }));
-        for language in ["objective-cpp", "matlab"] {
+        for language in [
+            "objective-cpp",
+            "matlab",
+            "agda",
+            "carbon",
+            "elm",
+            "idris",
+            "lean",
+            "pony",
+        ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
                     && gap.language.as_deref() == Some(language)

@@ -1572,6 +1572,14 @@ pub const fn language_capabilities() -> &'static [LanguageCapability] {
 
 const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
+        language: "agda",
+        suffixes: &[".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "assembly",
         suffixes: &[".asm", ".s"],
         aliases: &["asm"],
@@ -1602,6 +1610,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "carbon",
+        suffixes: &[".carbon"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "cpp",
@@ -1636,6 +1652,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "elm",
+        suffixes: &[".elm"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "go",
         suffixes: &[".go", ".pb.go"],
         aliases: &["golang"],
@@ -1658,6 +1682,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "idris",
+        suffixes: &[".idr", ".lidr"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "java",
@@ -1690,6 +1722,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "lean",
+        suffixes: &[".lean"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "lua",
@@ -1762,6 +1802,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "pony",
+        suffixes: &[".pony"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "python",
@@ -3349,6 +3397,39 @@ max_source_file_bytes = 2097152
                 extension_language(path),
                 Some("json" | "yaml" | "toml")
             ));
+        }
+    }
+
+    #[test]
+    fn unparsed_language_suffixes_advertise_only_file_retrieval() {
+        for (path, language) in [
+            ("Module.agda", "agda"),
+            ("Guide.lagda.md", "agda"),
+            ("Shape.impl.carbon", "carbon"),
+            ("Main.elm", "elm"),
+            ("Main.idr", "idris"),
+            ("Main.lidr", "idris"),
+            ("Algebra.lean", "lean"),
+            ("actor.pony", "pony"),
+        ] {
+            assert_eq!(extension_language(path), Some(language), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"source content\n",
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == language && signal.evidence == LanguageEvidence::Extension
+            }));
+            assert_eq!(canonical_language(language), Some(language));
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .expect("source capability is declared");
+            assert_eq!(capability.analyzers, &["source-fallback"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+        }
+        for path in ["Main.agdai", "Main.olean", "Main.elm.bak", "actor.pony.txt"] {
+            assert_eq!(extension_language(path), None, "{path}");
         }
     }
 
