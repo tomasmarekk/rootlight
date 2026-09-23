@@ -78,6 +78,8 @@ struct DeclaredType {
 
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
+    applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
@@ -107,6 +109,8 @@ impl<'a> VbaBindings<'a> {
         cancellation.check()?;
         let mut result = Self {
             facts: BTreeMap::new(),
+            applications: BTreeMap::new(),
+            invocations: BTreeMap::new(),
             bindings: BTreeMap::new(),
             branch_bindings: BTreeMap::new(),
             unconditional_names: BTreeMap::new(),
@@ -126,6 +130,21 @@ impl<'a> VbaBindings<'a> {
             cancellation.check()?;
             if result.facts.insert(fact.local_id(), fact).is_some() {
                 return Err(invalid_capture());
+            }
+            match fact.syntax_kind().as_str() {
+                "vba.application.reference" => result
+                    .applications
+                    .entry(fact.span().start_byte())
+                    .or_default()
+                    .push(fact),
+                "vba.invoked_identifier.reference" | "vba.invoked_get_identifier.reference" => {
+                    result
+                        .invocations
+                        .entry(fact.span().start_byte())
+                        .or_default()
+                        .push(fact);
+                }
+                _ => {}
             }
             if fact.kind() == SyntaxFactKind::Module
                 && fact.syntax_kind().as_str() == "vba.class.module"
@@ -403,12 +422,25 @@ impl<'a> VbaBindings<'a> {
         }
         for fact in facts {
             cancellation.check()?;
-            if fact.syntax_kind().as_str() != "vba.direct_type_identifier.reference" {
+            if !matches!(
+                fact.syntax_kind().as_str(),
+                "vba.direct_type_identifier.reference" | "vba.type_identifier.reference"
+            ) {
                 continue;
             }
             let Some(declaration) = self.declaration(fact.parent(), cancellation)? else {
                 continue;
             };
+            let declared_value_type = fact.syntax_kind().as_str()
+                == "vba.direct_type_identifier.reference"
+                || (fact.syntax_kind().as_str() == "vba.type_identifier.reference"
+                    && matches!(
+                        declaration.syntax_kind().as_str(),
+                        "vba.function.declaration" | "vba.get_property.declaration"
+                    ));
+            if !declared_value_type {
+                continue;
+            }
             let Some(&Some(symbol)) = declarations.get(&declaration.local_id()) else {
                 continue;
             };
@@ -482,6 +514,9 @@ impl<'a> VbaBindings<'a> {
         text: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        if text.contains('(') {
+            return self.returned_udt_field_reference(fact, text, cancellation);
+        }
         // A written dot-chain can select enum constants or declared UDT fields.
         // Indexing and default-member dispatch need separate application evidence.
         let mut components = text.split('.');
@@ -593,6 +628,86 @@ impl<'a> VbaBindings<'a> {
             member_count = member_count.checked_add(1).ok_or_else(invalid_capture)?;
         }
         Ok((member_count > 0).then_some(ResolvedBinding {
+            symbol,
+            is_call: false,
+        }))
+    }
+
+    fn returned_udt_field_reference(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let span = fact.span();
+        let start = span.start_byte();
+        let mut applications = self
+            .applications
+            .get(&start)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.span().end_byte() < span.end_byte());
+        let Some(application) = applications.next() else {
+            return Ok(None);
+        };
+        if applications.next().is_some() {
+            return Ok(None);
+        }
+        let application_bytes = usize::try_from(application.span().end_byte() - start)
+            .map_err(|_| invalid_capture())?;
+        let Some((application_text, suffix)) = text.split_at_checked(application_bytes) else {
+            return Ok(None);
+        };
+        let Some(members) = suffix.strip_prefix('.') else {
+            return Ok(None);
+        };
+        if !application_text.ends_with(')') {
+            return Ok(None);
+        }
+        // An application may also index an array. Its callee must independently
+        // resolve as a call before its declared UDT return type can own fields.
+        let mut invocations = self
+            .invocations
+            .get(&start)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.span().end_byte() < application.span().end_byte());
+        let Some(invocation) = invocations.next() else {
+            return Ok(None);
+        };
+        if invocations.next().is_some() {
+            return Ok(None);
+        }
+        let invocation_bytes =
+            usize::try_from(invocation.span().end_byte() - start).map_err(|_| invalid_capture())?;
+        let Some(invocation_text) = application_text.get(..invocation_bytes) else {
+            return Ok(None);
+        };
+        let Some(ResolvedBinding {
+            mut symbol,
+            is_call: true,
+        }) = self.resolve(invocation, invocation_text, cancellation)?
+        else {
+            return Ok(None);
+        };
+        for component in members.split('.') {
+            cancellation.check()?;
+            let Some(name) = member_key(component) else {
+                return Ok(None);
+            };
+            let Some(scope) = self.value_types.get(&symbol) else {
+                return Ok(None);
+            };
+            if self.foreign_field_scopes.contains(scope) {
+                return Ok(None);
+            }
+            let Some(Some(field)) = self.fields.get(scope).and_then(|fields| fields.get(&name))
+            else {
+                return Ok(None);
+            };
+            symbol = *field;
+        }
+        Ok(Some(ResolvedBinding {
             symbol,
             is_call: false,
         }))

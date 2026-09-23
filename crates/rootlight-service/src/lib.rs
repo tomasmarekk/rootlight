@@ -34506,6 +34506,149 @@ mod tests {
         vba_declared_udt_query_scenario(true);
     }
 
+    #[test]
+    fn vba_function_returned_udt_field_has_source_bound_target() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let source = "Attribute VB_Name = \"Packets\"\nPrivate Type Packet\nCount As Long\nEnd Type\nPrivate Function MakePacket() As Packet\nEnd Function\nPrivate Function MakePacketWithValue(ByVal value As Long) As Packet\nEnd Function\nPrivate Property Get ReadPacket() As Packet\nEnd Property\nSub Run()\nDim result As Long\nresult = MakePacket().Count\nresult = MakePacketWithValue(1).Count\nresult = ReadPacket().Count\nEnd Sub\n";
+        fs::write(fixture.path().join("Packets.bas"), source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document().clone();
+        let field = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "Count")
+            .unwrap();
+        for expression in [
+            "MakePacket().Count",
+            "MakePacketWithValue(1).Count",
+            "ReadPacket().Count",
+        ] {
+            let member = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    if site.syntax_kind != "vba.member.reference" {
+                        return false;
+                    }
+                    let span = site.source.span();
+                    let start = usize::try_from(span.start_byte()).unwrap();
+                    let end = usize::try_from(span.end_byte()).unwrap();
+                    source.as_bytes().get(start..end) == Some(expression.as_bytes())
+                })
+                .unwrap();
+            assert_eq!(
+                member.target,
+                OccurrenceTarget::Resolved { symbol: field.id }
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(member.id)
+                    && relation.object == RelationEndpoint::Entity(field.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+                    && relation.evidence.source.as_ref() == Some(&member.source)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.detail == "vba-member-target-unavailable"
+                    && gap.source.span() == member.source.span()
+            }));
+        }
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![document.files[0].evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        drop(snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document(),
+            &document
+        );
+    }
+
+    #[test]
+    fn vba_returned_udt_field_lookup_rejects_dynamic_indexed_and_unknown_targets() {
+        for (declaration, expression) in [
+            (
+                "Private Function MakePacket() As Variant\nEnd Function\n",
+                "MakePacket().Count",
+            ),
+            ("", "MakePacket(0).Count"),
+            (
+                "Private Function MakePacket() As Packet\nEnd Function\n",
+                "MakePacket().Missing",
+            ),
+        ] {
+            let fixture = durable_test_tempdir();
+            let local = if declaration.is_empty() {
+                "Dim MakePacket(0) As Packet\n"
+            } else {
+                ""
+            };
+            let source = format!(
+                "Attribute VB_Name = \"Packets\"\nPrivate Type Packet\nCount As Long\nEnd Type\n{declaration}Sub Run()\n{local}Dim result As Long\nresult = {expression}\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Packets.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let member = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    if site.syntax_kind != "vba.member.reference" {
+                        return false;
+                    }
+                    let span = site.source.span();
+                    let start = usize::try_from(span.start_byte()).unwrap();
+                    let end = usize::try_from(span.end_byte()).unwrap();
+                    source.as_bytes().get(start..end) == Some(expression.as_bytes())
+                })
+                .unwrap();
+            assert!(
+                matches!(member.target, OccurrenceTarget::Unresolved { .. }),
+                "{expression}"
+            );
+            assert!(
+                !document
+                    .relations
+                    .iter()
+                    .any(|edge| { edge.subject == RelationEndpoint::Occurrence(member.id) })
+            );
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "vba-member-target-unavailable"
+                    && gap.source.span() == member.source.span()
+            }));
+        }
+    }
+
     fn vba_declared_udt_query_scenario(instance: bool) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
