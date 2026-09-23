@@ -122,6 +122,7 @@ impl ResolutionEngine {
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
+        reconcile_elm_import_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
@@ -419,6 +420,7 @@ impl ResolutionEngine {
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
+        reconcile_elm_import_gaps(&mut document, cancellation)?;
         reconcile_classic_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
@@ -876,6 +878,73 @@ fn reconcile_groovy_import_gaps(
     ensure_relation_remap_is_safe(document, &remap)
 }
 
+fn reconcile_elm_import_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let producers = document
+        .provenance
+        .iter()
+        .filter(|record| record.rule.as_deref() == Some("elm-module-import-v1.indexed_snapshot"))
+        .map(|record| record.id)
+        .collect::<BTreeSet<_>>();
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let native_files = document
+        .files
+        .iter()
+        .filter(|file| file.language == "elm")
+        .map(|file| (file.id, file.provenance))
+        .collect::<BTreeMap<_, _>>();
+    let mut imports = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        cancellation.check()?;
+        if occurrence.syntax_kind != "elm.import"
+            || occurrence.role != OccurrenceRole::ImportUse
+            || !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            || !producers.contains(&occurrence.provenance)
+        {
+            continue;
+        }
+        let span = occurrence.source.span();
+        imports
+            .entry((span.file(), span.start_byte(), span.end_byte()))
+            .and_modify(|prior| *prior = None)
+            .or_insert(Some((&occurrence.source, occurrence.provenance)));
+    }
+    let mut remap = BTreeMap::new();
+    for gap in &mut document.skipped_regions {
+        cancellation.check()?;
+        let span = gap.source.span();
+        if gap.domain != rootlight_ir::FactDomain::Relations
+            || gap.detail != "unresolved-import-target"
+            || native_files.get(&span.file()) != Some(&gap.provenance)
+        {
+            continue;
+        }
+        // Elm import facts and their native gaps share the module-name span.
+        let Some(Some((source, provenance))) =
+            imports.get(&(span.file(), span.start_byte(), span.end_byte()))
+        else {
+            continue;
+        };
+        if *source != &gap.source {
+            continue;
+        }
+        let old = gap.id;
+        gap.detail = "elm-import-build-context-unverified".to_owned();
+        gap.reason = rootlight_ir::SkippedRegionReason::MissingBuildContext;
+        gap.provenance = *provenance;
+        gap.id =
+            rootlight_ir::derive_skipped_region_id(gap).map_err(ResolutionError::FactIdentity)?;
+        if old != gap.id {
+            remap.insert(old, gap.id);
+        }
+    }
+    ensure_relation_remap_is_safe(document, &remap)
+}
+
 #[derive(Clone)]
 struct PendingRelation {
     repository: rootlight_ids::RepositoryId,
@@ -1288,6 +1357,7 @@ fn build_provenance(
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
+        ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
         ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",
         ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",

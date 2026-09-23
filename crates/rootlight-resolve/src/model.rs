@@ -250,6 +250,8 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// A unique authored Elm module declaration matches the imported module name.
+    ElmModuleImport,
     /// A native receiver's project-owned declared type selects one accessible member.
     ClassicProjectMember,
     /// Declarative classic BASIC project membership selects one native class type.
@@ -274,6 +276,8 @@ pub enum ResolutionRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionSignal {
+    /// The imported Elm name selects one source-declared module in the generation.
+    SourceDeclaredModule,
     /// Exact source membership isolates a native declaration from other projects.
     NativeProjectMembership,
     /// Native static-import evidence identifies a namespace or one authored static method.

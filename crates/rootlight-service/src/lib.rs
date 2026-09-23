@@ -29597,6 +29597,117 @@ mod tests {
     }
 
     #[test]
+    fn elm_local_imports_resolve_to_source_declared_modules() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let importer_source = "module Main exposing (main)\nimport Shared\nmain = Shared.value\n";
+        fs::write(fixture.path().join("Main.elm"), importer_source).expect("Elm importer writes");
+        fs::write(
+            fixture.path().join("Shared.elm"),
+            "module Shared exposing (value)\nvalue = 1\n",
+        )
+        .expect("Elm module writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm modules index");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == "elm"
+                    && entity.kind == EntityKind::Module
+                    && entity.canonical_name == "Shared"
+            })
+            .expect("declared module has symbol identity");
+        let import = document
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.syntax_kind == "elm.import")
+            .expect("Elm import has an occurrence");
+        assert_eq!(import.role, rootlight_ir::OccurrenceRole::ImportUse);
+        let span = import.source.span();
+        let start = usize::try_from(span.start_byte()).expect("fixture offset fits");
+        let end = usize::try_from(span.end_byte()).expect("fixture offset fits");
+        assert_eq!(&importer_source[start..end], "Shared");
+        assert_eq!(
+            import.target,
+            rootlight_ir::OccurrenceTarget::Resolved { symbol: module.id }
+        );
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == rootlight_ir::RelationPredicate::Imports
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(module.id)
+                && relation.evidence.source.as_ref() == Some(&import.source)
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "unresolved-import-target" && gap.source == import.source
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "elm-import-build-context-unverified"
+                && gap.reason == rootlight_ir::SkippedRegionReason::MissingBuildContext
+                && gap.source == import.source
+        }));
+    }
+
+    #[test]
+    fn elm_imports_without_a_unique_local_declaration_do_not_claim_exact_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("Main.elm"),
+            "module Main exposing (main)\nimport Shared\nimport External.Library\nmain = 1\n",
+        )
+        .expect("Elm importer writes");
+        for directory in ["src", "test"] {
+            let path = fixture.path().join(directory);
+            fs::create_dir(&path).expect("fixture directory exists");
+            fs::write(
+                path.join("Shared.elm"),
+                "module Shared exposing (value)\nvalue = 1\n",
+            )
+            .expect("Elm module writes");
+        }
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm modules index");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let imports = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.syntax_kind == "elm.import")
+            .collect::<Vec<_>>();
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().any(|occurrence| matches!(
+            occurrence.target,
+            rootlight_ir::OccurrenceTarget::Candidates { total_count: 2, .. }
+        )));
+        assert!(imports.iter().any(|occurrence| matches!(
+            occurrence.target,
+            rootlight_ir::OccurrenceTarget::Unresolved { .. }
+        )));
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|relation| { relation.predicate == rootlight_ir::RelationPredicate::Imports })
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.detail == "unresolved-import-target")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn groovy_named_sources_do_not_fall_back_to_foreign_shebangs() {
         for path in ["Jenkinsfile", "flow.jenkins"] {
             let fixture = TempDir::new().unwrap();

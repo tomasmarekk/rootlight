@@ -124,7 +124,11 @@ impl ParseProvider for ElmParseProvider {
                 .headers
                 .get(index + 1)
                 .map_or(source.bytes().len(), |next| next.line_start);
-            let span = source_span(file, header.line_start, end)?;
+            let span = if header.kind == SyntaxFactKind::Import {
+                source_span(file, header.name_start, header.name_end)?
+            } else {
+                source_span(file, header.line_start, end)?
+            };
             facts.push(SyntaxFact::new(
                 local_id,
                 Some(1),
@@ -133,18 +137,16 @@ impl ParseProvider for ElmParseProvider {
                 1,
                 label(header.label),
             ));
-            facts.push(SyntaxFact::new(
-                local_id + 1,
-                Some(local_id),
-                SyntaxFactKind::Occurrence,
-                source_span(file, header.name_start, header.name_end)?,
-                2,
-                label(if header.kind == SyntaxFactKind::Import {
-                    "elm.name.reference"
-                } else {
-                    "elm.name.definition"
-                }),
-            ));
+            if header.kind != SyntaxFactKind::Import {
+                facts.push(SyntaxFact::new(
+                    local_id + 1,
+                    Some(local_id),
+                    SyntaxFactKind::Occurrence,
+                    source_span(file, header.name_start, header.name_end)?,
+                    2,
+                    label("elm.name.definition"),
+                ));
+            }
             while let Some(constructor) = parsed.constructors.get(constructor_index)
                 && constructor.owner_index == index
             {
@@ -255,7 +257,6 @@ struct ParsedSource {
 struct ConstructorCollector<'a> {
     masked: &'a [u8],
     cancellation: &'a Cancellation,
-    header_count: usize,
     max_items: usize,
     constructors: Vec<Constructor>,
 }
@@ -263,10 +264,15 @@ struct ConstructorCollector<'a> {
 fn syntax_fact_count(source: &ParsedSource) -> usize {
     source
         .headers
-        .len()
-        .saturating_add(source.constructors.len())
-        .saturating_mul(2)
-        .saturating_add(1)
+        .iter()
+        .fold(1_usize, |count, header| {
+            count.saturating_add(if header.kind == SyntaxFactKind::Import {
+                1
+            } else {
+                2
+            })
+        })
+        .saturating_add(source.constructors.len().saturating_mul(2))
 }
 
 fn required_syntax_fact_count(source: &ParsedSource) -> usize {
@@ -291,7 +297,7 @@ fn scan_source(
     std::str::from_utf8(bytes).map_err(|_| failure("invalid-utf8"))?;
     let masked = mask_non_code(bytes, cancellation)?;
     let mut headers = Vec::new();
-    let max_items = (max_syntax_nodes - 1) / 2;
+    let mut header_fact_count = 1_usize;
     let mut start = 0;
     let mut annotation: Option<Annotation> = None;
     while start < masked.len() {
@@ -302,9 +308,14 @@ fn scan_source(
             .map_or(masked.len(), |offset| start + offset);
         let line = &masked[start..end];
         if let Some(mut header) = parse_header(line, start) {
-            if headers.len() >= max_items {
-                return Err(failure("elm-syntax-node-limit"));
-            }
+            header_fact_count = header_fact_count
+                .checked_add(if header.kind == SyntaxFactKind::Import {
+                    1
+                } else {
+                    2
+                })
+                .filter(|count| *count <= max_syntax_nodes)
+                .ok_or_else(|| failure("elm-syntax-node-limit"))?;
             if header.label == "elm.function.declaration"
                 && let Some(prior) = annotation
                 && masked[prior.name_start..prior.name_end]
@@ -327,8 +338,7 @@ fn scan_source(
     let mut collector = ConstructorCollector {
         masked: &masked,
         cancellation,
-        header_count: headers.len(),
-        max_items,
+        max_items: (max_syntax_nodes - header_fact_count) / 2,
         constructors: Vec::new(),
     };
     for (owner_index, header) in headers.iter().enumerate() {
@@ -400,7 +410,7 @@ impl ConstructorCollector<'_> {
         {
             return Ok(());
         }
-        if self.header_count.saturating_add(self.constructors.len()) >= self.max_items {
+        if self.constructors.len() >= self.max_items {
             return Err(failure("elm-syntax-node-limit"));
         }
         let span_end = segment
@@ -659,6 +669,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn import_names_have_exact_spans_and_one_bounded_fact() {
+        let source =
+            b"module Main exposing (main)\nimport Shared exposing (value)\nmain = Shared.value\n";
+        let parsed = scan_source(source, 6, &Cancellation::new()).expect("bounded Elm source");
+        let import = parsed
+            .headers
+            .iter()
+            .find(|header| header.kind == SyntaxFactKind::Import)
+            .expect("Elm import exists");
+        assert_eq!(&source[import.name_start..import.name_end], b"Shared");
+        assert_eq!(syntax_fact_count(&parsed), 6);
+        assert_eq!(required_syntax_fact_count(&parsed), 5);
+        assert!(scan_source(source, 5, &Cancellation::new()).is_err());
     }
 
     #[test]

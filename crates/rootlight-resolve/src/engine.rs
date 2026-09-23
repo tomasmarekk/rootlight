@@ -11,7 +11,7 @@ use std::{
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, Confidence, ContainerRef, CoverageStatus, EntityKind, EntityRecord,
+    AnalysisTier, Confidence, ContainerRef, CoverageStatus, EntityFlag, EntityKind, EntityRecord,
     ExtensionSupport, FileRecord, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
     OccurrenceTarget, ProvenanceRecord, validate_ir_document,
 };
@@ -230,6 +230,12 @@ impl ResolutionEngine {
         } else {
             file_language
         };
+        if language == "elm"
+            && occurrence.syntax_kind == "elm.import"
+            && occurrence.role == OccurrenceRole::ImportUse
+        {
+            return self.resolve_elm_import(occurrence, index, work, cancellation);
+        }
         let example =
             (file_language == "markdown").then(|| markdown_example(occurrence.enclosing, index));
         let rule = if occurrence.role == OccurrenceRole::ImportUse {
@@ -434,6 +440,118 @@ impl ResolutionEngine {
             occurrence: occurrence.id,
             outcome,
             explanation,
+        })
+    }
+
+    fn resolve_elm_import(
+        &self,
+        occurrence: &OccurrenceRecord,
+        index: &CandidateIndex<'_>,
+        work: &mut ResolutionWorkBudget,
+        cancellation: &Cancellation,
+    ) -> Result<ResolutionDecision, ResolutionError> {
+        let source_length = occurrence
+            .source
+            .span()
+            .end_byte()
+            .checked_sub(occurrence.source.span().start_byte())
+            .ok_or(ResolutionError::InvalidScore)?;
+        let mut candidates = Vec::new();
+        let mut candidate_total = 0_u64;
+        for indexed in index
+            .by_name_hash
+            .get(&occurrence.syntactic_text_hash)
+            .into_iter()
+            .flatten()
+        {
+            cancellation.check()?;
+            work.consume()?;
+            let entity = indexed.entity;
+            let Some(target_file) = entity_source_file(entity) else {
+                continue;
+            };
+            if indexed.name_match != NameMatch::Canonical
+                || entity.language != "elm"
+                || entity.kind != EntityKind::Module
+                || entity.flags.contains(&EntityFlag::Synthetic)
+                || entity.container != Some(ContainerRef::File(target_file))
+                || target_file == occurrence.file
+                || index
+                    .files
+                    .get(&target_file)
+                    .map(|file| file.language.as_str())
+                    != Some("elm")
+                || u64::try_from(entity.canonical_name.len())
+                    .map_err(|_| ResolutionError::CountOverflow)?
+                    != source_length
+            {
+                continue;
+            }
+            candidate_total = candidate_total
+                .checked_add(1)
+                .ok_or(ResolutionError::CountOverflow)?;
+            if candidates.len() < self.limits.candidate_limit() {
+                candidates.push(CandidateExplanation {
+                    symbol: entity.id,
+                    score: confidence(950)?,
+                    positive_signals: vec![
+                        ResolutionSignal::SourceDeclaredModule,
+                        ResolutionSignal::CanonicalNameHash,
+                        ResolutionSignal::SameLanguage,
+                        ResolutionSignal::CompatibleKind,
+                    ],
+                    penalties: Vec::new(),
+                });
+            }
+        }
+        let outcome = if candidate_total == 1 {
+            ResolutionOutcome::Resolved {
+                symbol: candidates
+                    .first()
+                    .ok_or(ResolutionError::InvalidScore)?
+                    .symbol,
+                confidence: confidence(950)?,
+            }
+        } else if candidate_total > 1 {
+            ResolutionOutcome::Candidates {
+                symbols: candidates
+                    .iter()
+                    .map(|candidate| candidate.symbol)
+                    .collect(),
+                total_count: candidate_total,
+                completeness: if u64::try_from(candidates.len())
+                    .map_err(|_| ResolutionError::CountOverflow)?
+                    == candidate_total
+                {
+                    CoverageStatus::Complete
+                } else {
+                    CoverageStatus::Bounded
+                },
+                confidence: confidence(950)?,
+            }
+        } else {
+            ResolutionOutcome::Unresolved {
+                reason: UnresolvedReason::MissingDependency,
+                confidence: confidence(0)?,
+            }
+        };
+        Ok(ResolutionDecision {
+            occurrence: occurrence.id,
+            outcome,
+            explanation: ResolutionExplanation {
+                rule: ResolutionRule::ElmModuleImport,
+                provider_name: RESOLVER_PROVIDER_NAME,
+                provider_version: RESOLVER_PROVIDER_VERSION,
+                candidates,
+                rejected_candidates: Vec::new(),
+                rejected_total: 0,
+                completeness_assumptions: vec![
+                    CompletenessAssumption::ValidatedNormalizedDocument,
+                    CompletenessAssumption::SingleGeneration,
+                    CompletenessAssumption::CanonicalNameHash,
+                    CompletenessAssumption::NoRepositoryExecution,
+                ],
+            },
         })
     }
 }
