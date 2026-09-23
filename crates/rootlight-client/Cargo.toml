@@ -11,7 +11,6 @@ publish = false
 cap-std.workspace = true
 rootlight-encoding = { path = "../rootlight-encoding" }
 ed25519-compact.workspace = true
-fs2.workspace = true
 rootlight-build = { path = "../rootlight-build" }
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }

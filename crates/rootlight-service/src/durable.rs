@@ -1999,8 +1999,8 @@ impl DurableCatalog {
             .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         let inventory = self.inventory_for_admission(&mut accounting, available_bytes)?;
         let admission = match check_storage_admission(&inventory, repository, policy) {
             Ok(admission) => admission,
@@ -2046,8 +2046,8 @@ impl DurableCatalog {
             .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         if accounting.dirty || accounting.repositories.is_none() {
             return Err(FirstSliceError::Retention);
         }
@@ -2098,8 +2098,8 @@ impl DurableCatalog {
             .storage_accounting
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         let current = accounting
             .reservations
             .entries
@@ -2309,8 +2309,8 @@ impl DurableCatalog {
         mut budget: StorageScanBudget,
     ) -> Result<DurableStorageInventory, FirstSliceError> {
         budget.check()?;
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         let mut accounting = self
             .storage_accounting
             .lock()
@@ -2363,8 +2363,8 @@ impl DurableCatalog {
     pub(super) fn storage_inventory_cached(
         &self,
     ) -> Result<Option<DurableStorageInventory>, FirstSliceError> {
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         let accounting = self
             .storage_accounting
             .lock()
@@ -2433,7 +2433,7 @@ impl DurableCatalog {
                 &mut accounting.verified_source_blobs,
                 SourceBlobScan::AccountPhysicalBytes,
             )?;
-            let available_bytes = fs2::available_space(&self.repositories_path)
+            let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
                 .map_err(|_| FirstSliceError::Catalog)?;
             build_storage_inventory(
                 repositories.values().cloned().collect(),
@@ -2467,8 +2467,8 @@ impl DurableCatalog {
             .as_mut()
             .ok_or(FirstSliceError::Retention)?
             .insert(repository, scanned);
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
         if let Err(error) = inventory_from_accounting(accounting, available_bytes) {
             restore_repository_accounting(accounting, repository, previous);
             accounting.dirty = true;

@@ -35,8 +35,10 @@ use rootlight_ir::{
 };
 
 pub mod platform;
+mod space;
 mod text;
 
+pub use space::available_space;
 pub use text::{SourceText, TextEncoding};
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.

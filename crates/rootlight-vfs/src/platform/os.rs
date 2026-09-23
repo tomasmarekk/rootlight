@@ -23,6 +23,29 @@ use super::{PlatformError, PlatformFileIdentity, PrivateName};
 
 pub(super) const PRIVATE_FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
+#[cfg(windows)]
+pub(crate) fn available_volume_space(path: &Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::PCWSTR};
+
+    let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if path.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "filesystem path contains a NUL code unit",
+        ));
+    }
+    path.push(0);
+    let mut available = 0;
+    // SAFETY: `path` is NUL-terminated and remains alive for the call, and the
+    // sole output pointer refers to a live, writable u64.
+    unsafe {
+        GetDiskFreeSpaceExW(PCWSTR(path.as_ptr()), Some(&mut available), None, None)
+            .map_err(io::Error::other)?;
+    }
+    Ok(available)
+}
+
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 

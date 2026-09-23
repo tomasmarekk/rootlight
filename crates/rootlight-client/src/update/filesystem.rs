@@ -1031,7 +1031,7 @@ impl InstallLayout {
             .map_err(|_| FilesystemUpdateError::Clock)?
             .as_secs();
         let available =
-            fs2::available_space(&self.root).map_err(FilesystemUpdateError::DiskSpace)?;
+            rootlight_vfs::available_space(&self.root).map_err(FilesystemUpdateError::DiskSpace)?;
         Ok(UpdateContext {
             updates_enabled: policy.updates_enabled,
             current_version: install.active_version.clone(),

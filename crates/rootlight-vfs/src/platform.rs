@@ -18,6 +18,9 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 
 mod os;
 
+#[cfg(windows)]
+pub(crate) use os::available_volume_space;
+
 /// Maximum platform name units accepted for one private-tree entry.
 pub const MAX_PRIVATE_NAME_UNITS: usize = 255;
 
