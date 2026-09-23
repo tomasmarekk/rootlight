@@ -48,13 +48,13 @@ use rootlight_adapter_treesitter::{
     GrammarRegistry, ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION,
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
+use rootlight_adapters::{
+    ElmParseProvider, RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
+};
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
     RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
     RuntimeTraceRelationKind, RuntimeTraceResource,
-};
-use rootlight_adapters::{
-    RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
@@ -5190,6 +5190,34 @@ struct CachedRevisionChangePaths {
     paths: Vec<String>,
 }
 
+trait StructuralPreflight: ParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError>;
+}
+
+impl StructuralPreflight for TreeSitterProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        TreeSitterProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
+impl StructuralPreflight for ElmParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        ElmParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -5203,7 +5231,7 @@ pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
     extensions: ExtensionSupport,
-    structural_parser: Arc<TreeSitterProvider>,
+    structural_parsers: BTreeMap<String, Arc<dyn StructuralPreflight>>,
     analyzers: BTreeMap<String, TreeSitterAnalyzer>,
     project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     // The canonical-root digest remains an internal lookup key. Durable mode
@@ -6078,12 +6106,22 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
         let registry = GrammarRegistry::audited().map_err(|_| FirstSliceError::Adapter)?;
+        let elm_parser = Arc::new(
+            ElmParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let producer =
             ProducerIdentity::new("rootlight-first-slice-treesitter", "1.0", config.hash())
                 .map_err(|_| FirstSliceError::Adapter)?;
         let mut analyzers = BTreeMap::new();
+        let mut structural_parsers: BTreeMap<String, Arc<dyn StructuralPreflight>> =
+            BTreeMap::new();
         for descriptor in registry.descriptors() {
             let language = descriptor.language().clone();
+            structural_parsers.insert(
+                language.as_str().to_owned(),
+                Arc::clone(&parser) as Arc<dyn StructuralPreflight>,
+            );
             let frontend_version = if descriptor.family() == GrammarFamily::JavaScript {
                 format!(
                     "tree-sitter-typescript-tsx-{}",
@@ -6130,6 +6168,26 @@ impl FirstSliceService {
         if analyzers.len() != registry.descriptors().len() {
             return Err(FirstSliceError::Adapter);
         }
+        let elm_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&elm_parser) as Arc<dyn ParseProvider>;
+        let elm_analyzer = TreeSitterAnalyzer::new(
+            elm_provider,
+            ProducerIdentity::new("rootlight-first-slice-elm-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("elm").map_err(|_| FirstSliceError::Adapter)?,
+            "elm-native-structural-1",
+            ElmParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("elm".to_owned(), elm_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert("elm".to_owned(), elm_parser as Arc<dyn StructuralPreflight>)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
         let generation_cache = FirstSliceGenerationCache::new(total_generation_capacity)?;
         let source_snapshots =
             SourceSnapshotRetention::new(total_generation_capacity, maximum_retained_source_bytes)?;
@@ -6144,7 +6202,7 @@ impl FirstSliceService {
             config,
             analysis_limits,
             extensions: ExtensionSupport::default(),
-            structural_parser: parser,
+            structural_parsers,
             analyzers,
             project_analyzer,
             repositories: BTreeMap::new(),
@@ -7709,10 +7767,13 @@ impl FirstSliceService {
                     &self.analysis_limits,
                 )?;
                 let parse_request = derived.analysis_context(request)?.to_parse_request();
-                let required = match self
-                    .structural_parser
-                    .required_syntax_fact_count(&parse_request, cancellation)
-                {
+                let parser = self
+                    .structural_parsers
+                    .get(language)
+                    .ok_or(FirstSliceError::Adapter)?;
+                let required_result =
+                    parser.required_syntax_fact_count(&parse_request, cancellation);
+                let required = match required_result {
                     Ok(required) => required,
                     Err(error) if is_invalid_utf8_adapter_failure(&error) => 0,
                     Err(error) => return Err(map_adapter_error(error, cancellation).into()),
@@ -29210,7 +29271,6 @@ mod tests {
             ),
             ("Module.agda", "module Module where\n", "agda"),
             ("Shape.carbon", "fn MakeShape() {}\n", "carbon"),
-            ("Main.elm", "module Main exposing (main)\n", "elm"),
             ("Main.idr", "module Main\n", "idris"),
             ("Algebra.lean", "namespace Algebra\n", "lean"),
             ("actor.pony", "actor Main\n", "pony"),
@@ -29295,7 +29355,6 @@ mod tests {
             "matlab",
             "agda",
             "carbon",
-            "elm",
             "idris",
             "lean",
             "pony",
@@ -29306,6 +29365,97 @@ mod tests {
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn elm_native_headers_publish_source_backed_symbols_without_literal_ghosts() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Main exposing (render)\nimport Html\n{- type Ghost = Fake {- nested -} -}\ntype alias Model = { value : Int }\nrender model =\n    \"\"\"\ntype Phantom = False\n\"\"\"\nvalue = 1\n";
+        fs::write(fixture.path().join("Main.elm"), source).expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("native Elm source indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "Main.elm")
+            .expect("Elm file retained");
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .expect("Elm coverage resolves");
+        assert_eq!(coverage.language, "elm");
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("Elm repository status resolves");
+        let elm_coverage = status
+            .coverage
+            .iter()
+            .find(|entry| entry.language == "elm")
+            .expect("Elm language coverage exists");
+        assert_eq!(elm_coverage.discovered_files, 1);
+        assert_eq!(elm_coverage.indexed_files, 1);
+        for name in ["Main", "Model", "render", "value"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("Elm declaration locates");
+            let symbol = located
+                .data
+                .hits
+                .iter()
+                .find_map(|hit| hit.symbol)
+                .expect("Elm symbol identity resolves");
+            let explained = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .expect("Elm symbol explains");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            let reference = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("Elm declaration retains source evidence");
+            assert_eq!(reference.generation(), receipt.generation);
+            let definition = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .expect("Elm declaration source reads");
+            assert!(
+                definition.data.chunks[0]
+                    .bytes
+                    .windows(name.len())
+                    .any(|window| window == name.as_bytes())
+            );
+        }
+        for ghost in ["Ghost", "Phantom"] {
+            assert!(
+                generation
+                    .document()
+                    .entities
+                    .iter()
+                    .all(|entity| entity.canonical_name != ghost)
+            );
+        }
+        let reference = file
+            .evidence
+            .source
+            .clone()
+            .expect("source evidence exists");
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("Elm source reads");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
     }
 
     #[test]

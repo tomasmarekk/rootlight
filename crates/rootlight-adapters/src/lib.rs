@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod elm;
 mod project_context;
 mod project_semantics;
 mod runtime_trace;
@@ -25,6 +26,7 @@ use rootlight_ir::{
     ProducerKind, canonicalize_ir_document,
 };
 
+pub use elm::ElmParseProvider;
 pub use project_context::{
     CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,
     JvmProjectContext, MAX_PROJECT_CONTEXT_BYTES, MAX_PROJECT_CONTEXT_ITEMS,
