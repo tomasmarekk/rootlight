@@ -580,7 +580,6 @@ fn assert_repository_lifecycle(observe_background_noop: bool) {
         second_generation
     );
     assert_eq!(structured["data"]["publication_state"], "retained");
-    assert_eq!(structured["data"]["repository_state"], "ready");
     assert_eq!(
         structured["data"]["coverage"]["languages"][0]["language"],
         "rust"
@@ -605,6 +604,24 @@ fn assert_repository_lifecycle(observe_background_noop: bool) {
     let operations = structured["data"]["operations"]
         .as_array()
         .expect("repo.status returns requested operation details");
+    // Watcher work can begin after publication; availability must reflect
+    // the operation snapshot rather than the preceding index receipt.
+    let has_active_operation =
+        operations
+            .iter()
+            .any(|operation| match operation["state"].as_str() {
+                Some("queued" | "running" | "waiting_for_context") => true,
+                Some("published" | "failed" | "cancelled") => false,
+                state => panic!("unexpected repository operation state: {state:?}"),
+            });
+    assert_eq!(
+        structured["data"]["repository_state"],
+        if has_active_operation {
+            "indexing"
+        } else {
+            "ready"
+        }
+    );
     if let Some(background_operation) = background_operation {
         let background = operations
             .iter()
