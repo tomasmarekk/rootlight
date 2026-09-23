@@ -10426,6 +10426,28 @@ impl FirstSliceService {
             == self.provider_set_hash(FirstSliceIndexMode::Deep)?)
     }
 
+    /// Inspects one retained, identity-verified generation in this process.
+    ///
+    /// The callback borrows the immutable snapshot under a generation lease;
+    /// it cannot retain that borrow. This local diagnostic path does not encode
+    /// a sharing bundle or relax its independent transfer ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns repository or generation selection, cancellation, retention,
+    /// or durable rehydration failures.
+    pub fn inspect_generation<R>(
+        &self,
+        repository: RepositoryId,
+        generation: Option<GenerationId>,
+        cancellation: &Cancellation,
+        inspect: impl FnOnce(&rootlight_storage::GenerationSnapshot) -> R,
+    ) -> Result<R, FirstSliceError> {
+        let generation = self.resolve_generation(repository, generation)?.generation;
+        let lease = self.generation_lease(generation, cancellation)?;
+        Ok(inspect(lease.generation()))
+    }
+
     /// Exports one retained immutable generation as a portable source-free
     /// bundle.
     ///
@@ -39068,6 +39090,15 @@ mod tests {
                 .expect("file-only generation is loaded");
             assert_eq!(generation.file_count(), sources.len());
             assert_eq!(generation.document().files.len(), 1);
+            let inspected = service
+                .inspect_generation(
+                    receipt.repository,
+                    Some(receipt.generation),
+                    &deadline(),
+                    |snapshot| (snapshot.file_count(), snapshot.source_files().len()),
+                )
+                .expect("local inspection includes file-only records");
+            assert_eq!(inspected, (sources.len(), sources.len() - 1));
             assert_eq!(generation.source_files().len(), sources.len() - 1);
 
             for (path, content, language, canary) in sources {

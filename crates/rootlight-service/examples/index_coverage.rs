@@ -16,10 +16,6 @@ use rootlight_ir::{OccurrenceTarget, SourceRef, SourceSpan};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{FirstSliceBudget, FirstSliceService, FirstSliceStoragePolicy};
 use rootlight_source::{SourceEncoding, SourceReadOptions};
-use rootlight_storage::{
-    HARD_MAX_SHARED_GENERATION_BUNDLE_BYTES, HARD_MAX_SHARED_GENERATION_HEADER_BYTES,
-    SharedGenerationExpectation, SharedGenerationLimits,
-};
 use serde_json::json;
 
 fn deadline() -> Result<Cancellation, Box<dyn Error>> {
@@ -84,53 +80,57 @@ fn inspect(
         return Err("unchanged repository produced a different generation".into());
     }
     let status = service.repository_status(cold.repository, Some(cold.generation))?;
-    // This local inspection requests the existing transfer ceiling; it does not
-    // change the default wire policy or the indexing/generation resource budgets.
-    let transfer_limits = SharedGenerationLimits::new(
-        HARD_MAX_SHARED_GENERATION_HEADER_BYTES,
-        HARD_MAX_SHARED_GENERATION_BUNDLE_BYTES,
-    )?;
-    let exported = service
-        .export_shared_generation(
-            cold.repository,
-            Some(cold.generation),
-            transfer_limits,
-            &deadline()?,
-        )
-        .map_err(|error| {
-            format!(
-                "generation export failed: {error}; indexed files={}, entities={}",
-                cold.indexed_files, cold.entities
-            )
-        })?;
-    let imported = service
-        .import_shared_generation(
-            exported.bundle(),
-            SharedGenerationExpectation::new(cold.repository, exported.source_set_hash())
-                .with_generation(cold.generation),
-            transfer_limits,
-            &deadline()?,
-        )
-        .map_err(|error| {
-            format!(
-                "generation import failed: {error}; bundle bytes={}",
-                exported.bundle().len()
-            )
-        })?;
-    let document = imported.generation().document();
+    let (rows, configuration_hash) = service.inspect_generation(
+        cold.repository,
+        Some(cold.generation),
+        &deadline()?,
+        |snapshot| -> Result<_, Box<dyn Error>> {
+            Ok((
+                inspect_files(snapshot, &service, &repository, cold.generation)?,
+                snapshot.metadata().configuration_hash(),
+            ))
+        },
+    )??;
+    Ok(json!({
+        "schema":"rootlight-index-coverage-diagnostic/2", "explicit_configuration":config.is_some(),
+        "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
+        "configuration_hash":configuration_hash,
+        "cold":cold,"cold_wall_micros":cold_micros,"no_op_same_generation":true,"no_op_wall_micros":no_op_micros,
+        "generation_inspection_method":"local_identity_verified_snapshot",
+        "shared_bundle_roundtrip":false,
+        "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
+            "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
+        "files":rows,"full_semantic_completeness_proven":false,
+        "installed_mcp_qualified":false
+    }))
+}
+
+fn inspect_files(
+    snapshot: &rootlight_storage::GenerationSnapshot,
+    service: &FirstSliceService,
+    repository: &Path,
+    generation: rootlight_ids::GenerationId,
+) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
+    let document = snapshot.document();
     let mut rows = Vec::new();
-    for file in &document.files {
+    for file in document.files.iter().chain(
+        snapshot
+            .source_files()
+            .entries()
+            .iter()
+            .map(|entry| entry.file()),
+    ) {
         let source = file
             .evidence
             .source
             .clone()
             .ok_or("file has no generation-bound source")?;
-        if source.generation() != cold.generation {
+        if source.generation() != generation {
             return Err("file source belongs to a different generation".into());
         }
         let relative = rootlight_vfs::RelativePath::parse(std::path::Path::new(&file.path))?;
         let path = fs::canonicalize(repository.join(relative.as_str()))?;
-        if !path.starts_with(&repository) {
+        if !path.starts_with(repository) {
             return Err("source escaped repository".into());
         }
         let live = read_bounded(&path, file.byte_length)?;
@@ -161,7 +161,7 @@ fn inspect(
                 None,
             );
             let read = service.source_read_with_options_and_budget(
-                cold.generation,
+                generation,
                 vec![part.clone()],
                 SourceReadOptions::new()
                     .with_context_lines_before(0)
@@ -170,7 +170,7 @@ fn inspect(
                 FirstSliceBudget::default(),
                 &deadline()?,
             )?;
-            if read.data.generation != cold.generation || read.data.chunks.len() != 1 {
+            if read.data.generation != generation || read.data.chunks.len() != 1 {
                 return Err(format!(
                     "source retrieval returned an unexpected generation or chunk count: {}",
                     file.path
@@ -212,17 +212,10 @@ fn inspect(
             .collect();
         rows.push(json!({"file":file,"source_exact":true,"occurrences":occurrences,"gaps":gaps}));
     }
-    Ok(json!({
-        "schema":"rootlight-index-coverage-diagnostic/1", "explicit_configuration":config.is_some(),
-        "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
-        "configuration_hash":imported.generation().metadata().configuration_hash(),
-        "cold":cold,"cold_wall_micros":cold_micros,"no_op_same_generation":true,"no_op_wall_micros":no_op_micros,
-        "shared_bundle_bytes":exported.bundle().len(),"shared_bundle_limit":transfer_limits.max_bundle_bytes(),
-        "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
-            "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
-        "files":rows,"full_semantic_completeness_proven":false,
-        "installed_mcp_qualified":false
-    }))
+    if rows.len() != snapshot.file_count() {
+        return Err("inspection omitted a retained file record".into());
+    }
+    Ok(rows)
 }
 
 fn chunk_end(text: &str, start: usize) -> usize {
@@ -332,6 +325,11 @@ mod tests {
             assert_eq!(report["explicit_configuration"], config.is_some());
             assert_eq!(report["no_op_same_generation"], true);
             assert_eq!(report["full_semantic_completeness_proven"], false);
+            assert_eq!(
+                report["generation_inspection_method"],
+                "local_identity_verified_snapshot"
+            );
+            assert_eq!(report["shared_bundle_roundtrip"], false);
             let files = report["files"].as_array().unwrap();
             assert_eq!(files.len(), 3);
             assert!(files.iter().all(|file| file["source_exact"] == true));
@@ -341,7 +339,11 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 module["file"]["language"],
-                if config.is_some() { "vba" } else { "unknown" }
+                if config.is_some() {
+                    "vba"
+                } else {
+                    "visual-basic-classic"
+                }
             );
             assert!(inspect(&repository, &state, config).is_err());
         }

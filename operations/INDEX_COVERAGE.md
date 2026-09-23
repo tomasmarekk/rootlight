@@ -32,11 +32,12 @@ The JSON output records:
 - Per-file occurrence counts by syntax and resolution, plus explicit skipped
   regions from the normalized index.
 
-Inspection round-trips a source-free snapshot through the sharing API with its
-existing 128 MiB caller-selectable ceiling. The report records the actual bundle
-size and selected bound. This does not alter the 32 MiB default transfer policy,
-the service's indexing budgets, or the process hard ceilings. A larger snapshot
-fails the diagnostic explicitly rather than producing a partial report.
+Inspection borrows the service's identity-verified immutable generation under a
+local lease. It does not create a sharing bundle: large generations can be audited
+without changing the independent 32 MiB default and 128 MiB hard transfer
+ceilings. The report explicitly records that no sharing round-trip occurred.
+This diagnostic includes normalized and file-only retained records, but does not
+qualify the sharing API; validate that boundary separately where required.
 
 A successful run establishes these checks only. Independently compare the output
 against a complete repository inventory to account for excluded files. Missing
