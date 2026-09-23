@@ -10,9 +10,9 @@ publish = false
 [dependencies]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
-directories.workspace = true
 rootlight-ipc = { path = "../rootlight-ipc" }
 rootlight-protocol = { path = "../rootlight-protocol" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -20,7 +20,6 @@ thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
-rootlight-vfs = { path = "../rootlight-vfs" }
 
 [target.'cfg(windows)'.dependencies]
 nt-token.workspace = true

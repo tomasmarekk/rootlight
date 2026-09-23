@@ -21,6 +21,47 @@ use cap_std::fs::Dir;
 
 use super::{PlatformError, PlatformFileIdentity, PrivateName};
 
+#[cfg(windows)]
+pub(super) fn known_user_folder(folder: super::KnownUserFolder) -> io::Result<std::path::PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt as _};
+    use windows::{
+        Win32::{
+            System::Com::CoTaskMemFree,
+            UI::Shell::{
+                FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
+                KNOWN_FOLDER_FLAG, SHGetKnownFolderPath,
+            },
+        },
+        core::GUID,
+    };
+
+    let id: GUID = match folder {
+        super::KnownUserFolder::Profile => FOLDERID_Profile,
+        super::KnownUserFolder::LocalAppData => FOLDERID_LocalAppData,
+        super::KnownUserFolder::RoamingAppData => FOLDERID_RoamingAppData,
+    };
+    // SAFETY: The folder identifier is a static Windows GUID; no token or
+    // caller-owned output pointer crosses this API boundary.
+    let path = unsafe { SHGetKnownFolderPath(&id, KNOWN_FOLDER_FLAG(0), None) }
+        .map_err(io::Error::other)?;
+    if path.is_null() {
+        return Err(io::Error::other("known folder returned no path"));
+    }
+    // SAFETY: A successful SHGetKnownFolderPath returns a NUL-terminated
+    // CoTaskMem-owned buffer, which remains allocated until the copy finishes.
+    let result = std::path::PathBuf::from(OsString::from_wide(unsafe { path.as_wide() }));
+    // SAFETY: This is the exact allocation returned by SHGetKnownFolderPath,
+    // and no borrowed slice survives this call.
+    unsafe { CoTaskMemFree(Some(path.as_ptr().cast())) };
+    if !result.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "known folder path is not absolute",
+        ));
+    }
+    Ok(result)
+}
+
 pub(super) const PRIVATE_FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[cfg(windows)]

@@ -13,12 +13,14 @@ use std::{
     time::Duration,
 };
 
-use directories::ProjectDirs;
 use rootlight_ipc::Endpoint;
 use rootlight_protocol::{CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR};
 #[cfg(unix)]
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PrivateStandaloneFile};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+mod user_paths;
+pub use user_paths::user_home_dir;
 
 /// Maximum serialized discovery record accepted from disk.
 pub const MAX_DISCOVERY_BYTES: u64 = 4 * 1024;
@@ -123,20 +125,15 @@ impl RuntimePaths {
     /// path or security error when the session temporary directory is not
     /// private or cannot hold the maximum daemon endpoint path.
     pub fn resolve() -> Result<Self, RuntimeError> {
-        let project = ProjectDirs::from("dev", "tomasmarekk", "rootlight")
-            .ok_or(RuntimeError::UserDirectoriesUnavailable)?;
-        let state_dir = project
-            .state_dir()
-            .unwrap_or_else(|| project.data_local_dir())
-            .to_path_buf();
+        let state_dir =
+            user_paths::default_state_dir().ok_or(RuntimeError::UserDirectoriesUnavailable)?;
         #[cfg(target_os = "macos")]
         let runtime_dir = macos_default_runtime_dir()?;
         #[cfg(windows)]
         let runtime_dir = windows_default_runtime_dir(&state_dir)?;
         #[cfg(all(not(target_os = "macos"), not(windows)))]
-        let runtime_dir = project
-            .runtime_dir()
-            .map_or_else(|| state_dir.join("runtime"), Path::to_path_buf);
+        let runtime_dir =
+            user_paths::default_runtime_dir().unwrap_or_else(|| state_dir.join("runtime"));
         Self::new(state_dir, runtime_dir)
     }
 

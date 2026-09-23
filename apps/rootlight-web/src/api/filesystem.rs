@@ -644,14 +644,13 @@ struct PlatformRootCandidate {
 
 fn platform_root_candidates() -> Vec<PlatformRootCandidate> {
     let mut candidates = system_root_candidates();
-    if let Some(user_dirs) = directories::UserDirs::new() {
-        let home = user_dirs.home_dir().to_path_buf();
-        if !candidates.iter().any(|candidate| candidate.path == home) {
-            candidates.push(PlatformRootCandidate {
-                label: "Home".to_owned(),
-                path: home,
-            });
-        }
+    if let Some(home) = rootlight_runtime::user_home_dir()
+        && !candidates.iter().any(|candidate| candidate.path == home)
+    {
+        candidates.push(PlatformRootCandidate {
+            label: "Home".to_owned(),
+            path: home,
+        });
     }
     candidates.sort_by(|left, right| left.label.cmp(&right.label));
     candidates.truncate(MAX_PLATFORM_ROOTS);

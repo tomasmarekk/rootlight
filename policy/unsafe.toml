@@ -8,9 +8,9 @@ module = "rootlight_vfs::platform::os"
 source = "crates/rootlight-vfs/src/platform/os.rs"
 status = "enabled"
 owner = "@tomasmarekk"
-reason = "native filesystem APIs are required for available-volume-space queries, private-at-birth creation, exact identity, atomic no-replace publication, and identity-bound cleanup"
-expected_source_tokens = 6
-expected_geiger_count = 24
+reason = "native filesystem APIs are required for current-user known folders, available-volume-space queries, private-at-birth creation, exact identity, atomic no-replace publication, and identity-bound cleanup"
+expected_source_tokens = 9
+expected_geiger_count = 32
 geiger_host_os = "all"
 
 [[boundaries]]

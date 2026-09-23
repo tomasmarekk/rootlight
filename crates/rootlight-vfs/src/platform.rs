@@ -21,6 +21,27 @@ mod os;
 #[cfg(windows)]
 pub(crate) use os::available_volume_space;
 
+/// Current-user Windows folder resolved by the operating system.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownUserFolder {
+    /// The account profile directory.
+    Profile,
+    /// The account's local application-data directory.
+    LocalAppData,
+    /// The account's roaming application-data directory.
+    RoamingAppData,
+}
+
+/// Returns an exact current-user known folder without trusting environment variables.
+///
+/// # Errors
+/// Returns an I/O error when Windows cannot resolve an absolute folder path.
+#[cfg(windows)]
+pub fn known_user_folder(folder: KnownUserFolder) -> io::Result<std::path::PathBuf> {
+    os::known_user_folder(folder)
+}
+
 /// Maximum platform name units accepted for one private-tree entry.
 pub const MAX_PRIVATE_NAME_UNITS: usize = 255;
 

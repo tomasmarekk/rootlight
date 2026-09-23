@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 axum.workspace = true
 rootlight-encoding = { path = "../../crates/rootlight-encoding" }
-directories.workspace = true
 getrandom.workspace = true
 rootlight-cancel = { path = "../../crates/rootlight-cancel" }
 rootlight-client = { path = "../../crates/rootlight-client" }
