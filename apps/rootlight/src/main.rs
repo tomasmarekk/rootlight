@@ -796,7 +796,8 @@ fn installed_root_for_executable(executable: &Path) -> Result<PathBuf, CliError>
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .ok_or(CliError::InvalidInstalledLayout)?;
-    let parsed = semver::Version::parse(version).map_err(|_| CliError::InvalidInstalledLayout)?;
+    let parsed = rootlight_build::version::Version::parse(version)
+        .map_err(|_| CliError::InvalidInstalledLayout)?;
     if parsed.to_string() != version {
         return Err(CliError::InvalidInstalledLayout);
     }

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use semver::{BuildMetadata, Prerelease, Version};
+use rootlight_build::version::{BuildMetadata, Prerelease, Version};
 use serde::Serialize;
 
 const MAX_TAG_FILE_BYTES: u64 = 128 * 1024;

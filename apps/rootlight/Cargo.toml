@@ -20,7 +20,6 @@ rootlight-operations = { path = "../../crates/rootlight-operations" }
 rootlight-protocol = { path = "../../crates/rootlight-protocol" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
 rootlight-service = { path = "../../crates/rootlight-service" }
-semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true

@@ -36,7 +36,7 @@ use mcp_bootstrap::{
 };
 #[cfg(windows)]
 use rootlight_build::PRODUCT_VERSION;
-use semver::Version;
+use rootlight_build::version::Version;
 use serde::Deserialize;
 
 const INSTALL_MANIFEST_SCHEMA_V1: &str = "rootlight.install-ownership/1";

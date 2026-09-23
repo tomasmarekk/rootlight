@@ -9,8 +9,8 @@ use std::{
 };
 
 use ed25519_compact::{PublicKey, Signature};
+use rootlight_build::version::Version;
 use rootlight_encoding::BASE64;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 

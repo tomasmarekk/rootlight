@@ -18,8 +18,8 @@ use std::fs::OpenOptions;
 
 use cap_std::{ambient_authority, fs::Dir};
 use rootlight_build::PRODUCT_VERSION;
+use rootlight_build::version::Version;
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PublishError};
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zip::{CompressionMethod, ZipArchive};

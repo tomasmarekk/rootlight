@@ -11,6 +11,7 @@ publish = false
 anyhow.workspace = true
 blake3.workspace = true
 cargo_metadata.workspace = true
+rootlight-build = { path = "../crates/rootlight-build" }
 rootlight-encoding = { path = "../crates/rootlight-encoding" }
 ed25519-compact.workspace = true
 getrandom.workspace = true
@@ -36,7 +37,6 @@ rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 rootlight-sandbox = { path = "../crates/rootlight-sandbox" }
 schemars.workspace = true
-semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -17,6 +17,7 @@ use std::{
 };
 
 use ed25519_compact::{KeyPair, Seed};
+use rootlight_build::version::Version;
 use rootlight_client::{
     ArtifactMetadata, CandidateHealthCheck, CandidateHealthError, PackageUninstallOutcome,
     ProcessCandidateHealthCheck, ReproducibilityLevel, TrustedUpdatePolicy,
@@ -25,7 +26,6 @@ use rootlight_client::{
     canonical_artifact_signature_message, canonical_update_metadata_bytes,
     install_package_with_policy, recover_update, uninstall_package, update_runtime_status,
 };
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tempfile::NamedTempFile;

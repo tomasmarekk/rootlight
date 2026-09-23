@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod version;
+
 /// Product release version embedded into every shipped component.
 pub const PRODUCT_VERSION: &str = match option_env!("ROOTLIGHT_RELEASE_VERSION") {
     Some(version) => version,
