@@ -33771,6 +33771,201 @@ mod tests {
     }
 
     #[test]
+    fn classic_project_nested_udt_fields_follow_declared_types() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal data As OuterPayload)\nanswer = data.Inner.Middle.Count\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        fs::write(
+            fixture.path().join("Types.bas"),
+            "Attribute VB_Name = \"Types\"\nPublic Type LeafPayload\nCount As Long\nEnd Type\nPublic Type InnerPayload\nMiddle As LeafPayload\nEnd Type\nPublic Type OuterPayload\nInner As InnerPayload\nEnd Type\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nModule=Types; Types.bas\nModule=Client; Client.bas\n",
+        )
+        .unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let client_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Client.bas")
+            .unwrap();
+        let client_id = client_file.id;
+        let expected = [
+            ("data.Inner", "Inner"),
+            ("data.Inner.Middle", "Middle"),
+            ("data.Inner.Middle.Count", "Count"),
+        ];
+        for (expression, name) in expected {
+            let source = client.find(expression).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == client_file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte() == u64::try_from(source).unwrap()
+                        && site.source.span().end_byte()
+                            == u64::try_from(source + expression.len()).unwrap()
+                })
+                .unwrap();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Field
+                        && entity.canonical_name == name
+                        && entity.evidence.source.as_ref().is_some_and(|source| {
+                            document.files.iter().any(|file| {
+                                file.path == "Types.bas" && file.id == source.span().file()
+                            })
+                        })
+                })
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{expression}"
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(site.id)
+                    && relation.object == RelationEndpoint::Entity(target.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+                    && relation.evidence.source.as_ref() == Some(&site.source)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.detail == "vba-member-target-unavailable" && gap.source == site.source
+            }));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+        }
+        let no_op = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(no_op.generation, receipt.generation);
+        drop(snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = restored
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == client_id
+                    && site.syntax_kind == "vba.member.reference"
+                    && site.source.span().end_byte()
+                        == u64::try_from(
+                            client.find("data.Inner.Middle.Count").unwrap()
+                                + "data.Inner.Middle.Count".len(),
+                        )
+                        .unwrap()
+            })
+            .unwrap();
+        assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+        let read = restored
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"data.Inner.Middle.Count");
+    }
+
+    #[test]
+    fn classic_project_nested_udt_fields_reject_unproven_intermediate_types() {
+        for (inner_declaration, forward_type) in [
+            ("Inner As Variant\n", false),
+            ("Inner As MissingPayload\n", false),
+            ("Inner(1) As InnerPayload\n", false),
+            ("Inner As InnerPayload\nInner As InnerPayload\n", false),
+            ("#If Enabled Then\nInner As InnerPayload\n#End If\n", false),
+            ("Inner As InnerPayload\n", true),
+        ] {
+            let fixture = durable_test_tempdir();
+            let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal data As OuterPayload)\nanswer = data.Inner.Count\nEnd Sub\n";
+            fs::write(fixture.path().join("Client.bas"), client).unwrap();
+            let inner = "Public Type InnerPayload\nCount As Long\nEnd Type\n";
+            let outer = format!("Public Type OuterPayload\n{inner_declaration}End Type\n");
+            let types = if forward_type {
+                format!("Attribute VB_Name = \"Types\"\n{outer}{inner}")
+            } else {
+                format!("Attribute VB_Name = \"Types\"\n{inner}{outer}")
+            };
+            fs::write(fixture.path().join("Types.bas"), types).unwrap();
+            fs::write(
+                fixture.path().join("project.vbp"),
+                "Type=OleDll\nName=\"Primary\"\nModule=Types; Types.bas\nModule=Client; Client.bas\n",
+            )
+            .unwrap();
+            let mut service = FirstSliceService::new(4).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let document = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = document.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            let start = u64::try_from(client.find("data.Inner.Count").unwrap()).unwrap();
+            let end = start + u64::try_from("data.Inner.Count".len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{inner_declaration}"
+            );
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "vba-member-target-unavailable" && gap.source == site.source
+            }));
+        }
+    }
+
+    #[test]
     fn classic_project_value_type_names_preserve_context_boundaries() {
         for (declaration, kind) in [
             ("Enum State\nReady = 1\nEnd Enum\n", EntityKind::Enum),

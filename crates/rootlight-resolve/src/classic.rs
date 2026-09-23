@@ -779,30 +779,72 @@ impl<'a> ClassicIndex<'a> {
                     owner.kind,
                     EntityKind::Parameter | EntityKind::Variable | EntityKind::Field
                 )
-                && let Some(proof) = result.proof(occurrence)
-                && matches!(proof.target.kind, EntityKind::Class | EntityKind::Struct)
             {
-                if proof.target.kind == EntityKind::Struct {
-                    let safe = if let Some(&safe) = unconditional_udts.get(&proof.target.id) {
-                        safe
+                let typed = result
+                    .proof(occurrence)
+                    .map(|proof| (proof.target, Arc::clone(&proof.context)))
+                    .or_else(|| {
+                        // A same-module UDT type can already be resolved by
+                        // the native pass. VBA requires its declaration to
+                        // precede the field; cross-file member chaining also
+                        // requires the unique complete project declaration.
+                        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                            return None;
+                        };
+                        let target = entities.get(&symbol).copied()?;
+                        let project = memberships
+                            .get(&occurrence.file)
+                            .copied()
+                            .flatten()
+                            .and_then(|i| projects.get(i))
+                            .and_then(Option::as_ref)?;
+                        (owner.kind == EntityKind::Field
+                            && occurrence.role == OccurrenceRole::TypeUse
+                            && occurrence.syntax_kind == "vba.direct_type_identifier.reference"
+                            && target.kind == EntityKind::Struct
+                            && owner
+                                .evidence
+                                .source
+                                .as_ref()
+                                .zip(target.evidence.source.as_ref())
+                                .is_some_and(|(field, declaration)| {
+                                    field.span().file() == occurrence.file
+                                        && declaration.span().file() == occurrence.file
+                                        && declaration.span().end_byte()
+                                            <= field.span().start_byte()
+                                })
+                            && project
+                                .types
+                                .get(&target.canonical_name.to_ascii_lowercase())
+                                == Some(&Some(target.id)))
+                        .then(|| (target, Arc::clone(&project.evidence)))
+                    });
+                if let Some((target, context)) = typed.filter(|(target, _)| {
+                    matches!(target.kind, EntityKind::Class | EntityKind::Struct)
+                }) {
+                    let safe = if target.kind == EntityKind::Struct {
+                        if let Some(&safe) = unconditional_udts.get(&target.id) {
+                            safe
+                        } else {
+                            let safe = unconditional_udt(target, &sources, cancellation, work)?;
+                            unconditional_udts.insert(target.id, safe);
+                            safe
+                        }
                     } else {
-                        let safe = unconditional_udt(proof.target, &sources, cancellation, work)?;
-                        unconditional_udts.insert(proof.target.id, safe);
-                        safe
+                        true
                     };
-                    if !safe {
-                        continue;
+                    if safe {
+                        value_types
+                            .entry(owner.id)
+                            .and_modify(|prior| *prior = None)
+                            .or_insert(Some((
+                                owner,
+                                target.id,
+                                context,
+                                occurrence.source.clone(),
+                            )));
                     }
                 }
-                value_types
-                    .entry(owner.id)
-                    .and_modify(|prior| *prior = None)
-                    .or_insert(Some((
-                        owner,
-                        proof.target.id,
-                        Arc::clone(&proof.context),
-                        occurrence.source.clone(),
-                    )));
             }
             if occurrence.syntax_kind == "vba.value_identifier.reference"
                 && occurrence.role == OccurrenceRole::Reference
@@ -814,17 +856,32 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(symbol));
             }
         }
+        let mut member_occurrences = Vec::new();
         for occurrence in occurrences {
             cancellation.check()?;
-            work.consume()?;
-            if !matches!(
+            if matches!(
                 occurrence.syntax_kind.as_str(),
                 "vba.member.reference" | "vba.invoked_member.reference"
-            ) || occurrence.role != OccurrenceRole::Reference
-                || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            ) && occurrence.role == OccurrenceRole::Reference
+                && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             {
-                continue;
+                member_occurrences.push(occurrence);
+            } else {
+                // Keep the original per-occurrence work charge even when a
+                // record cannot participate in project member resolution.
+                work.consume()?;
             }
+        }
+        // Inner member expressions have shorter source spans than their
+        // enclosing chains, independent of the normalized record order.
+        member_occurrences.sort_unstable_by_key(|occurrence| {
+            let span = occurrence.source.span();
+            (span.end_byte() - span.start_byte(), span)
+        });
+        let mut resolved_members = BTreeMap::new();
+        for occurrence in member_occurrences {
+            cancellation.check()?;
+            work.consume()?;
             let span = occurrence.source.span();
             let start =
                 usize::try_from(span.start_byte()).map_err(|_| ResolutionError::CountOverflow)?;
@@ -837,10 +894,7 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            let Some((receiver, member)) = text.split_once('.') else {
-                continue;
-            };
-            let Some(receiver_name) = identifier(receiver) else {
+            let Some((receiver, member)) = text.rsplit_once('.') else {
                 continue;
             };
             let Some(name) = identifier(member) else {
@@ -862,7 +916,28 @@ impl<'a> ClassicIndex<'a> {
                     .map(|(owner, class, context, source)| {
                         (*owner, *class, Arc::clone(context), source.clone())
                     })
+            } else if receiver.contains('.') {
+                // A qualified receiver is usable only when the shorter exact
+                // source expression already resolved to a declared UDT field.
+                resolved_members
+                    .get(&receiver_span)
+                    .and_then(|id: &Option<FactId>| *id)
+                    .and_then(|id| result.proofs.get(&id))
+                    .filter(|proof| proof.target.kind == EntityKind::Field)
+                    .and_then(|proof| value_types.get(&proof.target.id))
+                    .and_then(Option::as_ref)
+                    .filter(|(_, class, _, _)| {
+                        entities
+                            .get(class)
+                            .is_some_and(|entity| entity.kind == EntityKind::Struct)
+                    })
+                    .map(|(owner, class, context, source)| {
+                        (*owner, *class, Arc::clone(context), source.clone())
+                    })
             } else {
+                let Some(receiver_name) = identifier(receiver) else {
+                    continue;
+                };
                 let Some(project) = memberships
                     .get(&occurrence.file)
                     .copied()
@@ -994,6 +1069,13 @@ impl<'a> ClassicIndex<'a> {
                     receiver: Some((owner, type_source)),
                 },
             );
+            if occurrence.syntax_kind == "vba.member.reference" && target.kind == EntityKind::Field
+            {
+                resolved_members
+                    .entry(span)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(occurrence.id));
+            }
         }
         Ok(result)
     }
