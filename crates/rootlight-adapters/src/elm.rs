@@ -66,14 +66,15 @@ impl ElmParseProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
-        let headers = scan_headers(request.source().bytes(), cancellation)?;
-        let count = syntax_fact_count(&headers);
-        if count > request.limits().max_syntax_nodes()
-            || count > self.capabilities.max_syntax_nodes()
-        {
-            return Err(failure("elm-syntax-node-limit"));
-        }
-        Ok(required_syntax_fact_count(&headers))
+        let source = scan_source(
+            request.source().bytes(),
+            request
+                .limits()
+                .max_syntax_nodes()
+                .min(self.capabilities.max_syntax_nodes()),
+            cancellation,
+        )?;
+        Ok(required_syntax_fact_count(&source))
     }
 }
 
@@ -89,13 +90,15 @@ impl ParseProvider for ElmParseProvider {
         cancellation: &Cancellation,
     ) -> Result<ParseReport, AdapterError> {
         let source = request.source();
-        let headers = scan_headers(source.bytes(), cancellation)?;
-        let fact_count = syntax_fact_count(&headers);
-        if fact_count > request.limits().max_syntax_nodes()
-            || fact_count > self.capabilities.max_syntax_nodes()
-        {
-            return Err(failure("elm-syntax-node-limit"));
-        }
+        let parsed = scan_source(
+            source.bytes(),
+            request
+                .limits()
+                .max_syntax_nodes()
+                .min(self.capabilities.max_syntax_nodes()),
+            cancellation,
+        )?;
+        let fact_count = syntax_fact_count(&parsed);
         let file = source.source_ref().span().file();
         let mut facts = Vec::new();
         facts
@@ -109,14 +112,16 @@ impl ParseProvider for ElmParseProvider {
             0,
             label("elm.source_file"),
         ));
-        for (index, header) in headers.iter().enumerate() {
+        let mut next_id = 2_u64;
+        let mut constructor_index = 0_usize;
+        for (index, header) in parsed.headers.iter().enumerate() {
             cancellation.check()?;
-            let local_id = u64::try_from(index)
-                .ok()
-                .and_then(|index| index.checked_mul(2))
-                .and_then(|index| index.checked_add(2))
+            let local_id = next_id;
+            next_id = next_id
+                .checked_add(2)
                 .ok_or_else(|| failure("elm-syntax-node-limit"))?;
-            let end = headers
+            let end = parsed
+                .headers
                 .get(index + 1)
                 .map_or(source.bytes().len(), |next| next.line_start);
             let span = source_span(file, header.line_start, end)?;
@@ -140,6 +145,31 @@ impl ParseProvider for ElmParseProvider {
                     "elm.name.definition"
                 }),
             ));
+            while let Some(constructor) = parsed.constructors.get(constructor_index)
+                && constructor.owner_index == index
+            {
+                let constructor_id = next_id;
+                next_id = next_id
+                    .checked_add(2)
+                    .ok_or_else(|| failure("elm-syntax-node-limit"))?;
+                facts.push(SyntaxFact::new(
+                    constructor_id,
+                    Some(local_id),
+                    SyntaxFactKind::Declaration,
+                    source_span(file, constructor.name_start, constructor.span_end)?,
+                    2,
+                    label("elm.constructor.declaration"),
+                ));
+                facts.push(SyntaxFact::new(
+                    constructor_id + 1,
+                    Some(constructor_id),
+                    SyntaxFactKind::Occurrence,
+                    source_span(file, constructor.name_start, constructor.name_end)?,
+                    3,
+                    label("elm.name.definition"),
+                ));
+                constructor_index += 1;
+            }
         }
         for batch in facts.chunks(32) {
             cancellation.check()?;
@@ -155,6 +185,12 @@ impl ParseProvider for ElmParseProvider {
         }
         let usage = sink.staged_usage();
         let source_bytes = source.bytes().len();
+        let declaration_count = parsed
+            .headers
+            .iter()
+            .filter(|header| header.kind != SyntaxFactKind::Import)
+            .count()
+            .saturating_add(parsed.constructors.len());
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
             CoverageStatus::Bounded,
@@ -166,15 +202,22 @@ impl ParseProvider for ElmParseProvider {
                 DomainCoverage::new(
                     FactDomain::Entities,
                     CoverageStatus::Bounded,
-                    headers.len(),
-                    headers.len(),
+                    declaration_count,
+                    declaration_count,
                     0,
                 )?,
             ],
         )?;
         Ok(ParseReport::new(
             coverage,
-            ResourceUsage::new(source_bytes, facts.len(), facts.len(), 2, None, usage),
+            ResourceUsage::new(
+                source_bytes,
+                facts.len(),
+                facts.len(),
+                facts.iter().map(SyntaxFact::depth).max().unwrap_or(0),
+                None,
+                usage,
+            ),
             StreamEnd::new(sink.next_sequence(), usage),
         )?)
     }
@@ -189,23 +232,59 @@ struct Header {
     label: &'static str,
 }
 
-fn syntax_fact_count(headers: &[Header]) -> usize {
-    headers.len().saturating_mul(2).saturating_add(1)
+#[derive(Clone, Copy)]
+struct Constructor {
+    owner_index: usize,
+    name_start: usize,
+    name_end: usize,
+    span_end: usize,
 }
 
-fn required_syntax_fact_count(headers: &[Header]) -> usize {
-    headers
-        .iter()
-        .filter(|header| header.kind != SyntaxFactKind::Import)
-        .count()
+struct ParsedSource {
+    headers: Vec<Header>,
+    constructors: Vec<Constructor>,
+}
+
+struct ConstructorCollector<'a> {
+    masked: &'a [u8],
+    cancellation: &'a Cancellation,
+    header_count: usize,
+    max_items: usize,
+    constructors: Vec<Constructor>,
+}
+
+fn syntax_fact_count(source: &ParsedSource) -> usize {
+    source
+        .headers
+        .len()
+        .saturating_add(source.constructors.len())
         .saturating_mul(2)
         .saturating_add(1)
 }
 
-fn scan_headers(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<Header>, AdapterError> {
+fn required_syntax_fact_count(source: &ParsedSource) -> usize {
+    source
+        .headers
+        .iter()
+        .filter(|header| header.kind != SyntaxFactKind::Import)
+        .count()
+        .saturating_add(source.constructors.len())
+        .saturating_mul(2)
+        .saturating_add(1)
+}
+
+fn scan_source(
+    bytes: &[u8],
+    max_syntax_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<ParsedSource, AdapterError> {
+    if max_syntax_nodes == 0 {
+        return Err(failure("elm-syntax-node-limit"));
+    }
     std::str::from_utf8(bytes).map_err(|_| failure("invalid-utf8"))?;
     let masked = mask_non_code(bytes, cancellation)?;
     let mut headers = Vec::new();
+    let max_items = (max_syntax_nodes - 1) / 2;
     let mut start = 0;
     while start < masked.len() {
         cancellation.check()?;
@@ -214,6 +293,9 @@ fn scan_headers(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<Header>
             .position(|byte| *byte == b'\n')
             .map_or(masked.len(), |offset| start + offset);
         if let Some(header) = parse_header(&masked[start..end], start) {
+            if headers.len() >= max_items {
+                return Err(failure("elm-syntax-node-limit"));
+            }
             headers
                 .try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
@@ -221,7 +303,100 @@ fn scan_headers(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<Header>
         }
         start = end.saturating_add(1);
     }
-    Ok(headers)
+    let mut collector = ConstructorCollector {
+        masked: &masked,
+        cancellation,
+        header_count: headers.len(),
+        max_items,
+        constructors: Vec::new(),
+    };
+    for (owner_index, header) in headers.iter().enumerate() {
+        cancellation.check()?;
+        if header.label != "elm.enum.declaration" {
+            continue;
+        }
+        let end = headers
+            .get(owner_index + 1)
+            .map_or(masked.len(), |next| next.line_start);
+        collector.scan(header.name_end, end, owner_index)?;
+    }
+    Ok(ParsedSource {
+        headers,
+        constructors: collector.constructors,
+    })
+}
+
+impl ConstructorCollector<'_> {
+    fn scan(&mut self, start: usize, end: usize, owner_index: usize) -> Result<(), AdapterError> {
+        let Some(equals) = self.masked[start..end]
+            .iter()
+            .position(|byte| *byte == b'=')
+            .map(|offset| start + offset)
+        else {
+            return Ok(());
+        };
+        let scan_start = equals + 1;
+        let mut segment_start = scan_start;
+        let mut depth = 0_usize;
+        for index in scan_start..end {
+            if index % CHECK_INTERVAL == 0 {
+                self.cancellation.check()?;
+            }
+            match self.masked[index] {
+                b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b'|' if depth == 0 => {
+                    self.capture(segment_start, index, owner_index)?;
+                    segment_start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        self.capture(segment_start, end, owner_index)
+    }
+
+    fn capture(
+        &mut self,
+        start: usize,
+        end: usize,
+        owner_index: usize,
+    ) -> Result<(), AdapterError> {
+        let segment = &self.masked[start..end];
+        let Some(prefix) = segment.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            return Ok(());
+        };
+        let name_start = start + prefix;
+        if !self.masked[name_start].is_ascii_uppercase() {
+            return Ok(());
+        }
+        let name_end = self.masked[name_start..end]
+            .iter()
+            .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+            .map_or(end, |length| name_start + length);
+        if self.masked[name_end..end]
+            .first()
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            return Ok(());
+        }
+        if self.header_count.saturating_add(self.constructors.len()) >= self.max_items {
+            return Err(failure("elm-syntax-node-limit"));
+        }
+        let span_end = segment
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map_or(name_end, |offset| start + offset + 1);
+        self.constructors
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        self.constructors.push(Constructor {
+            owner_index,
+            name_start,
+            name_end,
+            span_end,
+        });
+        Ok(())
+    }
 }
 
 fn parse_header(line: &[u8], start: usize) -> Option<Header> {
@@ -385,8 +560,9 @@ mod tests {
     #[test]
     fn headers_ignore_nested_comments_and_multiline_literals() {
         let source = b"module Main.Page exposing (.. )\n{- type Ghost = Fake {- hidden = 1 -} -}\nimport Html.Attributes\ntype alias Model = { value : Int }\nrender model =\n    \"\"\"\ntype Phantom = False\n\"\"\"\nvalue = 1\n";
-        let headers = scan_headers(source, &Cancellation::new()).expect("valid source");
-        let names: Vec<_> = headers
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let names: Vec<_> = parsed
+            .headers
             .iter()
             .map(|header| &source[header.name_start..header.name_end])
             .collect();
@@ -405,9 +581,10 @@ mod tests {
     #[test]
     fn headers_keep_exact_utf8_crlf_offsets_and_reject_invalid_source() {
         let source = "module Main exposing (..)\r\n{- Ω -}\r\nvalue = 1\r\n";
-        let headers = scan_headers(source.as_bytes(), &Cancellation::new()).expect("valid source");
-        assert_eq!(headers.len(), 2);
-        for header in headers {
+        let parsed =
+            scan_source(source.as_bytes(), usize::MAX, &Cancellation::new()).expect("valid source");
+        assert_eq!(parsed.headers.len(), 2);
+        for header in parsed.headers {
             let name = &source.as_bytes()[header.name_start..header.name_end];
             assert!(name == b"Main" || name == b"value");
             assert_eq!(
@@ -415,6 +592,34 @@ mod tests {
                 if name == b"Main" { b'm' } else { b'v' }
             );
         }
-        assert!(scan_headers(b"module Main\n\xff\nvalue = 1\n", &Cancellation::new()).is_err());
+        assert!(
+            scan_source(
+                b"module Main\n\xff\nvalue = 1\n",
+                usize::MAX,
+                &Cancellation::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_type_constructors_are_bounded_to_their_parent_type() {
+        let source = b"module Demo exposing (..)\ntype State\n    = Ready\n    | Failed (List String) {- | Ghost -}\n    | Loaded String\ntype alias Model = { x : Int }\n";
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let names: Vec<_> = parsed
+            .constructors
+            .iter()
+            .map(|constructor| &source[constructor.name_start..constructor.name_end])
+            .collect();
+        assert_eq!(names, [b"Ready".as_slice(), b"Failed", b"Loaded"]);
+        assert!(
+            parsed
+                .constructors
+                .iter()
+                .all(|constructor| constructor.owner_index == 1)
+        );
+        assert_eq!(required_syntax_fact_count(&parsed), 13);
+        assert_eq!(syntax_fact_count(&parsed), 13);
+        assert!(scan_source(source, 12, &Cancellation::new()).is_err());
     }
 }

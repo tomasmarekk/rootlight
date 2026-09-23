@@ -29459,6 +29459,91 @@ mod tests {
     }
 
     #[test]
+    fn elm_custom_type_constructors_publish_nested_source_bound_symbols() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Demo exposing (State(..))\n\ntype State\n    = Ready\n    | Failed String {- | Ghost -}\n    | Loaded (List String)\n";
+        fs::write(fixture.path().join("Demo.elm"), source).expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm custom type indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let state = service
+            .code_locate(
+                receipt.generation,
+                "State".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("custom type locates");
+        let state_symbol = state
+            .data
+            .hits
+            .iter()
+            .find_map(|hit| hit.symbol)
+            .expect("custom type has symbol identity");
+        for name in ["Ready", "Failed", "Loaded"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .expect("constructor locates");
+            let symbol = located
+                .data
+                .hits
+                .iter()
+                .find_map(|hit| hit.symbol)
+                .expect("constructor has symbol identity");
+            let explained = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .expect("constructor explains");
+            assert_eq!(explained.data.entity.canonical_name, name);
+            assert_eq!(explained.data.entity.kind, EntityKind::Constructor);
+            assert_eq!(
+                explained.data.entity.container,
+                Some(rootlight_ir::ContainerRef::Entity(state_symbol))
+            );
+            let source_ref = explained
+                .data
+                .entity
+                .evidence
+                .source
+                .expect("constructor has source evidence");
+            assert_eq!(source_ref.generation(), receipt.generation);
+            let span = source_ref.span();
+            let start = usize::try_from(span.start_byte()).expect("fixture offset fits");
+            let end = usize::try_from(span.end_byte()).expect("fixture offset fits");
+            assert!(source.as_bytes()[start..end].starts_with(name.as_bytes()));
+            let read = service
+                .source_read(receipt.generation, vec![source_ref.clone()], &deadline())
+                .expect("constructor source reads");
+            assert_eq!(read.data.chunks[0].reference, source_ref);
+            assert!(
+                read.data.chunks[0]
+                    .bytes
+                    .windows(name.len())
+                    .any(|window| window == name.as_bytes())
+            );
+        }
+        assert!(
+            generation
+                .document()
+                .entities
+                .iter()
+                .all(|entity| entity.canonical_name != "Ghost")
+        );
+    }
+
+    #[test]
     fn groovy_named_sources_do_not_fall_back_to_foreign_shebangs() {
         for path in ["Jenkinsfile", "flow.jenkins"] {
             let fixture = TempDir::new().unwrap();
