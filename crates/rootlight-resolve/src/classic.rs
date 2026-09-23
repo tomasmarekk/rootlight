@@ -181,6 +181,36 @@ fn member_path(manifest: &str, value: &str) -> Option<String> {
     (path.len() <= MAX_PATH_BYTES).then(|| path.to_ascii_lowercase())
 }
 
+fn unconditional_udt(
+    ty: &EntityRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<bool, ResolutionError> {
+    let source = ty
+        .evidence
+        .source
+        .as_ref()
+        .ok_or(ResolutionError::ClassicSourceIdentity)?;
+    let span = source.span();
+    let start = usize::try_from(span.start_byte()).map_err(|_| ResolutionError::CountOverflow)?;
+    let end = usize::try_from(span.end_byte()).map_err(|_| ResolutionError::CountOverflow)?;
+    let bytes = sources
+        .get(&span.file())
+        .and_then(|bytes| bytes.get(start..end))
+        .ok_or(ResolutionError::ClassicSourceIdentity)?;
+    // Without a configured preprocessor result, one conditional field makes
+    // the entire UDT field environment unsafe to select across files.
+    for line in bytes.split(|byte| matches!(byte, b'\r' | b'\n')) {
+        cancellation.check()?;
+        work.consume_many(line.len().div_ceil(64).max(1))?;
+        if line.trim_ascii_start().starts_with(b"#") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn parse_project(
     path: &str,
     bytes: &[u8],
@@ -693,11 +723,13 @@ impl<'a> ClassicIndex<'a> {
                 },
             );
         }
-        // Only class-typed receivers enter instance member lookup. Enum and
-        // UDT type identities do not establish an object dispatch environment.
+        // A project-proven UDT type also owns its declared fields. Enum values
+        // do not establish an instance member environment.
         let mut value_types = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         let mut members = BTreeMap::new();
+        let mut field_definitions = BTreeMap::new();
+        let mut unconditional_udts = BTreeMap::new();
         for entity in entities.values() {
             cancellation.check()?;
             work.consume()?;
@@ -723,6 +755,22 @@ impl<'a> ClassicIndex<'a> {
         for occurrence in occurrences {
             cancellation.check()?;
             work.consume()?;
+            if occurrence.role == OccurrenceRole::Definition
+                && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+                && entities
+                    .get(&symbol)
+                    .is_some_and(|entity| entity.kind == EntityKind::Field)
+            {
+                work.consume()?;
+                field_definitions
+                    .entry(symbol)
+                    .and_modify(|source: &mut Option<SourceRef>| {
+                        if source.as_ref() != Some(&occurrence.source) {
+                            *source = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(occurrence.source.clone()));
+            }
             if let Some(owner) = occurrence
                 .enclosing
                 .and_then(|id| entities.get(&id))
@@ -732,8 +780,20 @@ impl<'a> ClassicIndex<'a> {
                     EntityKind::Parameter | EntityKind::Variable | EntityKind::Field
                 )
                 && let Some(proof) = result.proof(occurrence)
-                && proof.target.kind == EntityKind::Class
+                && matches!(proof.target.kind, EntityKind::Class | EntityKind::Struct)
             {
+                if proof.target.kind == EntityKind::Struct {
+                    let safe = if let Some(&safe) = unconditional_udts.get(&proof.target.id) {
+                        safe
+                    } else {
+                        let safe = unconditional_udt(proof.target, &sources, cancellation, work)?;
+                        unconditional_udts.insert(proof.target.id, safe);
+                        safe
+                    };
+                    if !safe {
+                        continue;
+                    }
+                }
                 value_types
                     .entry(owner.id)
                     .and_modify(|prior| *prior = None)
@@ -884,19 +944,46 @@ impl<'a> ClassicIndex<'a> {
             let Some(target) = members.get(&(class, name)).copied().flatten() else {
                 continue;
             };
-            if !matches!(
-                target.visibility,
-                EntityVisibility::Public | EntityVisibility::Restricted
-            ) || !match owner.kind {
-                EntityKind::Module => matches!(
-                    target.kind,
-                    EntityKind::Function
-                        | EntityKind::Variable
-                        | EntityKind::Field
-                        | EntityKind::Constant
-                ),
-                _ => matches!(target.kind, EntityKind::Method | EntityKind::Field),
-            } {
+            let Some(receiver_type) = entities.get(&class).copied() else {
+                continue;
+            };
+            let accessible = if receiver_type.kind == EntityKind::Struct {
+                // Type fields have no independent access modifier in VBA. The
+                // project-proven public UDT and exact field owner supply access.
+                target.kind == EntityKind::Field
+                    && target.container == Some(ContainerRef::Entity(class))
+                    && target
+                        .evidence
+                        .source
+                        .as_ref()
+                        .zip(receiver_type.evidence.source.as_ref())
+                        .is_some_and(|(field, ty)| field.span().file() == ty.span().file())
+                    && field_definitions
+                        .get(&target.id)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|definition| {
+                            target.evidence.source.as_ref().is_some_and(|field| {
+                                definition.span().file() == field.span().file()
+                                    && definition.span().start_byte() >= field.span().start_byte()
+                                    && definition.span().end_byte() <= field.span().end_byte()
+                            })
+                        })
+            } else {
+                matches!(
+                    target.visibility,
+                    EntityVisibility::Public | EntityVisibility::Restricted
+                ) && match owner.kind {
+                    EntityKind::Module => matches!(
+                        target.kind,
+                        EntityKind::Function
+                            | EntityKind::Variable
+                            | EntityKind::Field
+                            | EntityKind::Constant
+                    ),
+                    _ => matches!(target.kind, EntityKind::Method | EntityKind::Field),
+                }
+            };
+            if !accessible {
                 continue;
             }
             result.proofs.insert(

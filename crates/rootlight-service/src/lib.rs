@@ -33470,7 +33470,7 @@ mod tests {
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
-        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal state As Phase, ByVal data As Payload)\nanswer = state.Ready\nEnd Sub\n";
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal state As Phase, ByVal data As Payload)\nanswer = state.Ready\nanswer = data.Count\nEnd Sub\n";
         fs::write(fixture.path().join("Client.bas"), client).unwrap();
         let manifest = "Type=OleDll\nName=\"Primary\"\nModule=Types; Types.bas\nModule=Client; Client.bas\nModule=Other; Other.bas\n";
         let mut previous = None;
@@ -33617,11 +33617,75 @@ mod tests {
             let member = document
                 .occurrences
                 .iter()
-                .find(|site| site.file == file.id && site.syntax_kind == "vba.member.reference")
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte()
+                            == u64::try_from(client.find("state.Ready").unwrap()).unwrap()
+                })
                 .unwrap();
             assert!(
                 matches!(member.target, OccurrenceTarget::Unresolved { .. }),
                 "an enum-typed value is not an enum namespace receiver"
+            );
+            let field_site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte()
+                            == u64::try_from(client.find("data.Count").unwrap()).unwrap()
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(field_site.target, OccurrenceTarget::Resolved { .. }),
+                resolved,
+                "{access} duplicate={duplicate} listed={listed}"
+            );
+            if resolved {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Field
+                            && entity.canonical_name == "Count"
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == types.id)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    field_site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+                assert!(document.relations.iter().any(|relation| {
+                    relation.subject == RelationEndpoint::Occurrence(field_site.id)
+                        && relation.object == RelationEndpoint::Entity(target.id)
+                        && relation.predicate == RelationPredicate::RefersTo
+                        && relation.evidence.source.as_ref() == Some(&field_site.source)
+                }));
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![field_site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, b"data.Count");
+            }
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-member-target-unavailable" && gap.source == field_site.source
+                }),
+                !resolved
             );
             for record in document
                 .coverage_records
@@ -33630,6 +33694,64 @@ mod tests {
             {
                 assert_eq!(record.discovered, record.indexed + record.skipped);
             }
+        }
+    }
+
+    #[test]
+    fn classic_project_udt_fields_reject_missing_duplicate_and_conditional_names() {
+        for fields in [
+            "Other As Long\n",
+            "Count As Long\nCount As Long\n",
+            "#If Enabled Then\nCount As Long\n#End If\n",
+        ] {
+            let fixture = durable_test_tempdir();
+            let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal data As Payload)\nanswer = data.Count\nEnd Sub\n";
+            fs::write(fixture.path().join("Client.bas"), client).unwrap();
+            fs::write(
+                fixture.path().join("Types.bas"),
+                format!("Attribute VB_Name = \"Types\"\nPublic Type Payload\n{fields}End Type\n"),
+            )
+            .unwrap();
+            fs::write(
+                fixture.path().join("project.vbp"),
+                "Type=OleDll\nName=\"Primary\"\nModule=Types; Types.bas\nModule=Client; Client.bas\n",
+            )
+            .unwrap();
+            let mut service = FirstSliceService::new(4).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let client_file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            assert!(document.occurrences.iter().any(|site| {
+                site.file == client_file.id
+                    && site.syntax_kind == "vba.direct_type_identifier.reference"
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            }));
+            let field_site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == client_file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte()
+                            == u64::try_from(client.find("data.Count").unwrap()).unwrap()
+                })
+                .unwrap();
+            assert!(
+                matches!(field_site.target, OccurrenceTarget::Unresolved { .. }),
+                "{fields}"
+            );
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "vba-member-target-unavailable" && gap.source == field_site.source
+            }));
         }
     }
 
