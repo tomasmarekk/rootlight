@@ -1179,15 +1179,59 @@ impl DaemonState {
         &self,
         mut inventory: IndexSupportInventory,
     ) -> Result<(), ServiceError> {
+        let mut bounded_adapters = Vec::new();
+        for mut adapter in inventory.adapters {
+            if bounded_adapters.len() == rootlight_observability::MAX_SUPPORT_ADAPTERS {
+                break;
+            }
+            if adapter.languages.is_empty() {
+                bounded_adapters.push(adapter);
+                continue;
+            }
+            let languages = std::mem::take(&mut adapter.languages);
+            // Keep each language addressable by adapter diagnostics while
+            // respecting the support schema's per-record label bound.
+            for chunk in languages.chunks(rootlight_observability::MAX_SUPPORT_RECORD_LABELS) {
+                if bounded_adapters.len() == rootlight_observability::MAX_SUPPORT_ADAPTERS {
+                    break;
+                }
+                let mut entry = adapter.clone();
+                entry.languages.extend(chunk.iter().cloned());
+                bounded_adapters.push(entry);
+            }
+        }
+        inventory.adapters = bounded_adapters;
         inventory
-            .adapters
-            .truncate(rootlight_observability::MAX_SUPPORT_ADAPTERS);
+            .languages
+            .truncate(rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES);
         inventory
             .repositories
             .truncate(rootlight_observability::MAX_SUPPORT_REPOSITORIES);
         inventory
             .generations
             .truncate(rootlight_observability::MAX_SUPPORT_GENERATIONS);
+        for language in &mut inventory.languages {
+            language
+                .suffixes
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+            language
+                .aliases
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+            language
+                .detectors
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+            language
+                .analyzers
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+        }
+        for repository in &mut inventory.repositories {
+            repository
+                .languages
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+            repository
+                .tiers
+                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
+        }
         let generation_status = generation_health_status(&inventory);
         let adapter_status = adapter_health_status(&inventory);
         *self
@@ -13878,6 +13922,52 @@ mod tests {
             operation.repository_id.as_deref() == Some(support_id(repository.as_bytes()).as_str())
         }));
 
+        let mut expanded = service
+            .state()
+            .index_support_inventory()
+            .expect("published support inventory remains readable");
+        expanded.adapters[0].languages = (0..=rootlight_observability::MAX_SUPPORT_RECORD_LABELS)
+            .map(|ordinal| format!("language-{ordinal:03}"))
+            .collect();
+        expanded.languages = (0..=rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES)
+            .map(
+                |ordinal| rootlight_observability::SupportLanguageCapabilityInventory {
+                    language: format!("language-{ordinal:03}"),
+                    suffixes: Vec::new(),
+                    aliases: Vec::new(),
+                    detectors: vec!["extension".to_owned()],
+                    maximum_tier: "tier_d".to_owned(),
+                    analyzers: vec!["parser".to_owned()],
+                },
+            )
+            .collect();
+        service
+            .state()
+            .replace_index_support_inventory(expanded)
+            .expect("expanded inventory publishes within support bounds");
+        let bounded = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V8, None));
+        let ControlResponse::SupportBundle(bounded) = bounded else {
+            panic!("bounded language inventory must produce a support bundle");
+        };
+        let mut bounded_archive = zip::ZipArchive::new(std::io::Cursor::new(bounded.archive))
+            .expect("bounded support ZIP opens");
+        let mut bounded_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut bounded_archive
+                .by_name("inventory.json")
+                .expect("bounded inventory entry opens"),
+            &mut bounded_inventory_bytes,
+        )
+        .expect("bounded inventory entry reads");
+        let bounded_inventory: SupportInventory =
+            serde_json::from_slice(&bounded_inventory_bytes).expect("bounded inventory decodes");
+        assert_eq!(
+            bounded_inventory.languages.len(),
+            rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES
+        );
+        assert_eq!(bounded_inventory.adapters.len(), 2);
+        assert_eq!(bounded_inventory.adapters[1].languages, ["language-032"]);
+
         let missing = service.execute(ControlRequest::SupportBundle(
             SupportBundleSchema::V5,
             Some(RepositoryId::from_bytes([99; 16])),
@@ -14465,6 +14555,58 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn support_inventory_bounds_language_capabilities() {
+        let service = service();
+        let maximum = rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES;
+        let maximum_labels = rootlight_observability::MAX_SUPPORT_RECORD_LABELS;
+        let adapter_languages = (0..=maximum_labels)
+            .map(|ordinal| format!("language-{ordinal:03}"))
+            .collect();
+        let languages = (0..=maximum)
+            .map(
+                |ordinal| rootlight_observability::SupportLanguageCapabilityInventory {
+                    language: format!("language-{ordinal:03}"),
+                    suffixes: Vec::new(),
+                    aliases: Vec::new(),
+                    detectors: Vec::new(),
+                    maximum_tier: "tier_d".to_owned(),
+                    analyzers: Vec::new(),
+                },
+            )
+            .collect();
+        service
+            .state()
+            .replace_index_support_inventory(IndexSupportInventory {
+                adapters: vec![SupportAdapterInventory {
+                    name: "parser".to_owned(),
+                    version: None,
+                    languages: adapter_languages,
+                    available: true,
+                    isolated: false,
+                    binary_sha256: None,
+                    artifact_sha256: None,
+                }],
+                languages,
+                ..IndexSupportInventory::default()
+            })
+            .expect("bounded support inventory publishes");
+        let retained = service
+            .state()
+            .index_support_inventory()
+            .expect("support inventory remains readable");
+        assert_eq!(retained.languages.len(), maximum);
+        assert_eq!(retained.languages[0].language, "language-000");
+        assert_eq!(retained.languages[maximum - 1].language, "language-063");
+        assert_eq!(retained.adapters.len(), 2);
+        assert_eq!(retained.adapters[0].languages.len(), maximum_labels);
+        assert_eq!(
+            retained.adapters[0].languages[maximum_labels - 1],
+            "language-031"
+        );
+        assert_eq!(retained.adapters[1].languages, ["language-032"]);
     }
 
     #[test]
