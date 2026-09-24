@@ -13084,10 +13084,47 @@ impl FirstSliceService {
         languages: &[String],
         cancellation: &Cancellation,
     ) -> Result<FirstSliceCoverageGapSummary, FirstSliceError> {
+        self.coverage_gap_summary_for_paths_until(
+            repository,
+            generation,
+            languages,
+            &[],
+            cancellation,
+        )
+    }
+
+    /// Summarizes gaps for a language union and canonical path-prefix scope.
+    ///
+    /// File-attributed gaps outside the selected paths are excluded. Global
+    /// discovery omissions and generation freshness remain visible because
+    /// their affected paths are not available from the retained receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns generation-selection, durable-hydration, cancellation, or
+    /// checked input-accounting failures.
+    pub fn coverage_gap_summary_for_paths_until(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        languages: &[String],
+        path_prefixes: &[String],
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceCoverageGapSummary, FirstSliceError> {
         let context = self.resolve_generation(repository, Some(generation))?;
         let lease = self.generation_lease(context.generation, cancellation)?;
         let snapshot = lease.generation();
         let document = snapshot.document();
+        let in_path_scope = |file: &FileRecord| {
+            path_prefixes.is_empty()
+                || path_prefixes.iter().any(|scope| {
+                    file.path == *scope
+                        || file
+                            .path
+                            .strip_prefix(scope)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+        };
         let file_only_fallback = document
             .diagnostics
             .iter()
@@ -13103,6 +13140,9 @@ impl FirstSliceService {
                     .map(|entry| entry.file()),
             ) {
                 check_cancellation(cancellation)?;
+                if !in_path_scope(file) {
+                    continue;
+                }
                 increment_evidence_count(
                     &mut fallback_counts,
                     (
@@ -13133,6 +13173,13 @@ impl FirstSliceService {
                                file: Option<FileId>,
                                source: Option<SourceSpan>|
              -> Result<(), FirstSliceError> {
+                if !path_prefixes.is_empty()
+                    && !file
+                        .and_then(|file| snapshot.find_file(file))
+                        .is_some_and(&in_path_scope)
+                {
+                    return Ok(());
+                }
                 let selection = source
                     .map(|span| embedded_languages.resolve(span, cancellation))
                     .transpose()?
@@ -39181,6 +39228,8 @@ mod tests {
             format!("# {}\n", "x".repeat(241)),
         )
         .expect("source writes");
+        fs::write(fixture.path().join("other.odd"), "unrelated source\n")
+            .expect("unrelated source writes");
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline())
             .expect("service initializes");
         let receipt = service
@@ -39224,6 +39273,25 @@ mod tests {
                         && gap.language.as_deref() == Some("yaml")
                         && gap.files == 1)
             );
+            let scoped = service
+                .coverage_gap_summary_for_paths_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &[],
+                    &["config.yaml".to_owned()],
+                    &deadline(),
+                )
+                .expect("path-scoped coverage resolves");
+            assert!(scoped.gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Truncated
+                    && gap.language.as_deref() == Some("yaml")
+                    && gap.files == 1
+            }));
+            assert!(scoped.gaps.iter().all(|gap| {
+                gap.language
+                    .as_deref()
+                    .is_none_or(|language| language == "yaml")
+            }));
         }
     }
 
@@ -40598,6 +40666,37 @@ mod tests {
                         .is_none_or(|value| value == *language)
                 }));
             }
+            let path_scoped = service
+                .coverage_gap_summary_for_paths_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &[],
+                    &["styles".to_owned()],
+                    &deadline(),
+                )
+                .expect("path-scoped file-only coverage resolves");
+            assert_eq!(path_scoped.skipped_inputs, 1);
+            assert!(path_scoped.gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Truncated
+                    && gap.language.as_deref() == Some("css")
+                    && gap.files == 1
+            }));
+            assert!(path_scoped.gaps.iter().all(|gap| {
+                gap.language
+                    .as_deref()
+                    .is_none_or(|language| language == "css")
+            }));
+            let nonmatching = service
+                .coverage_gap_summary_for_paths_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &[],
+                    &["style".to_owned()],
+                    &deadline(),
+                )
+                .expect("path prefix boundary is respected");
+            assert_eq!(nonmatching.skipped_inputs, 0);
+            assert!(nonmatching.gaps.iter().all(|gap| gap.language.is_none()));
         }
 
         let storage = durable_test_tempdir();

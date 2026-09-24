@@ -11245,7 +11245,7 @@ fn code_locate(
             request.query,
             mode,
             languages,
-            path_prefixes,
+            path_prefixes.clone(),
             kinds,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
@@ -11284,6 +11284,7 @@ fn code_locate(
         &response.usage,
         &response.data.coverage,
         &coverage_languages,
+        &path_prefixes,
         &context.cancellation,
     )?;
     Ok(daemon::CodeLocateResponse {
@@ -13548,6 +13549,7 @@ fn source_read(
     if request.merge_overlaps {
         references = merge_source_references(references)?;
     }
+    let requested_reference_count = references.len();
     let response = service
         .source_read_with_options_and_budget(
             generation.generation,
@@ -13561,6 +13563,10 @@ fn source_read(
     let execution = data.execution;
     let mut chunks = Vec::new();
     chunks
+        .try_reserve_exact(data.chunks.len())
+        .map_err(|_| resource_exhausted())?;
+    let mut path_prefixes = Vec::new();
+    path_prefixes
         .try_reserve_exact(data.chunks.len())
         .map_err(|_| resource_exhausted())?;
     for chunk in data.chunks {
@@ -13585,6 +13591,7 @@ fn source_read(
                 (daemon::SourceReadEncoding::Bytes as i32, String::new())
             }
         };
+        path_prefixes.push(chunk.path.clone());
         chunks.push(daemon::FirstSliceSourceChunk {
             extracted_from: chunk.extracted_from.as_ref().map(source_ref_to_wire),
             source: Some(source_ref_to_wire(&chunk.reference)),
@@ -13604,13 +13611,21 @@ fn source_read(
             tier: analysis_tier_to_wire(tier) as i32,
         });
     }
+    if execution.is_truncated() || chunks.len() != requested_reference_count {
+        path_prefixes.clear();
+    } else {
+        path_prefixes.sort_unstable();
+        path_prefixes.dedup();
+    }
     Ok(daemon::SourceReadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(
+        context: Some(query_context_with_languages(
             service,
             generation,
             &response.usage,
             &[],
+            &[],
+            &path_prefixes,
             &context.cancellation,
         )?),
         chunks,
@@ -14210,7 +14225,7 @@ fn query_context(
     coverage: &[CoverageRecord],
     cancellation: &Cancellation,
 ) -> Result<daemon::FirstSliceQueryContext, PublicError> {
-    query_context_with_languages(service, generation, usage, coverage, &[], cancellation)
+    query_context_with_languages(service, generation, usage, coverage, &[], &[], cancellation)
 }
 
 fn query_context_with_languages(
@@ -14219,6 +14234,7 @@ fn query_context_with_languages(
     usage: &QueryUsage,
     coverage: &[CoverageRecord],
     languages: &[String],
+    path_prefixes: &[String],
     cancellation: &Cancellation,
 ) -> Result<daemon::FirstSliceQueryContext, PublicError> {
     let (tier, mut status) = aggregate_coverage(coverage, &generation.receipt);
@@ -14226,10 +14242,11 @@ fn query_context_with_languages(
         .generation_freshness(generation.repository, generation.generation)
         .map_err(service_error)?;
     let summary = service
-        .coverage_gap_summary_until(
+        .coverage_gap_summary_for_paths_until(
             generation.repository,
             generation.generation,
             languages,
+            path_prefixes,
             cancellation,
         )
         .map_err(service_error)?;
