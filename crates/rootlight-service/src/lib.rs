@@ -29378,6 +29378,9 @@ mod tests {
             ("Main.idr", "module Main\n", "idris"),
             ("Algebra.lean", "namespace Algebra\n", "lean"),
             ("actor.pony", "actor Main\n", "pony"),
+            ("theme.less", "@accent: blue;\n", "less"),
+            ("theme.sass", "$accent: blue\n", "sass"),
+            ("theme.scss", "$accent: blue;\n", "scss"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -29462,6 +29465,9 @@ mod tests {
             "idris",
             "lean",
             "pony",
+            "less",
+            "sass",
+            "scss",
         ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported

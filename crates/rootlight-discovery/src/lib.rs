@@ -1737,6 +1737,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "less",
+        suffixes: &[".less"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "lua",
         suffixes: &[".lua"],
         aliases: &[],
@@ -1857,12 +1865,28 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "sass",
+        suffixes: &[".sass"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "scala",
         suffixes: &[".sc", ".scala", ".sbt"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "scss",
+        suffixes: &[".scss"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "solidity",
@@ -3432,6 +3456,9 @@ max_source_file_bytes = 2097152
             ("Main.lidr", "idris"),
             ("Algebra.lean", "lean"),
             ("actor.pony", "pony"),
+            ("theme.less", "less"),
+            ("theme.sass", "sass"),
+            ("theme.scss", "scss"),
         ] {
             assert_eq!(extension_language(path), Some(language), "{path}");
             let (_, signals) = classify(
@@ -3449,7 +3476,15 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, &["source-fallback"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
-        for path in ["Main.agdai", "Main.olean", "Main.elm.bak", "actor.pony.txt"] {
+        for path in [
+            "Main.agdai",
+            "Main.olean",
+            "Main.elm.bak",
+            "actor.pony.txt",
+            "theme.scss.bak",
+            "theme.sass.txt",
+            "theme.less.map",
+        ] {
             assert_eq!(extension_language(path), None, "{path}");
         }
     }
