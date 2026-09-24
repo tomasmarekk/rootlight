@@ -14289,6 +14289,7 @@ fn query_context_with_languages(
         structural_freshness: query_freshness_label(freshness.structural).to_owned(),
         semantic_freshness: query_freshness_label(freshness.semantic).to_owned(),
         coverage_gaps,
+        omitted_coverage_gap_groups: summary.omitted_gap_groups,
     })
 }
 

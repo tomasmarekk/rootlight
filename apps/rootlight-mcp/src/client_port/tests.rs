@@ -1855,6 +1855,18 @@ fn every_partial_coverage_reason_has_a_stable_mcp_warning() {
         metadata.warnings()[1].message.as_str(),
         "binary inputs were omitted from text analysis affected-files 2 language repository-wide"
     );
+
+    context.omitted_coverage_gap_groups = 2;
+    let metadata = read_metadata(&context, Vec::new()).expect("omitted groups remain visible");
+    assert_eq!(metadata.warnings().len(), 3);
+    assert_eq!(
+        metadata.warnings()[2].code.as_str(),
+        "coverage_gap_list_truncated"
+    );
+    assert_eq!(
+        metadata.warnings()[2].message.as_str(),
+        "2 coverage reason groups were omitted - narrow the query by language or path to inspect them"
+    );
 }
 
 #[test]
@@ -2079,6 +2091,7 @@ fn query_context(
         coverage_status: CoverageStatus::Complete,
         skipped_inputs: 0,
         coverage_gaps: Vec::new(),
+        omitted_coverage_gap_groups: 0,
         usage: QueryUsage {
             rows: 1,
             edges: 0,

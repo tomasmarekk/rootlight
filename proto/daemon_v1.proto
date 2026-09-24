@@ -773,6 +773,7 @@ message FirstSliceQueryContext {
   string structural_freshness = 9;
   string semantic_freshness = 10;
   repeated FirstSliceCoverageGap coverage_gaps = 11;
+  uint64 omitted_coverage_gap_groups = 12;
 }
 
 // Authoritative execution-completeness state for one bounded result.

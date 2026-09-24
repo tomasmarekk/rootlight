@@ -1737,10 +1737,24 @@ fn read_metadata(
 ) -> Result<ReadResponseMetadata, ClientPortError> {
     let mut warnings = Vec::new();
     warnings
-        .try_reserve_exact(context.coverage_gaps.len())
+        .try_reserve_exact(
+            context.coverage_gaps.len() + usize::from(context.omitted_coverage_gap_groups > 0),
+        )
         .map_err(|_| ClientPortError::Executor)?;
     for gap in &context.coverage_gaps {
         warnings.push(coverage_gap_warning(gap)?);
+    }
+    if context.omitted_coverage_gap_groups > 0 {
+        let message = format!(
+            "{} coverage reason groups were omitted - narrow the query by language or path to inspect them",
+            context.omitted_coverage_gap_groups
+        );
+        warnings.push(ResponseWarning {
+            code: SafeLabel::parse("coverage_gap_list_truncated")
+                .map_err(|_| ClientPortError::InvalidResponse)?,
+            message: SourceFreeMessage::parse(&message)
+                .map_err(|_| ClientPortError::InvalidResponse)?,
+        });
     }
     Ok(ReadResponseMetadata::new(
         context.repository.to_string(),

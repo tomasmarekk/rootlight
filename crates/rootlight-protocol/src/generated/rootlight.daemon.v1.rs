@@ -1279,6 +1279,9 @@ pub struct FirstSliceQueryContext {
     #[prost(message, repeated, tag = "11")]
     #[allow(missing_docs)]
     pub coverage_gaps: ::prost::alloc::vec::Vec<FirstSliceCoverageGap>,
+    #[prost(uint64, tag = "12")]
+    #[allow(missing_docs)]
+    pub omitted_coverage_gap_groups: u64,
 }
 /// One source-free limiting-resource observation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

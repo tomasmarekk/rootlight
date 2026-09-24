@@ -2529,6 +2529,8 @@ pub struct FirstSliceCoverageGap {
 pub struct FirstSliceCoverageGapSummary {
     /// Bounded, deterministically ordered reasons, including freshness warnings.
     pub gaps: Vec<FirstSliceCoverageGap>,
+    /// Reason/language groups omitted from `gaps`; narrower scopes can retrieve them.
+    pub omitted_gap_groups: u64,
     /// Distinct affected source files plus disjoint discovery exclusions.
     pub skipped_inputs: u64,
     /// Whether analysis or discovery is incomplete, independently of freshness.
@@ -2547,6 +2549,18 @@ fn coverage_gap_file_count(
         }
     }
     u64::try_from(skipped_files.len()).map_err(|_| FirstSliceError::Limits)
+}
+
+fn bound_coverage_gap_groups(
+    gaps: &mut Vec<FirstSliceCoverageGap>,
+) -> Result<u64, FirstSliceError> {
+    gaps.sort_by(|left, right| {
+        (left.reason, left.language.as_deref()).cmp(&(right.reason, right.language.as_deref()))
+    });
+    let omitted =
+        u64::try_from(gaps.len().saturating_sub(64)).map_err(|_| FirstSliceError::Limits)?;
+    gaps.truncate(64);
+    Ok(omitted)
 }
 
 /// Analysis coverage attached to one retained source file.
@@ -13469,12 +13483,10 @@ impl FirstSliceService {
                 files: receipt.indexed_files.max(1),
             });
         }
-        gaps.sort_by(|left, right| {
-            (left.reason, left.language.as_deref()).cmp(&(right.reason, right.language.as_deref()))
-        });
-        gaps.truncate(64);
+        let omitted_gap_groups = bound_coverage_gap_groups(&mut gaps)?;
         Ok(FirstSliceCoverageGapSummary {
             gaps,
+            omitted_gap_groups,
             skipped_inputs,
             incomplete,
         })
@@ -41110,6 +41122,23 @@ mod tests {
                 CancellationReason::ClientRequest
             ))
         ));
+    }
+
+    #[test]
+    fn coverage_gap_group_bound_reports_every_omitted_group() {
+        let mut gaps = (0..66)
+            .rev()
+            .map(|index| FirstSliceCoverageGap {
+                reason: FirstSliceCoverageGapReason::Unsupported,
+                language: Some(format!("language-{index:03}")),
+                files: 1,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bound_coverage_gap_groups(&mut gaps).unwrap(), 2);
+        assert_eq!(gaps.len(), 64);
+        assert_eq!(gaps[0].language.as_deref(), Some("language-000"));
+        assert_eq!(gaps[63].language.as_deref(), Some("language-063"));
+        assert_eq!(bound_coverage_gap_groups(&mut gaps).unwrap(), 0);
     }
 
     #[test]

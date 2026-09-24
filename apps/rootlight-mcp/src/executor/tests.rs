@@ -1614,6 +1614,7 @@ fn context(results: u64, source_bytes: u64) -> QueryContext {
         coverage_status: ClientCoverage::Complete,
         skipped_inputs: 0,
         coverage_gaps: Vec::new(),
+        omitted_coverage_gap_groups: 0,
         usage: usage(results, source_bytes),
     }
 }

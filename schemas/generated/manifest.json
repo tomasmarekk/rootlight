@@ -90,7 +90,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "136134cb2f829e0690a1be5bf4c7f62714890ad8ed1e887e4ad8995add6b93f4"
+      "blake3": "c533641d1fc9bb5b1b60c987ec91f5dc6f24457e5a5ea40ab2cfa1aabc7cdfb7"
     },
     {
       "path": "proto/ui_graph_v1.proto",
@@ -284,7 +284,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "769fdca8c1f58c9e9cf21d321c0b691501b29b0a7b88253b46616f6fd30eda8a"
+      "blake3": "c97ce003f873aaf968f807178a0732509e673b8b4b7d7aa757087dfd602b31f9"
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.ui.graph.v1.rs",
@@ -904,7 +904,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "5fa7c35a0b521c2789ed4bcc9dc1879cd8616aef971e0d111e12526f5a628f74"
+      "blake3": "d6ac6d6bf4b2dd9e68fc57aa7e0372bda499d863d711698582c92bc812503f1c"
     }
   ]
 }

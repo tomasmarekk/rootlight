@@ -2118,6 +2118,7 @@ mod tests {
             coverage_status: CoverageStatus::Bounded,
             skipped_inputs: 2,
             coverage_gaps: Vec::new(),
+            omitted_coverage_gap_groups: 0,
             usage: QueryUsage {
                 rows: 10,
                 edges: 5,

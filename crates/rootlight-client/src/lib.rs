@@ -707,6 +707,8 @@ pub struct QueryContext {
     pub skipped_inputs: u64,
     /// Bounded source-free reasons for partial repository coverage.
     pub coverage_gaps: Vec<CoverageGap>,
+    /// Reason/language groups omitted from the bounded list.
+    pub omitted_coverage_gap_groups: u64,
     /// Measured query usage.
     pub usage: QueryUsage,
 }
@@ -13680,6 +13682,9 @@ fn parse_query_context(
     if coverage_gaps.len() > 64 {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    if context.omitted_coverage_gap_groups > 0 && coverage_gaps.len() != 64 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     Ok(QueryContext {
         repository,
         generation,
@@ -13697,6 +13702,7 @@ fn parse_query_context(
         coverage_status: parse_coverage_status(context.coverage_status)?,
         skipped_inputs: context.skipped_inputs,
         coverage_gaps,
+        omitted_coverage_gap_groups: context.omitted_coverage_gap_groups,
         usage: parse_query_usage(context.usage)?,
     })
 }
@@ -15251,6 +15257,7 @@ mod tests {
             structural_freshness: "current".to_owned(),
             semantic_freshness: "current".to_owned(),
             coverage_gaps: Vec::new(),
+            omitted_coverage_gap_groups: 0,
         }
     }
 
@@ -15476,6 +15483,33 @@ mod tests {
         assert_eq!(parsed.semantic_freshness, QueryFreshness::Stale);
 
         context.semantic_freshness = "pending_refinement".to_owned();
+        assert!(matches!(
+            parse_query_context(Some(context), test_repository(), GenerationSelector::Active),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+
+    #[test]
+    fn query_context_preserves_bounded_coverage_gap_omission_count() {
+        let mut context = wire_query_context(0, 0);
+        context.coverage_gaps = (0..64)
+            .map(|index| daemon::FirstSliceCoverageGap {
+                reason: "unsupported".to_owned(),
+                language: Some(format!("language-{index:03}")),
+                files: 1,
+            })
+            .collect();
+        context.omitted_coverage_gap_groups = 2;
+        let parsed = parse_query_context(
+            Some(context.clone()),
+            test_repository(),
+            GenerationSelector::Active,
+        )
+        .expect("bounded omission count survives parsing");
+        assert_eq!(parsed.coverage_gaps.len(), 64);
+        assert_eq!(parsed.omitted_coverage_gap_groups, 2);
+
+        context.coverage_gaps.pop();
         assert!(matches!(
             parse_query_context(Some(context), test_repository(), GenerationSelector::Active),
             Err(ClientError::InvalidResponseCorrelation)
