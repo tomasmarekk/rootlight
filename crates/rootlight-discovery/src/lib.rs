@@ -30,6 +30,7 @@ mod incremental;
 mod matlab;
 mod objective_c;
 mod office;
+mod prolog;
 mod shebang;
 mod vba;
 
@@ -40,7 +41,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.13";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.14";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1498,7 +1499,11 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
             evidence: LanguageEvidence::Shebang,
         });
     }
-    let content_hint = if is_ambiguous_basic_source(&normalized) {
+    let content_hint = if is_ambiguous_perl_prolog_source(&normalized)
+        && prolog::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
+    {
+        Some("prolog")
+    } else if is_ambiguous_basic_source(&normalized) {
         let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
         if vba::has_content_hint(sample) {
             Some("vba")
@@ -1812,6 +1817,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "prolog",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "python",
         suffixes: &[".py"],
         aliases: &["py"],
@@ -1956,6 +1969,15 @@ pub fn is_ambiguous_basic_source(path: &str) -> bool {
             .iter()
             .any(|suffix| extension.eq_ignore_ascii_case(suffix))
     })
+}
+
+/// Reports the shared Perl/Prolog source suffix without claiming either syntax.
+#[must_use]
+pub fn is_ambiguous_perl_prolog_source(path: &str) -> bool {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("pl"))
 }
 
 /// Resolves one installed canonical language label or accepted alias.
@@ -3638,6 +3660,41 @@ max_source_file_bytes = 2097152
             .find(|entry| entry.language == "perl")
             .expect("Perl capability");
         assert!(capability.detectors.contains(&"shebang"));
+    }
+
+    #[test]
+    fn shared_pl_suffix_keeps_perl_and_prolog_evidence_distinct() {
+        for path in ["facts.pl", "src/FACTS.PL"] {
+            assert!(is_ambiguous_perl_prolog_source(path));
+            let path = RelativePath::parse(Path::new(path)).expect("fixture path");
+            let (_, signals) = classify(&path, b"% comment\nedge(a, b).\n");
+            assert!(signals.contains(&LanguageSignal {
+                language: "prolog".to_owned(),
+                evidence: LanguageEvidence::Content,
+            }));
+            assert!(signals.contains(&LanguageSignal {
+                language: "perl".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }));
+        }
+        for path in ["facts.pl.bak", "src/pl", "module.pm"] {
+            assert!(!is_ambiguous_perl_prolog_source(path));
+        }
+        let path = RelativePath::parse(Path::new("script.pl")).expect("fixture path");
+        let (_, signals) = classify(&path, b"use strict;\nsub edge { 1 }\n");
+        assert_eq!(
+            signals,
+            vec![LanguageSignal {
+                language: "perl".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }]
+        );
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "prolog")
+            .expect("Prolog capability");
+        assert_eq!(capability.detectors, ["content"]);
+        assert_eq!(capability.analyzers, ["source-fallback"]);
     }
 
     #[test]

@@ -69,7 +69,7 @@ use rootlight_discovery::{
     canonical_language, correlate_incremental_manifest, discover_incremental_with_progress,
     discover_manifest_and_reconcile_with_progress, discover_manifest_streaming,
     discover_with_snapshots_at_limit, extension_language, filename_language,
-    is_ambiguous_basic_source, language_capabilities,
+    is_ambiguous_basic_source, is_ambiguous_perl_prolog_source, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -15576,6 +15576,10 @@ fn supported_source_language<'a>(
         let language = basic_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if is_ambiguous_perl_prolog_source(&input.path) && prolog_content_language(input).is_some() {
+        let language = detected_source_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     // Live scripts are containers, not MATLAB text. A native .m grammar does
     // not provide the container reader required to analyze their embedded source.
     if Path::new(&input.path)
@@ -15667,6 +15671,11 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if is_ambiguous_basic_source(&input.path) {
         return basic_content_language(input);
     }
+    if is_ambiguous_perl_prolog_source(&input.path)
+        && let Some(language) = prolog_content_language(input)
+    {
+        return Some(language);
+    }
     if let Some(language) = source_language_from_path(&input.path) {
         return Some(language);
     }
@@ -15720,6 +15729,13 @@ fn basic_content_language(input: &ManifestInput) -> Option<&str> {
         (signal.evidence == LanguageEvidence::Content
             && matches!(signal.language.as_str(), "vba" | "visual-basic-classic"))
         .then_some(signal.language.as_str())
+    })
+}
+
+fn prolog_content_language(input: &ManifestInput) -> Option<&str> {
+    input.language_signals.iter().find_map(|signal| {
+        (signal.evidence == LanguageEvidence::Content && signal.language == "prolog")
+            .then_some(signal.language.as_str())
     })
 }
 
@@ -29274,6 +29290,7 @@ mod tests {
             ("Main.idr", "module Main\n", "idris"),
             ("Algebra.lean", "namespace Algebra\n", "lean"),
             ("actor.pony", "actor Main\n", "pony"),
+            ("Facts.pl", "% source\nedge(alpha, beta).\n", "prolog"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -29358,6 +29375,7 @@ mod tests {
             "idris",
             "lean",
             "pony",
+            "prolog",
         ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
@@ -29365,6 +29383,46 @@ mod tests {
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn shared_pl_suffix_routes_prolog_fallback_without_relabeling_perl() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(fixture.path().join("facts.pl"), "relation(alpha, beta).\n")
+            .expect("Prolog source writes");
+        fs::write(
+            fixture.path().join("script.pl"),
+            "use strict;\nsub relation { return 42; }\n",
+        )
+        .expect("Perl source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("both source languages publish");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let files = generation
+            .document()
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.language.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(files["facts.pl"], "prolog");
+        assert_eq!(files["script.pl"], "perl");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("repository status resolves");
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "prolog"
+                && coverage.discovered_files == 1
+                && coverage.indexed_files == 0
+        }));
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "perl"
+                && coverage.discovered_files == 1
+                && coverage.indexed_files == 1
+        }));
     }
 
     #[test]
