@@ -29649,6 +29649,61 @@ mod tests {
     }
 
     #[test]
+    fn elm_constructor_payload_types_keep_exact_uses_without_constructor_ghosts() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Demo exposing (Tree)\ntype Tree = Leaf Int | Branch Tree Tree\ndescribe : Tree -> String\ndescribe tree = \"Branch\" {- Phantom -}\n";
+        fs::write(fixture.path().join("Demo.elm"), source).expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm source indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let tree = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Enum && entity.canonical_name == "Tree")
+            .expect("type declaration has symbol identity");
+        let references = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.syntax_kind == "elm.type.reference")
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 5);
+        let mut local_uses = 0;
+        for reference in references {
+            let span = reference.source.span();
+            let start = usize::try_from(span.start_byte()).expect("offset fits");
+            let end = usize::try_from(span.end_byte()).expect("offset fits");
+            let written = &source[start..end];
+            assert_eq!(reference.role, rootlight_ir::OccurrenceRole::TypeUse);
+            if written == "Tree" {
+                assert_eq!(
+                    reference.target,
+                    rootlight_ir::OccurrenceTarget::Resolved { symbol: tree.id }
+                );
+                assert!(document.relations.iter().any(|relation| {
+                    relation.predicate == rootlight_ir::RelationPredicate::UsesType
+                        && relation.subject
+                            == rootlight_ir::RelationEndpoint::Occurrence(reference.id)
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(tree.id)
+                        && relation.evidence.source.as_ref() == Some(&reference.source)
+                }));
+                local_uses += 1;
+            } else {
+                assert!(matches!(written, "Int" | "String"));
+                assert!(matches!(
+                    reference.target,
+                    rootlight_ir::OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+        }
+        assert_eq!(local_uses, 3);
+    }
+
+    #[test]
     fn elm_type_uses_bind_only_unique_same_file_declarations() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Demo exposing (..)\ntype alias Model = { state : State, remote : Other.State }\ntype State = Ready\nview : Model -> Missing\nview model = \"Ghost\" -- Phantom\n";

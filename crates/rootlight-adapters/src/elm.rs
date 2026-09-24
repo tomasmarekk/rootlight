@@ -483,8 +483,27 @@ fn scan_source(
                 .or_insert(false);
         }
     }
+    let mut constructor_cursor = 0;
     for (owner_index, header) in headers.iter().enumerate() {
         cancellation.check()?;
+        if header.label == "elm.enum.declaration" {
+            // Only proven constructor payloads contain type operands.
+            while let Some(constructor) = collector.constructors.get(constructor_cursor)
+                && constructor.owner_index == owner_index
+            {
+                collect_type_references(
+                    &masked,
+                    (constructor.name_end, constructor.span_end),
+                    owner_index,
+                    remaining,
+                    &type_names,
+                    &mut type_references,
+                    cancellation,
+                )?;
+                constructor_cursor += 1;
+            }
+            continue;
+        }
         let end = headers
             .get(owner_index + 1)
             .map_or(masked.len(), |next| next.line_start);
@@ -1042,9 +1061,36 @@ mod tests {
             b"x"
         );
         assert_eq!(parsed.record_fields[0].owner_index, 2);
-        assert_eq!(required_syntax_fact_count(&parsed), 16);
-        assert_eq!(syntax_fact_count(&parsed), 16);
-        assert!(scan_source(source, 14, &Cancellation::new()).is_err());
+        let type_names = parsed
+            .type_references
+            .iter()
+            .map(|reference| &source[reference.name_start..reference.name_end])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            type_names,
+            [b"List".as_slice(), b"String", b"String", b"Int"]
+        );
+        assert_eq!(required_syntax_fact_count(&parsed), 19);
+        assert_eq!(syntax_fact_count(&parsed), 19);
+        assert!(scan_source(source, 18, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn unsupported_constructor_headers_do_not_become_type_uses() {
+        let source = b"module Demo exposing (..)\ntype State = Broken(Phantom) | Ready Int\n";
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let constructors = parsed
+            .constructors
+            .iter()
+            .map(|constructor| &source[constructor.name_start..constructor.name_end])
+            .collect::<Vec<_>>();
+        let references = parsed
+            .type_references
+            .iter()
+            .map(|reference| &source[reference.name_start..reference.name_end])
+            .collect::<Vec<_>>();
+        assert_eq!(constructors, [b"Ready".as_slice()]);
+        assert_eq!(references, [b"Int".as_slice()]);
     }
 
     #[test]
