@@ -124,10 +124,20 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         {
             Some(EntityKind::Namespace)
         }
-        SyntaxFactKind::Declaration if label == "css.style_rule.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "css.style_rule.declaration" | "scss.style_rule.declaration"
+            ) =>
+        {
             Some(EntityKind::StyleRule)
         }
-        SyntaxFactKind::Declaration if label == "css.keyframes.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "css.keyframes.declaration" | "scss.keyframes.declaration"
+            ) =>
+        {
             Some(EntityKind::Keyframes)
         }
         SyntaxFactKind::Declaration if label == "css.property.declaration" => {
@@ -427,6 +437,8 @@ pub fn structural_captured_name_for_language<'a>(
 /// without changing component spelling. VBA identifiers remove enclosing brackets
 /// or a trailing type character, retaining original case and source token spans.
 /// This spelling projection does not establish case-insensitive binding identity.
+/// SCSS style-rule selectors retain authored lists and whitespace without
+/// claiming that interpolation has been expanded.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -437,7 +449,15 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "prolog" && fact.syntax_kind().as_str() == "prolog.predicate.definition" {
+    if language == "scss"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "scss.selector.definition" | "scss.selector.signature"
+        )
+    {
+        (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
+            .then_some(Cow::Borrowed(text))
+    } else if language == "prolog" && fact.syntax_kind().as_str() == "prolog.predicate.definition" {
         crate::prolog_names::canonical_predicate_head(text, maximum_bytes).map(Cow::Owned)
     } else if language == "prolog" && fact.syntax_kind().as_str() == "prolog.nonterminal.definition"
     {
@@ -688,6 +708,18 @@ mod tests {
                 EntityKind::Variable,
                 EntityKind::Variable,
             ),
+            (
+                "scss.style_rule.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::StyleRule,
+                EntityKind::StyleRule,
+            ),
+            (
+                "scss.keyframes.declaration",
+                SyntaxFactKind::Declaration,
+                EntityKind::Keyframes,
+                EntityKind::Keyframes,
+            ),
         ] {
             let fact = SyntaxFact::new(
                 1,
@@ -717,6 +749,40 @@ mod tests {
             SyntaxKindLabel::new("elm.port.declaration").unwrap(),
         );
         assert_eq!(structural_entity_kind(&fact), Some(EntityKind::Function));
+    }
+
+    #[test]
+    fn scss_selector_capture_preserves_lists_without_loosening_identifiers() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let selector = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Occurrence,
+            span,
+            0,
+            SyntaxKindLabel::new("scss.selector.definition").unwrap(),
+        );
+        let identifier = SyntaxFact::new(
+            2,
+            None,
+            SyntaxFactKind::Occurrence,
+            span,
+            0,
+            SyntaxKindLabel::new("scss.identifier.definition").unwrap(),
+        );
+        assert_eq!(
+            structural_captured_name_for_fact("scss", &selector, ".card, .tile", 32),
+            Some(Cow::Borrowed(".card, .tile"))
+        );
+        assert!(structural_captured_name_for_fact("scss", &selector, ".card, .tile", 4).is_none());
+        assert!(structural_captured_name_for_fact("scss", &selector, "a\0b", 32).is_none());
+        assert!(
+            structural_captured_name_for_fact("scss", &identifier, ".card, .tile", 32).is_none()
+        );
     }
 
     #[test]

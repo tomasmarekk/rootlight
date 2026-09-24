@@ -1,7 +1,8 @@
 //! First-party structural scanner for source-backed SCSS declarations.
-//! Complete variables, mixins, and functions become identities, while named
-//! mixin includes and quoted imports retain source evidence. Import targets and
-//! value uses remain bounded.
+//! Static variables, mixins, functions, keyframes, and balanced style-rule
+//! blocks become identities.
+//! Named mixin includes and quoted imports retain source evidence; import
+//! targets, selector expansion, and value uses remain bounded.
 
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
@@ -166,7 +167,7 @@ impl ParseProvider for ScssParseProvider {
                 SyntaxFactKind::Signature,
                 name,
                 depth + 1,
-                label("scss.name.signature"),
+                label(declaration.kind.signature_label()),
             ));
             facts.push(SyntaxFact::new(
                 local_id + 2,
@@ -174,7 +175,7 @@ impl ParseProvider for ScssParseProvider {
                 SyntaxFactKind::Occurrence,
                 name,
                 depth + 1,
-                label("scss.identifier.definition"),
+                label(declaration.kind.definition_label()),
             ));
         }
         for (index, scope) in declarations.scopes.iter().enumerate() {
@@ -289,6 +290,8 @@ enum DeclarationKind {
     Variable,
     Mixin,
     Function,
+    Keyframes,
+    StyleRule,
 }
 
 impl DeclarationKind {
@@ -297,6 +300,26 @@ impl DeclarationKind {
             Self::Variable => "scss.variable.declaration",
             Self::Mixin => "scss.mixin.declaration",
             Self::Function => "scss.function.declaration",
+            Self::Keyframes => "scss.keyframes.declaration",
+            Self::StyleRule => "scss.style_rule.declaration",
+        }
+    }
+
+    fn signature_label(self) -> &'static str {
+        match self {
+            Self::StyleRule => "scss.selector.signature",
+            Self::Variable | Self::Mixin | Self::Function | Self::Keyframes => {
+                "scss.name.signature"
+            }
+        }
+    }
+
+    fn definition_label(self) -> &'static str {
+        match self {
+            Self::StyleRule => "scss.selector.definition",
+            Self::Variable | Self::Mixin | Self::Function | Self::Keyframes => {
+                "scss.identifier.definition"
+            }
         }
     }
 }
@@ -319,6 +342,8 @@ struct BlockScope {
     end: usize,
     parent: Option<usize>,
     owner: Option<usize>,
+    selector_header: Option<(usize, usize)>,
+    keyframes_body: bool,
     depth: usize,
 }
 
@@ -389,6 +414,7 @@ fn scan_source(
     let mut parentheses = 0_usize;
     let mut brackets = 0_usize;
     let mut statement_start = true;
+    let mut statement_offset = None;
     for (index, &byte) in masked.iter().enumerate() {
         if index.is_multiple_of(CHECK_INTERVAL) {
             cancellation.check()?;
@@ -399,6 +425,7 @@ fn scan_source(
             && statement_start
             && !byte.is_ascii_whitespace()
         {
+            statement_offset = Some(index);
             if let Some(mut declaration) = parse_declaration(&masked, source, index) {
                 let next = declarations
                     .len()
@@ -475,6 +502,17 @@ fn scan_source(
                     .last()
                     .is_some_and(|declaration| declaration.opening == Some(index))
                     .then(|| declarations.len() - 1);
+                let keyframes_body = parent.is_some_and(|scope| scopes[scope].keyframes_body)
+                    || statement_offset
+                        .and_then(|start| keyframes_keyword_end(&masked, start))
+                        .is_some();
+                let selector_header = if owner.is_none()
+                    && !parent.is_some_and(|scope| scopes[scope].keyframes_body)
+                {
+                    style_rule_header(&masked, statement_offset, index)
+                } else {
+                    None
+                };
                 let depth = scope_stack.len().saturating_mul(2).saturating_add(1)
                     + usize::from(owner.is_some());
                 scopes
@@ -486,6 +524,8 @@ fn scan_source(
                     end: source.len(),
                     parent,
                     owner,
+                    selector_header,
+                    keyframes_body,
                     depth,
                 });
                 scope_stack
@@ -493,18 +533,50 @@ fn scan_source(
                     .map_err(|_| SinkError::AllocationFailed)?;
                 scope_stack.push(scope_index);
                 statement_start = true;
+                statement_offset = None;
             }
             b'}' if interpolation_depth != 0 => {
                 interpolation_depth -= 1;
             }
             b'}' if parentheses == 0 && brackets == 0 => {
                 if let Some(scope_index) = scope_stack.pop() {
-                    scopes[scope_index].end = index + 1;
+                    let end = index + 1;
+                    scopes[scope_index].end = end;
+                    if let Some((name_start, name_end)) = scopes[scope_index].selector_header.take()
+                    {
+                        let next = declarations
+                            .len()
+                            .checked_add(1)
+                            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+                        if syntax_fact_count(next, scopes.len(), calls.len(), imports.len())?
+                            > max_syntax_nodes
+                        {
+                            return Err(failure("scss-syntax-node-limit"));
+                        }
+                        let declaration_index = declarations.len();
+                        declarations
+                            .try_reserve(1)
+                            .map_err(|_| SinkError::AllocationFailed)?;
+                        declarations.push(Declaration {
+                            kind: DeclarationKind::StyleRule,
+                            start: name_start,
+                            end,
+                            name_start,
+                            name_end,
+                            opening: Some(scopes[scope_index].start),
+                            scope: scopes[scope_index].parent,
+                            depth: scope_stack.len().saturating_mul(2).saturating_add(1),
+                        });
+                        scopes[scope_index].owner = Some(declaration_index);
+                        scopes[scope_index].depth = scopes[scope_index].depth.saturating_add(1);
+                    }
                 }
                 statement_start = true;
+                statement_offset = None;
             }
             b';' if parentheses == 0 && brackets == 0 && interpolation_depth == 0 => {
                 statement_start = true;
+                statement_offset = None;
             }
             _ => {}
         }
@@ -516,6 +588,43 @@ fn scan_source(
         calls,
         imports,
     })
+}
+
+fn style_rule_header(
+    source: &[u8],
+    start: Option<usize>,
+    opening: usize,
+) -> Option<(usize, usize)> {
+    let start = start?;
+    let header = source.get(start..opening)?;
+    let first = *header.first()?;
+    if matches!(first, b'@' | b'$') {
+        return None;
+    }
+    let last = header
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())?;
+    if header.get(last) == Some(&b':') {
+        return None;
+    }
+    Some((start, start.checked_add(last)?.checked_add(1)?))
+}
+
+fn keyframes_keyword_end(source: &[u8], start: usize) -> Option<usize> {
+    let tail = source.get(start..)?;
+    let length = tail.iter().position(u8::is_ascii_whitespace)?;
+    let keyword = tail.get(..length)?;
+    if keyword != b"@keyframes" {
+        let vendor = keyword.strip_prefix(b"@-")?.strip_suffix(b"-keyframes")?;
+        if vendor.is_empty()
+            || !vendor
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        {
+            return None;
+        }
+    }
+    start.checked_add(length)
 }
 
 fn parse_quoted_import_paths(
@@ -649,7 +758,8 @@ fn parse_declaration(masked: &[u8], source: &[u8], start: usize) -> Option<Decla
         } else if masked.get(start..)?.starts_with(b"@function") {
             (DeclarationKind::Function, 9)
         } else {
-            return None;
+            let end = keyframes_keyword_end(masked, start)?;
+            (DeclarationKind::Keyframes, end.checked_sub(start)?)
         };
         let after_keyword = start.checked_add(keyword_len)?;
         if !masked.get(after_keyword)?.is_ascii_whitespace() {
@@ -671,9 +781,9 @@ fn parse_declaration(masked: &[u8], source: &[u8], start: usize) -> Option<Decla
                 .any(|byte| !byte.is_ascii_whitespace())
                 .then_some((end, None))?
         }
-        DeclarationKind::Mixin | DeclarationKind::Function => {
+        DeclarationKind::Mixin | DeclarationKind::Function | DeclarationKind::Keyframes => {
             let mut opening = after_name;
-            if masked.get(opening) == Some(&b'(') {
+            if kind != DeclarationKind::Keyframes && masked.get(opening) == Some(&b'(') {
                 let mut parentheses = 1_usize;
                 opening += 1;
                 while let Some(&byte) = masked.get(opening) {
@@ -718,6 +828,7 @@ fn parse_declaration(masked: &[u8], source: &[u8], start: usize) -> Option<Decla
             }
             (ending?, Some(opening))
         }
+        DeclarationKind::StyleRule => return None,
     };
     Some(Declaration {
         kind,
@@ -858,7 +969,7 @@ mod tests {
     fn scans_nested_declarations_without_comment_or_string_lookalikes() {
         let source = b"$accent: #123;\n@mixin card($r) { border-radius: $r; }\n@function scale($x) { @return $x * 2; }\n/* $ghost: red; */\n.note { content: \"@mixin phantom {}\"; $nested: blue; }\n";
         let result = scan_source(source, 64, &Cancellation::new()).unwrap();
-        assert_eq!(result.declarations.len(), 4);
+        assert_eq!(result.declarations.len(), 5);
         assert_eq!(
             result
                 .declarations
@@ -873,6 +984,7 @@ mod tests {
                 (&b"card"[..], DeclarationKind::Mixin),
                 (&b"scale"[..], DeclarationKind::Function),
                 (&b"nested"[..], DeclarationKind::Variable),
+                (&b".note"[..], DeclarationKind::StyleRule),
             ]
         );
         assert_eq!(result.scopes.len(), 3);
@@ -971,5 +1083,48 @@ mod tests {
             );
         }
         assert!(scan_source(b"@import \"path.scss\";", 1, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn completes_nested_style_rules_without_promoting_at_rules_or_property_groups() {
+        let source = b"@media screen { .card, .tile { &:hover { color: red; } font: { size: 10px; } } }\n@mixin helper { .inside { color: blue; } }\n.unclosed {";
+        let result = scan_source(source, 64, &Cancellation::new()).unwrap();
+        let mut selectors = result
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.kind == DeclarationKind::StyleRule)
+            .map(|declaration| &source[declaration.name_start..declaration.name_end])
+            .collect::<Vec<_>>();
+        selectors.sort_unstable();
+        assert_eq!(
+            selectors,
+            [&b"&:hover"[..], &b".card, .tile"[..], &b".inside"[..]]
+        );
+        assert!(
+            scan_source(b".unclosed {", 64, &Cancellation::new())
+                .unwrap()
+                .declarations
+                .is_empty()
+        );
+        assert!(scan_source(b".complete {}", 4, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn separates_keyframe_names_from_timeline_steps_and_style_selectors() {
+        let source = b"@keyframes pulse { from { opacity: 0; } @if $enabled { 50% { opacity: .5; } } }\n@-webkit-keyframes fade { to { opacity: 1; } }\n@keyframes #{$dynamic} { 25% { opacity: 1; } }\n.actual { color: red; }";
+        let result = scan_source(source, 128, &Cancellation::new()).unwrap();
+        let names = |kind| {
+            result
+                .declarations
+                .iter()
+                .filter(|declaration| declaration.kind == kind)
+                .map(|declaration| &source[declaration.name_start..declaration.name_end])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(DeclarationKind::Keyframes),
+            [&b"pulse"[..], &b"fade"[..]]
+        );
+        assert_eq!(names(DeclarationKind::StyleRule), [&b".actual"[..]]);
     }
 }

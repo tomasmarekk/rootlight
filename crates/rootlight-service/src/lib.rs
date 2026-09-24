@@ -29560,7 +29560,7 @@ mod tests {
             .document()
             .entities
             .iter()
-            .filter(|entity| entity.language == "scss")
+            .filter(|entity| entity.language == "scss" && entity.kind != EntityKind::StyleRule)
             .collect::<Vec<_>>();
         entities.sort_unstable_by_key(|entity| entity.canonical_name.as_str());
         assert_eq!(
@@ -29676,6 +29676,101 @@ mod tests {
             )
             .expect("SCSS include source resolves");
         assert_eq!(read.data.chunks[0].bytes, b"card");
+    }
+
+    #[test]
+    fn scss_nested_style_rules_have_source_backed_selector_identities() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@media (min-width: 10px) {\n.card, .tile { color: red; &:hover { color: blue; } font: { size: 10px; } }\n}\n@mixin helper { .inside { color: green; } }\n.note { content: \".ghost { color: red; }\"; }\n// .comment { color: red; }\n.incomplete {\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let rules = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "scss" && entity.kind == EntityKind::StyleRule)
+            .collect::<Vec<_>>();
+        let mut names = rules
+            .iter()
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["&:hover", ".card, .tile", ".inside", ".note"]);
+        let card = rules
+            .iter()
+            .find(|entity| entity.canonical_name == ".card, .tile")
+            .expect("outer style rule has an identity");
+        let hover = rules
+            .iter()
+            .find(|entity| entity.canonical_name == "&:hover")
+            .expect("nested style rule has an identity");
+        assert_eq!(
+            hover.container,
+            Some(rootlight_ir::ContainerRef::Entity(card.id))
+        );
+        for rule in rules {
+            let definition = generation
+                .document()
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.syntax_kind == "scss.selector.definition"
+                        && occurrence.target
+                            == rootlight_ir::OccurrenceTarget::Resolved { symbol: rule.id }
+                })
+                .expect("style rule retains a selector definition");
+            let reference = &definition.source;
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("SCSS selector source resolves");
+            assert_eq!(read.data.chunks[0].bytes, rule.canonical_name.as_bytes());
+        }
+    }
+
+    #[test]
+    fn scss_keyframes_do_not_misclassify_timeline_steps_as_style_rules() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@keyframes pulse { from { opacity: 0; } 50% { opacity: .5; } to { opacity: 1; } }\n.actual { animation: pulse 1s; }\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let entities = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "scss")
+            .map(|entity| (entity.canonical_name.as_str(), entity.kind))
+            .collect::<Vec<_>>();
+        assert!(entities.contains(&("pulse", EntityKind::Keyframes)));
+        assert_eq!(
+            entities
+                .iter()
+                .filter(|(_, kind)| *kind == EntityKind::StyleRule)
+                .copied()
+                .collect::<Vec<_>>(),
+            [(".actual", EntityKind::StyleRule)]
+        );
     }
 
     #[test]
