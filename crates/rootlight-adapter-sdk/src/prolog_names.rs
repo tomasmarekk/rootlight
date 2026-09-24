@@ -1,6 +1,6 @@
-//! Source-backed identity for simple Prolog clause heads.
+//! Source-backed identity for simple Prolog predicate and DCG heads.
 //! The parser and structural lowering share this boundary so a captured head
-//! cannot acquire a different predicate arity during normalization.
+//! cannot acquire a different arity or indicator kind during normalization.
 
 /// Returns the written atom and arity of an unqualified clause head.
 ///
@@ -33,6 +33,17 @@ pub fn predicate_head(text: &str) -> Option<(&str, usize)> {
 pub fn canonical_predicate_head(text: &str, maximum_bytes: usize) -> Option<String> {
     let (name, arity) = predicate_head(text)?;
     let indicator = format!("{name}/{arity}");
+    (indicator.len() <= maximum_bytes).then_some(indicator)
+}
+
+/// Returns the canonical DCG nonterminal indicator from a source-backed head.
+///
+/// The `//` identity is distinct from the ordinary predicate's `/` identity;
+/// no assumption is made about a particular Prolog engine's DCG expansion.
+#[must_use]
+pub fn canonical_nonterminal_head(text: &str, maximum_bytes: usize) -> Option<String> {
+    let (name, arity) = predicate_head(text)?;
+    let indicator = format!("{name}//{arity}");
     (indicator.len() <= maximum_bytes).then_some(indicator)
 }
 
@@ -111,7 +122,7 @@ fn argument_count(args: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_predicate_head, predicate_head};
+    use super::{canonical_nonterminal_head, canonical_predicate_head, predicate_head};
 
     #[test]
     fn clause_head_identity_keeps_arity_and_exact_written_atom() {
@@ -129,6 +140,11 @@ mod tests {
             Some("edge/2".to_owned())
         );
         assert_eq!(canonical_predicate_head("edge(A, B)", 5), None);
+        assert_eq!(
+            canonical_nonterminal_head("edge(A, B)", 7),
+            Some("edge//2".to_owned())
+        );
+        assert_eq!(canonical_nonterminal_head("edge(A, B)", 6), None);
     }
 
     #[test]

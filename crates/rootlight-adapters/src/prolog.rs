@@ -111,6 +111,18 @@ impl ParseProvider for PrologParseProvider {
         ));
         for (index, clause) in parsed.groups.iter().enumerate() {
             cancellation.check()?;
+            let (declaration_label, signature_label, definition_label) = match clause.kind {
+                ClauseKind::Predicate => (
+                    "prolog.predicate.declaration",
+                    "prolog.predicate.signature",
+                    "prolog.predicate.definition",
+                ),
+                ClauseKind::Nonterminal => (
+                    "prolog.nonterminal.declaration",
+                    "prolog.nonterminal.signature",
+                    "prolog.nonterminal.definition",
+                ),
+            };
             let local_id = u64::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_mul(3))
@@ -123,7 +135,7 @@ impl ParseProvider for PrologParseProvider {
                 SyntaxFactKind::Declaration,
                 source_span(file, clause.head_start, clause.clause_end)?,
                 1,
-                label("prolog.predicate.declaration"),
+                label(declaration_label),
             ));
             facts.push(SyntaxFact::new(
                 local_id + 1,
@@ -131,7 +143,7 @@ impl ParseProvider for PrologParseProvider {
                 SyntaxFactKind::Signature,
                 head,
                 2,
-                label("prolog.predicate.signature"),
+                label(signature_label),
             ));
             facts.push(SyntaxFact::new(
                 local_id + 2,
@@ -139,7 +151,7 @@ impl ParseProvider for PrologParseProvider {
                 SyntaxFactKind::Occurrence,
                 head,
                 2,
-                label("prolog.predicate.definition"),
+                label(definition_label),
             ));
         }
         for batch in facts.chunks(32) {
@@ -189,6 +201,13 @@ struct Clause {
     clause_end: usize,
     name_end: usize,
     arity: usize,
+    kind: ClauseKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClauseKind {
+    Predicate,
+    Nonterminal,
 }
 
 struct ParsedSource {
@@ -243,6 +262,7 @@ fn scan_source(
                     let same_group = previous_groupable
                         && clauses.last().is_some_and(|previous: &Clause| {
                             previous.arity == clause.arity
+                                && previous.kind == clause.kind
                                 && source[previous.head_start..previous.name_end]
                                     == source[clause.head_start..clause.name_end]
                         });
@@ -302,12 +322,18 @@ fn clause_head(source: &[u8], masked: &[u8], start: usize, end: usize) -> Option
     let mut brackets = 0_usize;
     let mut braces = 0_usize;
     let mut head_end = end;
+    let mut kind = ClauseKind::Predicate;
     let mut index = start;
     while index < end {
         let tail = masked.get(index..end)?;
         if parens == 0 && brackets == 0 && braces == 0 {
-            if tail.starts_with(b"-->") || tail.starts_with(b":+") {
+            if tail.starts_with(b":+") {
                 return None;
+            }
+            if tail.starts_with(b"-->") {
+                kind = ClauseKind::Nonterminal;
+                head_end = index;
+                break;
             }
             if tail.starts_with(b":-") {
                 head_end = index;
@@ -333,6 +359,7 @@ fn clause_head(source: &[u8], masked: &[u8], start: usize, end: usize) -> Option
         clause_end: end + 1,
         name_end: start + name.len(),
         arity,
+        kind,
     })
 }
 
@@ -476,15 +503,27 @@ mod tests {
     }
 
     #[test]
-    fn comments_literals_dcg_and_unclosed_source_cannot_invent_predicates() {
+    fn comments_literals_and_unclosed_source_cannot_invent_predicates() {
         let source = b"/* nested /* edge(fake). */ */\nrule(X) --> [X].\nquery(X) :+ answer(X).\nactual('ignored ).', [a,b]).\n% ghost(X).\nunfinished(X\n";
         let parsed = scan_source(source, 10, &Cancellation::new()).expect("bounded source");
-        assert_eq!(parsed.groups.len(), 1);
-        let clause = parsed.groups[0];
+        assert_eq!(parsed.groups.len(), 2);
+        assert_eq!(parsed.groups[0].kind, ClauseKind::Nonterminal);
+        let clause = parsed.groups[1];
         assert_eq!(
             &source[clause.head_start..clause.head_end],
             b"actual('ignored ).', [a,b])"
         );
+    }
+
+    #[test]
+    fn dcg_and_predicate_groups_never_merge_at_the_same_written_arity() {
+        let source = b"phrase(X) --> [X].\nphrase(Y) --> [Y].\nphrase(X) :- X = plain.\n";
+        let parsed = scan_source(source, 10, &Cancellation::new()).expect("bounded source");
+        assert_eq!(parsed.clause_count, 3);
+        assert_eq!(parsed.groups.len(), 2);
+        assert_eq!(parsed.groups[0].kind, ClauseKind::Nonterminal);
+        assert_eq!(parsed.groups[1].kind, ClauseKind::Predicate);
+        assert_eq!(syntax_fact_count(&parsed.groups), 7);
     }
 
     #[test]

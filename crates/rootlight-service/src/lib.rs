@@ -29469,10 +29469,11 @@ mod tests {
             .iter()
             .filter(|entity| entity.language == "prolog")
             .collect::<Vec<_>>();
-        let names = definitions
+        let mut names = definitions
             .iter()
             .map(|entity| entity.canonical_name.as_str())
             .collect::<Vec<_>>();
+        names.sort_unstable();
         assert_eq!(names, ["relation/1", "relation/2"]);
         for entity in definitions {
             let reference = entity
@@ -29510,6 +29511,61 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn prolog_dcg_nonterminal_identity_stays_distinct_from_predicate_identity() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "phrase(X) :- X = plain.\nphrase(X) --> [X].\nphrase(Y) --> [Y].\n";
+        fs::write(fixture.path().join("grammar.pl"), source).expect("Prolog source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("DCG source indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let mut names = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "prolog")
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["phrase//1", "phrase/1"]);
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "phrase//1".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("nonterminal indicator locates");
+        let symbol = located
+            .data
+            .hits
+            .iter()
+            .find_map(|hit| hit.symbol)
+            .expect("nonterminal retains a symbol");
+        let explained = service
+            .symbol_explain(receipt.generation, symbol, &deadline())
+            .expect("nonterminal explains");
+        assert_eq!(explained.data.entity.canonical_name, "phrase//1");
+        let reference = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol == Some(symbol))
+            .and_then(|hit| hit.source.clone())
+            .expect("nonterminal retains source evidence");
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("nonterminal source reads");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
     }
 
     #[test]
