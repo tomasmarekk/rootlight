@@ -77,6 +77,9 @@ pub(super) fn hints(mut source: &[u8]) -> Hints {
             return Hints::default();
         }
         code_seen = true;
+        if first == b'[' && statement_start {
+            result.script |= multi_output_assignment(source);
+        }
         if first == b'[' && assignment {
             result.script |= numeric_matrix(rest);
         }
@@ -192,6 +195,50 @@ fn numeric_matrix(mut source: &[u8]) -> bool {
         source = source.get(length..).unwrap_or_default();
         value_seen = true;
     }
+}
+
+fn multi_output_assignment(source: &[u8]) -> bool {
+    let Some(mut source) = source.strip_prefix(b"[") else {
+        return false;
+    };
+    let mut outputs = 0;
+    loop {
+        source = trim_horizontal(source);
+        let Some(first) = source.first() else {
+            return false;
+        };
+        if !first.is_ascii_alphabetic() && *first != b'_' {
+            return false;
+        }
+        let length = source
+            .iter()
+            .take_while(|byte| identifier_byte(**byte))
+            .count();
+        source = trim_horizontal(source.get(length..).unwrap_or_default());
+        outputs += 1;
+        if let Some(tail) = source.strip_prefix(b",") {
+            source = tail;
+            continue;
+        }
+        let Some(tail) = source.strip_prefix(b"]") else {
+            return false;
+        };
+        let tail = trim_horizontal(tail);
+        return outputs >= 2
+            && tail.strip_prefix(b"=").is_some_and(|rhs| {
+                trim_horizontal(rhs)
+                    .first()
+                    .is_some_and(|byte| !matches!(byte, b'=' | b'\r' | b'\n'))
+            });
+    }
+}
+
+fn trim_horizontal(source: &[u8]) -> &[u8] {
+    source
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .and_then(|start| source.get(start..))
+        .unwrap_or_default()
 }
 
 fn identifier_byte(byte: u8) -> bool {

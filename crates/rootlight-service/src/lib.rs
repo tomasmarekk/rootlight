@@ -25831,6 +25831,47 @@ mod tests {
     }
 
     #[test]
+    fn matlab_multi_output_script_is_indexed_and_source_readable() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "[alpha, beta] = make_pair();\nresult = alpha + beta;\n";
+        fs::write(fixture.path().join("measure.m"), source).unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("MATLAB script publishes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let file = snapshot
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "measure.m")
+            .unwrap();
+        assert_eq!(file.language, "matlab");
+        let reference = file.evidence.source.clone().unwrap();
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read(receipt.generation, vec![reference], &cancellation)
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "alpha".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .unwrap();
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.path == "measure.m" && hit.language == "matlab" && hit.symbol.is_some()
+        }));
+    }
+
+    #[test]
     fn public_indexing_disambiguates_cpp_headers_from_syntax() {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(

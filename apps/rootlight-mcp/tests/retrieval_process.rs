@@ -1061,6 +1061,16 @@ fn matlab_script_bindings_cross_mcp_without_function_headers() {
             ("result", "variable", "result"),
         ],
     );
+    assert_lexical_relationship_sources(
+        "matlab",
+        "outputs.m",
+        "[alpha, beta] = make_pair();\nresult = alpha + beta;\ndisp(result);\n",
+        &[
+            ("alpha", "variable", "alpha"),
+            ("beta", "variable", "beta"),
+            ("result", "variable", "result"),
+        ],
+    );
 }
 
 #[test]
