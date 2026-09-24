@@ -584,10 +584,6 @@ fn assert_repository_lifecycle(observe_background_noop: bool) {
         structured["data"]["coverage"]["languages"][0]["language"],
         "rust"
     );
-    assert_eq!(
-        structured["data"]["recommended_actions"],
-        json!(["index repository"])
-    );
     assert_eq!(structured["warnings"][0]["code"], "stale_generation");
     assert!(
         structured["usage"]["json_bytes"]
@@ -604,6 +600,22 @@ fn assert_repository_lifecycle(observe_background_noop: bool) {
     let operations = structured["data"]["operations"]
         .as_array()
         .expect("repo.status returns requested operation details");
+    // Watcher work may be active in this snapshot, so the action must agree
+    // with the returned operation history rather than an earlier receipt.
+    let inspect_operation = operations.iter().any(|operation| {
+        matches!(
+            operation["state"].as_str(),
+            Some("queued" | "running" | "failed")
+        )
+    });
+    assert_eq!(
+        structured["data"]["recommended_actions"],
+        if inspect_operation {
+            json!(["index repository", "inspect operation"])
+        } else {
+            json!(["index repository"])
+        }
+    );
     // Watcher work can begin after publication; availability must reflect
     // the operation snapshot rather than the preceding index receipt.
     let has_active_operation =
