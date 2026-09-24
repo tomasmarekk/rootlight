@@ -23924,6 +23924,86 @@ mod tests {
     }
 
     #[test]
+    fn structural_javascript_references_exclude_sibling_and_foreign_bindings() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "function outer() { const shared = 1; function inner() { return shared; } }\nfunction sibling() { const shared = 2; return shared; }\n";
+        fs::write(fixture.path().join("main.js"), source).expect("main source writes");
+        fs::write(fixture.path().join("other.js"), "const shared = 3;\n")
+            .expect("foreign source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("JavaScript source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let main_file = document
+            .files
+            .iter()
+            .find(|file| file.path == "main.js")
+            .expect("main source is indexed")
+            .id;
+        let mut definitions = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.language == "javascript"
+                    && entity.canonical_name == "shared"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == main_file)
+            })
+            .collect::<Vec<_>>();
+        definitions.sort_unstable_by_key(|entity| {
+            entity
+                .evidence
+                .source
+                .as_ref()
+                .expect("definition has source")
+                .span()
+                .start_byte()
+        });
+        assert_eq!(definitions.len(), 2);
+        let mut references = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.file == main_file
+                    && occurrence.syntax_kind == "javascript.identifier.reference"
+                    && occurrence.syntactic_text_hash == content_hash(b"shared")
+                    && occurrence.role == OccurrenceRole::Reference
+            })
+            .collect::<Vec<_>>();
+        references.sort_unstable_by_key(|occurrence| occurrence.source.span().start_byte());
+        assert_eq!(references.len(), 2);
+        for (site, definition) in references.into_iter().zip(definitions) {
+            let candidates = match &site.target {
+                OccurrenceTarget::Resolved { symbol } => vec![*symbol],
+                OccurrenceTarget::Candidates { symbols, .. } => symbols.clone(),
+                OccurrenceTarget::Unresolved { .. } => Vec::new(),
+            };
+            assert_eq!(candidates, [definition.id]);
+            assert_eq!(site.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("JavaScript reference source resolves");
+            assert_eq!(read.data.chunks[0].bytes, b"shared");
+        }
+    }
+
+    #[test]
     fn public_indexing_makes_python_queryable_at_tier_d() {
         assert_public_language_repository(
             &[("src/value.py", "def python_value():\n    return 1\n")],

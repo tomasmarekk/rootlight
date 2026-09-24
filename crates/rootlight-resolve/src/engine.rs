@@ -121,68 +121,22 @@ impl ResolutionEngine {
         validate_ir_document(document, &IrLimits::default(), &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
-        if document.files.iter().any(|file| file.language == "groovy")
-            || document
-                .extensions
-                .iter()
-                .any(|extension| extension.namespace == rootlight_ir::PERL_BINDING_NAMESPACE)
-        {
-            let index = CandidateIndex::build(
-                &document.files,
-                &document.entities,
-                &document.provenance,
-                &document.extensions,
-                &document.coverage_records,
-                &document.occurrences,
-                cancellation,
-            )?;
-            let mut required = 0_usize;
-            for occurrence in &document.occurrences {
-                cancellation.check()?;
-                required = required
-                    .checked_add(index.occurrence_work(occurrence)?.unwrap_or(0))
-                    .ok_or(ResolutionError::CountOverflow)?;
-            }
-            return Ok(ResolutionWorkEstimate {
-                required,
-                limit: self.limits.work_limit(),
-            });
-        }
-
-        let mut entities_by_name = BTreeMap::<ContentHash, BTreeSet<SymbolId>>::new();
-        for entity in &document.entities {
+        let index = CandidateIndex::build(
+            &document.files,
+            &document.entities,
+            &document.provenance,
+            &document.extensions,
+            &document.coverage_records,
+            &document.occurrences,
+            cancellation,
+        )?;
+        let mut required = 0_usize;
+        for occurrence in &document.occurrences {
             cancellation.check()?;
-            for name in [
-                entity.canonical_name.as_bytes(),
-                entity.display_name.as_bytes(),
-                entity.qualified_name.as_bytes(),
-            ] {
-                entities_by_name
-                    .entry(content_hash(name))
-                    .or_default()
-                    .insert(entity.id);
-            }
+            required = required
+                .checked_add(index.occurrence_work(occurrence)?.unwrap_or(0))
+                .ok_or(ResolutionError::CountOverflow)?;
         }
-        let required = document
-            .occurrences
-            .iter()
-            .try_fold(0_usize, |required, occurrence| {
-                cancellation.check()?;
-                if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-                    || !resolvable_occurrence(occurrence)
-                {
-                    return Ok(required);
-                }
-                required
-                    .checked_add(1)
-                    .ok_or(ResolutionError::CountOverflow)?
-                    .checked_add(
-                        entities_by_name
-                            .get(&occurrence.syntactic_text_hash)
-                            .map_or(0, BTreeSet::len),
-                    )
-                    .ok_or(ResolutionError::CountOverflow)
-            })?;
         Ok(ResolutionWorkEstimate {
             required,
             limit: self.limits.work_limit(),
@@ -249,11 +203,22 @@ impl ResolutionEngine {
         } else {
             ResolutionRule::LexicalScope
         };
-        let same_spelling = index
-            .by_name_hash
-            .get(&occurrence.syntactic_text_hash)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let scoped_javascript = is_javascript_lexical_reference(occurrence, index);
+        let (scoped_candidates, scope_work) = if scoped_javascript {
+            index.javascript_lexical_candidates(occurrence)
+        } else {
+            (Vec::new(), 0)
+        };
+        work.consume_many(scope_work)?;
+        let same_spelling = if scoped_javascript {
+            scoped_candidates.as_slice()
+        } else {
+            index
+                .by_name_hash
+                .get(&occurrence.syntactic_text_hash)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        };
         let mut candidates = BinaryHeap::with_capacity(self.limits.candidate_limit());
         let mut rejected = Vec::new();
         let mut candidate_total = 0_u64;
@@ -743,6 +708,7 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
+    javascript_by_scope: BTreeMap<(ContentHash, FileId, ContainerRef), Vec<IndexedCandidate<'a>>>,
     pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
     pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
     pub(crate) provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
@@ -772,6 +738,7 @@ impl<'a> CandidateIndex<'a> {
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
+        let mut javascript_by_scope = BTreeMap::new();
         let mut entities = BTreeMap::new();
         let mut files = BTreeMap::new();
         let mut provenance = BTreeMap::new();
@@ -800,12 +767,38 @@ impl<'a> CandidateIndex<'a> {
                 entity,
                 NameMatch::Qualified,
             );
+            if entity.language == "javascript"
+                && let Some(file) = entity_source_file(entity)
+            {
+                // Bare names cannot bind declarations in sibling functions or
+                // unrelated files without source-owned import evidence.
+                let owner = match entity.container {
+                    Some(ContainerRef::Entity(parent)) => ContainerRef::Entity(parent),
+                    Some(ContainerRef::File(file)) => ContainerRef::File(file),
+                    Some(ContainerRef::Repository(_)) | None => ContainerRef::File(file),
+                };
+                for (name, name_match) in [
+                    (entity.canonical_name.as_bytes(), NameMatch::Canonical),
+                    (entity.display_name.as_bytes(), NameMatch::Display),
+                    (entity.qualified_name.as_bytes(), NameMatch::Qualified),
+                ] {
+                    let indexed = IndexedCandidate { entity, name_match };
+                    javascript_by_scope
+                        .entry((content_hash(name), file, owner))
+                        .or_insert_with(Vec::new)
+                        .push(indexed);
+                }
+            }
         }
         for record in provenance_records {
             cancellation.check()?;
             provenance.insert(record.id, record);
         }
         for entries in by_name_hash.values_mut() {
+            entries.sort_unstable_by_key(|entry| (entry.entity.id, entry.name_match));
+            entries.dedup_by_key(|entry| entry.entity.id);
+        }
+        for entries in javascript_by_scope.values_mut() {
             entries.sort_unstable_by_key(|entry| (entry.entity.id, entry.name_match));
             entries.dedup_by_key(|entry| entry.entity.id);
         }
@@ -828,6 +821,7 @@ impl<'a> CandidateIndex<'a> {
                 cancellation,
             )?,
             by_name_hash,
+            javascript_by_scope,
             entities,
             files,
             provenance,
@@ -863,6 +857,14 @@ impl<'a> CandidateIndex<'a> {
         {
             return Ok(None);
         }
+        if is_javascript_lexical_reference(occurrence, self) {
+            let (candidates, scope_work) = self.javascript_lexical_candidates(occurrence);
+            return 1_usize
+                .checked_add(scope_work)
+                .and_then(|work| work.checked_add(candidates.len()))
+                .map(Some)
+                .ok_or(ResolutionError::CountOverflow);
+        }
         1_usize
             .checked_add(
                 self.by_name_hash
@@ -872,6 +874,59 @@ impl<'a> CandidateIndex<'a> {
             .map(Some)
             .ok_or(ResolutionError::CountOverflow)
     }
+
+    fn javascript_lexical_candidates(
+        &self,
+        occurrence: &OccurrenceRecord,
+    ) -> (Vec<IndexedCandidate<'a>>, usize) {
+        let mut candidates = Vec::new();
+        let hash = occurrence.syntactic_text_hash;
+        if let Some(entries) = self.javascript_by_scope.get(&(
+            hash,
+            occurrence.file,
+            ContainerRef::File(occurrence.file),
+        )) {
+            candidates.extend_from_slice(entries);
+        }
+        let mut scope_work = 0;
+        let mut current = occurrence.enclosing;
+        let mut visited = BTreeSet::new();
+        for _ in 0..MAX_SCOPE_DEPTH {
+            let Some(symbol) = current else { break };
+            if !visited.insert(symbol) {
+                break;
+            }
+            scope_work += 1;
+            if let Some(entries) =
+                self.javascript_by_scope
+                    .get(&(hash, occurrence.file, ContainerRef::Entity(symbol)))
+            {
+                candidates.extend_from_slice(entries);
+            }
+            current = self.entities.get(&symbol).and_then(|entity| {
+                if let Some(ContainerRef::Entity(parent)) = entity.container {
+                    Some(parent)
+                } else {
+                    None
+                }
+            });
+        }
+        candidates.sort_unstable_by_key(|entry| (entry.entity.id, entry.name_match));
+        candidates.dedup_by_key(|entry| entry.entity.id);
+        (candidates, scope_work)
+    }
+}
+
+fn is_javascript_lexical_reference(
+    occurrence: &OccurrenceRecord,
+    index: &CandidateIndex<'_>,
+) -> bool {
+    occurrence.role == OccurrenceRole::Reference
+        && occurrence.syntax_kind == "javascript.identifier.reference"
+        && index
+            .files
+            .get(&occurrence.file)
+            .is_some_and(|file| file.language == "javascript")
 }
 
 fn score_candidate(

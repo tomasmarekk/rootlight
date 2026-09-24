@@ -979,6 +979,61 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
 }
 
 #[test]
+fn javascript_lexical_references_inspect_only_visible_owners() {
+    let mut fixture = Fixture::new();
+    let file = fixture.primary_file;
+    let outer = fixture.add_entity(10, "outer", file, EntityKind::Function, None);
+    let inner = fixture.add_entity(11, "inner", file, EntityKind::Function, Some(outer));
+    let local = fixture.add_entity(12, "shared", file, EntityKind::Variable, Some(outer));
+    for identity in 20..28 {
+        let sibling = fixture.add_entity(identity, "sibling", file, EntityKind::Function, None);
+        fixture.add_entity(
+            identity + 20,
+            "shared",
+            file,
+            EntityKind::Variable,
+            Some(sibling),
+        );
+    }
+    let foreign_file = fixture.add_file(70, "src/other.js");
+    fixture.add_entity(71, "shared", foreign_file, EntityKind::Variable, None);
+    fixture.add_entity(72, "remote", foreign_file, EntityKind::Variable, None);
+    fixture.add_occurrence(80, "shared", file, OccurrenceRole::Reference, Some(inner));
+    fixture.add_occurrence(81, "remote", file, OccurrenceRole::Reference, Some(inner));
+    for file in &mut fixture.document.files {
+        file.language = "javascript".to_owned();
+    }
+    fixture.document.provenance[0].language = "javascript".to_owned();
+    for entity in &mut fixture.document.entities {
+        entity.language = "javascript".to_owned();
+    }
+    for occurrence in &mut fixture.document.occurrences {
+        occurrence.syntax_kind = "javascript.identifier.reference".to_owned();
+    }
+    fixture.validate();
+
+    let engine = ResolutionEngine::default();
+    let estimate = engine
+        .estimate_work(&fixture.document, &Cancellation::new())
+        .expect("valid fixture has a bounded estimate");
+    assert_eq!(estimate.required, 7);
+    let batch = engine
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("visible JavaScript bindings resolve");
+    assert_eq!(batch.decisions.len(), 2);
+    assert!(matches!(
+        batch.decisions[0].outcome,
+        ResolutionOutcome::Resolved { symbol, .. } if symbol == local
+    ));
+    assert_eq!(batch.decisions[0].explanation.candidates.len(), 1);
+    assert!(matches!(
+        batch.decisions[1].outcome,
+        ResolutionOutcome::Unresolved { .. }
+    ));
+    assert!(batch.decisions[1].explanation.candidates.is_empty());
+}
+
+#[test]
 fn work_estimate_deduplicates_entity_name_aliases() {
     let mut fixture = Fixture::new();
     fixture.add_entity(
