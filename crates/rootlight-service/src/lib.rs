@@ -49,8 +49,8 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    ElmParseProvider, PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider,
-    SemanticProjectLanguage, import_runtime_trace,
+    ElmParseProvider, MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest,
+    ScssParseProvider, SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5219,6 +5219,16 @@ impl StructuralPreflight for ElmParseProvider {
     }
 }
 
+impl StructuralPreflight for MakeParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        MakeParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for PrologParseProvider {
     fn required_syntax_fact_count(
         &self,
@@ -6131,6 +6141,10 @@ impl FirstSliceService {
             ElmParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let make_parser = Arc::new(
+            MakeParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let prolog_parser = Arc::new(
             PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -6213,6 +6227,29 @@ impl FirstSliceService {
         }
         if structural_parsers
             .insert("elm".to_owned(), elm_parser as Arc<dyn StructuralPreflight>)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let make_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&make_parser) as Arc<dyn ParseProvider>;
+        let make_analyzer = TreeSitterAnalyzer::new(
+            make_provider,
+            ProducerIdentity::new("rootlight-first-slice-make-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("make").map_err(|_| FirstSliceError::Adapter)?,
+            "make-native-structural-1",
+            MakeParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("make".to_owned(), make_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "make".to_owned(),
+                make_parser as Arc<dyn StructuralPreflight>,
+            )
             .is_some()
         {
             return Err(FirstSliceError::Adapter);
@@ -25869,6 +25906,61 @@ mod tests {
         assert!(located.data.hits.iter().any(|hit| {
             hit.path == "measure.m" && hit.language == "matlab" && hit.symbol.is_some()
         }));
+    }
+
+    #[test]
+    fn make_targets_and_variables_have_exact_source_bound_identity() {
+        use rootlight_ir::{EntityKind, OccurrenceRole, OccurrenceTarget};
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source =
+            "APP := app\n.PHONY: all check\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n";
+        fs::write(fixture.path().join("Makefile"), source).unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Makefile")
+            .unwrap();
+        assert_eq!(file.language, "make");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "check" && entity.kind == EntityKind::BuildTarget
+            })
+            .unwrap();
+        assert!(document.entities.iter().any(|entity| {
+            entity.canonical_name == "APP" && entity.kind == EntityKind::Variable
+        }));
+        assert!(
+            document.occurrences.iter().any(|occurrence| {
+                occurrence.role == OccurrenceRole::Reference
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: target.id }
+                    && source.as_bytes().get(
+                        usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                            ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                    ) == Some(b"check".as_slice())
+            }),
+            "{:?}",
+            document.occurrences
+        );
     }
 
     #[test]

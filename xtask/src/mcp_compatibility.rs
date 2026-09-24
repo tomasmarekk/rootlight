@@ -343,8 +343,18 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         VerticalTool::SourceRead.contract_version(),
         |_| Ok(()),
     )?;
-    upgrade_additive_success_example(&mut tools, "query.advanced", "1.5", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.6", |_| Ok(()))?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "query.advanced",
+        VerticalTool::QueryAdvanced.contract_version(),
+        |_| Ok(()),
+    )?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "symbol.explain",
+        VerticalTool::SymbolExplain.contract_version(),
+        |_| Ok(()),
+    )?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "change.impact", "1.5", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
@@ -436,6 +446,8 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
             tool.third_legacy_output_schema_json()
         } else if tool.fourth_legacy_contract_version() == Some(output_version) {
             tool.fourth_legacy_output_schema_json()
+        } else if tool.fifth_legacy_contract_version() == Some(output_version) {
+            tool.fifth_legacy_output_schema_json()
         } else if tool.initial_contract_version() == Some(output_version) {
             tool.initial_output_schema_json()
         } else {
@@ -665,6 +677,22 @@ fn policy_snapshot() -> Value {
                 "retained_versions": ["1.0", "1.1"],
                 "kinds": ["style_rule", "keyframes", "markup_element", "markup_attribute"],
                 "required_version": "1.2",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            }, {
+                "tools": ["code.locate", "symbol.explain"],
+                "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"],
+                "kinds": ["build_target"],
+                "required_version": "1.7",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            }, {
+                "tools": ["query.advanced"],
+                "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"],
+                "kinds": ["build_target"],
+                "required_version": "1.6",
                 "public_error": ErrorCode::ProtocolMismatch,
                 "recovery": "select_supported_version",
                 "partial_result_returned": false,
@@ -1422,12 +1450,12 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.6",
+                    "current_version": "1.7",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "symbol.explain",
-                    "current_version": "1.6",
+                    "current_version": "1.7",
                     "projected_version": "1.0",
                 },
                 {
@@ -1482,7 +1510,7 @@ mod tests {
                 },
                 {
                     "tool": "query.advanced",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
             ])

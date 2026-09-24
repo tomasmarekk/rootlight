@@ -1753,6 +1753,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "make",
+        suffixes: &[".mak", ".mk"],
+        aliases: &["makefile"],
+        detectors: &["filename", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
         language: "markdown",
         suffixes: &[".markdown", ".md"],
         aliases: &[],
@@ -1978,7 +1986,16 @@ pub fn extension_language(path: &str) -> Option<&'static str> {
 #[must_use]
 pub fn filename_language(path: &str) -> Option<&'static str> {
     let name = path.rsplit(['/', '\\']).next()?;
-    name.eq_ignore_ascii_case("Jenkinsfile").then_some("groovy")
+    if name.eq_ignore_ascii_case("Jenkinsfile") {
+        Some("groovy")
+    } else if ["Makefile", "GNUmakefile", "BSDmakefile"]
+        .iter()
+        .any(|basename| name.eq_ignore_ascii_case(basename))
+    {
+        Some("make")
+    } else {
+        None
+    }
 }
 
 /// Reports a BASIC-family suffix that needs dialect evidence before parser admission.
@@ -3496,7 +3513,7 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn first_party_parsers_advertise_native_structural_analysis() {
-        for language in ["elm", "prolog", "scss"] {
+        for language in ["elm", "make", "prolog", "scss"] {
             let capability = language_capabilities()
                 .iter()
                 .find(|capability| capability.language == language)
@@ -3504,6 +3521,21 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["native"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
+    }
+
+    #[test]
+    fn make_source_names_have_native_filename_and_extension_evidence() {
+        for path in ["Makefile", "GNUmakefile", "BSDmakefile", "build/MAKEFILE"] {
+            assert_eq!(filename_language(path), Some("make"), "{path}");
+        }
+        for path in ["build.mk", "rules.MAK"] {
+            assert_eq!(extension_language(path), Some("make"), "{path}");
+        }
+        for path in ["Makefile.bak", "Makefile.txt", "build.mk.bak"] {
+            assert_ne!(filename_language(path), Some("make"), "{path}");
+            assert_ne!(extension_language(path), Some("make"), "{path}");
+        }
+        assert_eq!(canonical_language("make"), Some("make"));
     }
 
     #[test]

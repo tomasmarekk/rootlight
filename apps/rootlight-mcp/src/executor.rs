@@ -8837,6 +8837,7 @@ const fn coverage_status(status: client::CoverageStatus) -> rootlight_ir::Covera
 fn raw_entity_kinds(kind: EntityKind) -> &'static [&'static str] {
     match kind {
         EntityKind::File => &["file"],
+        EntityKind::BuildTarget => &["build_target"],
         EntityKind::Module => &["module", "namespace"],
         EntityKind::Type => &[
             "class",
@@ -8875,6 +8876,7 @@ fn raw_entity_kinds(kind: EntityKind) -> &'static [&'static str] {
 fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
     let kind = match kind {
         "file" => EntityKind::File,
+        "build_target" => EntityKind::BuildTarget,
         "module" | "namespace" => EntityKind::Module,
         "class" | "struct" | "enum" | "union" | "type_alias" | "trait" | "interface"
         | "protocol" | "type_parameter" => EntityKind::Type,

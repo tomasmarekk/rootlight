@@ -10,15 +10,15 @@ use crate::vertical::{
     RequiredNullable, ResolvedRepository, ResponseWarning, SymbolExplainData, UsageSummary,
 };
 
-/// Contract revision for source-kind locate and expert queries.
-pub const QUERY_VERSION: &str = "1.5";
-/// Contract revision for source-kind explanations.
-pub const EXPLAIN_VERSION: &str = "1.6";
+/// Contract revision for build-target-aware advanced queries.
+pub const QUERY_VERSION: &str = "1.6";
+/// Contract revision for build-target-aware explanations.
+pub const EXPLAIN_VERSION: &str = "1.7";
 /// Contract revision for change results containing source entities.
 pub const CHANGE_VERSION: &str = "1.5";
 
-/// Contract revision for locate results with explicit extracted-source origins.
-pub const LOCATE_VERSION: &str = "1.6";
+/// Contract revision for build targets and explicit extracted-source origins.
+pub const LOCATE_VERSION: &str = "1.7";
 /// Contract revision for source reads with explicit extracted-source origins.
 pub const SOURCE_READ_VERSION: &str = "1.1";
 
@@ -29,6 +29,48 @@ pub enum OriginLocateVersion {
     #[serde(rename = "1.6")]
     V1_6,
 }
+
+/// Exact version of build-target-aware locate responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BuildTargetLocateVersion {
+    /// Locate contract 1.7.
+    #[serde(rename = "1.7")]
+    V1_7,
+}
+
+/// Build-target-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_7 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, BuildTargetLocateVersion>,
+    BuildTargetLocateVersion,
+>;
+
+/// Exact version of build-target-aware advanced queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BuildTargetQueryVersion {
+    /// Advanced query contract 1.6.
+    #[serde(rename = "1.6")]
+    V1_6,
+}
+
+/// Build-target-aware `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_6 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, BuildTargetQueryVersion>,
+    BuildTargetQueryVersion,
+>;
+
+/// Exact version of build-target-aware explanations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BuildTargetExplainVersion {
+    /// Explanation contract 1.7.
+    #[serde(rename = "1.7")]
+    V1_7,
+}
+
+/// Build-target-aware `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_7 = EntityToolResponse<
+    EntityReadEnvelope<SymbolExplainData, BuildTargetExplainVersion>,
+    BuildTargetExplainVersion,
+>;
 
 /// Origin-aware `code.locate` success or domain error.
 pub type CodeLocateOutputV1_6 = EntityToolResponse<

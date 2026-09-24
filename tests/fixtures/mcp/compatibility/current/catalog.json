@@ -6634,11 +6634,11 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.6",
+            "contractVersion": "1.7",
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "3e629072c59165973515bd2c6ce9fdc6bcabe0a981ca7508c460727f38741200",
+            "inputShapeHash": "750482058c08497b6c9aca3000dc56365b4c0c6e0508850339996f17da4946c8",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -6773,6 +6773,11 @@
                 {
                   "const": "file",
                   "description": "Source file.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Authored build target, not a completed build artifact.",
                   "type": "string"
                 },
                 {
@@ -7160,7 +7165,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.6",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.7",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7303,6 +7308,16 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
+                  "type": "string"
+                }
+              ]
+            },
+            "BuildTargetLocateVersion": {
+              "description": "Exact version of build-target-aware locate responses.",
+              "oneOf": [
+                {
+                  "const": "1.7",
+                  "description": "Locate contract 1.7.",
                   "type": "string"
                 }
               ]
@@ -7547,7 +7562,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/OriginLocateVersion",
+                  "$ref": "#/$defs/BuildTargetLocateVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7563,6 +7578,11 @@
                 {
                   "const": "file",
                   "description": "Source file.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Authored build target, not a completed build artifact.",
                   "type": "string"
                 },
                 {
@@ -7706,7 +7726,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/OriginLocateVersion",
+                  "$ref": "#/$defs/BuildTargetLocateVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8319,16 +8339,6 @@
             "OperationId": {
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
-            },
-            "OriginLocateVersion": {
-              "description": "Exact version of origin-aware locate responses.",
-              "oneOf": [
-                {
-                  "const": "1.6",
-                  "description": "Locate contract 1.6.",
-                  "type": "string"
-                }
-              ]
             },
             "PlanExplanation": {
               "additionalProperties": false,
@@ -8979,7 +8989,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.6",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.7",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -9004,7 +9014,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.6",
+            "contractVersion": "1.7",
             "explainSupported": true,
             "fallbackSummary": "bounded sectioned explanations with typed evidence, source preview, and provenance",
             "generation": "selects_generation",
@@ -9259,7 +9269,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.6",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.7",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.explain`.",
@@ -9373,12 +9383,12 @@
                 }
               ]
             },
-            "BindingVersion": {
-              "description": "Exact version of import- and export-aware explanations.",
+            "BuildTargetExplainVersion": {
+              "description": "Exact version of build-target-aware explanations.",
               "oneOf": [
                 {
-                  "const": "1.6",
-                  "description": "Explanation contract 1.6.",
+                  "const": "1.7",
+                  "description": "Explanation contract 1.7.",
                   "type": "string"
                 }
               ]
@@ -9603,7 +9613,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingVersion",
+                  "$ref": "#/$defs/BuildTargetExplainVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -9619,6 +9629,11 @@
                 {
                   "const": "file",
                   "description": "Source file.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Authored build target, not a completed build artifact.",
                   "type": "string"
                 },
                 {
@@ -9762,7 +9777,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingVersion",
+                  "$ref": "#/$defs/BuildTargetExplainVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -11083,7 +11098,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.6",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.7",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -34755,11 +34770,11 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.5",
+            "contractVersion": "1.6",
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "426d376141f41231f0bc7df1c9cb621f4363f18adac659581ea687bb699c3b0c",
+            "inputShapeHash": "75e9207a99545f1ad92dd3a176cabb8c0c6c55d9c4c4bed86e58beb9bc573169",
             "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
@@ -34888,6 +34903,11 @@
                 {
                   "const": "file",
                   "description": "Source file.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Authored build target, not a completed build artifact.",
                   "type": "string"
                 },
                 {
@@ -35645,7 +35665,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.5",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `query.advanced`.",
@@ -35742,12 +35762,12 @@
                 }
               ]
             },
-            "BindingQueryVersion": {
-              "description": "Exact version of import- and export-aware locate and advanced queries.",
+            "BuildTargetQueryVersion": {
+              "description": "Exact version of build-target-aware advanced queries.",
               "oneOf": [
                 {
-                  "const": "1.5",
-                  "description": "Query contract 1.5.",
+                  "const": "1.6",
+                  "description": "Advanced query contract 1.6.",
                   "type": "string"
                 }
               ]
@@ -36001,7 +36021,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingQueryVersion",
+                  "$ref": "#/$defs/BuildTargetQueryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -36040,7 +36060,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BindingQueryVersion",
+                  "$ref": "#/$defs/BuildTargetQueryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -37026,7 +37046,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.5",
+          "$id": "https://rootlight.local/schema/mcp/query.advanced/output/1.6",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

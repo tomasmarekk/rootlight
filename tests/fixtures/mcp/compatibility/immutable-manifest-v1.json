@@ -6,22 +6,22 @@
     {
       "path": "current/batch.json",
       "bytes": 2025,
-      "sha256": "12cf2db645be5b6712482b53e44b0f965c36c617740bb9e59abe93601cff1d65"
+      "sha256": "a21e69dbc99bdefdce4cd0ff06bc3301bbd31404940935cc3eda9706c1e91b8e"
     },
     {
       "path": "current/catalog.json",
-      "bytes": 1411464,
-      "sha256": "46a01c83dcc0904c863893812d1248b2ac1a00117cbd5cf89d92507a5c218ab3"
+      "bytes": 1412340,
+      "sha256": "1dfafdba279e638c5f493c2b260cf7c9373731d9154b0e6b0f209c55a5193439"
     },
     {
       "path": "current/error-examples.json",
       "bytes": 5718,
-      "sha256": "4ddd61558f8fd04bb5178c7a11689a1a7b6c7822688c5ede454d2e574d7fd294"
+      "sha256": "c2b3064fd751521af8fe9c26fcd94d2151a456198a15e8bdbb6f657c82612280"
     },
     {
       "path": "current/policy.json",
-      "bytes": 6030,
-      "sha256": "af74583fb4637eb184f48519d655868006afbfa8d0b4af5e052f5fb778dacdae"
+      "bytes": 6954,
+      "sha256": "7915cbac18a60df3351e4bf1474ba73db1e4402aab5e8b84a451a1d925c48261"
     },
     {
       "path": "current/profiles.json",
@@ -31,7 +31,7 @@
     {
       "path": "current/success-examples.json",
       "bytes": 36766,
-      "sha256": "949f1a1a2ebb6f3c88d0aeded5e22a395422c39a0092ab9f0e2bb5e1cfb05f94"
+      "sha256": "7a58a1e22eeec670010ba2bcb08229a9099c922101b624935707b67dd1b5238b"
     },
     {
       "path": "release-history-v1.json",

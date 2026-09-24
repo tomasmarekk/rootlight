@@ -33,12 +33,12 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.6",
+        "current_version": "1.7",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
       {
-        "current_version": "1.6",
+        "current_version": "1.7",
         "projected_version": "1.0",
         "tool": "symbol.explain"
       },
@@ -93,7 +93,7 @@
         "tool": "source.read"
       },
       {
-        "current_version": "1.5",
+        "current_version": "1.6",
         "projected_version": "1.0",
         "tool": "query.advanced"
       }
@@ -172,6 +172,48 @@
         "tools": [
           "symbol.explain"
         ]
+      },
+      {
+        "kinds": [
+          "build_target"
+        ],
+        "partial_result_returned": false,
+        "public_error": "PROTOCOL_MISMATCH",
+        "recovery": "select_supported_version",
+        "required_version": "1.7",
+        "retained_versions": [
+          "1.0",
+          "1.1",
+          "1.2",
+          "1.3",
+          "1.4",
+          "1.5",
+          "1.6"
+        ],
+        "tools": [
+          "code.locate",
+          "symbol.explain"
+        ]
+      },
+      {
+        "kinds": [
+          "build_target"
+        ],
+        "partial_result_returned": false,
+        "public_error": "PROTOCOL_MISMATCH",
+        "recovery": "select_supported_version",
+        "required_version": "1.6",
+        "retained_versions": [
+          "1.0",
+          "1.1",
+          "1.2",
+          "1.3",
+          "1.4",
+          "1.5"
+        ],
+        "tools": [
+          "query.advanced"
+        ]
       }
     ]
   },
@@ -195,11 +237,11 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.6"
+      "version": "1.7"
     },
     {
       "tool": "symbol.explain",
-      "version": "1.6"
+      "version": "1.7"
     },
     {
       "tool": "symbol.relationships",
@@ -247,7 +289,7 @@
     },
     {
       "tool": "query.advanced",
-      "version": "1.5"
+      "version": "1.6"
     },
     {
       "tool": "query.batch",

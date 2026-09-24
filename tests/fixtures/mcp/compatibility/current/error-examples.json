@@ -62,7 +62,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.6"
+        "schema_version": "1.7"
       },
       "tool": "code.locate"
     },
@@ -75,7 +75,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.6"
+        "schema_version": "1.7"
       },
       "tool": "symbol.explain"
     },
@@ -231,7 +231,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.5"
+        "schema_version": "1.6"
       },
       "tool": "query.advanced"
     },

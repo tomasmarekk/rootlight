@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod elm;
+mod make;
 mod project_context;
 mod project_semantics;
 mod prolog;
@@ -29,6 +30,7 @@ use rootlight_ir::{
 };
 
 pub use elm::ElmParseProvider;
+pub use make::MakeParseProvider;
 pub use project_context::{
     CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,
     JvmProjectContext, MAX_PROJECT_CONTEXT_BYTES, MAX_PROJECT_CONTEXT_ITEMS,

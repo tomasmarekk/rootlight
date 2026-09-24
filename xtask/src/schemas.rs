@@ -1018,6 +1018,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "output",
         "1.5",
     )?;
+    write_mcp_tool_schema_version::<QueryAdvancedInput>(
+        &schema_root,
+        "query.advanced",
+        "input",
+        "1.6",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::QueryAdvancedOutputV1_6>(
+        &schema_root,
+        "query.advanced",
+        "output",
+        "1.6",
+    )?;
     write_mcp_tool_schema_version::<SymbolExplainInput>(
         &schema_root,
         "symbol.explain",
@@ -1029,6 +1041,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "symbol.explain",
         "output",
         "1.6",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.7",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SymbolExplainOutputV1_7>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.7",
     )?;
     write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.3")?;
     write_mcp_tool_schema_version::<CodeLocateOutputV1_3>(
@@ -1200,6 +1224,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "code.locate",
         "output",
         "1.6",
+    )?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.7")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_7>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.7",
     )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
@@ -1495,10 +1526,16 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                 | "mcp-code-locate-output-1.5.schema.json"
                 | "mcp-code-locate-input-1.6.schema.json"
                 | "mcp-code-locate-output-1.6.schema.json"
+                | "mcp-code-locate-input-1.7.schema.json"
+                | "mcp-code-locate-output-1.7.schema.json"
                 | "mcp-query-advanced-input-1.5.schema.json"
                 | "mcp-query-advanced-output-1.5.schema.json"
+                | "mcp-query-advanced-input-1.6.schema.json"
+                | "mcp-query-advanced-output-1.6.schema.json"
                 | "mcp-symbol-explain-input-1.6.schema.json"
                 | "mcp-symbol-explain-output-1.6.schema.json"
+                | "mcp-symbol-explain-input-1.7.schema.json"
+                | "mcp-symbol-explain-output-1.7.schema.json"
         );
         let document_kinds = binding_kinds
             || matches!(
@@ -1574,6 +1611,18 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                 Some("markup_element" | "markup_attribute") => source_kinds,
                 Some("style_rule" | "keyframes") => stylesheet_kinds,
                 Some("database_object") => database_kinds,
+                Some("build_target") => {
+                    matches!(
+                        name,
+                        "mcp-code-locate-input-1.7.schema.json"
+                            | "mcp-code-locate-output-1.7.schema.json"
+                            | "mcp-query-advanced-input-1.6.schema.json"
+                            | "mcp-query-advanced-output-1.6.schema.json"
+                            | "mcp-symbol-explain-input-1.7.schema.json"
+                            | "mcp-symbol-explain-output-1.7.schema.json"
+                    ) || name.starts_with("mcp-change-impact-output-")
+                        || name.starts_with("mcp-history-compare-output-")
+                }
                 _ => true,
             },
         );
@@ -3035,6 +3084,12 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.7.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.1.schema.json"),

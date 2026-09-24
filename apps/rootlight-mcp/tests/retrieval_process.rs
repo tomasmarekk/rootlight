@@ -1074,6 +1074,23 @@ fn matlab_script_bindings_cross_mcp_without_function_headers() {
 }
 
 #[test]
+fn make_static_targets_cross_mcp_with_exact_prerequisite_sources() {
+    let source = "APP := app\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n";
+    source_entities_cross_process_boundaries(
+        "make",
+        "Makefile",
+        source,
+        &[("all", "build_target", 1), ("check", "build_target", 1)],
+    );
+    assert_lexical_relationship_sources(
+        "make",
+        "Makefile",
+        source,
+        &[("check", "build_target", "check")],
+    );
+}
+
+#[test]
 fn nix_bindings_parameters_and_signatures_cross_real_process_boundaries() {
     let source = "{ system ? \"portable\" }@args: let identity = value: value; in { inherit system; result = identity args; }";
     source_entities_with_signatures_cross_process_boundaries(
@@ -1660,7 +1677,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.6");
+        assert_eq!(output["schema_version"], "1.7");
         if let Some(unsupported) = unsupported {
             assert_eq!(
                 output["warnings"]
@@ -1715,7 +1732,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.6");
+            assert_eq!(explanation["schema_version"], "1.7");
             assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
@@ -2488,7 +2505,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.6");
+    assert_eq!(output["schema_version"], "1.7");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -3304,7 +3321,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6")
+            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7")
         ),
         "read response uses a supported additive schema version"
     );

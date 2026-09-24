@@ -1264,6 +1264,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
 
+        let mut make_targets = HashMap::<String, Option<SymbolId>>::new();
+        if self.request.language().as_str() == "make" {
+            for entity in entities
+                .values()
+                .filter(|entity| entity.kind == EntityKind::BuildTarget)
+            {
+                make_targets
+                    .entry(entity.canonical_name.clone())
+                    .and_modify(|symbol| *symbol = None)
+                    .or_insert(Some(entity.id));
+            }
+        }
+
         let syntax_confidence = confidence(SYNTAX_CONFIDENCE)?;
         let containment_confidence = confidence(CONTAINMENT_CONFIDENCE)?;
         let mut occurrences = BTreeMap::<FactId, OccurrenceRecord>::new();
@@ -2042,6 +2055,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provenance_id,
                     )?;
                     skipped.insert(region.id, region);
+                }
+                if fact.syntax_kind().as_str() == "make.target.reference"
+                    && let Some(Some(symbol)) = make_targets.get(text)
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol: *symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, *symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &vba_bindings
                     && let Some(binding) = bindings.resolve(fact, text, cancellation)?

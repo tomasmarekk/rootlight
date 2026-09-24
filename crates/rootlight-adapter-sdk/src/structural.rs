@@ -32,6 +32,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "markdown.section.declaration" => {
             Some(EntityKind::DocumentSection)
         }
+        SyntaxFactKind::Declaration if label == "make.target.declaration" => {
+            Some(EntityKind::BuildTarget)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
