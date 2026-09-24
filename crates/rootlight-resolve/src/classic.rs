@@ -98,6 +98,7 @@ pub(crate) struct Proof<'a> {
     pub(crate) target: &'a EntityRecord,
     pub(crate) context: Arc<ProjectEvidence>,
     pub(crate) receiver: Option<(&'a EntityRecord, SourceRef)>,
+    getter_read: bool,
 }
 
 pub(crate) struct ProjectEvidence {
@@ -112,6 +113,60 @@ struct Member {
     location: MemberLocation,
     class: bool,
     predeclared_id: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Default)]
+struct PropertyAccessors<'a> {
+    get: Option<&'a EntityRecord>,
+    let_value: bool,
+    set_value: bool,
+    invalid: bool,
+}
+
+enum PropertyAccessorKind {
+    Get,
+    Let,
+    Set,
+}
+
+fn property_accessor_kind(
+    entity: &EntityRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+) -> Option<PropertyAccessorKind> {
+    // The shared property name cannot identify an accessor; require its exact
+    // retained declaration header before selecting one across project files.
+    let span = entity.evidence.source.as_ref()?.span();
+    let start = usize::try_from(span.start_byte()).ok()?;
+    let end = usize::try_from(span.end_byte()).ok()?;
+    let declaration = sources.get(&span.file())?.get(start..end)?;
+    let header = declaration
+        .split(|byte| matches!(byte, b'\r' | b'\n'))
+        .next()?;
+    let mut words = header
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|word| !word.is_empty());
+    let first = words.next()?;
+    let property = if first.eq_ignore_ascii_case(b"Public")
+        || first.eq_ignore_ascii_case(b"Private")
+        || first.eq_ignore_ascii_case(b"Friend")
+    {
+        words.next()?
+    } else {
+        first
+    };
+    if !property.eq_ignore_ascii_case(b"Property") {
+        return None;
+    }
+    let access = words.next()?;
+    if access.eq_ignore_ascii_case(b"Get") {
+        Some(PropertyAccessorKind::Get)
+    } else if access.eq_ignore_ascii_case(b"Let") {
+        Some(PropertyAccessorKind::Let)
+    } else if access.eq_ignore_ascii_case(b"Set") {
+        Some(PropertyAccessorKind::Set)
+    } else {
+        None
+    }
 }
 
 struct ResolvedProject {
@@ -736,6 +791,7 @@ impl<'a> ClassicIndex<'a> {
                     target,
                     context: Arc::clone(&project.evidence),
                     receiver: None,
+                    getter_read: false,
                 },
             );
         }
@@ -745,6 +801,7 @@ impl<'a> ClassicIndex<'a> {
         let mut value_types = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         let mut members = BTreeMap::new();
+        let mut property_accessors = BTreeMap::new();
         let mut parameterized_properties = BTreeSet::new();
         let mut field_definitions = BTreeMap::new();
         let mut unconditional_udts = BTreeMap::new();
@@ -760,8 +817,32 @@ impl<'a> ClassicIndex<'a> {
                 parameterized_properties.insert(owner);
             }
             if let Some(ContainerRef::Entity(owner)) = entity.container {
+                let key = (owner, entity.canonical_name.to_ascii_lowercase());
+                if entity.kind == EntityKind::Property {
+                    let prior_member = members.contains_key(&key);
+                    let accessors = property_accessors.entry(key.clone()).or_insert_with(|| {
+                        PropertyAccessors {
+                            invalid: prior_member,
+                            ..PropertyAccessors::default()
+                        }
+                    });
+                    match property_accessor_kind(entity, &sources) {
+                        Some(PropertyAccessorKind::Get) if accessors.get.is_none() => {
+                            accessors.get = Some(*entity);
+                        }
+                        Some(PropertyAccessorKind::Let) if !accessors.let_value => {
+                            accessors.let_value = true;
+                        }
+                        Some(PropertyAccessorKind::Set) if !accessors.set_value => {
+                            accessors.set_value = true;
+                        }
+                        _ => accessors.invalid = true,
+                    }
+                } else if let Some(accessors) = property_accessors.get_mut(&key) {
+                    accessors.invalid = true;
+                }
                 members
-                    .entry((owner, entity.canonical_name.to_ascii_lowercase()))
+                    .entry(key)
                     .and_modify(|prior| *prior = None)
                     .or_insert(Some(*entity));
                 // Enum constants also occupy the enclosing module namespace
@@ -886,14 +967,37 @@ impl<'a> ClassicIndex<'a> {
             }
         }
         let mut member_occurrences = Vec::new();
+        let mut read_receivers = BTreeSet::new();
         for occurrence in occurrences {
             cancellation.check()?;
-            if matches!(
+            let member = matches!(
                 occurrence.syntax_kind.as_str(),
                 "vba.member.reference" | "vba.invoked_member.reference"
-            ) && occurrence.role == OccurrenceRole::Reference
-                && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            ) && occurrence.role == OccurrenceRole::Reference;
+            let span = occurrence.source.span();
+            if member
+                && let Some(bytes) = sources.get(&occurrence.file)
+                && let (Ok(start), Ok(end)) = (
+                    usize::try_from(span.start_byte()),
+                    usize::try_from(span.end_byte()),
+                )
+                && let Some(receiver) = bytes.get(start..end).and_then(|text| {
+                    text.iter()
+                        .rposition(|byte| *byte == b'.')
+                        .map(|dot| &text[..dot])
+                })
+                && receiver.contains(&b'.')
+                && let Some(receiver_end) = span.start_byte().checked_add(
+                    u64::try_from(receiver.len()).map_err(|_| ResolutionError::CountOverflow)?,
+                )
+                && let Ok(receiver_span) =
+                    rootlight_ir::SourceSpan::new(occurrence.file, span.start_byte(), receiver_end)
             {
+                // Only an exact prefix used as another member's receiver
+                // proves a getter read without assignment-context syntax.
+                read_receivers.insert(receiver_span);
+            }
+            if member && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
                 member_occurrences.push(occurrence);
             } else {
                 // Keep the original per-occurrence work charge even when a
@@ -1054,7 +1158,16 @@ impl<'a> ClassicIndex<'a> {
             let Some((owner, class, context, type_source)) = binding else {
                 continue;
             };
-            let Some(target) = members.get(&(class, name)).copied().flatten() else {
+            let key = (class, name);
+            let target = members.get(&key).copied().flatten().or_else(|| {
+                read_receivers
+                    .contains(&span)
+                    .then_some(())
+                    .and_then(|()| property_accessors.get(&key))
+                    .filter(|accessors: &&PropertyAccessors<'_>| !accessors.invalid)
+                    .and_then(|accessors| accessors.get)
+            });
+            let Some(target) = target else {
                 continue;
             };
             let Some(receiver_type) = entities.get(&class).copied() else {
@@ -1112,6 +1225,14 @@ impl<'a> ClassicIndex<'a> {
                     target,
                     context,
                     receiver: Some((owner, type_source)),
+                    getter_read: occurrence.syntax_kind == "vba.member.reference"
+                        && read_receivers.contains(&span)
+                        && !parameterized_properties.contains(&target.id)
+                        && property_accessors
+                            .get(&key)
+                            .filter(|accessors: &&PropertyAccessors<'_>| !accessors.invalid)
+                            .and_then(|accessors| accessors.get)
+                            .is_some_and(|getter| getter.id == target.id),
                 },
             );
             // Without arity evidence, a bare parameterized getter cannot be
@@ -1135,10 +1256,11 @@ impl<'a> ClassicIndex<'a> {
     }
 
     pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {
-        occurrence.syntax_kind == "vba.invoked_member.reference"
-            && self.proof(occurrence).is_some_and(|proof| {
-                matches!(proof.target.kind, EntityKind::Method | EntityKind::Function)
-            })
+        self.proof(occurrence).is_some_and(|proof| {
+            proof.getter_read
+                || (occurrence.syntax_kind == "vba.invoked_member.reference"
+                    && matches!(proof.target.kind, EntityKind::Method | EntityKind::Function))
+        })
     }
 
     pub(crate) fn resolve(&self, occurrence: &OccurrenceRecord) -> Option<ResolutionDecision> {

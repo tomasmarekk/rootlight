@@ -35274,13 +35274,24 @@ mod tests {
 
     #[test]
     fn classic_project_property_results_resolve_nested_members() {
-        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Owner)\nvalue.Child.Apply\nEnd Sub\n";
-        for (access, listed_result, getter, indexed, expected_child, expected_apply) in [
-            ("Public", true, true, false, true, true),
-            ("Private", true, true, false, false, false),
-            ("Public", false, true, false, false, false),
-            ("Public", true, false, false, false, false),
-            ("Public", true, true, true, true, false),
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Owner)\nvalue.Child.Apply\nSet value.Child = New Result\nEnd Sub\n";
+        for (
+            access,
+            listed_result,
+            getter,
+            paired,
+            duplicate_getter,
+            indexed,
+            expected_child,
+            expected_apply,
+        ) in [
+            ("Public", true, true, false, false, false, true, true),
+            ("Public", true, true, true, false, false, true, true),
+            ("Public", true, true, false, true, false, false, false),
+            ("Private", true, true, false, false, false, false, false),
+            ("Public", false, true, false, false, false, false, false),
+            ("Public", true, false, false, false, false, false, false),
+            ("Public", true, true, false, false, true, true, false),
         ] {
             let storage = durable_test_tempdir();
             let fixture = durable_test_tempdir();
@@ -35301,8 +35312,18 @@ mod tests {
                 fixture.path().join("Owner.cls"),
                 if getter {
                     format!(
-                        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Owner\"\n{access} Property Get Child({}) As Result\nSet Child = New Result\nEnd Property\n",
-                        if indexed { "ByVal index As Long" } else { "" }
+                        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Owner\"\n{access} Property Get Child({}) As Result\nSet Child = New Result\nEnd Property\n{}{}",
+                        if indexed { "ByVal index As Long" } else { "" },
+                        if paired {
+                            "Public Property Set Child(ByVal value As Result)\nEnd Property\n"
+                        } else {
+                            ""
+                        },
+                        if duplicate_getter {
+                            "Public Property Get Child(ByVal index As Long) As Result\nEnd Property\n"
+                        } else {
+                            ""
+                        },
                     )
                 } else {
                     format!(
@@ -35340,6 +35361,7 @@ mod tests {
                 .iter()
                 .find(|file| file.path == "Client.bas")
                 .unwrap();
+            let owner_source = fs::read(fixture.path().join("Owner.cls")).unwrap();
             let start = u64::try_from(client.find("value.Child.Apply").unwrap()).unwrap();
             for (text, name, kind, expected) in [
                 ("value.Child", "Child", EntityKind::Property, expected_child),
@@ -35353,7 +35375,23 @@ mod tests {
                 let target = document
                     .entities
                     .iter()
-                    .find(|entity| entity.canonical_name == name && entity.kind == kind)
+                    .find(|entity| {
+                        entity.canonical_name == name
+                            && entity.kind == kind
+                            && (!paired
+                                || name != "Child"
+                                || entity.evidence.source.as_ref().is_some_and(|source| {
+                                    owner_source
+                                        .get(
+                                            usize::try_from(source.span().start_byte()).unwrap()
+                                                ..usize::try_from(source.span().end_byte())
+                                                    .unwrap(),
+                                        )
+                                        .is_some_and(|text| {
+                                            text.starts_with(b"Public Property Get Child")
+                                        })
+                                }))
+                    })
                     .unwrap();
                 if indexed && name == "Child" {
                     assert!(document.entities.iter().any(|entity| {
@@ -35375,7 +35413,8 @@ mod tests {
                 if expected {
                     assert_eq!(
                         site.target,
-                        OccurrenceTarget::Resolved { symbol: target.id }
+                        OccurrenceTarget::Resolved { symbol: target.id },
+                        "{access} listed_result={listed_result} getter={getter} paired={paired} duplicate_getter={duplicate_getter} indexed={indexed} {text}"
                     );
                     let read = service
                         .source_read_with_options_and_budget(
@@ -35390,14 +35429,17 @@ mod tests {
                         )
                         .unwrap();
                     assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
-                    if name == "Apply" {
-                        assert!(document.relations.iter().any(|relation| {
-                            relation.predicate == RelationPredicate::Calls
-                                && relation.subject == RelationEndpoint::Occurrence(site.id)
-                                && relation.object == RelationEndpoint::Entity(target.id)
-                                && relation.evidence.source.as_ref() == Some(&site.source)
-                        }));
-                    }
+                    let call = document.relations.iter().any(|relation| {
+                        relation.predicate == RelationPredicate::Calls
+                            && relation.subject == RelationEndpoint::Occurrence(site.id)
+                            && relation.object == RelationEndpoint::Entity(target.id)
+                            && relation.evidence.source.as_ref() == Some(&site.source)
+                    });
+                    assert_eq!(call, name == "Apply" || !indexed);
+                    assert_eq!(
+                        site.role == OccurrenceRole::CallSite,
+                        name == "Apply" || !indexed
+                    );
                 } else {
                     assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
                 }
@@ -35406,8 +35448,26 @@ mod tests {
                         gap.source == site.source && gap.detail == "vba-member-target-unavailable"
                     }),
                     !expected,
-                    "{access} listed_result={listed_result} getter={getter} indexed={indexed} {text}"
+                    "{access} listed_result={listed_result} getter={getter} paired={paired} duplicate_getter={duplicate_getter} indexed={indexed} {text}"
                 );
+            }
+            if paired {
+                let start = u64::try_from(client.find("Set value.Child").unwrap() + 4).unwrap();
+                let write = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from("value.Child".len()).unwrap()
+                            && site.syntax_kind == "vba.member.reference"
+                    })
+                    .unwrap();
+                assert!(matches!(write.target, OccurrenceTarget::Unresolved { .. }));
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.source == write.source && gap.detail == "vba-member-target-unavailable"
+                }));
             }
         }
     }

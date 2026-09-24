@@ -394,8 +394,8 @@ impl ResolutionEngine {
             let semantics = relation_semantics(occurrence, &decision, &lookup);
             let old_id = occurrence.id;
             if lookup.classic.is_call(occurrence) {
-                // Only the native invocation position plus a project-owned method
-                // target establishes a call; an invoked field remains a reference.
+                // A project-owned method invocation or proven parameterless
+                // getter read establishes a call; indexed and unknown writes do not.
                 occurrence.role = OccurrenceRole::CallSite;
             }
             apply_target(occurrence, &decision);
