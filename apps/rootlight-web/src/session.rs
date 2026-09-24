@@ -7,9 +7,8 @@ use std::{
 
 use rootlight_encoding::BASE64URL_NOPAD;
 use sha2::{Digest as _, Sha256};
-use subtle::ConstantTimeEq;
 
-use crate::error::WebError;
+use crate::{error::WebError, secret::equal_secret_bytes};
 
 pub(crate) const SESSION_COOKIE_NAME: &str = "rootlight_session";
 pub(crate) const CSRF_HEADER_NAME: &str = "x-rootlight-csrf";
@@ -59,7 +58,7 @@ impl AuthenticatedSession {
     }
 
     pub(crate) fn validate_csrf(&self, encoded: &str) -> bool {
-        decode_secret(encoded).is_some_and(|candidate| bool::from(self.csrf.ct_eq(&candidate)))
+        decode_secret(encoded).is_some_and(|candidate| equal_secret_bytes(&self.csrf, &candidate))
     }
 }
 
@@ -193,7 +192,7 @@ fn constant_time_bootstrap_index(
         .iter()
         .enumerate()
         .fold(None, |matched, (index, record)| {
-            if bool::from(record.digest.ct_eq(candidate)) {
+            if equal_secret_bytes(&record.digest, candidate) {
                 Some(index)
             } else {
                 matched
@@ -244,7 +243,7 @@ fn constant_time_session_index(records: &[SessionRecord], candidate: &[u8; 32]) 
         .iter()
         .enumerate()
         .fold(None, |matched, (index, record)| {
-            if bool::from(record.key.ct_eq(candidate)) {
+            if equal_secret_bytes(&record.key, candidate) {
                 Some(index)
             } else {
                 matched

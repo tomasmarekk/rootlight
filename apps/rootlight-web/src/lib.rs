@@ -12,6 +12,7 @@ mod error;
 mod filesystem_registry;
 mod graph_registry;
 mod index_registry;
+mod secret;
 mod security;
 mod session;
 mod source_registry;

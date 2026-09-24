@@ -9,10 +9,9 @@ use std::{
 use rootlight_client::{GraphProjectionContinuation, GraphProjectionId, GraphProjectionPage};
 use rootlight_encoding::BASE64URL_NOPAD;
 use sha2::Digest as _;
-use subtle::ConstantTimeEq as _;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::session::SessionIdentity;
+use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
 const TOKEN_BYTES: usize = 32;
 const TOKEN_LENGTH: usize = 43;
@@ -176,7 +175,7 @@ impl GraphRegistry {
             .records
             .iter_mut()
             .find(|record| {
-                record.owner == owner && bool::from(record.token_digest.ct_eq(digest.as_slice()))
+                record.owner == owner && equal_secret_bytes(&record.token_digest, digest.as_slice())
             })
             .ok_or(GraphRegistryError::Invalid)?;
         record.last_seen = now;
@@ -197,7 +196,7 @@ impl GraphRegistry {
             .records
             .iter()
             .position(|record| {
-                record.owner == owner && bool::from(record.token_digest.ct_eq(digest.as_slice()))
+                record.owner == owner && equal_secret_bytes(&record.token_digest, digest.as_slice())
             })
             .ok_or(GraphRegistryError::Invalid)?;
         Ok(state

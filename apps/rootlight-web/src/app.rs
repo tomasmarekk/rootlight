@@ -18,7 +18,6 @@ use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
 };
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq as _;
 use tokio::sync::watch;
 
 use crate::{
@@ -28,6 +27,7 @@ use crate::{
     filesystem_registry::FilesystemRegistry,
     graph_registry::GraphRegistry,
     index_registry::IndexRegistry,
+    secret::equal_secret_bytes,
     security::{self, SecurityPolicy},
     session::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
@@ -66,8 +66,7 @@ impl ServiceControl {
     }
 
     fn authorize_credential(&self, candidate: &str) -> bool {
-        candidate.len() == self.token.len()
-            && bool::from(candidate.as_bytes().ct_eq(self.token.as_bytes()))
+        equal_secret_bytes(candidate.as_bytes(), self.token.as_bytes())
     }
 }
 

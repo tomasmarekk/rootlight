@@ -18,7 +18,6 @@ rootlight-vfs = { path = "../../crates/rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true

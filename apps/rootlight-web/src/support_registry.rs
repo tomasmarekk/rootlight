@@ -8,9 +8,8 @@ use std::{
 
 use rootlight_encoding::BASE64URL_NOPAD;
 use sha2::Digest as _;
-use subtle::ConstantTimeEq as _;
 
-use crate::session::SessionIdentity;
+use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
 const TOKEN_BYTES: usize = 32;
 const TOKEN_LENGTH: usize = 43;
@@ -160,7 +159,7 @@ impl SupportRegistry {
         state.reservations.remove(reservation);
         if archive.is_empty()
             || archive.len() > MAX_ARCHIVE_BYTES
-            || !bool::from(sha256.ct_eq(sha2::Sha256::digest(&archive).as_slice()))
+            || !equal_secret_bytes(&sha256, sha2::Sha256::digest(&archive).as_slice())
         {
             return Err(SupportRegistryError::ArchiveInvalid);
         }
@@ -206,7 +205,8 @@ impl SupportRegistry {
             .artifacts
             .iter()
             .position(|record| {
-                record.owner == owner && bool::from(record.receipt_digest.ct_eq(digest.as_slice()))
+                record.owner == owner
+                    && equal_secret_bytes(&record.receipt_digest, digest.as_slice())
             })
             .ok_or(SupportRegistryError::Invalid)?;
         Ok(state

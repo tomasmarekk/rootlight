@@ -14,9 +14,8 @@ use rootlight_cancel::Cancellation;
 use rootlight_encoding::BASE64URL_NOPAD;
 use rootlight_vfs::{BrowseDirectory, BrowseDirectorySnapshot, BrowseError};
 use sha2::{Digest as _, Sha256};
-use subtle::ConstantTimeEq as _;
 
-use crate::session::SessionIdentity;
+use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
 const TOKEN_BYTES: usize = 32;
 const BROWSE_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -535,7 +534,7 @@ fn decode_token_digest(encoded: &str) -> Result<[u8; 32], FilesystemRegistryErro
 }
 
 fn token_matches(left: &[u8; 32], right: &[u8; 32]) -> bool {
-    bool::from(left.ct_eq(right))
+    equal_secret_bytes(left, right)
 }
 
 fn admit_capability(state: &mut RegistryState, owner: SessionIdentity) {
