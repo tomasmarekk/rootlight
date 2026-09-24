@@ -35092,7 +35092,7 @@ mod tests {
             ),
             (
                 "a/Client.bas",
-                "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Worker)\nvalue.Apply\nEnd Sub\n",
+                "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Worker)\nvalue.Apply\nEnd Sub\nPublic Function Produce() As Worker\nEnd Function\nPublic Function Missing() As Ghost\nEnd Function\n",
             ),
             (
                 "b/project.vbp",
@@ -35152,6 +35152,37 @@ mod tests {
             "{:#?}",
             document.entities
         );
+        let return_type = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.type_identifier.reference"
+                    && site.target == OccurrenceTarget::Resolved { symbol: target.id }
+            })
+            .unwrap();
+        assert_eq!(
+            return_type.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::UsesType
+                && relation.object == RelationEndpoint::Entity(target.id)
+                && relation.evidence.source.as_ref() == Some(&return_type.source)
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.source == return_type.source && gap.detail == "vba-type-target-unavailable"
+        }));
+        let missing_type = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.type_identifier.reference"
+                    && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+            })
+            .unwrap();
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.source == missing_type.source && gap.detail == "vba-type-target-unavailable"
+        }));
         assert!(
             document
                 .relations

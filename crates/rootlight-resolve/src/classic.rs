@@ -662,9 +662,25 @@ impl<'a> ClassicIndex<'a> {
                 || !matches!(
                     occurrence.syntax_kind.as_str(),
                     "vba.direct_type_identifier.reference"
+                        | "vba.type_identifier.reference"
                         | "vba.automatic_type_identifier.reference"
                 )
                 || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            {
+                continue;
+            }
+            // Generic type captures also occur on array parameters; only a
+            // callable return declaration proves this scalar result type.
+            if occurrence.syntax_kind == "vba.type_identifier.reference"
+                && !occurrence
+                    .enclosing
+                    .and_then(|id| entities.get(&id))
+                    .is_some_and(|owner| {
+                        matches!(
+                            owner.kind,
+                            EntityKind::Function | EntityKind::Method | EntityKind::Property
+                        )
+                    })
             {
                 continue;
             }
