@@ -47,7 +47,10 @@ pub use limits::{
 };
 pub use nix_names::{nix_canonical_attribute_name, nix_static_attribute_name};
 pub use objective_c_names::canonical_objective_c_selector;
-pub use prolog_names::{canonical_nonterminal_head, canonical_predicate_head, predicate_head};
+pub use prolog_names::{
+    canonical_nonterminal_head, canonical_predicate_head, character_code_literal_len,
+    predicate_head,
+};
 pub use report::{
     AnalysisReport, CoverageReport, DomainCoverage, ParseReport, ProjectAnalysisReport,
     ResourceUsage, StreamEnd, WorkReport,

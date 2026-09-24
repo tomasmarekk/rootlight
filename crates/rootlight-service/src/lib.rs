@@ -29569,6 +29569,50 @@ mod tests {
     }
 
     #[test]
+    fn prolog_quoted_functor_identity_retains_exact_source_and_ignores_comments() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "% '<urn:ghost>'(A).\n'<urn:edge>'(A, B) :- edge(A, B).\n";
+        fs::write(fixture.path().join("facts.pl"), source).expect("Prolog source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("quoted Prolog source indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let names = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "prolog")
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["'<urn:edge>'/2"]);
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "'<urn:edge>'/2".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("quoted indicator locates");
+        let reference = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol.is_some())
+            .and_then(|hit| hit.source.clone())
+            .expect("quoted functor retains source evidence");
+        assert_eq!(reference.generation(), receipt.generation);
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .expect("quoted functor source reads");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+    }
+
+    #[test]
     fn elm_native_headers_publish_source_backed_symbols_without_literal_ghosts() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Main exposing (render)\nimport Html\n{- type Ghost = Fake {- nested -} -}\ntype alias Model = { value : Int }\nrender model =\n    \"\"\"\ntype Phantom = False\n\"\"\"\nvalue = 1\n";

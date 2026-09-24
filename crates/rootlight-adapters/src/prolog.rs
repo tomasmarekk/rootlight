@@ -6,7 +6,7 @@ use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
     LanguageId, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport, ParseRequest,
     ResourceUsage, SinkError, StreamEnd, SyntaxFact, SyntaxFactBatch, SyntaxFactKind,
-    SyntaxFactSink, SyntaxKindLabel, predicate_head,
+    SyntaxFactSink, SyntaxKindLabel, character_code_literal_len, predicate_head,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FileId, content_hash};
@@ -392,6 +392,16 @@ fn mask_non_code(source: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, 
         let byte = *tail
             .first()
             .ok_or_else(|| failure("prolog-source-span-invalid"))?;
+        let character_code = if !line_comment && block_depth == 0 && quote.is_none() {
+            character_code_literal_len(source, index)
+        } else {
+            None
+        };
+        let quoted_atom_start = !line_comment
+            && block_depth == 0
+            && quote.is_none()
+            && byte == b'\''
+            && character_code.is_none();
         let length = if line_comment {
             if byte == b'\n' {
                 line_comment = false;
@@ -428,6 +438,8 @@ fn mask_non_code(source: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, 
         } else if tail.starts_with(b"/*") {
             block_depth = 1;
             2
+        } else if let Some(length) = character_code {
+            length
         } else if matches!(byte, b'\'' | b'"' | b'`') {
             quote = Some(byte);
             1
@@ -445,6 +457,13 @@ fn mask_non_code(source: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, 
             if !matches!(*byte, b'\n' | b'\r') {
                 *byte = b' ';
             }
+        }
+        if quoted_atom_start {
+            // Keep only the opening marker so a quoted functor can start a
+            // sentence; its punctuation and delimiters stay masked as data.
+            *masked
+                .get_mut(index)
+                .ok_or_else(|| failure("prolog-source-span-invalid"))? = b'\'';
         }
         index = end;
     }
@@ -524,6 +543,32 @@ mod tests {
         assert_eq!(parsed.groups[0].kind, ClauseKind::Nonterminal);
         assert_eq!(parsed.groups[1].kind, ClauseKind::Predicate);
         assert_eq!(syntax_fact_count(&parsed.groups), 7);
+    }
+
+    #[test]
+    fn quoted_functor_head_keeps_source_span_without_comment_ghosts() {
+        let source = b"% '<urn:ghost>'(A).\n'<urn:edge>'(A, B) :- edge(A, B).\n";
+        let parsed = scan_source(source, 4, &Cancellation::new()).expect("quoted source parses");
+        assert_eq!(parsed.clause_count, 1);
+        assert_eq!(parsed.groups.len(), 1);
+        let clause = parsed.groups[0];
+        assert_eq!(
+            &source[clause.head_start..clause.head_end],
+            b"'<urn:edge>'(A, B) "
+        );
+        assert_eq!(&source[clause.head_start..clause.name_end], b"'<urn:edge>'");
+    }
+
+    #[test]
+    fn character_code_literals_do_not_hide_following_clauses() {
+        let source = b"token(0'@, In, Out) :- Out = In.\nnext(0'(, 0',).\n'<urn:edge>'(A, B).\n";
+        let parsed = scan_source(source, 10, &Cancellation::new()).expect("character codes scan");
+        assert_eq!(parsed.clause_count, 3);
+        assert_eq!(parsed.groups.len(), 3);
+        assert_eq!(
+            &source[parsed.groups[2].head_start..parsed.groups[2].name_end],
+            b"'<urn:edge>'"
+        );
     }
 
     #[test]

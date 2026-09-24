@@ -24,17 +24,9 @@ pub(super) fn has_content_hint(source: &[u8]) -> bool {
             character.is_alphabetic() || matches!(character, '(' | '\'' | '[' | '{')
         });
     }
-    let Some(first) = source.chars().next() else {
+    let Some(name_end) = atom_name_end(source) else {
         return false;
     };
-    if !first.is_lowercase() && !(first.is_alphabetic() && !first.is_uppercase()) {
-        return false;
-    }
-    let name_end = source
-        .char_indices()
-        .take_while(|(_, character)| character.is_alphanumeric() || *character == '_')
-        .last()
-        .map_or(0, |(index, character)| index + character.len_utf8());
     let Some(rest) = source.get(name_end..) else {
         return false;
     };
@@ -49,6 +41,28 @@ pub(super) fn has_content_hint(source: &[u8]) -> bool {
     };
     let rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
     rest.starts_with(":-") || rest.starts_with(":+") || sentence_dot(rest)
+}
+
+fn atom_name_end(source: &str) -> Option<usize> {
+    if source.starts_with('\'') {
+        let closing = source.get(1..)?.find('\'')?;
+        let inner = source.get(1..closing + 1)?;
+        // Routing must not claim escaped atoms that the static parser cannot
+        // interpret independently of the mutable character_escapes flag.
+        return (!inner.is_empty()
+            && !inner.contains('\\')
+            && !inner.chars().any(char::is_control))
+        .then_some(closing + 2);
+    }
+    let first = source.chars().next()?;
+    if !first.is_lowercase() && !(first.is_alphabetic() && !first.is_uppercase()) {
+        return None;
+    }
+    source
+        .char_indices()
+        .take_while(|(_, character)| character.is_alphanumeric() || *character == '_')
+        .last()
+        .map(|(index, character)| index + character.len_utf8())
 }
 
 fn first_statement(mut source: &str) -> Option<&str> {
@@ -134,6 +148,8 @@ mod tests {
             "% source comment\n:- use_module(library(lists)).\n",
             "/* license */\nreach(A, B) :-\n  edge(A, B).\n",
             "path(a, b).\n",
+            "'<urn:edge>'(A, B) :- edge(A, B).\n",
+            "'plain'(A).\n",
             "result('close ) here', [a, b]) .\n",
             "λ(1).\n",
             "#!/usr/bin/env swipl\nquery(X) :+ answer(X).\n",
@@ -154,6 +170,8 @@ mod tests {
             "% reach(A).\n",
             "/* unclosed comment\nreach(A).\n",
             "reach('unclosed).\n",
+            "'escaped\\'name'(A).\n",
+            "'string' . \"other\";\n",
             "result(1) .suffix\n",
             ":-\n",
         ] {
