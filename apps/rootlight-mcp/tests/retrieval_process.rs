@@ -398,11 +398,13 @@ fn scss_bounded_declarations_cross_real_process_boundaries() {
     source_entities_with_coverage_cross_process_boundaries(
         "scss",
         "theme.scss",
-        "$accent: #123; @mixin card($color) { $local: $color; } .first { $local: red; }",
+        "$accent: #123; @mixin card($color) { $local: $color; } .first { $local: red; } @keyframes pulse { 50% { opacity: .5; } }",
         &[
             ("accent", "variable", 1),
             ("card", "function", 1),
             ("local", "variable", 2),
+            (".first", "style_rule", 1),
+            ("pulse", "keyframes", 1),
         ],
         &[],
         Some(true),
@@ -1759,7 +1761,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             arguments,
             "1.0",
         );
-        if !matches!(kind, "import" | "export")
+        if !matches!(kind, "import" | "export" | "style_rule" | "keyframes")
             && matches!(
                 language,
                 "r" | "scala"
@@ -1773,8 +1775,8 @@ fn source_entities_with_coverage_cross_process_boundaries(
                     | "scss"
             )
         {
-            // These fixtures use existing IR kinds, unlike the newer data
-            // kinds that correctly require the updated retrieval schema.
+            // Only these kinds retain a lossless representation in the
+            // legacy retrieval contract.
             assert_success(&retained, "code.locate");
             continue;
         }
@@ -3601,20 +3603,18 @@ fn build_daemon_binary() -> PathBuf {
         .parent()
         .expect("MCP binary has a profile directory");
     let daemon = profile_dir.join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
-    if daemon.is_file() {
-        return daemon;
-    }
-
     let target_dir = profile_dir
         .parent()
         .expect("profile directory belongs to a Cargo target directory");
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // A sibling executable may predate the current parser even when it exists.
     let output = Command::new(cargo)
         .current_dir(&workspace)
         .args([
             OsStr::new("build"),
             OsStr::new("--locked"),
+            OsStr::new("--offline"),
             OsStr::new("-p"),
             OsStr::new("rootlight-daemon"),
             OsStr::new("--bin"),

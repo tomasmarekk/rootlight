@@ -487,19 +487,17 @@ fn semantic_process_binaries() -> (PathBuf, PathBuf) {
         "rootlight-adapter-host{}",
         std::env::consts::EXE_SUFFIX
     ));
-    if daemon.is_file() && adapter.is_file() {
-        return (daemon, mcp);
-    }
-
     let target_dir = profile_dir
         .parent()
         .expect("Cargo profile belongs to a target directory");
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // Existing siblings may be stale after an incremental workspace edit.
     let mut command = Command::new(cargo);
     command.current_dir(workspace).args([
         OsStr::new("build"),
         OsStr::new("--locked"),
+        OsStr::new("--offline"),
         OsStr::new("--package"),
         OsStr::new("rootlight-daemon"),
         OsStr::new("--package"),

@@ -983,19 +983,18 @@ fn ensure_daemon_binary() -> PathBuf {
         .parent()
         .expect("MCP binary has a profile directory");
     let daemon = profile_dir.join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
-    if daemon.is_file() {
-        return daemon;
-    }
     let target_dir = profile_dir
         .parent()
         .expect("profile directory belongs to a Cargo target directory");
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // Existing siblings may be stale after an incremental workspace edit.
     let output = Command::new(cargo)
         .current_dir(&workspace)
         .args([
             OsStr::new("build"),
             OsStr::new("--locked"),
+            OsStr::new("--offline"),
             OsStr::new("-p"),
             OsStr::new("rootlight-daemon"),
             OsStr::new("--bin"),

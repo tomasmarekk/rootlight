@@ -390,6 +390,7 @@ fn build_hook_daemon() -> PathBuf {
         .args([
             OsStr::new("build"),
             OsStr::new("--locked"),
+            OsStr::new("--offline"),
             OsStr::new("-p"),
             OsStr::new("rootlight-daemon"),
             OsStr::new("--bin"),

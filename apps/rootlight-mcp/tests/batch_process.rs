@@ -1244,6 +1244,7 @@ fn ensure_daemon_binary() -> PathBuf {
         .args([
             OsStr::new("build"),
             OsStr::new("--locked"),
+            OsStr::new("--offline"),
             OsStr::new("-p"),
             OsStr::new("rootlight-daemon"),
             OsStr::new("-p"),
@@ -1286,6 +1287,7 @@ fn build_batch_hook_mcp() -> PathBuf {
         .args([
             OsStr::new("build"),
             OsStr::new("--locked"),
+            OsStr::new("--offline"),
             OsStr::new("-p"),
             OsStr::new("rootlight-mcp"),
             OsStr::new("--bin"),
