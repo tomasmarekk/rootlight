@@ -29830,6 +29830,55 @@ mod tests {
     }
 
     #[test]
+    fn scss_module_directives_retain_exact_urls_without_claiming_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@use \"base/colors\" as colors;\n@forward 'base/mixins' show card;\n@use \"scale\" with ($base: 2);\n.note { content: \"@use 'ghost';\"; }\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let mut imports = generation
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                matches!(occurrence.syntax_kind.as_str(), "scss.use" | "scss.forward")
+                    && occurrence.role == OccurrenceRole::ImportUse
+            })
+            .collect::<Vec<_>>();
+        imports.sort_unstable_by_key(|occurrence| occurrence.source.span().start_byte());
+        assert_eq!(imports.len(), 3);
+        for (import, (kind, url)) in imports.into_iter().zip([
+            ("scss.use", "base/colors"),
+            ("scss.forward", "base/mixins"),
+            ("scss.use", "scale"),
+        ]) {
+            assert_eq!(import.syntax_kind, kind);
+            assert_eq!(import.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![import.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("SCSS module URL source resolves");
+            assert_eq!(read.data.chunks[0].bytes, url.as_bytes());
+            assert!(generation.document().skipped_regions.iter().any(|gap| {
+                gap.detail == "unresolved-import-target" && gap.source == import.source
+            }));
+        }
+    }
+
+    #[test]
     fn shared_pl_suffix_indexes_prolog_clauses_without_relabeling_perl() {
         let fixture = TempDir::new().expect("fixture root exists");
         let prolog = "% ghost(X).\nrelation(alpha, beta).\nrelation(A, B) :- helper(A, B).\nrelation(alpha).\n";

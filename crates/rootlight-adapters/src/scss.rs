@@ -1,8 +1,8 @@
 //! First-party structural scanner for source-backed SCSS declarations.
 //! Static variables, mixins, functions, keyframes, and balanced style-rule
 //! blocks become identities.
-//! Named mixin includes and quoted imports retain source evidence; import
-//! targets, selector expansion, and value uses remain bounded.
+//! Named mixin includes and quoted module loads retain source evidence;
+//! module targets, selector expansion, and value uses remain bounded.
 
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
@@ -235,7 +235,7 @@ impl ParseProvider for ScssParseProvider {
                 SyntaxFactKind::Import,
                 source_span(file, import.path_start, import.path_end)?,
                 import.depth,
-                label("scss.import"),
+                label(import.kind.label()),
             ));
         }
         facts.sort_by_key(|fact| (fact.span().start_byte(), fact.depth()));
@@ -356,7 +356,25 @@ struct MixinCall {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModuleLoadKind {
+    Import,
+    Use,
+    Forward,
+}
+
+impl ModuleLoadKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Import => "scss.import",
+            Self::Use => "scss.use",
+            Self::Forward => "scss.forward",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuotedImport {
+    kind: ModuleLoadKind,
     path_start: usize,
     path_end: usize,
     scope: Option<usize>,
@@ -464,7 +482,13 @@ fn scan_source(
                     calls.len(),
                     imports.len(),
                 )?);
-                if let Some(mut paths) = parse_quoted_import_paths(source, index, available)? {
+                if let Some(mut paths) = parse_quoted_module_paths(
+                    &masked,
+                    source,
+                    index,
+                    available,
+                    scope_stack.is_empty(),
+                )? {
                     for import in &mut paths {
                         import.scope = scope_stack.last().copied();
                         import.depth = scope_stack.len().saturating_mul(2).saturating_add(1);
@@ -674,6 +698,7 @@ fn parse_quoted_import_paths(
             .try_reserve(1)
             .map_err(|_| SinkError::AllocationFailed)?;
         imports.push(QuotedImport {
+            kind: ModuleLoadKind::Import,
             path_start,
             path_end: cursor,
             scope: None,
@@ -684,6 +709,155 @@ fn parse_quoted_import_paths(
             Some(b',') => cursor = skip_whitespace(source, cursor + 1),
             Some(b';') => return Ok(Some(imports)),
             _ => return Ok(None),
+        }
+    }
+}
+
+fn parse_quoted_module_paths(
+    masked: &[u8],
+    source: &[u8],
+    start: usize,
+    maximum_paths: usize,
+    top_level: bool,
+) -> Result<Option<Vec<QuotedImport>>, AdapterError> {
+    if let Some(imports) = parse_quoted_import_paths(source, start, maximum_paths)? {
+        return Ok(Some(imports));
+    }
+    if !top_level {
+        return Ok(None);
+    }
+    let tail = masked.get(start..).unwrap_or_default();
+    let (kind, keyword) = if tail.starts_with(b"@use") {
+        (ModuleLoadKind::Use, b"@use".as_slice())
+    } else if tail.starts_with(b"@forward") {
+        (ModuleLoadKind::Forward, b"@forward".as_slice())
+    } else {
+        return Ok(None);
+    };
+    let Some(after_keyword) = start.checked_add(keyword.len()) else {
+        return Ok(None);
+    };
+    if !masked
+        .get(after_keyword)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        return Ok(None);
+    }
+    let Some(quote_start) = skip_module_gap(source, after_keyword) else {
+        return Ok(None);
+    };
+    let Some(&quote) = source.get(quote_start) else {
+        return Ok(None);
+    };
+    if !matches!(quote, b'\'' | b'"') {
+        return Ok(None);
+    }
+    let path_start = quote_start + 1;
+    let mut path_end = path_start;
+    while let Some(&byte) = source.get(path_end) {
+        if byte == b'\\' {
+            path_end = path_end.saturating_add(2);
+        } else if byte == quote {
+            break;
+        } else {
+            path_end += 1;
+        }
+    }
+    let Some(path) = source.get(path_start..path_end) else {
+        return Ok(None);
+    };
+    if path.is_empty() || path.windows(2).any(|pair| pair == b"#{") {
+        return Ok(None);
+    }
+    if source.get(path_end) != Some(&quote) {
+        return Ok(None);
+    }
+    let mut cursor = skip_whitespace(masked, path_end + 1);
+    if let Some(after_as) = module_clause(masked, cursor, b"as") {
+        cursor = skip_whitespace(masked, after_as);
+        cursor = match kind {
+            ModuleLoadKind::Use if masked.get(cursor) == Some(&b'*') => cursor + 1,
+            ModuleLoadKind::Use => match identifier_end(masked, cursor) {
+                Some(end) => end,
+                None => return Ok(None),
+            },
+            ModuleLoadKind::Forward => {
+                let Some(end) = identifier_end(masked, cursor) else {
+                    return Ok(None);
+                };
+                if end <= cursor + 1
+                    || masked.get(end - 1) != Some(&b'-')
+                    || masked.get(end) != Some(&b'*')
+                {
+                    return Ok(None);
+                }
+                end + 1
+            }
+            ModuleLoadKind::Import => return Ok(None),
+        };
+        cursor = skip_whitespace(masked, cursor);
+    }
+    if kind == ModuleLoadKind::Forward {
+        let after_visibility = module_clause(masked, cursor, b"show")
+            .or_else(|| module_clause(masked, cursor, b"hide"));
+        if let Some(after_visibility) = after_visibility {
+            cursor = skip_whitespace(masked, after_visibility);
+            loop {
+                if masked.get(cursor) == Some(&b'$') {
+                    cursor += 1;
+                }
+                let Some(end) = identifier_end(masked, cursor) else {
+                    return Ok(None);
+                };
+                cursor = skip_whitespace(masked, end);
+                if masked.get(cursor) != Some(&b',') {
+                    break;
+                }
+                cursor = skip_whitespace(masked, cursor + 1);
+            }
+        }
+    }
+    if let Some(after_with) = module_clause(masked, cursor, b"with") {
+        cursor = skip_whitespace(masked, after_with);
+        let Some(end) = balanced_end(masked, cursor, b'(', b')') else {
+            return Ok(None);
+        };
+        cursor = skip_whitespace(masked, end);
+    }
+    if masked.get(cursor) != Some(&b';') {
+        return Ok(None);
+    }
+    if maximum_paths == 0 {
+        return Err(failure("scss-syntax-node-limit"));
+    }
+    Ok(Some(vec![QuotedImport {
+        kind,
+        path_start,
+        path_end,
+        scope: None,
+        depth: 0,
+    }]))
+}
+
+fn module_clause(source: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+    let end = start.checked_add(keyword.len())?;
+    (source.get(start..end) == Some(keyword)
+        && source.get(end).is_some_and(u8::is_ascii_whitespace))
+    .then_some(end)
+}
+
+fn skip_module_gap(source: &[u8], mut cursor: usize) -> Option<usize> {
+    loop {
+        cursor = skip_whitespace(source, cursor);
+        let tail = source.get(cursor..)?;
+        if tail.starts_with(b"/*") {
+            let end = tail.get(2..)?.windows(2).position(|pair| pair == b"*/")?;
+            cursor = cursor.checked_add(end)?.checked_add(4)?;
+        } else if tail.starts_with(b"//") {
+            let end = tail.iter().position(|byte| *byte == b'\n')?;
+            cursor = cursor.checked_add(end)?.checked_add(1)?;
+        } else {
+            return Some(cursor);
         }
     }
 }
@@ -1083,6 +1257,45 @@ mod tests {
             );
         }
         assert!(scan_source(b"@import \"path.scss\";", 1, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn captures_static_use_and_forward_urls_with_directive_identity() {
+        let source = b"@use \"theme/colors\" as colors;\n@use 'mixins' as *;\n@use \"scale\" with ($base: 1);\n@forward \"tokens\";\n@forward 'functions' as util-* show $base, run;\n@forward \"private\" hide $secret with ($base: 2);\n@use /* module note */ \"commented\";\n.note { content: \"@use 'ghost';\"; @use \"nested\"; }\n// @forward 'comment';\n";
+        let result = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert_eq!(result.imports.len(), 7);
+        assert_eq!(
+            result
+                .imports
+                .iter()
+                .map(|import| (&source[import.path_start..import.path_end], import.kind))
+                .collect::<Vec<_>>(),
+            [
+                (&b"theme/colors"[..], ModuleLoadKind::Use),
+                (&b"mixins"[..], ModuleLoadKind::Use),
+                (&b"scale"[..], ModuleLoadKind::Use),
+                (&b"tokens"[..], ModuleLoadKind::Forward),
+                (&b"functions"[..], ModuleLoadKind::Forward),
+                (&b"private"[..], ModuleLoadKind::Forward),
+                (&b"commented"[..], ModuleLoadKind::Use),
+            ]
+        );
+        for source in [
+            &b"@use \"unfinished\""[..],
+            &b"@use \"theme\", \"other\";"[..],
+            &b"@use \"theme\" as;"[..],
+            &b"@forward \"theme\" hide;"[..],
+            &b"@forward \"theme\" as util;"[..],
+            &b"@use \"theme/#{$dynamic}\";"[..],
+        ] {
+            assert!(
+                scan_source(source, 64, &Cancellation::new())
+                    .unwrap()
+                    .imports
+                    .is_empty()
+            );
+        }
+        assert!(scan_source(b"@use \"module\";", 1, &Cancellation::new()).is_err());
     }
 
     #[test]
