@@ -29562,6 +29562,12 @@ mod tests {
             .and_then(|hit| hit.source.clone())
             .expect("nonterminal retains source evidence");
         assert_eq!(reference.generation(), receipt.generation);
+        let start = usize::try_from(reference.span().start_byte()).expect("fixture offset fits");
+        let end = usize::try_from(reference.span().end_byte()).expect("fixture offset fits");
+        assert_eq!(
+            &source.as_bytes()[start..end],
+            b"phrase(X) --> [X].\nphrase(Y) --> [Y]."
+        );
         let read = service
             .source_read(receipt.generation, vec![reference], &deadline())
             .expect("nonterminal source reads");

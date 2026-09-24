@@ -257,8 +257,8 @@ fn scan_source(
                     clause_count = clause_count
                         .checked_add(1)
                         .ok_or_else(|| failure("prolog-clause-count-limit"))?;
-                    // A predicate identity needs one source-backed representative per
-                    // contiguous clause group, while coverage records every omitted clause.
+                    // One identity spans all contiguous clauses; retaining only
+                    // the first clause would hide alternative definitions from source.read.
                     let same_group = previous_groupable
                         && clauses.last().is_some_and(|previous: &Clause| {
                             previous.arity == clause.arity
@@ -266,7 +266,12 @@ fn scan_source(
                                 && source[previous.head_start..previous.name_end]
                                     == source[clause.head_start..clause.name_end]
                         });
-                    if !same_group {
+                    if same_group {
+                        clauses
+                            .last_mut()
+                            .expect("a matching clause group already exists")
+                            .clause_end = index + 1;
+                    } else {
                         let next_count = clauses
                             .len()
                             .checked_add(1)
@@ -502,6 +507,10 @@ mod tests {
         assert_eq!(heads, [b"edge(a, b)".as_slice(), b"link([a,b], 'x.y')"]);
         assert_eq!(parsed.clause_count, 3);
         assert_eq!(syntax_fact_count(&parsed.groups), 7);
+        assert_eq!(
+            &source[parsed.groups[0].head_start..parsed.groups[0].clause_end],
+            b"edge(a, b).\nedge(A, B) :-\n  route(A, B)."
+        );
         assert!(scan_source(source, 6, &Cancellation::new()).is_err());
     }
 
