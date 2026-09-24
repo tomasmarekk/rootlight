@@ -49,7 +49,8 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    ElmParseProvider, RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
+    ElmParseProvider, PrologParseProvider, RuntimeTraceImportRequest, SemanticProjectLanguage,
+    import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5218,6 +5219,16 @@ impl StructuralPreflight for ElmParseProvider {
     }
 }
 
+impl StructuralPreflight for PrologParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        PrologParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -6110,6 +6121,10 @@ impl FirstSliceService {
             ElmParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let prolog_parser = Arc::new(
+            PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let producer =
             ProducerIdentity::new("rootlight-first-slice-treesitter", "1.0", config.hash())
                 .map_err(|_| FirstSliceError::Adapter)?;
@@ -6184,6 +6199,32 @@ impl FirstSliceService {
         }
         if structural_parsers
             .insert("elm".to_owned(), elm_parser as Arc<dyn StructuralPreflight>)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let prolog_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&prolog_parser) as Arc<dyn ParseProvider>;
+        let prolog_analyzer = TreeSitterAnalyzer::new(
+            prolog_provider,
+            ProducerIdentity::new("rootlight-first-slice-prolog-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("prolog").map_err(|_| FirstSliceError::Adapter)?,
+            "prolog-native-structural-1",
+            PrologParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers
+            .insert("prolog".to_owned(), prolog_analyzer)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "prolog".to_owned(),
+                prolog_parser as Arc<dyn StructuralPreflight>,
+            )
             .is_some()
         {
             return Err(FirstSliceError::Adapter);
@@ -29290,7 +29331,6 @@ mod tests {
             ("Main.idr", "module Main\n", "idris"),
             ("Algebra.lean", "namespace Algebra\n", "lean"),
             ("actor.pony", "actor Main\n", "pony"),
-            ("Facts.pl", "% source\nedge(alpha, beta).\n", "prolog"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -29375,7 +29415,6 @@ mod tests {
             "idris",
             "lean",
             "pony",
-            "prolog",
         ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
@@ -29386,10 +29425,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_pl_suffix_routes_prolog_fallback_without_relabeling_perl() {
+    fn shared_pl_suffix_indexes_prolog_clauses_without_relabeling_perl() {
         let fixture = TempDir::new().expect("fixture root exists");
-        fs::write(fixture.path().join("facts.pl"), "relation(alpha, beta).\n")
-            .expect("Prolog source writes");
+        let prolog = "% ghost(X).\nrelation(alpha, beta).\nrelation(A, B) :- helper(A, B).\nrelation(alpha).\n";
+        fs::write(fixture.path().join("facts.pl"), prolog).expect("Prolog source writes");
         fs::write(
             fixture.path().join("script.pl"),
             "use strict;\nsub relation { return 42; }\n",
@@ -29416,13 +29455,61 @@ mod tests {
         assert!(status.coverage.iter().any(|coverage| {
             coverage.language == "prolog"
                 && coverage.discovered_files == 1
-                && coverage.indexed_files == 0
+                && coverage.indexed_files == 1
+                && coverage.status == "bounded"
         }));
         assert!(status.coverage.iter().any(|coverage| {
             coverage.language == "perl"
                 && coverage.discovered_files == 1
                 && coverage.indexed_files == 1
         }));
+        let definitions = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "prolog")
+            .collect::<Vec<_>>();
+        let names = definitions
+            .iter()
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["relation/1", "relation/2"]);
+        for entity in definitions {
+            let reference = entity
+                .evidence
+                .source
+                .clone()
+                .expect("clause retains source evidence");
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .expect("clause source reads");
+            assert!(
+                prolog
+                    .as_bytes()
+                    .windows(read.data.chunks[0].bytes.len())
+                    .any(|candidate| candidate == read.data.chunks[0].bytes)
+            );
+        }
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "relation/2".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .expect("predicate indicator locates");
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter(|hit| hit.symbol.is_some())
+                .count(),
+            1
+        );
     }
 
     #[test]

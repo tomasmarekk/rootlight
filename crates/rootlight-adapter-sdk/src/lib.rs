@@ -18,6 +18,7 @@ mod lua_names;
 mod nix_names;
 mod objective_c_names;
 mod powershell_names;
+mod prolog_names;
 mod r_names;
 mod report;
 mod request;
@@ -46,6 +47,7 @@ pub use limits::{
 };
 pub use nix_names::{nix_canonical_attribute_name, nix_static_attribute_name};
 pub use objective_c_names::canonical_objective_c_selector;
+pub use prolog_names::{canonical_predicate_head, predicate_head};
 pub use report::{
     AnalysisReport, CoverageReport, DomainCoverage, ParseReport, ProjectAnalysisReport,
     ResourceUsage, StreamEnd, WorkReport,

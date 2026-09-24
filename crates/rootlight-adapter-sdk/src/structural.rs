@@ -189,6 +189,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "elm.port.declaration" => {
             Some(EntityKind::Function)
         }
+        SyntaxFactKind::Declaration if label == "prolog.predicate.declaration" => {
+            Some(EntityKind::Function)
+        }
         SyntaxFactKind::Declaration if label.contains("constructor") => {
             Some(EntityKind::Constructor)
         }
@@ -423,7 +426,9 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if matches!(language, "vba" | "visual-basic-classic")
+    if language == "prolog" && fact.syntax_kind().as_str() == "prolog.predicate.definition" {
+        crate::prolog_names::canonical_predicate_head(text, maximum_bytes).map(Cow::Owned)
+    } else if matches!(language, "vba" | "visual-basic-classic")
         && fact.syntax_kind().as_str() == "vba.module_name.definition"
     {
         (text.len() <= maximum_bytes)

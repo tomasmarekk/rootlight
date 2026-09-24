@@ -1662,7 +1662,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "go",
@@ -1822,7 +1822,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["content"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "python",
@@ -3428,7 +3428,6 @@ max_source_file_bytes = 2097152
             ("Module.agda", "agda"),
             ("Guide.lagda.md", "agda"),
             ("Shape.impl.carbon", "carbon"),
-            ("Main.elm", "elm"),
             ("Main.idr", "idris"),
             ("Main.lidr", "idris"),
             ("Algebra.lean", "lean"),
@@ -3452,6 +3451,18 @@ max_source_file_bytes = 2097152
         }
         for path in ["Main.agdai", "Main.olean", "Main.elm.bak", "actor.pony.txt"] {
             assert_eq!(extension_language(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn first_party_parsers_advertise_native_structural_analysis() {
+        for language in ["elm", "prolog"] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .expect("native language capability exists");
+            assert_eq!(capability.analyzers, ["native"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
         }
     }
 
@@ -3694,7 +3705,7 @@ max_source_file_bytes = 2097152
             .find(|entry| entry.language == "prolog")
             .expect("Prolog capability");
         assert_eq!(capability.detectors, ["content"]);
-        assert_eq!(capability.analyzers, ["source-fallback"]);
+        assert_eq!(capability.analyzers, ["native"]);
     }
 
     #[test]

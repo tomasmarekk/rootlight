@@ -8,6 +8,7 @@
 mod elm;
 mod project_context;
 mod project_semantics;
+mod prolog;
 mod runtime_trace;
 mod scip_export;
 mod scip_import;
@@ -39,6 +40,7 @@ pub use project_semantics::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, SemanticProjectAnalyzer,
     SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
 };
+pub use prolog::PrologParseProvider;
 pub use runtime_trace::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceImportRequest,
     RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
