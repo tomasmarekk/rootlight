@@ -12,6 +12,7 @@ mod prolog;
 mod runtime_trace;
 mod scip_export;
 mod scip_import;
+mod scss;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +56,7 @@ pub use scip_import::{
     ScipImportError, ScipImportLimits, ScipImportOutcome, ScipImportReport, ScipImportRequest,
     ScipImportSource, ScipResource, import_scip_index,
 };
+pub use scss::ScssParseProvider;
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 /// Version of the shared first-party semantic adapter implementation.

@@ -2881,6 +2881,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "typescript.lambda.scope"
                         | "typescript.mapped_type.scope"
                         | "typescript.conditional.scope"
+                        | "scss.block.scope"
                 ) {
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
@@ -2895,6 +2896,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "javascript" | "typescript"
                         ) {
                             "rootlight.ecmascript-lexical-scope/1"
+                        } else if self.language_for_fact(fact) == "scss" {
+                            "rootlight.scss-lexical-scope/1"
                         } else {
                             "rootlight.solidity-lexical-scope/1"
                         },

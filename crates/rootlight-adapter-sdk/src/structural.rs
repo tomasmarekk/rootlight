@@ -136,6 +136,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "yaml.anchor.declaration" => {
             Some(EntityKind::Variable)
         }
+        SyntaxFactKind::Declaration if label == "scss.variable.declaration" => {
+            Some(EntityKind::Variable)
+        }
+        SyntaxFactKind::Declaration if label == "scss.mixin.declaration" => {
+            Some(EntityKind::Function)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
